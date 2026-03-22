@@ -90,6 +90,10 @@ class Store {
         return ids.has(settingID);
     }
 
+    async clearHistory() {
+        await set('historyItems', []);
+    }
+
     async addToHistory(tuneHistoryItem) {
         let historyItems = await get('historyItems') || [];
 
