@@ -127,14 +127,15 @@ export default {
         this.settings = await ffBackend.settingsFromTuneID(this.tuneID);
         let aliases = await ffBackend.aliasesFromTuneID(this.tuneID);
 
-        // Expand this.settings with chords where relevant
-        // TODO move this function about and actually write it properly
-        // This might do:
-        // "[ABCDEFG]b?#?m?(in|aj)?7?(dim)?(\/[ABCDEFG]b?#?m?(in|aj)?7?(dim)?)?"
+        // Detect chord symbols in ABC notation — chords are written as
+        // double-quoted strings e.g. "Am", "Gmaj7", "C#dim", "G/B".
+        // The pattern matches a full chord name to avoid false positives
+        // from other quoted strings (e.g. text annotations).
+        const chordPattern = /"[ABCDEFG]b?#?m?(in|aj)?7?(dim)?(\/[ABCDEFG]b?#?m?(in|aj)?7?(dim)?)?"/;
         this.settings = this.settings.map((settingData) => {
-            settingData.hasChords = (Math.random() > 0.5);
+            settingData.hasChords = chordPattern.test(settingData.abc);
             return settingData;
-        })
+        });
 
         let primaryAliasIndex = 0;
 
