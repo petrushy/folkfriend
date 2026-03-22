@@ -15,10 +15,19 @@
                 @historyItemClicked="loadHistoryItem"
             />
         </v-list>
+        <v-btn
+            v-if="historyRowsProps.length > 0"
+            class="mt-4"
+            @click="clearHistory"
+        >
+            <v-icon left>{{ icons.delete }}</v-icon>
+            Clear History
+        </v-btn>
     </v-container>
 </template>
 
 <script>
+import {mdiDelete} from '@mdi/js';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
 import HistoryRow from '@/components/HistoryRow';
@@ -34,7 +43,10 @@ export default {
         return {
             historyItems: [],
             historyRowsProps: [],
-        }; 
+            icons: {
+                delete: mdiDelete,
+            },
+        };
     },
     created: function () {
         eventBus.$emit('parentViewActivated');
@@ -57,6 +69,12 @@ export default {
         });
     },
     methods: {
+        clearHistory() {
+            store.clearHistory().then(() => {
+                this.historyItems = [];
+                this.historyRowsProps = [];
+            });
+        },
         loadHistoryItem(timestamp) {
             for(let historyItem of this.historyItems) {
                 // Assume timestamps are unique. There's near-millisecond
