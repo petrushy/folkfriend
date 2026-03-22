@@ -80,6 +80,7 @@ export default {
         return {
             abcVisual: null,
             midiBuffer: null,
+            audioContext: null,
             paused: true,
             fullscreen: false,
 
@@ -140,40 +141,34 @@ export default {
                 return;
             }
 
-            // Can create an AudioContext here because are inside the context of a button press
-            window.AudioContext = window.AudioContext ||
-                            window.webkitAudioContext ||
-                            navigator.mozAudioContext ||
-                            navigator.msAudioContext;
+            window.AudioContext = window.AudioContext || window.webkitAudioContext;
 
-            let audioContext = new window.AudioContext();
+            // Reuse the AudioContext across plays — iOS does not allow multiple contexts
+            if (!this.audioContext) {
+                this.audioContext = new window.AudioContext();
+            }
 
-            audioContext.resume().then(() => {
-                // In theory the AC shouldn't start suspended because it is being initialized in a click handler, but iOS seems to anyway.
-
-                // This does a bare minimum so this object could be created in advance, or whenever convenient.
+            this.audioContext.resume().then(() => {
                 this.midiBuffer = new ABCJS.synth.CreateSynth();
 
-                // midiBuffer.init preloads and caches all the notes needed. There may be significant network traffic here.
                 return this.midiBuffer.init({
                     visualObj: this.abcVisual,
-                    audioContext: audioContext,
+                    audioContext: this.audioContext,
                     millisecondsPerMeasure: this.abcVisual.millisecondsPerMeasure()
-                }).then(response => {
-                    // midiBuffer.prime actually builds the output buffer.
+                }).then(() => {
                     return this.midiBuffer.prime();
-                }).then(response => {
-                    // At this point, everything slow has happened. midiBuffer.start will return very quickly and will start playing very quickly without lag.
+                }).then(() => {
+                    return this.audioContext.resume();
+                }).then(() => {
                     this.midiBuffer.start();
                     this.midiBuffer.onEnded = () => {
-                        if(!this.paused) {
+                        if (!this.paused) {
                             this.stopPlaying();
                         }
                     };
-                    return Promise.resolve();
                 }).catch(error => {
-                    console.error("AudioContext error", error);
-                })
+                    console.error('AudioContext error', error);
+                });
             });
         },
         stopPlaying: function () {
