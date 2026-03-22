@@ -117,10 +117,10 @@ export default {
             if (!/^L:/m.test(this.abc)) {
                 abcLines.push('L:1/8');
             }
-            // Default tempo if none specified. ABCJS defaults to Q:1/4=180
-            // which is too fast for most session tunes. 120 BPM is a comfortable
-            // moderate tempo.
-            if (!/^Q:/m.test(this.abc)) {
+            // For polkas (M:2/4), ABCJS's default of 180 BPM is too fast.
+            // Inject 120 BPM only when no tempo is specified and the meter is 2/4.
+            const isPolka = this.meter === '2/4' || /^M:2\/4/m.test(this.abc);
+            if (isPolka && !/^Q:/m.test(this.abc)) {
                 abcLines.push('Q:1/4=120');
             }
             abcLines.push(this.abc);
