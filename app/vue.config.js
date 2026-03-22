@@ -39,5 +39,21 @@ module.exports = {
         name: 'FolkFriend',
         theme_color: '#055581',
         background_color: '#055581',
+        workboxOptions: {
+            // The tune index is 32MB — too large to precache, but we want it
+            // served from cache immediately after first load. CacheFirst means:
+            // cold start → fetch from network + cache; all subsequent loads →
+            // serve from cache instantly with no network round-trip.
+            runtimeCaching: [{
+                urlPattern: /\/res\/folkfriend-non-user-data\.json/,
+                // Serve from cache immediately for fast startup, but fetch a
+                // fresh copy in the background. The updated version is used on
+                // the next app open.
+                handler: 'StaleWhileRevalidate',
+                options: {
+                    cacheName: 'folkfriend-tune-data',
+                },
+            }],
+        },
     },
 };
