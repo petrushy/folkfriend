@@ -161,8 +161,8 @@ fn process_audio_files(ff: FolkFriend, input: String, with_transcription_query: 
             println!("=== Query for file {:?} ===", audio_file_path);
             for result in results.iter().take(10) {
                 println!(
-                    "{:?}\t{:?}\t{:?}",
-                    result.setting.tune_id, result.display_name, result.score
+                    "{:?}\t{:?}\t{:?}\t{:?}",
+                    result.setting.tune_id, result.setting_id, result.display_name, result.score
                 );
             }
         } else {
