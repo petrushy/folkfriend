@@ -18,10 +18,19 @@
         <p v-if="favouriteRowsProps.length === 0" class="mt-4 grey--text">
             No favourites yet. Star a tune from the results list to save it here.
         </p>
+        <v-btn
+            v-if="favouriteItems.length > 0"
+            class="mt-4"
+            @click="exportFavourites"
+        >
+            <v-icon left>{{ icons.export }}</v-icon>
+            Export
+        </v-btn>
     </v-container>
 </template>
 
 <script>
+import {mdiExport} from '@mdi/js';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
 import FavouriteRow from '@/components/FavouriteRow';
@@ -37,6 +46,9 @@ export default {
         return {
             favouriteItems: [],
             favouriteRowsProps: [],
+            icons: {
+                export: mdiExport,
+            },
         };
     },
     created: function () {
@@ -73,6 +85,41 @@ export default {
             store.removeFavourite(settingID).then(() => {
                 this.loadFavourites();
             });
+        },
+        exportFavourites() {
+            const rows = this.favouriteItems.map((item) => {
+                const name = utils.parseDisplayableName(item.result.displayName);
+                const descriptor = utils.parseDisplayableDescription(item.result.setting);
+                const url = `https://thesession.org/tunes/${item.result.setting.tune_id}#setting${item.result.settingID}`;
+                return `  <li><a href="${url}">${name}</a> — ${descriptor}</li>`;
+            }).join('\n');
+
+            const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>FolkFriend Favourites</title>
+  <style>
+    body { font-family: sans-serif; max-width: 600px; margin: 2em auto; }
+    li { margin: 0.5em 0; }
+    a { color: #1565C0; }
+  </style>
+</head>
+<body>
+  <h1>FolkFriend Favourites</h1>
+  <ul>
+${rows}
+  </ul>
+</body>
+</html>`;
+
+            const blob = new Blob([html], {type: 'text/html'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'folkfriend-favourites.html';
+            a.click();
+            URL.revokeObjectURL(url);
         },
     }
 };
