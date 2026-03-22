@@ -68,6 +68,21 @@
                     </v-list-item>
                 </router-link>
 
+                <router-link to="/favourites">
+                    <v-list-item @click="0">
+                        <v-list-item-action>
+                            <v-icon medium>
+                                {{ icons.star }}
+                            </v-icon>
+                        </v-list-item-action>
+                        <v-list-item-content>
+                            <v-list-item-title class="navBarEntry">
+                                Favourites
+                            </v-list-item-title>
+                        </v-list-item-content>
+                    </v-list-item>
+                </router-link>
+
                 <router-link to="/settings">
                     <v-list-item @click="0">
                         <v-list-item-action>
@@ -186,6 +201,7 @@ import {
     mdiMenu,
     mdiMicrophone,
     mdiMusicNote,
+    mdiStar,
     // mdiShareVariant,
 } from '@mdi/js';
 import utils from '@/js/utils.js';
@@ -213,6 +229,7 @@ export default {
             menu: mdiMenu,
             microphone: mdiMicrophone,
             musicNote: mdiMusicNote,
+            star: mdiStar,
             // shareVariant: mdiShareVariant,
         },
         isPWA: utils.checkStandalone(),

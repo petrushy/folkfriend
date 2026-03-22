@@ -36,13 +36,20 @@
                             )}`
                         }}
                     </h3>
-                    <v-icon v-if="settingData.hasChords" class="justify-end tabChordIcon">
-                        $vuetify.icons.tabChord
-                    </v-icon>
-                    <v-chip v-if="expandedIndex.includes(i)" small class="sourceChip settingSourceChip ma-1 px-2"
-                        @click.stop="$openUrl(`https://thesession.org/tunes/${tuneID}#setting${settingData.setting_id}`)">
-                        Source&nbsp;<v-icon small>{{ icons.openInNew }}</v-icon>
-                    </v-chip>
+                    <div class="headerActions">
+                        <v-icon v-if="expandedIndex.includes(i)" class="settingStarIcon"
+                            :color="favouritedSettings[settingData.setting_id] ? 'amber darken-1' : 'grey lighten-1'"
+                            @click.stop="toggleFavourite(settingData)">
+                            {{ favouritedSettings[settingData.setting_id] ? icons.star : icons.starOutline }}
+                        </v-icon>
+                        <v-icon v-if="settingData.hasChords" class="tabChordIcon">
+                            $vuetify.icons.tabChord
+                        </v-icon>
+                        <v-chip v-if="expandedIndex.includes(i)" small class="sourceChip settingSourceChip px-2"
+                            @click.stop="$openUrl(`https://thesession.org/tunes/${tuneID}#setting${settingData.setting_id}`)">
+                            Source&nbsp;<v-icon small>{{ icons.openInNew }}</v-icon>
+                        </v-chip>
+                    </div>
                 </v-expansion-panel-header>
                 <v-expansion-panel-content>
                     <AbcDisplay :abc="settingData.abc" :mode="settingData.mode" :meter="settingData.meter"
@@ -68,7 +75,10 @@ import eventBus from '@/eventBus';
 
 import {
     mdiOpenInNew,
+    mdiStar,
+    mdiStarOutline,
 } from '@mdi/js';
+import store from '@/services/store.js';
 export default {
     name: 'TuneView',
     components: { AbcDisplay },
@@ -97,10 +107,12 @@ export default {
             abcFullScreen: false,
 
             expandedIndex: [],
+            favouritedSettings: {},
 
             icons: {
                 openInNew: mdiOpenInNew,
-
+                star: mdiStar,
+                starOutline: mdiStarOutline,
             },
             sourceTheSession: `https://thesession.org/tunes/${this.tuneID}`
         };
@@ -139,7 +151,12 @@ export default {
         );
         this.name = this.displayableAliases.splice(primaryAliasIndex, 1)[0];
 
-        console.log(this.settings);
+        // Load favourite state for each setting
+        for (const s of this.settings) {
+            store.isFavourite(String(s.setting_id)).then(v => {
+                this.$set(this.favouritedSettings, s.setting_id, v);
+            });
+        }
 
         // Auto-pop open the matched setting and scroll into view
         if (this.settingID) {
@@ -179,6 +196,20 @@ export default {
                 panels.$children[expandedIndex].$el.scrollIntoView();
             }
         },
+        toggleFavourite: function (settingData) {
+            const sid = String(settingData.setting_id);
+            if (this.favouritedSettings[settingData.setting_id]) {
+                store.removeFavourite(sid);
+                this.$set(this.favouritedSettings, settingData.setting_id, false);
+            } else {
+                store.addFavourite({
+                    settingID: sid,
+                    setting: settingData,
+                    displayName: this.displayName,
+                });
+                this.$set(this.favouritedSettings, settingData.setting_id, true);
+            }
+        },
         sourceClicked: function () {
             window.open(this.sourceTheSession);
         },
@@ -213,6 +244,18 @@ h1 {
 
 .settingSourceChip {
     flex: 0 0 auto;
+}
+
+.headerActions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex: 0 0 auto;
+}
+
+.settingStarIcon {
+    cursor: pointer;
 }
 
 .akaSpan {

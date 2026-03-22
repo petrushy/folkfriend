@@ -55,6 +55,29 @@ class Store {
         return await get('historyItems') || [];
     }
 
+    async getFavourites() {
+        return await get('favouriteItems') || [];
+    }
+
+    async addFavourite(result) {
+        const items = await this.getFavourites();
+        if (!items.find(f => f.result.settingID === result.settingID)) {
+            const {FavouriteItem} = await import('@/js/schema');
+            items.unshift(new FavouriteItem(result));
+            await set('favouriteItems', items);
+        }
+    }
+
+    async removeFavourite(settingID) {
+        const items = await this.getFavourites();
+        await set('favouriteItems', items.filter(f => f.result.settingID !== settingID));
+    }
+
+    async isFavourite(settingID) {
+        const items = await this.getFavourites();
+        return items.some(f => f.result.settingID === settingID);
+    }
+
     async addToHistory(tuneHistoryItem) {
         let historyItems = await get('historyItems') || [];
 
