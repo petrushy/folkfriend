@@ -101,6 +101,17 @@ export default {
             if (this.meter) {
                 abcLines.push(`M:${this.meter}`);
             }
+            // Per ABC standard, L: (unit note length) defaults to 1/8 if absent.
+            // Without it some renderers misinterpret note durations.
+            if (!/^L:/m.test(this.abc)) {
+                abcLines.push('L:1/8');
+            }
+            // Default tempo if none specified. ABCJS defaults to Q:1/4=180
+            // which is too fast for most session tunes. 120 BPM is a comfortable
+            // moderate tempo.
+            if (!/^Q:/m.test(this.abc)) {
+                abcLines.push('Q:1/4=120');
+            }
             abcLines.push(this.abc);
             return abcLines.join('\n');
         },
