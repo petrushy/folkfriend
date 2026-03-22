@@ -17,14 +17,9 @@
         <v-row
             wrap
             justify="center"
-            class="py-2"
+            align="center"
+            class="py-2 px-2"
         >
-            <!-- <v-btn
-                class="mx-1 px-3 abcControls"
-                @click="restartPlaying"
-            >
-                <v-icon>{{ icons.replay }}</v-icon>
-            </v-btn> -->
             <v-btn
                 class="mx-1 px-3 abcControls"
                 @click="playButton"
@@ -48,12 +43,26 @@
             >
                 <v-icon>{{ icons.fullscreen }}</v-icon>
             </v-btn>
+            <div class="ml-auto d-flex align-center tempoControl">
+                <v-icon small class="mr-1">{{ icons.metronome }}</v-icon>
+                <v-slider
+                    v-model="tempoPercent"
+                    min="50"
+                    max="200"
+                    step="5"
+                    hide-details
+                    dense
+                    style="width: 100px; min-width: 80px;"
+                    @change="tempoChanged"
+                />
+                <span class="ml-1 tempoLabel">{{ tempoPercent }}%</span>
+            </div>
         </v-row>
     </v-card>
 </template>
 
 <script>
-import { mdiArrowExpand, mdiPause, mdiPlay, mdiStop } from '@mdi/js';
+import { mdiArrowExpand, mdiPause, mdiPlay, mdiStop, mdiMetronome } from '@mdi/js';
 import store from '@/services/store.js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
@@ -83,9 +92,11 @@ export default {
             audioContext: null,
             paused: true,
             fullscreen: false,
+            tempoPercent: 100,
 
             icons: {
                 fullscreen: mdiArrowExpand,
+                metronome: mdiMetronome,
                 pause: mdiPause,
                 play: mdiPlay,
                 stop: mdiStop,
@@ -165,7 +176,7 @@ export default {
                 return this.midiBuffer.init({
                     visualObj: this.abcVisual,
                     audioContext: this.audioContext,
-                    millisecondsPerMeasure: this.abcVisual.millisecondsPerMeasure()
+                    millisecondsPerMeasure: this.abcVisual.millisecondsPerMeasure() * (100 / this.tempoPercent),
                 }).then(() => {
                     return this.midiBuffer.prime();
                 }).then(() => {
@@ -181,6 +192,14 @@ export default {
                     console.error('AudioContext error', error);
                 });
             });
+        },
+        tempoChanged: function () {
+            // Tempo is baked in at init() time — stop playback so the
+            // user restarts at the new tempo.
+            if (!this.paused) {
+                this.stopPlaying();
+                delete this.midiBuffer;
+            }
         },
         stopPlaying: function () {
             this.paused = true;
@@ -229,5 +248,12 @@ export default {
 
 .abcControls {
     min-width: 0 !important;
+}
+
+
+.tempoLabel {
+    min-width: 3em;
+    text-align: right;
+    font-size: 0.85em;
 }
 </style>
