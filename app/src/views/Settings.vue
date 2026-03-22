@@ -36,6 +36,36 @@
                 />
             </v-row>
         </v-card>
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
+                Transfer Data
+            </h1>
+            <p>
+                Export your favourites, history and settings to a file, then
+                restore them on another device.
+            </p>
+            <v-row class="px-2">
+                <v-btn class="mr-3 mb-2" @click="downloadUserData">
+                    <v-icon left>{{ icons.download }}</v-icon>
+                    Download User Data
+                </v-btn>
+                <v-btn class="mb-2" @click="$refs.restoreInput.click()">
+                    <v-icon left>{{ icons.upload }}</v-icon>
+                    Restore User Data
+                </v-btn>
+                <input
+                    ref="restoreInput"
+                    type="file"
+                    accept="application/json,.json"
+                    style="display: none"
+                    @change="restoreUserData"
+                >
+            </v-row>
+            <p v-if="restoreMessage" class="mt-2 mb-0">
+                {{ restoreMessage }}
+            </p>
+        </v-card>
+
         <v-card
             class="pa-5 my-2"
         >
@@ -110,9 +140,11 @@ import {
     mdiCellphoneArrowDown,
     mdiCheckCircleOutline,
     mdiDotsVertical,
+    mdiDownload,
     mdiExportVariant,
     // mdiMonitorArrowDownVariant,
     mdiPlusBoxOutline,
+    mdiUpload,
 } from '@mdi/js';
 
 export default {
@@ -139,10 +171,13 @@ export default {
             installDesktop: mdiCellphoneArrowDown,
             installMobile: mdiCellphoneArrowDown,
             dotsVertical: mdiDotsVertical,
+            download: mdiDownload,
+            upload: mdiUpload,
         },
         settingsLoaded: false,
         userSettings: store.userSettings,
         isPWA: utils.checkStandalone(),
+        restoreMessage: null,
     }),
     created: function() {
         this.ua = utils.checkUserAgent();
@@ -150,6 +185,33 @@ export default {
     methods: {
         settingsChanged() {
             store.updateUserSettings(this.userSettings);
+        },
+        async downloadUserData() {
+            const json = await store.exportUserData();
+            const blob = new Blob([json], {type: 'application/json'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'folkfriend-data.json';
+            a.click();
+            URL.revokeObjectURL(url);
+        },
+        restoreUserData(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                try {
+                    await store.importUserData(event.target.result);
+                    this.userSettings = store.userSettings;
+                    this.restoreMessage = '✓ Data restored successfully.';
+                } catch (err) {
+                    this.restoreMessage = `Failed to restore: ${err.message}`;
+                }
+                // Reset file input so the same file can be re-selected if needed
+                this.$refs.restoreInput.value = '';
+            };
+            reader.readAsText(file);
         },
     },
 };

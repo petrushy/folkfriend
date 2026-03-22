@@ -113,6 +113,28 @@ class Store {
         await set('historyItems', historyItems);
     }
 
+    async exportUserData() {
+        const payload = {
+            version: 1,
+            exportedAt: Date.now(),
+            userSettings: this.userSettings,
+            historyItems: await this.getHistoryItems(),
+            favouriteItems: await this.getFavourites(),
+        };
+        return JSON.stringify(payload, null, 2);
+    }
+
+    async importUserData(jsonString) {
+        const payload = JSON.parse(jsonString);
+        if (payload.version !== 1) {
+            throw new Error(`Unsupported data version: ${payload.version}`);
+        }
+        await set('historyItems', payload.historyItems || []);
+        await set('favouriteItems', payload.favouriteItems || []);
+        await this.updateUserSettings(payload.userSettings || this.userSettings);
+        this._favouriteIDs = null;
+    }
+
     loadAnalytics(analytics) {
         this.analytics = analytics;
         this.setAnalyticsLoaded();
