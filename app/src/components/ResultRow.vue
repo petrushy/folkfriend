@@ -60,7 +60,7 @@ export default {
             required: true
         },
         settingID: {
-            type: String,
+            type: Number,
             default: null,
             required: false
         },

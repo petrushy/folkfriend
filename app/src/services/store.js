@@ -2,9 +2,8 @@
 // Vuex is overkill for out needs. Use a very simple global object store for
 //  very basic state management.
 import eventBus from '@/eventBus.js';
-import {get,
-    set
-} from 'idb-keyval';
+import {get, set} from 'idb-keyval';
+import {FavouriteItem} from '@/js/schema';
 import {
     logEvent
 } from 'firebase/analytics';
@@ -36,6 +35,7 @@ class Store {
         this.userSettings = JSON.parse(localStorage.getItem('userSettings')) || USER_SETTING_DEFAULTS;
         this.searchState = this.searchStates.READY;
 
+        this._favouriteIDs = null;
         this.analytics = null;
         this.analyticsLoaded = new Promise(resolve => {
             this.setAnalyticsLoaded = resolve;
@@ -59,23 +59,35 @@ class Store {
         return await get('favouriteItems') || [];
     }
 
+    async _loadFavouriteIDs() {
+        if (this._favouriteIDs === null) {
+            const items = await this.getFavourites();
+            this._favouriteIDs = new Set(items.map(f => f.result.settingID));
+        }
+        return this._favouriteIDs;
+    }
+
     async addFavourite(result) {
-        const items = await this.getFavourites();
-        if (!items.find(f => f.result.settingID === result.settingID)) {
-            const {FavouriteItem} = await import('@/js/schema');
+        const ids = await this._loadFavouriteIDs();
+        if (!ids.has(result.settingID)) {
+            const items = await this.getFavourites();
             items.unshift(new FavouriteItem(result));
             await set('favouriteItems', items);
+            ids.add(result.settingID);
         }
     }
 
     async removeFavourite(settingID) {
         const items = await this.getFavourites();
         await set('favouriteItems', items.filter(f => f.result.settingID !== settingID));
+        if (this._favouriteIDs !== null) {
+            this._favouriteIDs.delete(settingID);
+        }
     }
 
     async isFavourite(settingID) {
-        const items = await this.getFavourites();
-        return items.some(f => f.result.settingID === settingID);
+        const ids = await this._loadFavouriteIDs();
+        return ids.has(settingID);
     }
 
     async addToHistory(tuneHistoryItem) {

@@ -94,7 +94,7 @@ export default {
             default: ''
         },
         settingID: {
-            type: String,
+            type: Number,
             required: false,
             default: null
         },
@@ -153,7 +153,7 @@ export default {
 
         // Load favourite state for each setting
         for (const s of this.settings) {
-            store.isFavourite(String(s.setting_id)).then(v => {
+            store.isFavourite(s.setting_id).then(v => {
                 this.$set(this.favouritedSettings, s.setting_id, v);
             });
         }
@@ -197,17 +197,17 @@ export default {
             }
         },
         toggleFavourite: function (settingData) {
-            const sid = String(settingData.setting_id);
-            if (this.favouritedSettings[settingData.setting_id]) {
+            const sid = settingData.setting_id;
+            if (this.favouritedSettings[sid]) {
                 store.removeFavourite(sid);
-                this.$set(this.favouritedSettings, settingData.setting_id, false);
+                this.$set(this.favouritedSettings, sid, false);
             } else {
                 store.addFavourite({
                     settingID: sid,
                     setting: settingData,
                     displayName: this.displayName,
                 });
-                this.$set(this.favouritedSettings, settingData.setting_id, true);
+                this.$set(this.favouritedSettings, sid, true);
             }
         },
         sourceClicked: function () {

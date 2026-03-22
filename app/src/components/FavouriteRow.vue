@@ -39,7 +39,7 @@ export default {
             required: true
         },
         settingID: {
-            type: String,
+            type: Number,
             required: true
         },
     },
