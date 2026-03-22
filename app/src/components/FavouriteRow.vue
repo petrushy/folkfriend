@@ -14,6 +14,9 @@
                 <v-col class="py-0 descriptor">
                     {{ descriptor }}
                 </v-col>
+                <v-col class="py-0 text-right timestamp">
+                    {{ timestampString }}
+                </v-col>
             </v-row>
         </v-container>
         <v-btn icon class="mr-2" @click.stop="unstar">
@@ -26,6 +29,7 @@
 
 <script>
 import {mdiStar} from '@mdi/js';
+import utils from '@/js/utils';
 
 export default {
     name: 'FavouriteRow',
@@ -42,11 +46,20 @@ export default {
             type: Number,
             required: true
         },
+        timestamp: {
+            type: Number,
+            required: true
+        },
     },
     data() {
         return {
             starIcon: mdiStar,
         };
+    },
+    computed: {
+        timestampString() {
+            return utils.utcToString(this.timestamp);
+        }
     },
     methods: {
         favouriteItemClicked() {

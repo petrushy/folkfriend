@@ -10,6 +10,7 @@
                 :name="row.name"
                 :descriptor="row.descriptor"
                 :settingID="row.settingID"
+                :timestamp="row.timestamp"
                 @favouriteItemClicked="loadFavouriteItem"
                 @unstar="removeFavourite"
             />
@@ -50,6 +51,7 @@ export default {
                     name: utils.parseDisplayableName(item.result.displayName),
                     descriptor: utils.parseDisplayableDescription(item.result.setting),
                     settingID: item.result.settingID,
+                    timestamp: item.timestamp,
                 }));
             });
         },
