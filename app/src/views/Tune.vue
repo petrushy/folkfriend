@@ -25,7 +25,7 @@
 
         <v-expansion-panels ref="expansionPanels" v-model="expandedIndex" :class="{ abcFullScreen: abcFullScreen }"
             multiple>
-            <v-expansion-panel v-for="settingData in settings" :key="settingData.setting_id" class="expansionPanel"
+            <v-expansion-panel v-for="(settingData, i) in settings" :key="settingData.setting_id" class="expansionPanel"
                 :setting="settingData">
                 <v-expansion-panel-header>
                     <h3 class="descriptor font-weight-medium">
@@ -39,6 +39,10 @@
                     <v-icon v-if="settingData.hasChords" class="justify-end tabChordIcon">
                         $vuetify.icons.tabChord
                     </v-icon>
+                    <v-chip v-if="expandedIndex.includes(i)" small class="sourceChip settingSourceChip ma-1 px-2"
+                        @click.stop="$openUrl(`https://thesession.org/tunes/${tuneID}#setting${settingData.setting_id}`)">
+                        Source&nbsp;<v-icon small>{{ icons.openInNew }}</v-icon>
+                    </v-chip>
                 </v-expansion-panel-header>
                 <v-expansion-panel-content>
                     <AbcDisplay :abc="settingData.abc" :mode="settingData.mode" :meter="settingData.meter"
@@ -177,6 +181,9 @@ export default {
         },
         sourceClicked: function () {
             window.open(this.sourceTheSession);
+        },
+        $openUrl: function (url) {
+            window.open(url);
         }
     },
 };
@@ -202,6 +209,10 @@ h1 {
 
 .sourceChip {
     font-style: italic;
+}
+
+.settingSourceChip {
+    flex: 0 0 auto;
 }
 
 .akaSpan {

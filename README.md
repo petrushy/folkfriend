@@ -51,20 +51,20 @@ You can also run the commands over many files by passing in a CSV file.
 #### Output
 ```
 === Query for file "wavs/soup_dragon.wav" ===
-"10785"	"soup dragon, the"	0.872093
-"414"	"seamus cooley's"	0.5697674
-"9477"	"gan ainm"	0.53488374
-"16022"	"jig for jules"	0.5232558
-"23096"	"prince's strand"	0.5
-"1902"	"muireann's"	0.5
-"19744"	"sue morley's"	0.5
-"10420"	"sailor and the maid, the"	0.5
-"1317"	"daniel of the sun"	0.4883721
-"18027"	"oriental, the"	0.4883721
-FolkFriend command finished in 208.24ms
+"10785"	"39664"	"soup dragon, the"	0.6744186
+"22416"	"52844"	"gwrachod llanddona"	0.4651163
+"9995"	"9995"	"dominic macgowan"	0.43023255
+"793"	"13940"	"jimmy ward's"	0.40697673
+"877"	"36932"	"priest in his boots, the"	0.39534885
+"24407"	"50750"	"mccoppin's"	0.37209302
+"25183"	"52929"	"christmas slippers"	0.37209302
+"414"	"2061"	"seamus cooley's"	0.37209302
+"141"	"5265"	"humours of tulla, the"	0.37209302
+"22998"	"46761"	"give me a match to light me pipe and i'll be off to bryant's cove"	0.3604651
+FolkFriend command finished in 2.31s
 ```
 
-This command downloads the tune index to `~/.folkfriend/` on your local machine. The numbers on the left are the IDs from [thesession.org](thesession.org), which is currently the only data source FolkFriend uses.
+This command downloads the tune index to `~/.folkfriend/` on your local machine. The columns are: tune ID, setting ID, tune name, and match score. The tune IDs are from [thesession.org](thesession.org), which is currently the only data source FolkFriend uses. The setting ID identifies the specific version of the tune that was matched.
 
 # TODO
 `cargo test` doesn't run any tests because I didn't know how good an idea unit tests were when I built this. When I get around to updating & revamping everything I'll add in lots :)
