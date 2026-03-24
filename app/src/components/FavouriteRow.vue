@@ -1,5 +1,12 @@
 <template>
     <div class="favourite-row-wrapper d-flex align-center">
+        <v-checkbox
+            :input-value="selected"
+            class="ml-2 mr-0 mt-0 pt-0 flex-grow-0"
+            hide-details
+            @change="$emit('toggle', settingID)"
+            @click.stop
+        />
         <v-container
             v-ripple
             class="flex-grow-1"
@@ -49,6 +56,10 @@ export default {
         timestamp: {
             type: Number,
             required: true
+        },
+        selected: {
+            type: Boolean,
+            default: false
         },
     },
     data() {
