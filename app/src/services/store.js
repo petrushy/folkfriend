@@ -15,7 +15,8 @@ const USER_SETTING_DEFAULTS = {
     advancedMode: false,
     preferFileUpload: false,
     showAbcText: false,
-    microphoneChoice: null
+    microphoneChoice: null,
+    recordingTimeLimitSecs: 10,
 };
 
 class Store {
@@ -44,6 +45,7 @@ class Store {
         });
         this.currentUser = null;
         this.auth = null;
+        this._unsubscribeSync = null;
     }
 
     async updateUserSettings(userSettings) {
@@ -153,24 +155,22 @@ class Store {
             this.getFavourites(),
             this.getHistoryItems(),
         ]);
-        try {
-            const result = await sync.pullOrSeed(user.uid, localFavs, localHistory);
-            await Promise.all([
-                set('favouriteItems', result.favourites),
-                set('historyItems', result.history),
-            ]);
-            this._favouriteIDs = null;
-            if (result.seeded) {
-                sync.pushFavourites(user.uid, result.favourites);
-                sync.pushHistory(user.uid, result.history);
+        this._unsubscribeSync = sync.subscribe(user.uid, localFavs, localHistory, async (type, items) => {
+            if (type === 'favourites') {
+                await set('favouriteItems', items);
+                this._favouriteIDs = null;
+            } else {
+                await set('historyItems', items);
             }
             eventBus.$emit('syncComplete');
-        } catch (e) {
-            console.error('Sync pull failed', e);
-        }
+        });
     }
 
     onSignedOut() {
+        if (this._unsubscribeSync) {
+            this._unsubscribeSync();
+            this._unsubscribeSync = null;
+        }
         this.currentUser = null;
         eventBus.$emit('authStateChanged', null);
     }

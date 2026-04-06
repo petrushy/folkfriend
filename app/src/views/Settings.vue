@@ -35,6 +35,19 @@
                     @change="settingsChanged"
                 />
             </v-row>
+            <v-row align="center" class="pl-2 pr-4 mt-2">
+                <v-text-field
+                    v-model.number="userSettings.recordingTimeLimitSecs"
+                    label="Max recording length (seconds)"
+                    type="number"
+                    min="5"
+                    max="60"
+                    style="max-width: 220px"
+                    hint="Default 10s is recommended — longer recordings can reduce search accuracy"
+                    persistent-hint
+                    @change="onRecordingLimitChanged"
+                />
+            </v-row>
         </v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
@@ -223,6 +236,11 @@ export default {
     },
     methods: {
         settingsChanged() {
+            store.updateUserSettings(this.userSettings);
+        },
+        onRecordingLimitChanged() {
+            const v = Math.round(this.userSettings.recordingTimeLimitSecs);
+            this.userSettings.recordingTimeLimitSecs = Math.min(60, Math.max(5, v || 10));
             store.updateUserSettings(this.userSettings);
         },
         async signIn() {

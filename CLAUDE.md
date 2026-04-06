@@ -83,6 +83,40 @@ After installing, the service worker caches all assets (including WASM) so the a
 
 - `rust/wavs/soup_dragon.wav` has a corrupt WAV header in git (LIST chunk size and data chunk size are wrong). The file has a non-standard 78-byte header (LIST/INFO chunk from Lavf60.16.100 between fmt and data). Patched in-place by fixing offsets 0x04, 0x28, 0x4a.
 
+## Caching strategy
+
+The app is an offline-first PWA. Caching is configured in `app/vue.config.js` via Workbox (injected into the service worker at build time). The service worker only runs in **production** builds.
+
+### Precache (automatic, build-time)
+
+All static assets emitted by webpack — JS bundles, CSS, WASM, fonts, icons — are precached by the service worker on install. This covers the entire app shell and makes it available offline immediately after the first load.
+
+### Runtime cache: tune index (`StaleWhileRevalidate`)
+
+- **URL pattern:** `/res/folkfriend-non-user-data.json` (local dev) and `https://folkfriend-app-data.web.app/folkfriend-non-user-data.json` (production)
+- **Cache name:** `folkfriend-tune-data`
+- **Strategy:** StaleWhileRevalidate — served from cache instantly on startup, then a fresh copy is fetched in the background and stored for the next launch. Auto-updates every 28 days in-app (see `worker.js`).
+- **Why:** The tune index is ~32 MB and must not block app startup.
+
+### Runtime cache: ABCJS soundfonts (`CacheFirst`)
+
+- **URL pattern:** `https://paulrosen.github.io/midi-js-soundfonts/**`
+- **Cache name:** `abcjs-soundfonts`
+- **Strategy:** CacheFirst — served from cache if present, otherwise fetched and cached. Max 500 entries, 1-year TTL.
+- **Why:** ABCJS fetches individual MP3 files per note on first play (e.g. `FluidR3_GM/acoustic_grand_piano-mp3/A3.mp3`). After the user plays a tune once while online, all fetched notes are cached and playback works offline (e.g. on airplane mode).
+
+### IndexedDB (idb-keyval)
+
+Not part of the service worker — managed directly by `app/src/services/store.js`:
+
+- `'favouriteItems'` — array of `FavouriteItem` objects
+- `'historyItems'` — array of `HistoryItem` objects (capped at 100)
+- `'tuneIndex'` / `'tuneIndexMetadata'` — cached tune index and its version (`v` = days since 2020-01-01)
+
+### Firebase / Firestore
+
+User data (favourites + history) is synced to Firestore under `users/{uid}/data/favourites` and `users/{uid}/data/history`. Firestore SDK handles its own offline queue — writes made while offline are automatically replayed when connectivity returns. Security rules are in `firestore.rules`.
+
 ## Recent changes
 
 ### CLI: settingID in query output (`rust/src/bin.rs`)
