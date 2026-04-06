@@ -76,6 +76,29 @@
         </v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
+                Import from The Session
+            </h1>
+            <p>
+                Enter your bookmarks URL from thesession.org to import them as favourites.
+                Find it at: thesession.org/members/<em>your-id</em>/bookmarks
+            </p>
+            <v-text-field
+                v-model="bookmarkUrl"
+                label="Bookmarks URL"
+                placeholder="https://thesession.org/members/12345/bookmarks"
+                hide-details
+                class="mb-3"
+            />
+            <v-btn :loading="importing" :disabled="!bookmarkUrl" @click="importFromTheSession">
+                <v-icon left>{{ icons.import }}</v-icon>
+                Import bookmarks
+            </v-btn>
+            <p v-if="importStatus" class="mt-3 mb-0" :class="importError ? 'error--text' : ''">
+                {{ importStatus }}
+            </p>
+        </v-card>
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
                 Transfer Data
             </h1>
             <p>
@@ -171,6 +194,7 @@
 
 <script>
 import store from '@/services/store.js';
+import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
 import {
@@ -182,6 +206,7 @@ import {
     mdiDownload,
     mdiExportVariant,
     mdiGoogle,
+    mdiImport,
     mdiLogout,
     // mdiMonitorArrowDownVariant,
     mdiPlusBoxOutline,
@@ -206,9 +231,14 @@ export default {
         signingIn: false,
         signingOut: false,
         authError: null,
+        bookmarkUrl: '',
+        importing: false,
+        importStatus: null,
+        importError: false,
         icons: {
             account: mdiAccountCircle,
             google: mdiGoogle,
+            import: mdiImport,
             logout: mdiLogout,
             iosShare: mdiExportVariant,
             iosAddToHomeScreen: mdiPlusBoxOutline,
@@ -265,6 +295,86 @@ export default {
                 await store.signOut();
             } finally {
                 this.signingOut = false;
+            }
+        },
+        async fetchAllBookmarks(baseUrl) {
+            const items = [];
+            let page = 1;
+            while (true) {
+                this.importStatus = `Fetching bookmarks… page ${page}`;
+                const res = await fetch(`${baseUrl}?format=json&page=${page}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status} from thesession.org`);
+                const data = await res.json();
+                if (!data.items || data.items.length === 0) break;
+                items.push(...data.items);
+                if (data.items.length < 10) break;
+                page++;
+            }
+            return items;
+        },
+        async importFromTheSession() {
+            this.importStatus = null;
+            this.importError = false;
+            this.importing = true;
+            try {
+                const bookmarks = await this.fetchAllBookmarks(
+                    this.bookmarkUrl.trim().replace(/\?.*$/, '')
+                );
+                if (bookmarks.length === 0) {
+                    this.importStatus = 'No bookmarks found at that URL.';
+                    return;
+                }
+                this.importStatus = `Found ${bookmarks.length} bookmarks. Waiting for tune index…`;
+
+                // Wait for the WASM index to be ready before processing
+                await new Promise(resolve => {
+                    if (store.state.indexLoaded) return resolve();
+                    eventBus.$once('indexLoaded', resolve);
+                });
+
+                const withTimeout = (promise, ms) => Promise.race([
+                    promise,
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+                ]);
+
+                let imported = 0, skipped = 0, notFound = 0;
+                for (const [i, item] of bookmarks.entries()) {
+                    this.importStatus = `Processing ${i + 1} / ${bookmarks.length}…`;
+                    const tuneID = item.target.id.split(':')[2]; // must be string — WASM expects String
+                    const settingID = parseInt(item.object.id.split(':')[2], 10);
+                    const displayName = item.object.displayName;
+                    if (await store.isFavourite(settingID)) {
+                        skipped++;
+                        continue;
+                    }
+                    let settings;
+                    try {
+                        settings = await withTimeout(ffBackend.settingsFromTuneID(tuneID), 3000);
+                    } catch (e) {
+                        console.warn(`settingsFromTuneID failed for tuneID ${tuneID}:`, e.message);
+                        notFound++;
+                        continue;
+                    }
+                    const setting = settings.find(s => parseInt(s.setting_id, 10) === settingID);
+                    if (setting) setting.tune_id = tuneID; // ensure tune_id is set (string)
+                    if (!setting) {
+                        notFound++;
+                        continue;
+                    }
+                    await store.addFavourite({ settingID, setting, displayName });
+                    imported++;
+                }
+                const parts = [];
+                if (imported) parts.push(`${imported} imported`);
+                if (skipped) parts.push(`${skipped} already saved`);
+                if (notFound) parts.push(`${notFound} not found in tune index`);
+                this.importStatus = `Done: ${parts.join(', ')}.`;
+            } catch (err) {
+                this.importError = true;
+                this.importStatus = `Import failed: ${err.message}`;
+                console.error('Bookmark import error', err);
+            } finally {
+                this.importing = false;
             }
         },
         async downloadUserData() {

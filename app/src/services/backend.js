@@ -182,10 +182,9 @@ class FFBackend {
     }
 
     async settingsFromTuneID(tuneID) {
-        return new Promise(resolve => {
-            this.folkfriendWorker.settingsFromTuneID(tuneID, Comlink.proxy(response => {
-                resolve(response);
-            }));
+        return new Promise((resolve, reject) => {
+            this.folkfriendWorker.settingsFromTuneID(tuneID, Comlink.proxy(resolve))
+                .catch(reject);
         });
     }
 
