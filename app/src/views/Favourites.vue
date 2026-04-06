@@ -78,10 +78,15 @@ export default {
     created: function () {
         eventBus.$emit('parentViewActivated');
         this.loadFavourites();
+        eventBus.$on('syncComplete', this.loadFavourites);
+    },
+    beforeDestroy() {
+        eventBus.$off('syncComplete', this.loadFavourites);
     },
     methods: {
         loadFavourites() {
             store.getFavourites().then((items) => {
+                items.sort((a, b) => b.timestamp - a.timestamp);
                 this.favouriteItems = items;
                 this.favouriteRowsProps = items.map((item) => ({
                     name: utils.parseDisplayableName(item.result.displayName),

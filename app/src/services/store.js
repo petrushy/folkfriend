@@ -164,6 +164,7 @@ class Store {
                 sync.pushFavourites(user.uid, result.favourites);
                 sync.pushHistory(user.uid, result.history);
             }
+            eventBus.$emit('syncComplete');
         } catch (e) {
             console.error('Sync pull failed', e);
         }
