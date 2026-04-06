@@ -117,6 +117,48 @@ Not part of the service worker — managed directly by `app/src/services/store.j
 
 User data (favourites + history) is synced to Firestore under `users/{uid}/data/favourites` and `users/{uid}/data/history`. Firestore SDK handles its own offline queue — writes made while offline are automatically replayed when connectivity returns. Security rules are in `firestore.rules`.
 
+## Firebase setup (Petrus's fork)
+
+This fork uses a separate Firebase project (`folkfriend-petrush-fork`) — not the original `folk-friend` project used by the upstream app.
+
+- **Project:** `folkfriend-petrush-fork`
+- **Hosting:** `https://folkfriend-petrush-fork.web.app`
+- **Config:** `app/src/services/firebase.js` (shared instance for Auth, Firestore, Analytics)
+- **Deploy:** `cd app && npm run build && firebase deploy --only hosting`
+
+### Firebase services enabled
+
+- **Authentication:** Google sign-in provider; authorized domains include `localhost` and `folkfriend-petrush-fork.web.app`
+- **Firestore:** production mode; security rules in `firestore.rules` (users can only read/write their own data)
+- **Analytics:** inherited from original app, wired through `store.loadAnalytics()`
+
+### Google sync architecture
+
+**New files:**
+
+- `app/src/services/firebase.js` — shared `FirebaseApp` instance
+- `app/src/services/sync.js` — Firestore real-time sync logic
+
+**How it works:**
+
+- On sign-in: `sync.subscribe()` sets up `onSnapshot` listeners on `users/{uid}/data/favourites` and `users/{uid}/data/history`
+- First snapshot: if Firestore is empty (first device ever), seeds from local IndexedDB; otherwise replaces local with Firestore data
+- Subsequent snapshots: fire in real-time when any device writes, update IndexedDB and emit `syncComplete` on `eventBus`
+- On every write (`addFavourite`, `removeFavourite`, `addToHistory`): pushes the full updated array to Firestore immediately
+- On sign-out: `onSnapshot` listeners are unsubscribed
+- Firestore is the source of truth — deletions propagate correctly; no additive-merge that would re-add removed items
+- Firestore SDK queues writes made offline and replays them when connectivity returns
+
+**Reactivity pattern:** `store.currentUser` is a plain object (not Vue reactive). Components listen to `eventBus.$on('authStateChanged', ...)` to update their local `data.currentUser`. Similarly, `eventBus.$on('syncComplete', ...)` triggers list reloads in `Favourites.vue`.
+
+### User settings added
+
+- `recordingTimeLimitSecs` (default: 10, range: 5–60) — max recording length before auto-stop. Note: the search algorithm is optimised for ~10s; longer recordings can reduce accuracy due to NW alignment scoring and quadratic query time.
+
+### Help/About page additions
+
+- Tune dataset date derived from `store.state.tuneIndexVersion` (set in `backend.js` after `setupTuneIndex`). The version `v` is days since 2020-01-01; convert with `new Date((1577836800 + v * 86400) * 1000)`.
+
 ## Recent changes
 
 ### CLI: settingID in query output (`rust/src/bin.rs`)
