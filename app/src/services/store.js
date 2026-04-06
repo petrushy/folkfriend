@@ -4,6 +4,8 @@
 import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
+import { GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
+import * as sync from './sync.js';
 import {
     logEvent
 } from 'firebase/analytics';
@@ -40,6 +42,8 @@ class Store {
         this.analyticsLoaded = new Promise(resolve => {
             this.setAnalyticsLoaded = resolve;
         });
+        this.currentUser = null;
+        this.auth = null;
     }
 
     async updateUserSettings(userSettings) {
@@ -74,15 +78,17 @@ class Store {
             items.unshift(new FavouriteItem(result));
             await set('favouriteItems', items);
             ids.add(result.settingID);
+            if (this.currentUser) sync.pushFavourites(this.currentUser.uid, items);
         }
     }
 
     async removeFavourite(settingID) {
-        const items = await this.getFavourites();
-        await set('favouriteItems', items.filter(f => f.result.settingID !== settingID));
+        const items = (await this.getFavourites()).filter(f => f.result.settingID !== settingID);
+        await set('favouriteItems', items);
         if (this._favouriteIDs !== null) {
             this._favouriteIDs.delete(settingID);
         }
+        if (this.currentUser) sync.pushFavourites(this.currentUser.uid, items);
     }
 
     async isFavourite(settingID) {
@@ -111,6 +117,7 @@ class Store {
         historyItems = historyItems.slice(0, 100);
 
         await set('historyItems', historyItems);
+        if (this.currentUser) sync.pushHistory(this.currentUser.uid, historyItems);
     }
 
     async exportUserData() {
@@ -133,6 +140,45 @@ class Store {
         await set('favouriteItems', payload.favouriteItems || []);
         await this.updateUserSettings(payload.userSettings || this.userSettings);
         this._favouriteIDs = null;
+    }
+
+    loadAuth(auth) {
+        this.auth = auth;
+    }
+
+    async onSignedIn(user) {
+        this.currentUser = user;
+        eventBus.$emit('authStateChanged', user);
+        const [localFavs, localHistory] = await Promise.all([
+            this.getFavourites(),
+            this.getHistoryItems(),
+        ]);
+        try {
+            const merged = await sync.pullAndMerge(user.uid, localFavs, localHistory);
+            await Promise.all([
+                set('favouriteItems', merged.favourites),
+                set('historyItems', merged.history),
+            ]);
+            this._favouriteIDs = null;
+            sync.pushFavourites(user.uid, merged.favourites);
+            sync.pushHistory(user.uid, merged.history);
+        } catch (e) {
+            console.error('Sync pull failed', e);
+        }
+    }
+
+    onSignedOut() {
+        this.currentUser = null;
+        eventBus.$emit('authStateChanged', null);
+    }
+
+    async signIn() {
+        const provider = new GoogleAuthProvider();
+        await signInWithPopup(this.auth, provider);
+    }
+
+    async signOut() {
+        await firebaseSignOut(this.auth);
     }
 
     loadAnalytics(analytics) {

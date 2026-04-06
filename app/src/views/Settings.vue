@@ -38,6 +38,31 @@
         </v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
+                Sync
+            </h1>
+            <p>Sign in to keep your favourites and history in sync across devices.</p>
+            <div v-if="currentUser">
+                <v-row align="center" class="px-2 mb-2">
+                    <v-icon left color="success">{{ icons.account }}</v-icon>
+                    <span>Signed in as <strong>{{ currentUser.email }}</strong></span>
+                </v-row>
+                <v-btn :loading="signingOut" @click="signOut">
+                    <v-icon left>{{ icons.logout }}</v-icon>
+                    Sign out
+                </v-btn>
+            </div>
+            <div v-else>
+                <v-btn :loading="signingIn" @click="signIn">
+                    <v-icon left>{{ icons.google }}</v-icon>
+                    Sign in with Google
+                </v-btn>
+                <p v-if="authError" class="mt-3 mb-0 error--text">
+                    {{ authError }}
+                </p>
+            </div>
+        </v-card>
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
                 Transfer Data
             </h1>
             <p>
@@ -133,15 +158,18 @@
 
 <script>
 import store from '@/services/store.js';
-import eventBus from '@/eventBus';
+import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
 import {
     // mdiCellphoneArrowDownVariant,
+    mdiAccountCircle,
     mdiCellphoneArrowDown,
     mdiCheckCircleOutline,
     mdiDotsVertical,
     mdiDownload,
     mdiExportVariant,
+    mdiGoogle,
+    mdiLogout,
     // mdiMonitorArrowDownVariant,
     mdiPlusBoxOutline,
     mdiUpload,
@@ -161,7 +189,14 @@ export default {
         next();
     },
     data: () => ({
+        currentUser: store.currentUser,
+        signingIn: false,
+        signingOut: false,
+        authError: null,
         icons: {
+            account: mdiAccountCircle,
+            google: mdiGoogle,
+            logout: mdiLogout,
             iosShare: mdiExportVariant,
             iosAddToHomeScreen: mdiPlusBoxOutline,
             checkCircle: mdiCheckCircleOutline,
@@ -181,10 +216,38 @@ export default {
     }),
     created: function() {
         this.ua = utils.checkUserAgent();
+        eventBus.$on('authStateChanged', user => { this.currentUser = user; });
+    },
+    beforeDestroy() {
+        eventBus.$off('authStateChanged');
     },
     methods: {
         settingsChanged() {
             store.updateUserSettings(this.userSettings);
+        },
+        async signIn() {
+            this.authError = null;
+            this.signingIn = true;
+            try {
+                await store.signIn();
+            } catch (err) {
+                const messages = {
+                    'auth/unauthorized-domain': 'This domain is not authorised in Firebase. Add it under Authentication → Authorized domains in the Firebase console.',
+                    'auth/popup-blocked': 'The sign-in popup was blocked. Allow popups for this site and try again.',
+                    'auth/popup-closed-by-user': 'Sign-in cancelled.',
+                };
+                this.authError = messages[err.code] || `Sign-in failed: ${err.message}`;
+            } finally {
+                this.signingIn = false;
+            }
+        },
+        async signOut() {
+            this.signingOut = true;
+            try {
+                await store.signOut();
+            } finally {
+                this.signingOut = false;
+            }
         },
         async downloadUserData() {
             const json = await store.exportUserData();
