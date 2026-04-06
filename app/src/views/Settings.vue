@@ -341,7 +341,7 @@ export default {
                 for (const [i, item] of bookmarks.entries()) {
                     this.importStatus = `Processing ${i + 1} / ${bookmarks.length}…`;
                     const tuneID = item.target.id.split(':')[2]; // must be string — WASM expects String
-                    const settingID = parseInt(item.object.id.split(':')[2], 10);
+                    const settingID = item.object.id.split(':')[2]; // string, consistent with WASM setting_id
                     const displayName = item.object.displayName;
                     if (await store.isFavourite(settingID)) {
                         skipped++;
@@ -355,8 +355,7 @@ export default {
                         notFound++;
                         continue;
                     }
-                    const setting = settings.find(s => parseInt(s.setting_id, 10) === settingID);
-                    if (setting) setting.tune_id = tuneID; // ensure tune_id is set (string)
+                    const setting = settings.find(s => s.setting_id === settingID);
                     if (!setting) {
                         notFound++;
                         continue;

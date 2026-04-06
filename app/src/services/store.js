@@ -68,12 +68,13 @@ class Store {
     async _loadFavouriteIDs() {
         if (this._favouriteIDs === null) {
             const items = await this.getFavourites();
-            this._favouriteIDs = new Set(items.map(f => f.result.settingID));
+            this._favouriteIDs = new Set(items.map(f => String(f.result.settingID)));
         }
         return this._favouriteIDs;
     }
 
     async addFavourite(result) {
+        result = { ...result, settingID: String(result.settingID) };
         const ids = await this._loadFavouriteIDs();
         if (!ids.has(result.settingID)) {
             const items = await this.getFavourites();
@@ -85,7 +86,8 @@ class Store {
     }
 
     async removeFavourite(settingID) {
-        const items = (await this.getFavourites()).filter(f => f.result.settingID !== settingID);
+        settingID = String(settingID);
+        const items = (await this.getFavourites()).filter(f => String(f.result.settingID) !== settingID);
         await set('favouriteItems', items);
         if (this._favouriteIDs !== null) {
             this._favouriteIDs.delete(settingID);
@@ -95,7 +97,7 @@ class Store {
 
     async isFavourite(settingID) {
         const ids = await this._loadFavouriteIDs();
-        return ids.has(settingID);
+        return ids.has(String(settingID));
     }
 
     async clearHistory() {
