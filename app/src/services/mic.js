@@ -106,6 +106,82 @@ class MicService {
         this.finishOpening();
     }
 
+    async startContinuous() {
+        if (store.isListening()) return;
+        store.setSearchState(store.searchStates.LISTENING);
+
+        this._ringBuffer = [];
+
+        if (!navigator || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            alert('Missing support for navigator.mediaDevices.getUserMedia');
+            throw 'Missing support for navigator.mediaDevices.getUserMedia';
+        }
+
+        try {
+            this.micStream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+        } catch (e) {
+            store.setSearchState(store.searchStates.READY);
+            throw e;
+        }
+
+        this.audioCtx = new AudioContext();
+        this.micProcessor = this.audioCtx.createScriptProcessor(this.bufferSize, 1, 1);
+
+        const sampleRate = this.audioCtx.sampleRate;
+        this._ringBufferMaxChunks = Math.ceil(
+            (store.userSettings.recordingTimeLimitSecs || 10) * sampleRate / this.bufferSize
+        );
+
+        this.micProcessor.onaudioprocess = (audioProcessingEvent) => {
+            const channelData = audioProcessingEvent.inputBuffer.getChannelData(0);
+            this._ringBuffer.push(new Float32Array(channelData)); // copy
+            if (this._ringBuffer.length > this._ringBufferMaxChunks) {
+                this._ringBuffer.shift();
+            }
+        };
+
+        this.micSource = this.audioCtx.createMediaStreamSource(this.micStream);
+        this.micSource.connect(this.micProcessor);
+        this.micProcessor.connect(this.audioCtx.destination);
+
+        try {
+            console.debug(`Continuous mode: sample rate ${sampleRate}, max chunks ${this._ringBufferMaxChunks}`);
+            await ffBackend.setSampleRate(sampleRate);
+        } catch (e) {
+            await this.stopContinuous();
+            throw e;
+        }
+    }
+
+    getContinuousAudio() {
+        const chunks = this._ringBuffer || [];
+        const total = chunks.reduce((n, c) => n + c.length, 0);
+        const out = new Float32Array(total);
+        let offset = 0;
+        for (const chunk of chunks) {
+            out.set(chunk, offset);
+            offset += chunk.length;
+        }
+        return out;
+    }
+
+    async stopContinuous() {
+        this._ringBuffer = [];
+        if (this.micProcessor) {
+            this.micProcessor.disconnect();
+            this.micProcessor = null;
+        }
+        if (this.micStream) {
+            this.micStream.getTracks().forEach(t => t.stop());
+            this.micStream = null;
+        }
+        if (this.audioCtx) {
+            await this.audioCtx.close();
+            this.audioCtx = null;
+        }
+        store.setSearchState(store.searchStates.READY);
+    }
+
     async stopRecording() {
         // There is never a use case where we don't want this to be in working state
         //  Even if the mic has failed to open we might still have to wait a second

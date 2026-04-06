@@ -5,7 +5,7 @@ import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
 import { GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
-import * as sync from './sync.js';
+import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
 import {
     logEvent
 } from 'firebase/analytics';
@@ -32,7 +32,8 @@ class Store {
         this.searchStates = {
             READY: 'ready',
             RECORDING: 'recording',
-            WORKING: 'working'
+            WORKING: 'working',
+            LISTENING: 'listening',
         };
 
         this.userSettings = JSON.parse(localStorage.getItem('userSettings')) || USER_SETTING_DEFAULTS;
@@ -81,7 +82,7 @@ class Store {
             items.unshift(new FavouriteItem(result));
             await set('favouriteItems', items);
             ids.add(result.settingID);
-            if (this.currentUser) sync.pushFavourites(this.currentUser.uid, items);
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
         }
     }
 
@@ -92,7 +93,7 @@ class Store {
         if (this._favouriteIDs !== null) {
             this._favouriteIDs.delete(settingID);
         }
-        if (this.currentUser) sync.pushFavourites(this.currentUser.uid, items);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
     async isFavourite(settingID) {
@@ -121,7 +122,6 @@ class Store {
         historyItems = historyItems.slice(0, 100);
 
         await set('historyItems', historyItems);
-        if (this.currentUser) sync.pushHistory(this.currentUser.uid, historyItems);
     }
 
     async exportUserData() {
@@ -153,18 +153,13 @@ class Store {
     async onSignedIn(user) {
         this.currentUser = user;
         eventBus.$emit('authStateChanged', user);
-        const [localFavs, localHistory] = await Promise.all([
-            this.getFavourites(),
-            this.getHistoryItems(),
-        ]);
-        this._unsubscribeSync = sync.subscribe(user.uid, localFavs, localHistory, async (type, items) => {
+        const localFavs = await this.getFavourites();
+        this._unsubscribeSync = syncSubscribe(user.uid, localFavs, async (type, items) => {
             if (type === 'favourites') {
                 await set('favouriteItems', items);
                 this._favouriteIDs = null;
-            } else {
-                await set('historyItems', items);
+                eventBus.$emit('syncComplete');
             }
-            eventBus.$emit('syncComplete');
         });
     }
 
@@ -211,9 +206,13 @@ class Store {
         return this.searchState === this.searchStates.WORKING;
     }
 
+    isListening() {
+        return this.searchState === this.searchStates.LISTENING;
+    }
+
     setSearchState(state) {
         this.searchState = state;
-        if (!(this.isReady() || this.isRecording() || this.isWorking())) {
+        if (!(this.isReady() || this.isRecording() || this.isWorking() || this.isListening())) {
             this.searchState = this.searchStates.READY;
             console.error(`Invalid state ${state}`);
         }

@@ -12,7 +12,7 @@
                     <v-list-item @click="0">
                         <v-list-item-action>
                             <v-icon medium>
-                                {{ icons.microphone }}
+                                {{ icons.magnify }}
                             </v-icon>
                         </v-list-item-action>
                         <v-list-item-content>
@@ -168,9 +168,9 @@
             />
             <v-icon
                 color="primary"
-                @click="clickSettings"
+                @click="clickSearch($event)"
             >
-                {{ icons.cog }}
+                {{ icons.magnify }}
             </v-icon>
         </v-app-bar>
 
@@ -199,6 +199,7 @@ import {
     mdiHelpCircleOutline,
     mdiHistory,
     mdiHeart,
+    mdiMagnify,
     mdiMenu,
     mdiMicrophone,
     mdiMusicNote,
@@ -227,6 +228,7 @@ export default {
             heart: mdiHeart,
             help: mdiHelpCircleOutline,
             history: mdiHistory,
+            magnify: mdiMagnify,
             menu: mdiMenu,
             microphone: mdiMicrophone,
             musicNote: mdiMusicNote,
@@ -248,7 +250,7 @@ export default {
         //  hamburger. As a fallback, the navigation hamburger becomes a cross
         //  which refreshes the page in case recording / working hangs completely.
         eventBus.$on('setSearchState', () => {
-            if (store.isReady()) {
+            if (store.isReady() || store.isListening()) {
                 if (this.hamburgerState === this.hamburgerStates.cancel) {
                     this.hamburgerState = this.hamburgerStates.hamburger;
                 }
@@ -292,6 +294,13 @@ export default {
             let result = window.confirm('Cancel this search?');
             if (result) {
                 window.location.reload(false);
+            }
+        },
+        clickSearch(e) {
+            if (e && e.currentTarget) e.currentTarget.blur();
+            if (this.$route.name !== 'search') {
+                router.push({ name: 'search' });
+                eventBus.$emit('parentViewActivated');
             }
         },
         clickSettings() {

@@ -87,7 +87,7 @@ class FFBackend {
         });
     }
 
-    async submitFilledBuffer() {
+    async submitFilledBuffer(skipHistory = false) {
         let t0 = performance.now();
         const contour = await this.transcribePCMBuffer();
         let tEnd = performance.now();
@@ -151,9 +151,11 @@ class FFBackend {
         }
 
         store.state.lastContour = contour;
-        store.addToHistory(new HistoryItem({
-            contour: contour
-        }));
+        if (!skipHistory) {
+            store.addToHistory(new HistoryItem({
+                contour: contour
+            }));
+        }
 
         if (!doQuery) {
             router.push({
@@ -179,6 +181,11 @@ class FFBackend {
                 resolve(abc);
             }));
         });
+    }
+
+    async analyzeRingBuffer(pcm) {
+        await this.feedEntirePCMSignal(pcm);
+        await this.submitFilledBuffer(true);
     }
 
     async settingsFromTuneID(tuneID) {
