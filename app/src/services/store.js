@@ -154,14 +154,16 @@ class Store {
             this.getHistoryItems(),
         ]);
         try {
-            const merged = await sync.pullAndMerge(user.uid, localFavs, localHistory);
+            const result = await sync.pullOrSeed(user.uid, localFavs, localHistory);
             await Promise.all([
-                set('favouriteItems', merged.favourites),
-                set('historyItems', merged.history),
+                set('favouriteItems', result.favourites),
+                set('historyItems', result.history),
             ]);
             this._favouriteIDs = null;
-            sync.pushFavourites(user.uid, merged.favourites);
-            sync.pushHistory(user.uid, merged.history);
+            if (result.seeded) {
+                sync.pushFavourites(user.uid, result.favourites);
+                sync.pushHistory(user.uid, result.history);
+            }
         } catch (e) {
             console.error('Sync pull failed', e);
         }

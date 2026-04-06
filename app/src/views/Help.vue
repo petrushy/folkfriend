@@ -45,7 +45,7 @@
         </v-card>
         <p class="AppInfo">
             Folkfriend app version: {{ frontendVersion }}<br>Folkfriend library version:
-            {{ backendVersion }}<br>© {{ year }} Tom Wyllie. All Rights Reserved.
+            {{ backendVersion }}<br>Tune dataset: {{ tuneIndexDate }}<br>© {{ year }} Tom Wyllie. All Rights Reserved.
         </p>
     </v-container>
 </template>
@@ -88,6 +88,13 @@ export default {
         },
         frontendVersion() {
             return ffConfig.FRONTEND_VERSION;
+        },
+        tuneIndexDate() {
+            const v = store.state.tuneIndexVersion;
+            if (!v) return 'loading…';
+            // v = days since 2020-01-01
+            const ms = (1577836800 + v * 86400) * 1000;
+            return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
         },
     },
     created: function () {

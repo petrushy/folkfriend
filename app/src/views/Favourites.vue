@@ -160,10 +160,13 @@ export default {
                 return;
             }
 
+            const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
             const sections = selected.map((item) => {
-                const name = utils.parseDisplayableName(item.result.displayName);
-                const descriptor = utils.parseDisplayableDescription(item.result.setting);
-                const url = `https://thesession.org/tunes/${item.result.setting.tune_id}#setting${item.result.settingID}`;
+                const name = escapeHtml(utils.parseDisplayableName(item.result.displayName));
+                const descriptor = escapeHtml(utils.parseDisplayableDescription(item.result.setting));
+                const tuneID = parseInt(item.result.setting.tune_id, 10);
+                const settingID = parseInt(item.result.settingID, 10);
+                const url = `https://thesession.org/tunes/${tuneID}#setting${settingID}`;
                 const svg = this.renderAbcSvg(item.result.setting);
                 return `  <div class="tune">
     <h2><a href="${url}">${name}</a></h2>

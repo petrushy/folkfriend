@@ -39,6 +39,7 @@ class FFBackend {
             }));
         });
         store.logAnalyticsEvent('tune_index_init', analyticsData).then();
+        store.state.tuneIndexVersion = analyticsData['tune_index_metadata_version'];
     }
 
     async setSampleRate(sampleRate) {
