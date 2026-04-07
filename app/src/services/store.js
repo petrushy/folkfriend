@@ -3,7 +3,7 @@
 //  very basic state management.
 import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
-import {FavouriteItem} from '@/js/schema';
+import {FavouriteItem, FavouriteFolder} from '@/js/schema';
 import { GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
 import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
 import {
@@ -40,6 +40,7 @@ class Store {
         this.searchState = this.searchStates.READY;
 
         this._favouriteIDs = null;
+        this._favouriteTuneIDs = null;
         this.analytics = null;
         this.analyticsLoaded = new Promise(resolve => {
             this.setAnalyticsLoaded = resolve;
@@ -66,23 +67,114 @@ class Store {
         return await get('favouriteItems') || [];
     }
 
+    async getFolders() {
+        return await get('favouriteFolders') || [];
+    }
+
+    async _getOrCreateTodayFolder() {
+        const today = new Date().toISOString().slice(0, 10);
+        const folders = await this.getFolders();
+        let folder = folders.find(f => f.name === today);
+        if (!folder) {
+            folder = new FavouriteFolder({ name: today });
+            folders.push(folder);
+            await set('favouriteFolders', folders);
+            const items = await this.getFavourites();
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+        }
+        return folder;
+    }
+
+    async addFolder(name) {
+        const folders = await this.getFolders();
+        const folder = new FavouriteFolder({ name });
+        folders.push(folder);
+        await set('favouriteFolders', folders);
+        const items = await this.getFavourites();
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+        return folder;
+    }
+
+    async renameFolder(folderId, newName) {
+        const folders = await this.getFolders();
+        const folder = folders.find(f => f.id === folderId);
+        if (folder) folder.name = newName;
+        await set('favouriteFolders', folders);
+        const items = await this.getFavourites();
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+    }
+
+    async deleteFolder(folderId) {
+        const folders = (await this.getFolders()).filter(f => f.id !== folderId);
+        // Move items from deleted folder to null (unfiled)
+        const items = await this.getFavourites();
+        items.forEach(item => { if (item.folderId === folderId) item.folderId = null; });
+        await set('favouriteFolders', folders);
+        await set('favouriteItems', items);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+    }
+
+    async moveFavouriteToFolder(settingID, folderId) {
+        settingID = String(settingID);
+        const items = await this.getFavourites();
+        const item = items.find(f => String(f.result.settingID) === settingID);
+        if (item) item.folderId = folderId;
+        await set('favouriteItems', items);
+        const folders = await this.getFolders();
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+    }
+
+    _isValidSettingID(settingID) {
+        const s = String(settingID);
+        return settingID != null && s !== 'undefined' && s !== 'null' && s !== '';
+    }
+
     async _loadFavouriteIDs() {
         if (this._favouriteIDs === null) {
-            const items = await this.getFavourites();
+            let items = await this.getFavourites();
+            // Clean up any items with invalid settingIDs (stored from a previous bug)
+            const clean = items.filter(f => this._isValidSettingID(f.result.settingID));
+            if (clean.length !== items.length) {
+                await set('favouriteItems', clean);
+                items = clean;
+            }
             this._favouriteIDs = new Set(items.map(f => String(f.result.settingID)));
+            this._favouriteTuneIDs = new Set(
+                items.filter(f => f.result.setting && f.result.setting.tune_id)
+                     .map(f => String(f.result.setting.tune_id))
+            );
         }
         return this._favouriteIDs;
     }
 
+    async _loadFavouriteTuneIDs() {
+        await this._loadFavouriteIDs(); // ensures _favouriteTuneIDs is also populated
+        return this._favouriteTuneIDs;
+    }
+
+    _invalidateFavouriteCache() {
+        this._favouriteIDs = null;
+        this._favouriteTuneIDs = null;
+    }
+
     async addFavourite(result) {
+        if (!this._isValidSettingID(result.settingID)) {
+            console.warn('addFavourite: invalid settingID, ignoring', result.settingID);
+            return;
+        }
         result = { ...result, settingID: String(result.settingID) };
         const ids = await this._loadFavouriteIDs();
         if (!ids.has(result.settingID)) {
+            const folder = await this._getOrCreateTodayFolder();
             const items = await this.getFavourites();
-            items.unshift(new FavouriteItem(result));
+            items.unshift(new FavouriteItem(result, folder.id));
             await set('favouriteItems', items);
             ids.add(result.settingID);
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+            if (this._favouriteTuneIDs && result.setting && result.setting.tune_id) {
+                this._favouriteTuneIDs.add(String(result.setting.tune_id));
+            }
+            const folders = await this.getFolders();
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
         }
     }
 
@@ -90,15 +182,22 @@ class Store {
         settingID = String(settingID);
         const items = (await this.getFavourites()).filter(f => String(f.result.settingID) !== settingID);
         await set('favouriteItems', items);
-        if (this._favouriteIDs !== null) {
-            this._favouriteIDs.delete(settingID);
-        }
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        // Invalidate both caches — tune may still be favourited via another setting
+        this._invalidateFavouriteCache();
+        const folders = await this.getFolders();
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
     }
 
     async isFavourite(settingID) {
+        if (!this._isValidSettingID(settingID)) return false;
         const ids = await this._loadFavouriteIDs();
         return ids.has(String(settingID));
+    }
+
+    async isTuneFavourite(tuneID) {
+        if (!tuneID) return false;
+        const ids = await this._loadFavouriteTuneIDs();
+        return ids.has(String(tuneID));
     }
 
     async clearHistory() {
@@ -126,24 +225,26 @@ class Store {
 
     async exportUserData() {
         const payload = {
-            version: 1,
+            version: 2,
             exportedAt: Date.now(),
             userSettings: this.userSettings,
             historyItems: await this.getHistoryItems(),
             favouriteItems: await this.getFavourites(),
+            favouriteFolders: await this.getFolders(),
         };
         return JSON.stringify(payload, null, 2);
     }
 
     async importUserData(jsonString) {
         const payload = JSON.parse(jsonString);
-        if (payload.version !== 1) {
+        if (payload.version !== 1 && payload.version !== 2) {
             throw new Error(`Unsupported data version: ${payload.version}`);
         }
         await set('historyItems', payload.historyItems || []);
         await set('favouriteItems', payload.favouriteItems || []);
+        await set('favouriteFolders', payload.favouriteFolders || []);
         await this.updateUserSettings(payload.userSettings || this.userSettings);
-        this._favouriteIDs = null;
+        this._invalidateFavouriteCache();
     }
 
     loadAuth(auth) {
@@ -153,11 +254,12 @@ class Store {
     async onSignedIn(user) {
         this.currentUser = user;
         eventBus.$emit('authStateChanged', user);
-        const localFavs = await this.getFavourites();
-        this._unsubscribeSync = syncSubscribe(user.uid, localFavs, async (type, items) => {
+        const [localFavs, localFolders] = await Promise.all([this.getFavourites(), this.getFolders()]);
+        this._unsubscribeSync = syncSubscribe(user.uid, localFavs, localFolders, async (type, items, folders) => {
             if (type === 'favourites') {
                 await set('favouriteItems', items);
-                this._favouriteIDs = null;
+                await set('favouriteFolders', folders || []);
+                this._invalidateFavouriteCache();
                 eventBus.$emit('syncComplete');
             }
         });

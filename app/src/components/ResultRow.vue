@@ -17,7 +17,7 @@
             >
                 <v-row class="pt-1 pb-0">
                     <v-col class="py-0">
-                        <h2>{{ name }}</h2>
+                        <span class="tune-title">{{ name }}</span>
                     </v-col>
                 </v-row>
                 <v-row class="pb-2 pt-0">
@@ -34,7 +34,7 @@
                 </v-row>
             </v-container>
         </router-link>
-        <v-btn icon class="mr-2" @click.stop="toggleFavourite">
+        <v-btn icon class="mr-2" :disabled="!hasValidSettingID && !favourited" @click.stop="toggleFavourite">
             <v-icon :color="favourited ? 'amber darken-1' : 'grey lighten-1'">
                 {{ favourited ? starIcon : starOutlineIcon }}
             </v-icon>
@@ -78,7 +78,7 @@ export default {
         };
     },
     created() {
-        store.isFavourite(this.settingID).then(v => {
+        store.isTuneFavourite(this.setting.tune_id).then(v => {
             this.favourited = v;
         });
     },
@@ -102,6 +102,9 @@ export default {
                 return 'No Match';
             }
         },
+        hasValidSettingID() {
+            return store._isValidSettingID(this.settingID);
+        },
         scoreColour: function () {
             let x = this.score;
             x = Math.min(0.7, x);
@@ -121,12 +124,16 @@ export default {
                 displayName: this.displayName,
             }));
         },
-        toggleFavourite() {
+        async toggleFavourite() {
+            if (!store._isValidSettingID(this.settingID)) {
+                // Name query results have no settingID — navigate to tune to star a specific setting
+                return;
+            }
             if (this.favourited) {
-                store.removeFavourite(this.settingID);
-                this.favourited = false;
+                await store.removeFavourite(this.settingID);
+                this.favourited = await store.isTuneFavourite(this.setting.tune_id);
             } else {
-                store.addFavourite({
+                await store.addFavourite({
                     settingID: this.settingID,
                     setting: this.setting,
                     displayName: this.displayName,
@@ -139,6 +146,12 @@ export default {
 </script>
 
 <style scoped>
+.tune-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  display: block;
+}
+
 .descriptor {
   font-style: italic;
 }

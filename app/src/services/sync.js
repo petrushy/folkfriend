@@ -7,21 +7,22 @@ function favDoc(uid) {
     return doc(db, 'users', uid, 'data', 'favourites');
 }
 
-// Subscribe to real-time Firestore updates for favourites.
+// Subscribe to real-time Firestore updates for favourites and folders.
 // - On first snapshot: if Firestore has data → use it; if empty → seed from local.
 // - On subsequent snapshots: always use Firestore (source of truth), call onChange.
 // Returns an unsubscribe function to call on sign-out.
-export function subscribe(uid, localFavs, onChange) {
-    let favSeeded = false;
+export function subscribe(uid, localFavs, localFolders, onChange) {
+    let seeded = false;
 
     const unsubFav = onSnapshot(favDoc(uid), snap => {
         if (!snap.exists()) {
-            if (!favSeeded) {
-                favSeeded = true;
-                pushFavourites(uid, localFavs);
+            if (!seeded) {
+                seeded = true;
+                pushFavourites(uid, localFavs, localFolders);
             }
         } else {
-            onChange('favourites', snap.data().items || []);
+            const data = snap.data();
+            onChange('favourites', data.items || [], data.folders || []);
         }
     });
 
@@ -32,6 +33,10 @@ function toPlain(items) {
     return JSON.parse(JSON.stringify(items));
 }
 
-export function pushFavourites(uid, items) {
-    setDoc(favDoc(uid), { items: toPlain(items), updatedAt: serverTimestamp() }).catch(console.error);
+export function pushFavourites(uid, items, folders = []) {
+    setDoc(favDoc(uid), {
+        items: toPlain(items),
+        folders: toPlain(folders),
+        updatedAt: serverTimestamp(),
+    }).catch(console.error);
 }

@@ -156,6 +156,7 @@ export default {
             }
         },
         startPlaying: function () {
+            eventBus.$emit('stopSynthPlayback');
             this.paused = false;
 
             if (!ABCJS.synth.supportsAudio()) {

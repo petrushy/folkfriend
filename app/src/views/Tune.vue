@@ -152,29 +152,29 @@ export default {
         );
         this.name = this.displayableAliases.splice(primaryAliasIndex, 1)[0];
 
-        // Load favourite state for each setting
-        for (const s of this.settings) {
-            store.isFavourite(s.setting_id).then(v => {
-                this.$set(this.favouritedSettings, s.setting_id, v);
-            });
-        }
+        // Load favourite state for all settings first, then decide which panel to open
+        await Promise.all(this.settings.map(async s => {
+            const v = await store.isFavourite(s.setting_id);
+            this.$set(this.favouritedSettings, s.setting_id, v);
+        }));
 
-        // Auto-pop open the matched setting and scroll into view
+        // Auto-pop open the matched setting:
+        // 1. If a specific settingID was passed (e.g. from audio results or favourites list), use it
+        // 2. Else if any setting is favourited, open the first favourited one
+        // 3. Otherwise open the first setting
         if (this.settingID) {
             for (const [i, setting] of this.settings.entries()) {
                 if (setting.setting_id === this.settingID) {
                     this.expandedIndex = [i];
+                    break;
                 }
             }
         } else {
-            // By default, open the first tune. Only pop it open
-            //  here because otherwise if it's in data() the first
-            //  one pops open unwanted even when we've hit another
-            //  as above.
-            this.expandedIndex = [0];
+            let favouritedIndex = this.settings.findIndex(s => this.favouritedSettings[s.setting_id]);
+            this.expandedIndex = [favouritedIndex >= 0 ? favouritedIndex : 0];
         }
     },
-    beforeRouteLeave: function (to, from, next) {
+    beforeRouteLeave: function (_to, _from, next) {
         eventBus.$emit('stopSynthPlayback');
         next();
     },
