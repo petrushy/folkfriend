@@ -63,6 +63,7 @@
                     :selected="selectedIDs.has(row.settingID)"
                     :tags="row.tags"
                     :allTags="allTags"
+                    :setting="row.setting"
                     @favouriteItemClicked="loadFavouriteItem"
                     @unstar="removeFavourite"
                     @toggle="toggleSelected"
@@ -285,6 +286,7 @@ export default {
                 settingID: item.result.settingID,
                 timestamp: item.timestamp,
                 tags: item.tags || [],
+                setting: item.result.setting || null,
             };
         },
         loadFavourites() {

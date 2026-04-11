@@ -1,5 +1,5 @@
 <template>
-    <div class="favourite-row-wrapper d-flex align-center">
+    <div ref="rowEl" class="favourite-row-wrapper d-flex align-center">
         <v-checkbox
             :input-value="selected"
             class="ml-2 mr-0 mt-0 pt-0 flex-grow-0"
@@ -18,11 +18,8 @@
                 </v-col>
             </v-row>
             <v-row class="pb-0 pt-0">
-                <v-col class="py-0 descriptor">
-                    {{ descriptor }}
-                </v-col>
-                <v-col class="py-0 text-right timestamp">
-                    {{ timestampString }}
+                <v-col class="py-0 tune-meta">
+                    {{ descriptor }}, {{ timestampString }}
                 </v-col>
             </v-row>
             <!-- Tag chips — @click.stop on the row prevents bubbling to the container's navigation handler -->
@@ -38,6 +35,10 @@
                 </v-col>
             </v-row>
         </v-container>
+
+        <!-- ABC preview — only rendered when the row is wide enough -->
+        <!-- eslint-disable-next-line vue/no-v-html -->
+        <div v-if="showAbcPreview" class="abc-preview" :style="{ width: abcPreviewDisplayWidth + 'px' }" @click.stop="favouriteItemClicked" v-html="abcSvg" />
 
         <!-- Add tag button — outside the clickable container, left of star, easy to tap -->
         <v-menu v-model="addTagMenu" :close-on-content-click="false" offset-y left>
@@ -73,7 +74,14 @@
 
 <script>
 import { mdiStar, mdiTagPlusOutline } from '@mdi/js';
+import ABCJS from 'abcjs';
 import utils from '@/js/utils';
+
+// Minimum row width (px) before the ABC preview is shown.
+// Left of preview: checkbox(~40) + tune info min(~180) = ~220
+// Right of preview: add-tag btn(~36) + star btn(~52) = ~88
+// Preview itself needs at least ~200px → total ~508; use 540 to give a little breathing room.
+const ABC_PREVIEW_MIN_ROW_WIDTH = 540;
 
 export default {
     name: 'FavouriteRow',
@@ -85,9 +93,11 @@ export default {
         selected: { type: Boolean, default: false },
         tags: { type: Array, default: () => [] },
         allTags: { type: Array, default: () => [] },
+        setting: { type: Object, default: null },
     },
     data() {
         return {
+            rowWidth: 0,
             addTagMenu: false,
             tagInputValue: null,
             icons: {
@@ -103,6 +113,71 @@ export default {
         addableTags() {
             return this.allTags.filter(t => !this.tags.includes(t));
         },
+        abcPreviewDisplayWidth() {
+            // buttons (add-tag ~40 + star ~52) + checkbox (~44) + min tune-info (~180)
+            const reserved = 44 + 180 + 92;
+            const available = this.rowWidth - reserved;
+            return Math.min(480, Math.max(220, Math.floor(available * 0.7)));
+        },
+        showAbcPreview() {
+            return this.rowWidth >= ABC_PREVIEW_MIN_ROW_WIDTH && !!this.setting && !!this.setting.abc;
+        },
+        abcSvg() {
+            if (!this.setting || !this.setting.abc) return '';
+            const lines = [];
+            if (this.setting.mode) lines.push(`K:${this.setting.mode}`);
+            if (this.setting.meter) lines.push(`M:${this.setting.meter}`);
+            if (!/^L:/m.test(this.setting.abc)) lines.push('L:1/8');
+            // Strip chord annotations and tempo — chords add vertical whitespace above the staff.
+            let body = this.setting.abc;
+            body = body.replace(/^Q:[^\n]*/gm, '');
+            body = body.replace(/"[^"]*"/g, '');
+            // Strip multi-voice ABC — keep only V:1 content so only one staff renders.
+            if (/^V:/m.test(body)) {
+                const filtered = [];
+                let inV1 = true; // before any V: marker, include content
+                for (const line of body.split('\n')) {
+                    if (/^V:1/.test(line)) { inV1 = true; continue; }
+                    if (/^V:/.test(line))  { inV1 = false; continue; }
+                    if (inV1) filtered.push(line);
+                }
+                body = filtered.join('\n');
+            }
+            // Take only the first 3 actual bars (count 4 '|' chars to skip the
+            // leading '|:' repeat marker without consuming a real bar).
+            let count = 0;
+            let cutAt = body.length;
+            for (let i = 0; i < body.length; i++) {
+                if (body[i] === '|' && ++count >= 4) { cutAt = i + 1; break; }
+            }
+            lines.push(body.slice(0, cutAt));
+
+            const div = document.createElement('div');
+            ABCJS.renderAbc(div, lines.join('\n'), {
+                // Render at actual display width so no CSS scaling is needed.
+                // scale zooms note size (1.0 = default); 0.65 gives compact but readable notation.
+                staffwidth: this.abcPreviewDisplayWidth,
+                scale: 0.65,
+                paddingtop: 0,
+                paddingbottom: 0,
+                paddingleft: 0,
+                paddingright: 0,
+                // Force everything onto one line regardless of time signature width
+                wrap: { minSpacing: 1, maxSpacing: 3, preferredMeasuresPerLine: 8 },
+            });
+            return div.innerHTML;
+        },
+    },
+    mounted() {
+        if (window.ResizeObserver) {
+            this._ro = new ResizeObserver(entries => {
+                this.rowWidth = entries[0].contentRect.width;
+            });
+            this._ro.observe(this.$refs.rowEl);
+        }
+    },
+    beforeDestroy() {
+        if (this._ro) this._ro.disconnect();
     },
     methods: {
         favouriteItemClicked() {
@@ -132,11 +207,27 @@ export default {
   display: block;
 }
 
-.descriptor {
+.tune-meta {
   font-style: italic;
+  color: #757575; /* grey darken-1 */
+  font-size: 0.85rem;
 }
 
-.descriptor::first-letter {
+.tune-meta::first-letter {
   text-transform: uppercase;
+}
+
+.abc-preview {
+  /* width set inline; SVG scaled down from ABC_RENDER_STAFFWIDTH to container width */
+  overflow: hidden;
+  opacity: 0.75;
+  margin: 0 6px;
+  flex-shrink: 0;
+  align-self: center;
+  cursor: pointer;
+}
+
+.abc-preview :deep(svg) {
+  display: block;
 }
 </style>
