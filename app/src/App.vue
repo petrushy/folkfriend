@@ -360,7 +360,7 @@ html, body {
 
 .viewContainerWrapper {
     display: block;
-    max-width: min(90vh, 90vw);
+    max-width: 90vw;
     padding-left: 0;
     padding-right: 0;
     margin-left: auto;
