@@ -143,12 +143,13 @@ export default {
                 }
                 body = filtered.join('\n');
             }
-            // Take only the first 3 actual bars (count 4 '|' chars to skip the
+            // Take only the first 2 actual bars (count 3 '|' chars to skip the
             // leading '|:' repeat marker without consuming a real bar).
+            // 2 bars reliably fits on one staff line at any preview width.
             let count = 0;
             let cutAt = body.length;
             for (let i = 0; i < body.length; i++) {
-                if (body[i] === '|' && ++count >= 4) { cutAt = i + 1; break; }
+                if (body[i] === '|' && ++count >= 3) { cutAt = i + 1; break; }
             }
             lines.push(body.slice(0, cutAt));
 
@@ -218,8 +219,9 @@ export default {
 }
 
 .abc-preview {
-  /* width set inline; SVG scaled down from ABC_RENDER_STAFFWIDTH to container width */
+  /* width set inline; height capped to one staff line — second wraps clip below */
   overflow: hidden;
+  max-height: 80px;
   opacity: 0.75;
   margin: 0 6px;
   flex-shrink: 0;

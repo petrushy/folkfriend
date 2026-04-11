@@ -51,6 +51,33 @@
                         </div>
                     </div>
                     <div class="headerActions">
+                        <v-menu
+                            v-if="expandedIndex.includes(i) && favouritedSettings[settingData.setting_id]"
+                            v-model="addTagMenus[settingData.setting_id]"
+                            :close-on-content-click="false"
+                            offset-y
+                            left
+                        >
+                            <template #activator="{ on }">
+                                <v-btn icon small @click.stop v-on="on">
+                                    <v-icon color="grey darken-1">{{ icons.tagPlus }}</v-icon>
+                                </v-btn>
+                            </template>
+                            <v-card width="220" @click.stop>
+                                <v-combobox
+                                    v-model="tagInputValues[settingData.setting_id]"
+                                    :items="addableTagsFor(settingData.setting_id)"
+                                    label="Add tag"
+                                    dense
+                                    solo
+                                    flat
+                                    hide-details
+                                    class="px-2 pt-1 pb-1"
+                                    @change="onTagSelected(settingData.setting_id, $event)"
+                                    @keydown.esc.stop="$set(addTagMenus, settingData.setting_id, false)"
+                                />
+                            </v-card>
+                        </v-menu>
                         <v-icon v-if="expandedIndex.includes(i)" class="settingStarIcon"
                             :color="favouritedSettings[settingData.setting_id] ? 'amber darken-1' : 'grey lighten-1'"
                             @click.stop="toggleFavourite(settingData)">
@@ -91,6 +118,7 @@ import {
     mdiOpenInNew,
     mdiStar,
     mdiStarOutline,
+    mdiTagPlusOutline,
 } from '@mdi/js';
 import store from '@/services/store.js';
 export default {
@@ -123,11 +151,15 @@ export default {
             expandedIndex: [],
             favouritedSettings: {},
             settingTags: {},
+            allTags: [],
+            addTagMenus: {},
+            tagInputValues: {},
 
             icons: {
                 openInNew: mdiOpenInNew,
                 star: mdiStar,
                 starOutline: mdiStarOutline,
+                tagPlus: mdiTagPlusOutline,
             },
             sourceTheSession: `https://thesession.org/tunes/${this.tuneID}`
         };
@@ -168,14 +200,17 @@ export default {
         this.name = this.displayableAliases.splice(primaryAliasIndex, 1)[0];
 
         // Load favourite state and tags for all settings, then decide which panel to open
-        await Promise.all(this.settings.map(async s => {
-            const [v, tags] = await Promise.all([
-                store.isFavourite(s.setting_id),
-                store.getTagsForSetting(s.setting_id),
-            ]);
-            this.$set(this.favouritedSettings, s.setting_id, v);
-            this.$set(this.settingTags, s.setting_id, tags);
-        }));
+        [this.allTags] = await Promise.all([
+            store.getAllTags(),
+            ...this.settings.map(async s => {
+                const [v, tags] = await Promise.all([
+                    store.isFavourite(s.setting_id),
+                    store.getTagsForSetting(s.setting_id),
+                ]);
+                this.$set(this.favouritedSettings, s.setting_id, v);
+                this.$set(this.settingTags, s.setting_id, tags);
+            }),
+        ]);
 
         // Auto-pop open the matched setting:
         // 1. If a specific settingID was passed (e.g. from audio results or favourites list), use it
@@ -231,6 +266,23 @@ export default {
                 this.$set(this.favouritedSettings, sid, true);
                 store.getTagsForSetting(sid).then(tags => this.$set(this.settingTags, sid, tags));
             }
+        },
+        addableTagsFor(settingID) {
+            const current = this.settingTags[settingID] || [];
+            return this.allTags.filter(t => !current.includes(t));
+        },
+        async onTagSelected(settingID, val) {
+            const tag = typeof val === 'string' ? val.trim() : '';
+            if (tag && !(this.settingTags[settingID] || []).includes(tag)) {
+                await store.addTagToFavourite(settingID, tag);
+                if (!this.allTags.includes(tag)) this.allTags = [...this.allTags, tag].sort();
+                const tags = await store.getTagsForSetting(settingID);
+                this.$set(this.settingTags, settingID, tags);
+            }
+            this.$nextTick(() => {
+                this.$set(this.tagInputValues, settingID, null);
+                this.$set(this.addTagMenus, settingID, false);
+            });
         },
         sourceClicked: function () {
             window.open(this.sourceTheSession);

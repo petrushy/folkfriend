@@ -103,6 +103,13 @@ class Store {
         }
     }
 
+    async getAllTags() {
+        await this._loadFavouriteIDs();
+        const all = new Set();
+        for (const tags of this._settingTagsCache.values()) tags.forEach(t => all.add(t));
+        return [...all].sort();
+    }
+
     async removeTagFromFavourite(settingID, tag) {
         settingID = String(settingID);
         this._invalidateFavouriteCache();
