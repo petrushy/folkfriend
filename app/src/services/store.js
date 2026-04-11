@@ -4,7 +4,7 @@
 import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
-import { GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
+import { GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut as firebaseSignOut } from 'firebase/auth';
 import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
 import {
     logEvent
@@ -318,7 +318,21 @@ class Store {
 
     async signIn() {
         const provider = new GoogleAuthProvider();
-        await signInWithPopup(this.auth, provider);
+        // Safari (and iOS PWA) blocks signInWithPopup — use redirect flow instead.
+        const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+        if (isSafari) {
+            await signInWithRedirect(this.auth, provider);
+        } else {
+            await signInWithPopup(this.auth, provider);
+        }
+    }
+
+    async handleRedirectResult() {
+        try {
+            await getRedirectResult(this.auth);
+        } catch (e) {
+            console.warn('getRedirectResult error', e);
+        }
     }
 
     async signOut() {

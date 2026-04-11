@@ -324,6 +324,8 @@ async function initAnalytics() {
 
     const auth = getAuth(firebaseApp);
     store.loadAuth(auth);
+    // Resolve any pending redirect sign-in (Safari/iOS uses redirect flow).
+    store.handleRedirectResult();
     onAuthStateChanged(auth, user => {
         if (user) {
             store.onSignedIn(user);
