@@ -46,6 +46,7 @@
 import {mdiStar, mdiStarOutline} from '@mdi/js';
 import utils from '@/js/utils.js';
 import store from '@/services/store.js';
+import ffBackend from '@/services/backend.js';
 import {HistoryItem} from '@/js/schema';
 
 export default {
@@ -133,9 +134,19 @@ export default {
                 await store.removeFavourite(this.settingID);
                 this.favourited = await store.isTuneFavourite(this.setting.tune_id);
             } else {
+                // Query results have abc='' — fetch the full setting so the exported HTML has sheet music
+                let fullSettings = null;
+                try {
+                    fullSettings = await ffBackend.settingsFromTuneID(this.setting.tune_id);
+                } catch (e) {
+                    console.warn('Could not fetch full setting, starring with empty ABC', e);
+                }
+                const fullSetting = fullSettings
+                    ? fullSettings.find(s => String(s.setting_id) === String(this.settingID))
+                    : null;
                 await store.addFavourite({
                     settingID: this.settingID,
-                    setting: this.setting,
+                    setting: fullSetting || this.setting,
                     displayName: this.displayName,
                 });
                 this.favourited = true;

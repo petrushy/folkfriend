@@ -21,10 +21,6 @@
                         @change="toggleSelectGroup(unfiledRows)"
                     />
                     <span class="folder-title grey--text text--darken-1">Unfiled</span>
-                    <v-spacer />
-                    <v-btn icon small :disabled="!someUnfiledSelected" @click.stop="shareGroup(unfiledRows)">
-                        <v-icon small>{{ icons.export }}</v-icon>
-                    </v-btn>
                 </div>
                 <FavouriteRow
                     v-for="row in unfiledRows"
@@ -77,9 +73,6 @@
                         @blur="commitRename(folder.id)"
                     />
                     <v-spacer />
-                    <v-btn icon small :disabled="!someFolderSelected(folder.id)" @click.stop="shareGroup(rowsByFolder(folder.id))">
-                        <v-icon small>{{ icons.export }}</v-icon>
-                    </v-btn>
                     <v-btn icon small @click.stop="startRename(folder)">
                         <v-icon small>{{ icons.pencil }}</v-icon>
                     </v-btn>
@@ -114,6 +107,16 @@
         <p v-if="allRows.length === 0 && folders.length === 0" class="mt-4 grey--text">
             No favourites yet. Star a tune from the results list to save it here.
         </p>
+
+        <v-btn
+            v-if="allRows.length > 0"
+            :disabled="selectedIDs.size === 0"
+            class="mt-4"
+            @click="shareFavourites"
+        >
+            <v-icon left>{{ icons.export }}</v-icon>
+            Share selected
+        </v-btn>
 
         <v-snackbar v-model="snackbar" :timeout="3000">{{ snackbarText }}</v-snackbar>
 
@@ -333,14 +336,10 @@ export default {
                 this.loadFavourites();
             });
         },
-        shareGroup(rows) {
-            const selected = this.favouriteItems.filter(item =>
-                rows.some(r => r.settingID === item.result.settingID && this.selectedIDs.has(r.settingID))
-            );
+        shareFavourites() {
+            const selected = this.favouriteItems.filter(item => this.selectedIDs.has(item.result.settingID));
             if (selected.length === 0) return;
-            this._doShare(selected);
-        },
-        _doShare(selected) {
+
             if (navigator.share) {
                 const text = selected.map((item) => {
                     const name = utils.parseDisplayableName(item.result.displayName);
@@ -353,7 +352,8 @@ export default {
             }
 
             const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-            const sections = selected.map((item) => {
+
+            const renderItem = (item) => {
                 const name = escapeHtml(utils.parseDisplayableName(item.result.displayName));
                 const descriptor = escapeHtml(utils.parseDisplayableDescription(item.result.setting));
                 const tuneID = parseInt(item.result.setting.tune_id, 10);
@@ -365,6 +365,24 @@ export default {
     <p class="descriptor">${descriptor}</p>
     ${svg}
   </div>`;
+            };
+
+            // Build folder-grouped sections
+            const folderMap = new Map(this.folders.map(f => [f.id, f.name]));
+            const groups = [];
+
+            // Folders in display order (newest first, matching the UI)
+            for (const folder of this.folders) {
+                const items = selected.filter(item => item.folderId === folder.id);
+                if (items.length > 0) groups.push({ heading: folder.name, items });
+            }
+            // Unfiled
+            const unfiled = selected.filter(item => !item.folderId || !folderMap.has(item.folderId));
+            if (unfiled.length > 0) groups.push({ heading: null, items: unfiled });
+
+            const sections = groups.map(({ heading, items }) => {
+                const headingHtml = heading ? `  <h2 class="folder-heading">${escapeHtml(heading)}</h2>` : '';
+                return headingHtml + '\n' + items.map(renderItem).join('\n');
             }).join('\n');
 
             const html = `<!DOCTYPE html>
@@ -374,9 +392,9 @@ export default {
   <title>FolkFriend — Shared Tunes</title>
   <style>
     body { font-family: sans-serif; max-width: 600px; margin: 2em auto; }
-    .tune { margin: 2em 0; border-top: 1px solid #ccc; padding-top: 1em; }
-    .tune:first-child { border-top: none; }
-    h2 { margin: 0 0 0.2em; }
+    .folder-heading { margin: 2em 0 0.5em; color: #444; border-bottom: 2px solid #ccc; padding-bottom: 0.2em; }
+    .tune { margin: 1.5em 0 1.5em 0; border-top: 1px solid #eee; padding-top: 1em; }
+    h2.tune-title { margin: 0 0 0.2em; font-size: 1.1em; }
     h2 a { color: #1565C0; text-decoration: none; }
     h2 a:hover { text-decoration: underline; }
     .descriptor { margin: 0 0 0.8em; font-style: italic; color: #555; }
