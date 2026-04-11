@@ -28,14 +28,28 @@
             <v-expansion-panel v-for="(settingData, i) in settings" :key="settingData.setting_id" class="expansionPanel"
                 :setting="settingData">
                 <v-expansion-panel-header>
-                    <h3 class="descriptor font-weight-medium">
-                        {{
-                            `${settingData.dance} in ${settingData.mode.slice(
-                                0,
-                                4
-                            )}`
-                        }}
-                    </h3>
+                    <div class="headerLeft">
+                        <h3 class="descriptor font-weight-medium">
+                            {{
+                                `${settingData.dance} in ${settingData.mode.slice(
+                                    0,
+                                    4
+                                )}`
+                            }}
+                        </h3>
+                        <div
+                            v-if="expandedIndex.includes(i) && settingTags[settingData.setting_id] && settingTags[settingData.setting_id].length > 0"
+                            class="settingTagRow"
+                        >
+                            <v-chip
+                                v-for="tag in settingTags[settingData.setting_id]"
+                                :key="tag"
+                                x-small
+                                outlined
+                                @click.stop
+                            >{{ tag }}</v-chip>
+                        </div>
+                    </div>
                     <div class="headerActions">
                         <v-icon v-if="expandedIndex.includes(i)" class="settingStarIcon"
                             :color="favouritedSettings[settingData.setting_id] ? 'amber darken-1' : 'grey lighten-1'"
@@ -108,6 +122,7 @@ export default {
 
             expandedIndex: [],
             favouritedSettings: {},
+            settingTags: {},
 
             icons: {
                 openInNew: mdiOpenInNew,
@@ -152,10 +167,14 @@ export default {
         );
         this.name = this.displayableAliases.splice(primaryAliasIndex, 1)[0];
 
-        // Load favourite state for all settings first, then decide which panel to open
+        // Load favourite state and tags for all settings, then decide which panel to open
         await Promise.all(this.settings.map(async s => {
-            const v = await store.isFavourite(s.setting_id);
+            const [v, tags] = await Promise.all([
+                store.isFavourite(s.setting_id),
+                store.getTagsForSetting(s.setting_id),
+            ]);
             this.$set(this.favouritedSettings, s.setting_id, v);
+            this.$set(this.settingTags, s.setting_id, tags);
         }));
 
         // Auto-pop open the matched setting:
@@ -202,6 +221,7 @@ export default {
             if (this.favouritedSettings[sid]) {
                 store.removeFavourite(sid);
                 this.$set(this.favouritedSettings, sid, false);
+                this.$set(this.settingTags, sid, []);
             } else {
                 store.addFavourite({
                     settingID: sid,
@@ -209,6 +229,7 @@ export default {
                     displayName: this.displayName,
                 });
                 this.$set(this.favouritedSettings, sid, true);
+                store.getTagsForSetting(sid).then(tags => this.$set(this.settingTags, sid, tags));
             }
         },
         sourceClicked: function () {
@@ -245,6 +266,19 @@ h1 {
 
 .settingSourceChip {
     flex: 0 0 auto;
+}
+
+.headerLeft {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+}
+
+.settingTagRow {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 4px;
 }
 
 .headerActions {

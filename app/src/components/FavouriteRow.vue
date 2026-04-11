@@ -17,7 +17,7 @@
                     <span class="tune-title">{{ name }}</span>
                 </v-col>
             </v-row>
-            <v-row class="pb-2 pt-0">
+            <v-row class="pb-0 pt-0">
                 <v-col class="py-0 descriptor">
                     {{ descriptor }}
                 </v-col>
@@ -25,30 +25,42 @@
                     {{ timestampString }}
                 </v-col>
             </v-row>
+            <!-- Tag chips — @click.stop on the row prevents bubbling to the container's navigation handler -->
+            <v-row v-if="tags.length > 0" class="pb-2 pt-1" @click.stop>
+                <v-col class="py-0 d-flex flex-wrap align-center" style="gap:4px">
+                    <v-chip
+                        v-for="tag in tags"
+                        :key="tag"
+                        x-small
+                        close
+                        @click:close="$emit('removeTag', { settingID, tag })"
+                    >{{ tag }}</v-chip>
+                </v-col>
+            </v-row>
         </v-container>
 
-        <!-- Move to folder menu -->
-        <v-menu v-if="folders.length > 0" offset-y left>
+        <!-- Add tag button — outside the clickable container, left of star, easy to tap -->
+        <v-menu v-model="addTagMenu" :close-on-content-click="false" offset-y left>
             <template #activator="{ on }">
                 <v-btn icon class="mr-0" @click.stop v-on="on">
-                    <v-icon small>{{ icons.folderMove }}</v-icon>
+                    <v-icon color="grey darken-1">{{ icons.plus }}</v-icon>
                 </v-btn>
             </template>
-            <v-list dense>
-                <v-list-item
-                    v-for="folder in moveTargetFolders"
-                    :key="folder.id"
-                    @click="$emit('moveToFolder', { settingID, folderId: folder.id })"
-                >
-                    <v-list-item-title>{{ folder.name }}</v-list-item-title>
-                </v-list-item>
-                <v-list-item
-                    v-if="currentFolderId !== null"
-                    @click="$emit('moveToFolder', { settingID, folderId: null })"
-                >
-                    <v-list-item-title class="grey--text">Unfile</v-list-item-title>
-                </v-list-item>
-            </v-list>
+            <v-card width="220" @click.stop>
+                <v-combobox
+                    ref="tagInput"
+                    v-model="tagInputValue"
+                    :items="addableTags"
+                    label="Add tag"
+                    dense
+                    solo
+                    flat
+                    hide-details
+                    class="px-2 pt-1 pb-1"
+                    @change="onTagSelected"
+                    @keydown.esc.stop="addTagMenu = false"
+                />
+            </v-card>
         </v-menu>
 
         <v-btn icon class="mr-2" @click.stop="unstar">
@@ -60,7 +72,7 @@
 </template>
 
 <script>
-import { mdiStar, mdiFolderMoveOutline } from '@mdi/js';
+import { mdiStar, mdiTagPlusOutline } from '@mdi/js';
 import utils from '@/js/utils';
 
 export default {
@@ -71,14 +83,16 @@ export default {
         settingID: { type: Number, required: true },
         timestamp: { type: Number, required: true },
         selected: { type: Boolean, default: false },
-        folders: { type: Array, default: () => [] },
-        currentFolderId: { default: null },
+        tags: { type: Array, default: () => [] },
+        allTags: { type: Array, default: () => [] },
     },
     data() {
         return {
+            addTagMenu: false,
+            tagInputValue: null,
             icons: {
                 star: mdiStar,
-                folderMove: mdiFolderMoveOutline,
+                plus: mdiTagPlusOutline,
             },
         };
     },
@@ -86,8 +100,8 @@ export default {
         timestampString() {
             return utils.utcToString(this.timestamp);
         },
-        moveTargetFolders() {
-            return this.folders.filter(f => f.id !== this.currentFolderId);
+        addableTags() {
+            return this.allTags.filter(t => !this.tags.includes(t));
         },
     },
     methods: {
@@ -96,6 +110,16 @@ export default {
         },
         unstar() {
             this.$emit('unstar', this.settingID);
+        },
+        onTagSelected(val) {
+            const tag = typeof val === 'string' ? val.trim() : '';
+            if (tag && !this.tags.includes(tag)) {
+                this.$emit('addTag', { settingID: this.settingID, tag });
+            }
+            this.$nextTick(() => {
+                this.tagInputValue = null;
+                this.addTagMenu = false;
+            });
         },
     }
 };

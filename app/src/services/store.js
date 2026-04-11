@@ -3,7 +3,7 @@
 //  very basic state management.
 import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
-import {FavouriteItem, FavouriteFolder} from '@/js/schema';
+import {FavouriteItem} from '@/js/schema';
 import { GoogleAuthProvider, signInWithPopup, signOut as firebaseSignOut } from 'firebase/auth';
 import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
 import {
@@ -41,6 +41,8 @@ class Store {
 
         this._favouriteIDs = null;
         this._favouriteTuneIDs = null;
+        this._settingTagsCache = null; // Map<settingID string, string[]>
+        this._tuneTagsCache = null;    // Map<tuneID string, string[]> — union across all settings
         this.analytics = null;
         this.analyticsLoaded = new Promise(resolve => {
             this.setAnalyticsLoaded = resolve;
@@ -64,64 +66,77 @@ class Store {
     }
 
     async getFavourites() {
-        return await get('favouriteItems') || [];
-    }
-
-    async getFolders() {
-        return await get('favouriteFolders') || [];
-    }
-
-    async _getOrCreateTodayFolder() {
-        const today = new Date().toISOString().slice(0, 10);
-        const folders = await this.getFolders();
-        let folder = folders.find(f => f.name === today);
-        if (!folder) {
-            folder = new FavouriteFolder({ name: today });
-            folders.push(folder);
-            await set('favouriteFolders', folders);
-            const items = await this.getFavourites();
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+        let items = await get('favouriteItems') || [];
+        // Migrate items that still use the old folderId model → convert folder name to tag
+        const needsMigration = items.some(item => item.folderId !== undefined);
+        if (needsMigration) {
+            const folders = await get('favouriteFolders') || [];
+            const folderNameById = new Map(folders.map(f => [f.id, f.name]));
+            items = items.map(item => {
+                if (item.folderId !== undefined) {
+                    const tag = item.folderId ? folderNameById.get(item.folderId) : null;
+                    const tags = tag ? [tag] : [];
+                    const { folderId: _removed, ...rest } = item;
+                    return { ...rest, tags };
+                }
+                return item;
+            });
+            await set('favouriteItems', items);
+            await set('favouriteFolders', []);
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
         }
-        return folder;
+        return items;
     }
 
-    async addFolder(name) {
-        const folders = await this.getFolders();
-        const folder = new FavouriteFolder({ name });
-        folders.push(folder);
-        await set('favouriteFolders', folders);
-        const items = await this.getFavourites();
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
-        return folder;
-    }
-
-    async renameFolder(folderId, newName) {
-        const folders = await this.getFolders();
-        const folder = folders.find(f => f.id === folderId);
-        if (folder) folder.name = newName;
-        await set('favouriteFolders', folders);
-        const items = await this.getFavourites();
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
-    }
-
-    async deleteFolder(folderId) {
-        const folders = (await this.getFolders()).filter(f => f.id !== folderId);
-        // Move items from deleted folder to null (unfiled)
-        const items = await this.getFavourites();
-        items.forEach(item => { if (item.folderId === folderId) item.folderId = null; });
-        await set('favouriteFolders', folders);
-        await set('favouriteItems', items);
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
-    }
-
-    async moveFavouriteToFolder(settingID, folderId) {
+    async addTagToFavourite(settingID, tag) {
         settingID = String(settingID);
+        tag = tag.trim();
+        if (!tag) return;
+        this._invalidateFavouriteCache();
         const items = await this.getFavourites();
         const item = items.find(f => String(f.result.settingID) === settingID);
-        if (item) item.folderId = folderId;
+        if (item) {
+            if (!item.tags) item.tags = [];
+            if (!item.tags.includes(tag)) item.tags.push(tag);
+            await set('favouriteItems', items);
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        }
+    }
+
+    async removeTagFromFavourite(settingID, tag) {
+        settingID = String(settingID);
+        this._invalidateFavouriteCache();
+        const items = await this.getFavourites();
+        const item = items.find(f => String(f.result.settingID) === settingID);
+        if (item && item.tags) {
+            item.tags = item.tags.filter(t => t !== tag);
+            await set('favouriteItems', items);
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        }
+    }
+
+    async renameTag(oldName, newName) {
+        newName = newName.trim();
+        if (!newName || oldName === newName) return;
+        this._invalidateFavouriteCache();
+        const items = await this.getFavourites();
+        items.forEach(item => {
+            if (item.tags && item.tags.includes(oldName)) {
+                item.tags = item.tags.map(t => (t === oldName ? newName : t));
+            }
+        });
         await set('favouriteItems', items);
-        const folders = await this.getFolders();
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+    }
+
+    async deleteTag(name) {
+        this._invalidateFavouriteCache();
+        const items = await this.getFavourites();
+        items.forEach(item => {
+            if (item.tags) item.tags = item.tags.filter(t => t !== name);
+        });
+        await set('favouriteItems', items);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
     _isValidSettingID(settingID) {
@@ -143,6 +158,16 @@ class Store {
                 items.filter(f => f.result.setting && f.result.setting.tune_id)
                      .map(f => String(f.result.setting.tune_id))
             );
+            this._settingTagsCache = new Map(items.map(f => [String(f.result.settingID), f.tags || []]));
+            this._tuneTagsCache = new Map();
+            items.forEach(f => {
+                if (f.result.setting && f.result.setting.tune_id) {
+                    const tid = String(f.result.setting.tune_id);
+                    const existing = this._tuneTagsCache.get(tid) || [];
+                    (f.tags || []).forEach(t => { if (!existing.includes(t)) existing.push(t); });
+                    this._tuneTagsCache.set(tid, existing);
+                }
+            });
         }
         return this._favouriteIDs;
     }
@@ -155,6 +180,8 @@ class Store {
     _invalidateFavouriteCache() {
         this._favouriteIDs = null;
         this._favouriteTuneIDs = null;
+        this._settingTagsCache = null;
+        this._tuneTagsCache = null;
     }
 
     async addFavourite(result) {
@@ -165,16 +192,14 @@ class Store {
         result = { ...result, settingID: String(result.settingID) };
         const ids = await this._loadFavouriteIDs();
         if (!ids.has(result.settingID)) {
-            const folder = await this._getOrCreateTodayFolder();
             const items = await this.getFavourites();
-            items.unshift(new FavouriteItem(result, folder.id));
+            items.unshift(new FavouriteItem(result));
             await set('favouriteItems', items);
             ids.add(result.settingID);
             if (this._favouriteTuneIDs && result.setting && result.setting.tune_id) {
                 this._favouriteTuneIDs.add(String(result.setting.tune_id));
             }
-            const folders = await this.getFolders();
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
         }
     }
 
@@ -184,8 +209,7 @@ class Store {
         await set('favouriteItems', items);
         // Invalidate both caches — tune may still be favourited via another setting
         this._invalidateFavouriteCache();
-        const folders = await this.getFolders();
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items, folders);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
     async isFavourite(settingID) {
@@ -198,6 +222,18 @@ class Store {
         if (!tuneID) return false;
         const ids = await this._loadFavouriteTuneIDs();
         return ids.has(String(tuneID));
+    }
+
+    async getTagsForSetting(settingID) {
+        if (!this._isValidSettingID(settingID)) return [];
+        if (this._settingTagsCache === null) await this._loadFavouriteIDs();
+        return this._settingTagsCache.get(String(settingID)) || [];
+    }
+
+    async getTagsForTune(tuneID) {
+        if (!tuneID) return [];
+        if (this._tuneTagsCache === null) await this._loadFavouriteIDs();
+        return this._tuneTagsCache.get(String(tuneID)) || [];
     }
 
     async clearHistory() {
@@ -225,24 +261,24 @@ class Store {
 
     async exportUserData() {
         const payload = {
-            version: 2,
+            version: 3,
             exportedAt: Date.now(),
             userSettings: this.userSettings,
             historyItems: await this.getHistoryItems(),
             favouriteItems: await this.getFavourites(),
-            favouriteFolders: await this.getFolders(),
         };
         return JSON.stringify(payload, null, 2);
     }
 
     async importUserData(jsonString) {
         const payload = JSON.parse(jsonString);
-        if (payload.version !== 1 && payload.version !== 2) {
+        if (payload.version !== 1 && payload.version !== 2 && payload.version !== 3) {
             throw new Error(`Unsupported data version: ${payload.version}`);
         }
         await set('historyItems', payload.historyItems || []);
+        // v1/v2 exports may have folderId on items; getFavourites() will migrate them on next load
         await set('favouriteItems', payload.favouriteItems || []);
-        await set('favouriteFolders', payload.favouriteFolders || []);
+        if (payload.favouriteFolders) await set('favouriteFolders', payload.favouriteFolders);
         await this.updateUserSettings(payload.userSettings || this.userSettings);
         this._invalidateFavouriteCache();
     }
@@ -254,11 +290,10 @@ class Store {
     async onSignedIn(user) {
         this.currentUser = user;
         eventBus.$emit('authStateChanged', user);
-        const [localFavs, localFolders] = await Promise.all([this.getFavourites(), this.getFolders()]);
-        this._unsubscribeSync = syncSubscribe(user.uid, localFavs, localFolders, async (type, items, folders) => {
+        const localFavs = await this.getFavourites();
+        this._unsubscribeSync = syncSubscribe(user.uid, localFavs, async (type, items) => {
             if (type === 'favourites') {
                 await set('favouriteItems', items);
-                await set('favouriteFolders', folders || []);
                 this._invalidateFavouriteCache();
                 eventBus.$emit('syncComplete');
             }

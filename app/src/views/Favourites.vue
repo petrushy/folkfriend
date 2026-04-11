@@ -3,108 +3,114 @@
         <div class="d-flex align-center my-2">
             <h1>Favourites</h1>
             <v-spacer />
-            <v-btn small text color="primary" @click="promptNewFolder">
-                <v-icon left small>{{ icons.folderPlus }}</v-icon>
-                New folder
+            <v-btn icon small :color="groupByTag ? 'primary' : ''" :title="groupByTag ? 'Flat list' : 'Group by tag'" @click="groupByTag = !groupByTag">
+                <v-icon small>{{ icons.group }}</v-icon>
             </v-btn>
         </div>
 
-        <!-- Unfiled items (no folder) -->
-        <div v-if="unfiledRows.length > 0" class="mb-2">
-            <v-list class="resultsTable">
-                <div class="folder-header d-flex align-center px-2 py-1">
-                    <v-checkbox
-                        :input-value="allUnfiledSelected"
-                        :indeterminate="someUnfiledSelected && !allUnfiledSelected"
-                        class="ml-2 mr-0 mt-0 pt-0 flex-grow-0"
-                        hide-details
-                        @change="toggleSelectGroup(unfiledRows)"
-                    />
-                    <span class="folder-title grey--text text--darken-1">Unfiled</span>
-                </div>
+        <!-- Tag filter bar -->
+        <div v-if="allTags.length > 0" class="tag-filter-bar mb-3">
+            <div class="d-flex flex-wrap align-center" style="gap:6px">
+                <span class="caption grey--text mr-1">Filter:</span>
+                <v-chip
+                    v-for="tag in allTags"
+                    :key="tag"
+                    small
+                    :color="activeTags.includes(tag) ? 'primary' : undefined"
+                    :outlined="!activeTags.includes(tag)"
+                    @click="toggleActiveTag(tag)"
+                    @click.right.prevent="openTagMenu(tag, $event)"
+                >{{ tag }}</v-chip>
+                <v-btn v-if="activeTags.length > 0" x-small text @click="activeTags = []">Clear</v-btn>
+                <v-spacer />
+                <v-btn x-small text color="grey" @click="manageTagsDialog = true">Manage tags</v-btn>
+            </div>
+        </div>
+
+        <!-- Select all + name filter bar -->
+        <div v-if="favouriteItems.length > 0" class="d-flex align-center px-2 py-1 select-all-bar">
+            <v-checkbox
+                :input-value="allVisibleSelected"
+                :indeterminate="someVisibleSelected && !allVisibleSelected"
+                class="ml-2 mr-1 mt-0 pt-0 flex-grow-0"
+                hide-details
+                @change="toggleSelectAll"
+            />
+            <span class="caption grey--text text--darken-1 flex-shrink-0">
+                {{ allVisibleSelected ? 'Deselect all' : 'Select all' }}
+                <template v-if="selectedIDs.size > 0">({{ selectedIDs.size }})</template>
+            </span>
+            <v-text-field
+                v-model="nameFilter"
+                placeholder="Search by name…"
+                dense
+                hide-details
+                clearable
+                class="ml-3"
+            />
+        </div>
+
+        <!-- Flat list view -->
+        <template v-if="!groupByTag">
+            <v-list v-if="allRows.length > 0" class="resultsTable">
                 <FavouriteRow
-                    v-for="row in unfiledRows"
+                    v-for="row in allRows"
                     :key="row.settingID"
                     :name="row.name"
                     :descriptor="row.descriptor"
                     :settingID="row.settingID"
                     :timestamp="row.timestamp"
                     :selected="selectedIDs.has(row.settingID)"
-                    :folders="folderList"
-                    :currentFolderId="null"
+                    :tags="row.tags"
+                    :allTags="allTags"
                     @favouriteItemClicked="loadFavouriteItem"
                     @unstar="removeFavourite"
                     @toggle="toggleSelected"
-                    @moveToFolder="moveFavouriteToFolder"
+                    @addTag="addTag"
+                    @removeTag="removeTag"
                 />
             </v-list>
-        </div>
+            <p v-else-if="favouriteItems.length > 0" class="mt-4 grey--text">
+                No favourites match the selected tags.
+            </p>
+        </template>
 
-        <!-- Folders -->
-        <div v-for="folder in folders" :key="folder.id" class="mb-2">
-            <v-list class="resultsTable">
-                <div
-                    class="folder-header d-flex align-center px-2 py-1"
-                    style="cursor:pointer"
-                    @click="toggleFolder(folder.id)"
-                >
-                    <v-checkbox
-                        :input-value="allFolderSelected(folder.id)"
-                        :indeterminate="someFolderSelected(folder.id) && !allFolderSelected(folder.id)"
-                        class="ml-2 mr-0 mt-0 pt-0 flex-grow-0"
-                        hide-details
-                        @change="toggleSelectGroup(rowsByFolder(folder.id))"
-                        @click.stop
-                    />
-                    <v-icon small class="mr-1">{{ collapsedFolders.has(folder.id) ? icons.chevronRight : icons.chevronDown }}</v-icon>
-                    <span v-if="editingFolderId !== folder.id" class="folder-title" @dblclick.stop="startRename(folder)">
-                        {{ folder.name }}
-                    </span>
-                    <v-text-field
-                        v-else
-                        :ref="`rename-${folder.id}`"
-                        v-model="editingFolderName"
-                        dense
-                        hide-details
-                        class="folder-rename-field"
-                        @click.stop
-                        @keydown.enter.stop="commitRename(folder.id)"
-                        @keydown.esc.stop="cancelRename"
-                        @blur="commitRename(folder.id)"
-                    />
-                    <v-spacer />
-                    <v-btn icon small @click.stop="startRename(folder)">
-                        <v-icon small>{{ icons.pencil }}</v-icon>
-                    </v-btn>
-                    <v-btn icon small @click.stop="confirmDeleteFolder(folder)">
-                        <v-icon small>{{ icons.delete }}</v-icon>
-                    </v-btn>
-                </div>
-
-                <template v-if="!collapsedFolders.has(folder.id)">
-                    <FavouriteRow
-                        v-for="row in rowsByFolder(folder.id)"
-                        :key="row.settingID"
-                        :name="row.name"
-                        :descriptor="row.descriptor"
-                        :settingID="row.settingID"
-                        :timestamp="row.timestamp"
-                        :selected="selectedIDs.has(row.settingID)"
-                        :folders="folderList"
-                        :currentFolderId="folder.id"
-                        @favouriteItemClicked="loadFavouriteItem"
-                        @unstar="removeFavourite"
-                        @toggle="toggleSelected"
-                        @moveToFolder="moveFavouriteToFolder"
-                    />
-                    <div v-if="rowsByFolder(folder.id).length === 0" class="px-4 py-2 grey--text text--darken-1">
-                        Empty folder
+        <!-- Grouped view -->
+        <template v-else>
+            <div v-for="group in tagGroups" :key="group.tag || '__untagged__'" class="mb-2">
+                <v-list class="resultsTable">
+                    <div
+                        class="tag-group-header d-flex align-center px-3 py-1"
+                        style="cursor:pointer"
+                        @click="toggleTagGroup(group.tag)"
+                    >
+                        <v-icon small class="mr-1">{{ collapsedTagGroups.has(group.tag) ? icons.chevronRight : icons.chevronDown }}</v-icon>
+                        <span class="tag-group-title">{{ group.tag || 'Untagged' }}</span>
+                        <span class="ml-1 caption grey--text">({{ group.rows.length }})</span>
                     </div>
-                </template>
-            </v-list>
-        </div>
+                    <template v-if="!collapsedTagGroups.has(group.tag)">
+                        <FavouriteRow
+                            v-for="row in group.rows"
+                            :key="row.settingID"
+                            :name="row.name"
+                            :descriptor="row.descriptor"
+                            :settingID="row.settingID"
+                            :timestamp="row.timestamp"
+                            :selected="selectedIDs.has(row.settingID)"
+                            :tags="row.tags"
+                            :allTags="allTags"
+                            @favouriteItemClicked="loadFavouriteItem"
+                            @unstar="removeFavourite"
+                            @toggle="toggleSelected"
+                            @addTag="addTag"
+                            @removeTag="removeTag"
+                        />
+                    </template>
+                </v-list>
+            </div>
+        </template>
 
-        <p v-if="allRows.length === 0 && folders.length === 0" class="mt-4 grey--text">
+        <p v-if="favouriteItems.length === 0" class="mt-4 grey--text">
             No favourites yet. Star a tune from the results list to save it here.
         </p>
 
@@ -120,39 +126,68 @@
 
         <v-snackbar v-model="snackbar" :timeout="3000">{{ snackbarText }}</v-snackbar>
 
-        <!-- New folder dialog -->
-        <v-dialog v-model="newFolderDialog" max-width="320">
+        <!-- Manage tags dialog -->
+        <v-dialog v-model="manageTagsDialog" max-width="360">
             <v-card>
-                <v-card-title>New folder</v-card-title>
-                <v-card-text>
-                    <v-text-field
-                        ref="newFolderField"
-                        v-model="newFolderName"
-                        label="Folder name"
-                        autofocus
-                        @keydown.enter="createFolder"
-                        @keydown.esc="newFolderDialog = false"
-                    />
-                </v-card-text>
+                <v-card-title>Manage tags</v-card-title>
+                <v-list dense>
+                    <v-list-item v-for="tag in allTags" :key="tag">
+                        <v-list-item-content>
+                            <v-list-item-title>{{ tag }}</v-list-item-title>
+                        </v-list-item-content>
+                        <v-list-item-action class="flex-row" style="gap:4px">
+                            <v-btn icon x-small @click="openRenameTag(tag)">
+                                <v-icon x-small>{{ icons.pencil }}</v-icon>
+                            </v-btn>
+                            <v-btn icon x-small color="red" @click="confirmDeleteTag(tag)">
+                                <v-icon x-small>{{ icons.delete }}</v-icon>
+                            </v-btn>
+                        </v-list-item-action>
+                    </v-list-item>
+                    <v-list-item v-if="allTags.length === 0">
+                        <v-list-item-content class="grey--text">No tags yet.</v-list-item-content>
+                    </v-list-item>
+                </v-list>
                 <v-card-actions>
                     <v-spacer />
-                    <v-btn text @click="newFolderDialog = false">Cancel</v-btn>
-                    <v-btn color="primary" text :disabled="!newFolderName.trim()" @click="createFolder">Create</v-btn>
+                    <v-btn text @click="manageTagsDialog = false">Close</v-btn>
                 </v-card-actions>
             </v-card>
         </v-dialog>
 
-        <!-- Delete folder confirm dialog -->
-        <v-dialog v-model="deleteFolderDialog" max-width="320">
+        <!-- Rename tag dialog -->
+        <v-dialog v-model="renameTagDialog" max-width="320">
             <v-card>
-                <v-card-title>Delete folder?</v-card-title>
+                <v-card-title>Rename tag</v-card-title>
                 <v-card-text>
-                    "{{ deleteFolderTarget && deleteFolderTarget.name }}" will be deleted. Tunes inside will become unfiled.
+                    <v-text-field
+                        ref="renameTagField"
+                        v-model="renameTagNew"
+                        label="New name"
+                        autofocus
+                        @keydown.enter="commitRenameTag"
+                        @keydown.esc="renameTagDialog = false"
+                    />
                 </v-card-text>
                 <v-card-actions>
                     <v-spacer />
-                    <v-btn text @click="deleteFolderDialog = false">Cancel</v-btn>
-                    <v-btn color="red" text @click="deleteFolder">Delete</v-btn>
+                    <v-btn text @click="renameTagDialog = false">Cancel</v-btn>
+                    <v-btn color="primary" text :disabled="!renameTagNew.trim()" @click="commitRenameTag">Rename</v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
+
+        <!-- Delete tag confirm dialog -->
+        <v-dialog v-model="deleteTagDialog" max-width="320">
+            <v-card>
+                <v-card-title>Delete tag?</v-card-title>
+                <v-card-text>
+                    "{{ deleteTagTarget }}" will be removed from all favourites.
+                </v-card-text>
+                <v-card-actions>
+                    <v-spacer />
+                    <v-btn text @click="deleteTagDialog = false">Cancel</v-btn>
+                    <v-btn color="red" text @click="doDeleteTag">Delete</v-btn>
                 </v-card-actions>
             </v-card>
         </v-dialog>
@@ -160,7 +195,7 @@
 </template>
 
 <script>
-import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiFolderPlus } from '@mdi/js';
+import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
@@ -174,15 +209,17 @@ export default {
     data() {
         return {
             favouriteItems: [],
-            folders: [],
             selectedIDs: new Set(),
-            collapsedFolders: new Set(),
-            editingFolderId: null,
-            editingFolderName: '',
-            newFolderDialog: false,
-            newFolderName: '',
-            deleteFolderDialog: false,
-            deleteFolderTarget: null,
+            activeTags: [],
+            nameFilter: '',
+            groupByTag: false,
+            collapsedTagGroups: new Set(),
+            manageTagsDialog: false,
+            renameTagDialog: false,
+            renameTagOld: '',
+            renameTagNew: '',
+            deleteTagDialog: false,
+            deleteTagTarget: null,
             snackbar: false,
             snackbarText: '',
             icons: {
@@ -191,28 +228,45 @@ export default {
                 delete: mdiDelete,
                 chevronRight: mdiChevronRight,
                 chevronDown: mdiChevronDown,
-                folderPlus: mdiFolderPlus,
+                group: mdiTagMultipleOutline,
             },
         };
     },
     computed: {
-        folderList() {
-            return this.folders.map(f => ({ id: f.id, name: f.name }));
+        filteredItems() {
+            const needle = (this.nameFilter || '').trim().toLowerCase();
+            return this.favouriteItems.filter(item => {
+                if (this.activeTags.length > 0 && !this.activeTags.every(t => (item.tags || []).includes(t))) return false;
+                if (needle && !utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle)) return false;
+                return true;
+            });
+        },
+        allTags() {
+            const tags = new Set();
+            this.filteredItems.forEach(item => (item.tags || []).forEach(t => tags.add(t)));
+            return [...tags].sort();
         },
         allRows() {
-            return this.favouriteItems.map(item => this._toRow(item));
+            return this.filteredItems.map(item => this._toRow(item));
         },
-        unfiledRows() {
-            return this.favouriteItems
-                .filter(item => !item.folderId)
-                .map(item => this._toRow(item));
+        allVisibleSelected() {
+            return this.allRows.length > 0 && this.allRows.every(r => this.selectedIDs.has(r.settingID));
         },
-        allUnfiledSelected() {
-            return this.unfiledRows.length > 0 &&
-                this.unfiledRows.every(r => this.selectedIDs.has(r.settingID));
+        someVisibleSelected() {
+            return this.allRows.some(r => this.selectedIDs.has(r.settingID));
         },
-        someUnfiledSelected() {
-            return this.unfiledRows.some(r => this.selectedIDs.has(r.settingID));
+        tagGroups() {
+            const tagsToShow = this.activeTags.length > 0 ? this.activeTags : this.allTags;
+            const groups = [];
+            for (const tag of tagsToShow) {
+                const items = this.favouriteItems.filter(item => (item.tags || []).includes(tag));
+                if (items.length > 0) groups.push({ tag, rows: items.map(i => this._toRow(i)) });
+            }
+            if (this.activeTags.length === 0) {
+                const untagged = this.favouriteItems.filter(item => !(item.tags && item.tags.length > 0));
+                if (untagged.length > 0) groups.push({ tag: null, rows: untagged.map(i => this._toRow(i)) });
+            }
+            return groups;
         },
     },
     created() {
@@ -230,48 +284,45 @@ export default {
                 descriptor: utils.parseDisplayableDescription(item.result.setting),
                 settingID: item.result.settingID,
                 timestamp: item.timestamp,
-                folderId: item.folderId || null,
+                tags: item.tags || [],
             };
         },
         loadFavourites() {
-            Promise.all([store.getFavourites(), store.getFolders()]).then(([items, folders]) => {
+            store.getFavourites().then(items => {
                 items.sort((a, b) => b.timestamp - a.timestamp);
-                // Sort folders by createdAt descending (newest session first)
-                folders.sort((a, b) => b.createdAt - a.createdAt);
                 this.favouriteItems = items;
-                this.folders = folders;
                 const existingIDs = new Set(items.map(i => i.result.settingID));
                 this.selectedIDs = new Set([...this.selectedIDs].filter(id => existingIDs.has(id)));
+                // Drop any activeTags that no longer exist
+                const tagSet = new Set();
+                items.forEach(i => (i.tags || []).forEach(t => tagSet.add(t)));
+                this.activeTags = this.activeTags.filter(t => tagSet.has(t));
             });
         },
-        rowsByFolder(folderId) {
-            return this.favouriteItems
-                .filter(item => item.folderId === folderId)
-                .map(item => this._toRow(item));
+        toggleSelectAll() {
+            const next = new Set(this.selectedIDs);
+            if (this.allVisibleSelected) {
+                this.allRows.forEach(r => next.delete(r.settingID));
+            } else {
+                this.allRows.forEach(r => next.add(r.settingID));
+            }
+            this.selectedIDs = next;
         },
-        allFolderSelected(folderId) {
-            const rows = this.rowsByFolder(folderId);
-            return rows.length > 0 && rows.every(r => this.selectedIDs.has(r.settingID));
+        toggleActiveTag(tag) {
+            const i = this.activeTags.indexOf(tag);
+            if (i >= 0) this.activeTags.splice(i, 1);
+            else this.activeTags.push(tag);
         },
-        someFolderSelected(folderId) {
-            return this.rowsByFolder(folderId).some(r => this.selectedIDs.has(r.settingID));
-        },
-        toggleFolder(folderId) {
-            const next = new Set(this.collapsedFolders);
-            if (next.has(folderId)) next.delete(folderId);
-            else next.add(folderId);
-            this.collapsedFolders = next;
+        toggleTagGroup(tag) {
+            const next = new Set(this.collapsedTagGroups);
+            if (next.has(tag)) next.delete(tag);
+            else next.add(tag);
+            this.collapsedTagGroups = next;
         },
         toggleSelected(settingID) {
             const next = new Set(this.selectedIDs);
             if (next.has(settingID)) next.delete(settingID);
             else next.add(settingID);
-            this.selectedIDs = next;
-        },
-        toggleSelectGroup(rows) {
-            const allSel = rows.every(r => this.selectedIDs.has(r.settingID));
-            const next = new Set(this.selectedIDs);
-            rows.forEach(r => allSel ? next.delete(r.settingID) : next.add(r.settingID));
             this.selectedIDs = next;
         },
         loadFavouriteItem(settingID) {
@@ -291,48 +342,42 @@ export default {
         removeFavourite(settingID) {
             store.removeFavourite(settingID).then(() => this.loadFavourites());
         },
-        moveFavouriteToFolder({ settingID, folderId }) {
-            store.moveFavouriteToFolder(settingID, folderId).then(() => this.loadFavourites());
+        addTag({ settingID, tag }) {
+            store.addTagToFavourite(settingID, tag).then(() => this.loadFavourites());
         },
-        promptNewFolder() {
-            this.newFolderName = '';
-            this.newFolderDialog = true;
+        removeTag({ settingID, tag }) {
+            store.removeTagFromFavourite(settingID, tag).then(() => this.loadFavourites());
         },
-        createFolder() {
-            if (!this.newFolderName.trim()) return;
-            store.addFolder(this.newFolderName.trim()).then(() => {
-                this.newFolderDialog = false;
-                this.newFolderName = '';
+        openTagMenu(tag) {
+            // Right-click on filter chip — quick rename shortcut
+            this.openRenameTag(tag);
+        },
+        openRenameTag(tag) {
+            this.renameTagOld = tag;
+            this.renameTagNew = tag;
+            this.manageTagsDialog = false;
+            this.renameTagDialog = true;
+        },
+        commitRenameTag() {
+            if (!this.renameTagNew.trim()) { this.renameTagDialog = false; return; }
+            store.renameTag(this.renameTagOld, this.renameTagNew.trim()).then(() => {
+                const i = this.activeTags.indexOf(this.renameTagOld);
+                if (i >= 0) this.activeTags.splice(i, 1, this.renameTagNew.trim());
+                this.renameTagDialog = false;
                 this.loadFavourites();
             });
         },
-        startRename(folder) {
-            this.editingFolderId = folder.id;
-            this.editingFolderName = folder.name;
-            this.$nextTick(() => {
-                const ref = this.$refs[`rename-${folder.id}`];
-                if (ref && ref[0]) ref[0].focus();
-            });
+        confirmDeleteTag(tag) {
+            this.deleteTagTarget = tag;
+            this.manageTagsDialog = false;
+            this.deleteTagDialog = true;
         },
-        cancelRename() {
-            this.editingFolderId = null;
-            this.editingFolderName = '';
-        },
-        commitRename(folderId) {
-            if (!this.editingFolderName.trim()) { this.cancelRename(); return; }
-            store.renameFolder(folderId, this.editingFolderName.trim()).then(() => {
-                this.cancelRename();
-                this.loadFavourites();
-            });
-        },
-        confirmDeleteFolder(folder) {
-            this.deleteFolderTarget = folder;
-            this.deleteFolderDialog = true;
-        },
-        deleteFolder() {
-            store.deleteFolder(this.deleteFolderTarget.id).then(() => {
-                this.deleteFolderDialog = false;
-                this.deleteFolderTarget = null;
+        doDeleteTag() {
+            store.deleteTag(this.deleteTagTarget).then(() => {
+                const i = this.activeTags.indexOf(this.deleteTagTarget);
+                if (i >= 0) this.activeTags.splice(i, 1);
+                this.deleteTagDialog = false;
+                this.deleteTagTarget = null;
                 this.loadFavourites();
             });
         },
@@ -360,30 +405,17 @@ export default {
                 const settingID = parseInt(item.result.settingID, 10);
                 const url = `https://thesession.org/tunes/${tuneID}#setting${settingID}`;
                 const svg = this._renderAbcSvg(item.result.setting);
+                const tagsHtml = (item.tags && item.tags.length > 0)
+                    ? `<p class="tags">${item.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</p>`
+                    : '';
                 return `  <div class="tune">
     <h2><a href="${url}">${name}</a></h2>
-    <p class="descriptor">${descriptor}</p>
+    ${tagsHtml}<p class="descriptor">${descriptor}</p>
     ${svg}
   </div>`;
             };
 
-            // Build folder-grouped sections
-            const folderMap = new Map(this.folders.map(f => [f.id, f.name]));
-            const groups = [];
-
-            // Folders in display order (newest first, matching the UI)
-            for (const folder of this.folders) {
-                const items = selected.filter(item => item.folderId === folder.id);
-                if (items.length > 0) groups.push({ heading: folder.name, items });
-            }
-            // Unfiled
-            const unfiled = selected.filter(item => !item.folderId || !folderMap.has(item.folderId));
-            if (unfiled.length > 0) groups.push({ heading: null, items: unfiled });
-
-            const sections = groups.map(({ heading, items }) => {
-                const headingHtml = heading ? `  <h2 class="folder-heading">${escapeHtml(heading)}</h2>` : '';
-                return headingHtml + '\n' + items.map(renderItem).join('\n');
-            }).join('\n');
+            const sections = selected.map(renderItem).join('\n');
 
             const html = `<!DOCTYPE html>
 <html lang="en">
@@ -392,11 +424,11 @@ export default {
   <title>FolkFriend — Shared Tunes</title>
   <style>
     body { font-family: sans-serif; max-width: 600px; margin: 2em auto; }
-    .folder-heading { margin: 2em 0 0.5em; color: #444; border-bottom: 2px solid #ccc; padding-bottom: 0.2em; }
     .tune { margin: 1.5em 0 1.5em 0; border-top: 1px solid #eee; padding-top: 1em; }
-    h2.tune-title { margin: 0 0 0.2em; font-size: 1.1em; }
     h2 a { color: #1565C0; text-decoration: none; }
     h2 a:hover { text-decoration: underline; }
+    .tags { margin: 0.2em 0 0.5em; display: flex; flex-wrap: wrap; gap: 4px; }
+    .tag { background: #e8f0fe; color: #1a56a0; border-radius: 12px; padding: 1px 8px; font-size: 0.8em; }
     .descriptor { margin: 0 0 0.8em; font-style: italic; color: #555; }
     svg { width: 100%; height: auto; }
   </style>
@@ -438,19 +470,24 @@ ${sections}
     background: #efefef;
 }
 
-.folder-header {
+.tag-group-header {
     background: #e8e8e8;
     border-radius: 4px 4px 0 0;
-    min-height: 40px;
+    min-height: 36px;
 }
 
-.folder-title {
+.tag-group-title {
     font-weight: 600;
     font-size: 0.95rem;
 }
 
-.folder-rename-field {
-    max-width: 200px;
-    font-size: 0.95rem;
+.tag-filter-bar {
+    border-bottom: 1px solid #e0e0e0;
+    padding-bottom: 10px;
+}
+
+.select-all-bar {
+    border-bottom: 1px solid #e0e0e0;
+    min-height: 36px;
 }
 </style>

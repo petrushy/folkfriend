@@ -20,7 +20,7 @@
                         <span class="tune-title">{{ name }}</span>
                     </v-col>
                 </v-row>
-                <v-row class="pb-2 pt-0">
+                <v-row class="pb-0 pt-0">
                     <v-col class="py-0 descriptor">
                         {{ descriptor }}
                     </v-col>
@@ -30,6 +30,11 @@
                         :style="`color: ${scoreColour};`"
                     >
                         {{ scoreLabel }}
+                    </v-col>
+                </v-row>
+                <v-row v-if="tags.length > 0" class="pb-2 pt-1">
+                    <v-col class="py-0 d-flex flex-wrap" style="gap:4px">
+                        <v-chip v-for="tag in tags" :key="tag" x-small outlined>{{ tag }}</v-chip>
                     </v-col>
                 </v-row>
             </v-container>
@@ -74,6 +79,7 @@ export default {
     data() {
         return {
             favourited: false,
+            tags: [],
             starIcon: mdiStar,
             starOutlineIcon: mdiStarOutline,
         };
@@ -81,6 +87,7 @@ export default {
     created() {
         store.isTuneFavourite(this.setting.tune_id).then(v => {
             this.favourited = v;
+            if (v) this._loadTags();
         });
     },
     computed: {
@@ -118,6 +125,9 @@ export default {
         },
     },
     methods: {
+        _loadTags() {
+            store.getTagsForTune(this.setting.tune_id).then(tags => { this.tags = tags; });
+        },
         addToHistory() {
             store.addToHistory(new HistoryItem({
                 settingID: this.settingID,
@@ -133,6 +143,7 @@ export default {
             if (this.favourited) {
                 await store.removeFavourite(this.settingID);
                 this.favourited = await store.isTuneFavourite(this.setting.tune_id);
+                if (this.favourited) this._loadTags(); else this.tags = [];
             } else {
                 // Query results have abc='' — fetch the full setting so the exported HTML has sheet music
                 let fullSettings = null;
@@ -150,6 +161,7 @@ export default {
                     displayName: this.displayName,
                 });
                 this.favourited = true;
+                this._loadTags();
             }
         },
     },

@@ -6,17 +6,9 @@ export class HistoryItem {
 }
 
 export class FavouriteItem {
-    constructor(result, folderId = null) {
+    constructor(result) {
         this.result = result; // { settingID, setting, displayName }
         this.timestamp = Date.now();
-        this.folderId = folderId;
-    }
-}
-
-export class FavouriteFolder {
-    constructor({ id, name, createdAt } = {}) {
-        this.id = id || (Date.now().toString(36) + Math.random().toString(36).slice(2));
-        this.name = name || new Date().toISOString().slice(0, 10);
-        this.createdAt = createdAt || Date.now();
+        this.tags = []; // string[] — user-defined tags, e.g. ['to practice', 'for tuesday sessions']
     }
 }
