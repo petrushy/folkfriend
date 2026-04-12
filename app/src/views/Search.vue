@@ -169,6 +169,7 @@ export default {
         }
     },
     beforeDestroy() {
+        this._destroyed = true;
         eventBus.$off('indexLoaded', this._onIndexLoaded);
         eventBus.$off('searchError', this._onSearchError);
         eventBus.$off('setSearchState', this._onSetSearchState);
@@ -203,11 +204,13 @@ export default {
                 return;
             }
             // analyzeRingBuffer sets state to WORKING then READY when done.
-            // We re-enter LISTENING after WORKING completes (i.e. when state becomes READY).
+            // We re-enter LISTENING after WORKING completes, but only if we're still on this view.
             const restoreListening = () => {
                 if (store.isReady()) {
                     eventBus.$off('setSearchState', restoreListening);
-                    store.setSearchState(store.searchStates.LISTENING);
+                    if (!this._destroyed) {
+                        store.setSearchState(store.searchStates.LISTENING);
+                    }
                 }
             };
             eventBus.$on('setSearchState', restoreListening);

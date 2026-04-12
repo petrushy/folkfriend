@@ -1,4 +1,5 @@
 import { initializeApp } from 'firebase/app';
+import { getAuth } from 'firebase/auth';
 
 // This **IS** okay to be public !!!
 const firebaseConfig = {
@@ -19,6 +20,6 @@ const firebaseConfig = {
 
 };
 
-
 const firebaseApp = initializeApp(firebaseConfig);
+export const firebaseAuth = getAuth(firebaseApp);
 export default firebaseApp;

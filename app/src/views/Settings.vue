@@ -143,8 +143,8 @@
                     {{ icons.checkCircle }}
                 </v-icon>
             </p>
-            <p v-else-if="ua.isSafari && ua.isMobile">
-                On iOS Safari,
+            <div v-else-if="ua.isSafari && ua.isMobile">
+                <p class="mb-1">On iOS Safari,</p>
                 <ul>
                     <li>
                         Tap <v-icon class="pb-2">
@@ -158,9 +158,9 @@
                         </v-icon> "add to home screen"
                     </li>
                 </ul>
-            </p>
-            <p v-else-if="ua.isChrome && ua.isMobile">
-                On Chrome mobile,
+            </div>
+            <div v-else-if="ua.isChrome && ua.isMobile">
+                <p class="mb-1">On Chrome mobile,</p>
                 <ul>
                     <li>
                         Tap <v-icon class="pb-1">
@@ -173,9 +173,9 @@
                         </v-icon> "Install FolkFriend"
                     </li>
                 </ul>
-            </p>
-            <p v-else-if="ua.isChrome && !ua.isMobile">
-                On Chrome desktop,
+            </div>
+            <div v-else-if="ua.isChrome && !ua.isMobile">
+                <p class="mb-1">On Chrome desktop,</p>
                 <ul>
                     <li>
                         Tap <v-icon class="pb-1">
@@ -183,7 +183,7 @@
                         </v-icon> "install app"
                     </li>
                 </ul>
-            </p>
+            </div>
             <p v-else>
                 To install FolkFriend, navigate to the settings of your browser
                 and select "Add to Home Screen" or "Install App".
@@ -227,7 +227,7 @@ export default {
         next();
     },
     data: () => ({
-        currentUser: store.currentUser,
+        currentUser: null,
         signingIn: false,
         signingOut: false,
         authError: null,
@@ -259,6 +259,8 @@ export default {
     }),
     created: function() {
         this.ua = utils.checkUserAgent();
+        // Read current value immediately in case authStateChanged already fired before mount.
+        this.currentUser = store.currentUser;
         this._onAuthStateChanged = user => { this.currentUser = user; };
         eventBus.$on('authStateChanged', this._onAuthStateChanged);
     },

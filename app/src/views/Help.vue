@@ -113,7 +113,7 @@ export default {
 <style scoped>
 .feedbackEmail {
     font-weight: bold;
-    color: --var(--v-primary-base);
+    color: var(--v-primary-base);
 }
 
 .v-card {

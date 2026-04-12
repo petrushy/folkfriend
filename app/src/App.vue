@@ -113,7 +113,7 @@
                     </v-list-item>
                 </router-link>
 
-                <a href="https://donorbox.org/help-support-development-of-folkfriend" target="_blank">
+                <a href="https://donorbox.org/help-support-development-of-folkfriend" target="_blank" rel="noopener noreferrer">
                     <v-list-item @click="0">
                         <v-list-item-action>
                             <v-icon medium>
@@ -183,8 +183,9 @@
 
 <script>
 import { getAnalytics } from 'firebase/analytics';
-import { getAuth, onAuthStateChanged } from 'firebase/auth';
-import firebaseApp from '@/services/firebase.js';
+import { onAuthStateChanged } from 'firebase/auth';
+import firebaseApp, { firebaseAuth } from '@/services/firebase.js';
+
 
 import ffBackend from '@/services/backend.js';
 import store from '@/services/store.js';
@@ -322,11 +323,8 @@ async function initAnalytics() {
     store.loadAnalytics(analytics);
     store.logAnalyticsEvent('running_standalone', {'value': utils.checkStandalone()}).then();
 
-    const auth = getAuth(firebaseApp);
-    store.loadAuth(auth);
-    // Resolve any pending redirect sign-in (Safari/iOS uses redirect flow).
-    store.handleRedirectResult();
-    onAuthStateChanged(auth, user => {
+    store.loadAuth(firebaseAuth);
+    onAuthStateChanged(firebaseAuth, user => {
         if (user) {
             store.onSignedIn(user);
         } else {
