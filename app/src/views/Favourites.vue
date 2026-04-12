@@ -3,6 +3,15 @@
         <div class="d-flex align-center my-2">
             <h1>Favourites</h1>
             <v-spacer />
+            <v-select
+                v-model="sortBy"
+                :items="sortOptions"
+                dense
+                hide-details
+                style="max-width: 130px;"
+                class="mr-2 caption"
+                :prepend-icon="icons.sort"
+            />
             <v-btn icon small :color="groupByTag ? 'primary' : ''" :title="groupByTag ? 'Flat list' : 'Group by tag'" @click="groupByTag = !groupByTag">
                 <v-icon small>{{ icons.group }}</v-icon>
             </v-btn>
@@ -196,7 +205,7 @@
 </template>
 
 <script>
-import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline } from '@mdi/js';
+import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiSort } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
@@ -223,6 +232,14 @@ export default {
             deleteTagTarget: null,
             snackbar: false,
             snackbarText: '',
+            sortBy: 'date',
+            sortOptions: [
+                { text: 'Date', value: 'date' },
+                { text: 'Name', value: 'name' },
+                { text: 'Tune type', value: 'type' },
+                { text: 'Key', value: 'key' },
+                { text: 'Tags', value: 'tags' },
+            ],
             icons: {
                 export: mdiExport,
                 pencil: mdiPencil,
@@ -230,17 +247,52 @@ export default {
                 chevronRight: mdiChevronRight,
                 chevronDown: mdiChevronDown,
                 group: mdiTagMultipleOutline,
+                sort: mdiSort,
             },
         };
     },
     computed: {
         filteredItems() {
             const needle = (this.nameFilter || '').trim().toLowerCase();
-            return this.favouriteItems.filter(item => {
+            const filtered = this.favouriteItems.filter(item => {
                 if (this.activeTags.length > 0 && !this.activeTags.every(t => (item.tags || []).includes(t))) return false;
                 if (needle && !utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle)) return false;
                 return true;
             });
+            const sorted = [...filtered];
+            switch (this.sortBy) {
+                case 'name':
+                    sorted.sort((a, b) =>
+                        utils.parseDisplayableName(a.result.displayName)
+                            .localeCompare(utils.parseDisplayableName(b.result.displayName)));
+                    break;
+                case 'type':
+                    sorted.sort((a, b) => {
+                        const da = utils.parseDisplayableDescription(a.result.setting) || '';
+                        const db = utils.parseDisplayableDescription(b.result.setting) || '';
+                        return da.localeCompare(db);
+                    });
+                    break;
+                case 'key':
+                    sorted.sort((a, b) => {
+                        const ka = (a.result.setting && a.result.setting.mode) || '';
+                        const kb = (b.result.setting && b.result.setting.mode) || '';
+                        return ka.localeCompare(kb);
+                    });
+                    break;
+                case 'tags':
+                    sorted.sort((a, b) => {
+                        const ta = (a.tags || []).join(',');
+                        const tb = (b.tags || []).join(',');
+                        return ta.localeCompare(tb);
+                    });
+                    break;
+                case 'date':
+                default:
+                    sorted.sort((a, b) => b.timestamp - a.timestamp);
+                    break;
+            }
+            return sorted;
         },
         allTags() {
             const tags = new Set();
@@ -291,7 +343,6 @@ export default {
         },
         loadFavourites() {
             store.getFavourites().then(items => {
-                items.sort((a, b) => b.timestamp - a.timestamp);
                 this.favouriteItems = items;
                 const existingIDs = new Set(items.map(i => i.result.settingID));
                 this.selectedIDs = new Set([...this.selectedIDs].filter(id => existingIDs.has(id)));
