@@ -189,19 +189,21 @@ export default {
                     visualObj: this.abcVisual,
                     audioContext: this.audioContext,
                     millisecondsPerMeasure: this.abcVisual.millisecondsPerMeasure() * (100 / this.tempoPercent),
+                    // onEnded must be nested under options.options — ABCJS reads it as
+                    // params = options.options and then params.onEnded.
+                    options: {
+                        onEnded: () => {
+                            this.paused = true;
+                            this.midiBuffer = null;
+                            this.$forceUpdate();
+                        },
+                    },
                 }).then(() => {
                     return this.midiBuffer.prime();
                 }).then(() => {
                     return this.audioContext.resume();
                 }).then(() => {
                     this.midiBuffer.start();
-                    this.midiBuffer.onEnded = () => {
-                        // Tune finished naturally — reset to idle state so the
-                        // play button returns to ▶ and the next press starts fresh.
-                        // Must set to null (not delete) so Vue 2 reactivity triggers a re-render.
-                        this.paused = true;
-                        this.midiBuffer = null;
-                    };
                 }).catch(error => {
                     console.error('AudioContext error', error);
                 });
