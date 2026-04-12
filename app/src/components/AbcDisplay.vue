@@ -210,12 +210,47 @@ export default {
             });
         },
         tempoChanged: function () {
-            // Tempo is baked in at init() time — stop playback so the
-            // user restarts at the new tempo.
-            if (!this.paused) {
-                this.stopPlaying();
-                delete this.midiBuffer;
-            }
+            // If not playing, nothing to do — new tempo will be used on next play.
+            if (this.paused || !this.midiBuffer) return;
+
+            // Prime a NEW synth instance in the background while the current one
+            // keeps playing. When ready, get the current position, stop the old
+            // one, seek the new one to that position, and start it.
+            const msPerMeasure = this.abcVisual.millisecondsPerMeasure() * (100 / this.tempoPercent);
+            const onEnded = () => {
+                this.paused = true;
+                this.midiBuffer = null;
+                this.$forceUpdate();
+            };
+            const newBuffer = new ABCJS.synth.CreateSynth();
+            newBuffer.init({
+                visualObj: this.abcVisual,
+                audioContext: this.audioContext,
+                millisecondsPerMeasure: msPerMeasure,
+                options: { onEnded },
+            }).then(() => {
+                return newBuffer.prime();
+            }).then(() => {
+                // pause() returns elapsed playback time in seconds at the OLD
+                // tempo. To preserve musical position after changing tempo, we
+                // convert that elapsed time to beats and seek the new synth by
+                // beats instead of raw seconds.
+                let positionBeats = 0;
+                if (this.midiBuffer) {
+                    this.midiBuffer.onEnded = null;
+                    const positionSeconds = this.midiBuffer.pause();
+                    const oldMsPerMeasure = this.midiBuffer.millisecondsPerMeasure;
+                    const oldBeatsPerMeasure = this.midiBuffer.beatsPerMeasure;
+                    if (positionSeconds && oldMsPerMeasure && oldBeatsPerMeasure) {
+                        positionBeats = positionSeconds * 1000 * oldBeatsPerMeasure / oldMsPerMeasure;
+                    }
+                }
+                this.midiBuffer = newBuffer;
+                if (positionBeats) newBuffer.seek(positionBeats, 'beats');
+                newBuffer.start();
+            }).catch(error => {
+                console.error('Tempo change error', error);
+            });
         },
         stopPlaying: function () {
             this.paused = true;
