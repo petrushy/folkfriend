@@ -21,27 +21,30 @@
             class="py-2 px-2"
         >
             <v-btn
-                class="mx-1 px-3 abcControls"
+                small
+                class="mx-1 px-2 abcControls"
                 @click="playButton"
             >
-                <v-icon v-if="paused">
+                <v-icon small v-if="paused">
                     {{ icons.play }}
                 </v-icon>
-                <v-icon v-else>
+                <v-icon small v-else>
                     {{ icons.pause }}
                 </v-icon>
             </v-btn>
             <v-btn
-                class="mx-1 px-3 abcControls"
+                small
+                class="mx-1 px-2 abcControls"
                 @click="stopPlaying"
             >
-                <v-icon>{{ icons.stop }}</v-icon>
+                <v-icon small>{{ icons.stop }}</v-icon>
             </v-btn>
             <v-btn
-                class="mx-1 px-3 abcControls"
+                small
+                class="mx-1 px-2 abcControls"
                 @click="goFullScreen"
             >
-                <v-icon>{{ icons.fullscreen }}</v-icon>
+                <v-icon small>{{ icons.fullscreen }}</v-icon>
             </v-btn>
             <div class="ml-auto d-flex align-center tempoControl">
                 <v-icon small class="mr-1">{{ icons.metronome }}</v-icon>
