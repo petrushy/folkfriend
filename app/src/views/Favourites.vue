@@ -312,11 +312,11 @@ export default {
             const tagsToShow = this.activeTags.length > 0 ? this.activeTags : this.allTags;
             const groups = [];
             for (const tag of tagsToShow) {
-                const items = this.favouriteItems.filter(item => (item.tags || []).includes(tag));
+                const items = this.filteredItems.filter(item => (item.tags || []).includes(tag));
                 if (items.length > 0) groups.push({ tag, rows: items.map(i => this._toRow(i)) });
             }
             if (this.activeTags.length === 0) {
-                const untagged = this.favouriteItems.filter(item => !(item.tags && item.tags.length > 0));
+                const untagged = this.filteredItems.filter(item => !(item.tags && item.tags.length > 0));
                 if (untagged.length > 0) groups.push({ tag: null, rows: untagged.map(i => this._toRow(i)) });
             }
             return groups;

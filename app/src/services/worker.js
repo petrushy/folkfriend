@@ -121,7 +121,6 @@ class FolkFriendWASMWrapper {
             console.timeEnd('tune-index-load');
 
             // THEN check the latest version and if we want to upgrade
-            const tuneIndexMetadataRemote = await this.fetchTuneIndexMetadata();
             let tuneIndexMetadataLocal = await get('tuneIndexMetadata');
 
             if (typeof tuneIndexMetadataLocal === 'undefined') {
@@ -134,28 +133,35 @@ class FolkFriendWASMWrapper {
                 };
             }
 
-            const remoteVersion = tuneIndexMetadataRemote['v'];
             const localVersion = tuneIndexMetadataLocal['v'];
-            const daysSinceUpdate = remoteVersion - localVersion;
-            console.debug(`Tune index was ${daysSinceUpdate} days out of date`);
+            analyticsData['tune_index_metadata_version'] = localVersion;
 
-            // Folkfriend's TuneIndex (at time of writing) updates once a week,
-            //  scheduled to update just after the latest data dump on Github
-            //  from thesession.org. Having all users automatically update the 
-            //  whole index every week is a little overkill though and uses a
-            //  lot of bandwidth (which may not be free). Only auto-update if
-            //  it's been a while since the last update. A while = 4 weeks.
-            if (daysSinceUpdate >= 28) {
-                console.debug('Upgrading tune index');
-                const downloadedTuneIndex = await this.fetchTuneIndexData();
-                await set('tuneIndex', downloadedTuneIndex);
-                await set('tuneIndexMetadata', tuneIndexMetadataRemote);
+            try {
+                const tuneIndexMetadataRemote = await this.fetchTuneIndexMetadata();
+                const remoteVersion = tuneIndexMetadataRemote['v'];
+                const daysSinceUpdate = remoteVersion - localVersion;
+                console.debug(`Tune index was ${daysSinceUpdate} days out of date`);
+
+                // Folkfriend's TuneIndex (at time of writing) updates once a week,
+                //  scheduled to update just after the latest data dump on Github
+                //  from thesession.org. Having all users automatically update the 
+                //  whole index every week is a little overkill though and uses a
+                //  lot of bandwidth (which may not be free). Only auto-update if
+                //  it's been a while since the last update. A while = 4 weeks.
+                if (daysSinceUpdate >= 28) {
+                    console.debug('Upgrading tune index');
+                    const downloadedTuneIndex = await this.fetchTuneIndexData();
+                    await set('tuneIndex', downloadedTuneIndex);
+                    await set('tuneIndexMetadata', tuneIndexMetadataRemote);
+                    analyticsData['days_since_update'] = 0;
+                    analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
+                    analyticsData['newly_updated'] = true;
+                } else {
+                    analyticsData['days_since_update'] = daysSinceUpdate;
+                }
+            } catch (e) {
+                console.warn('Could not refresh tune index metadata, using cached index', e);
                 analyticsData['days_since_update'] = 0;
-                analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
-                analyticsData['newly_updated'] = true;
-            } else {
-                analyticsData['days_since_update'] = daysSinceUpdate;
-                analyticsData['tune_index_metadata_version'] = tuneIndexMetadataLocal['v'];
             }
         }
 

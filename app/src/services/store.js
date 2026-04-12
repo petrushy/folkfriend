@@ -2,7 +2,7 @@
 // Vuex is overkill for out needs. Use a very simple global object store for
 //  very basic state management.
 import eventBus from '@/eventBus.js';
-import {get} from 'idb-keyval';
+import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
 import { GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut as firebaseSignOut } from 'firebase/auth';
 import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
@@ -54,7 +54,7 @@ class Store {
 
     async _dbSet(key, value) {
         try {
-            await this._dbSet(key, value);
+            await set(key, value);
         } catch (e) {
             console.error(`IndexedDB write error (${key})`, e);
         }
