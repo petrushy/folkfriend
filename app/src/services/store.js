@@ -2,7 +2,7 @@
 // Vuex is overkill for out needs. Use a very simple global object store for
 //  very basic state management.
 import eventBus from '@/eventBus.js';
-import {get, set} from 'idb-keyval';
+import {get} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
 import { GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult, signOut as firebaseSignOut } from 'firebase/auth';
 import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
@@ -52,6 +52,14 @@ class Store {
         this._unsubscribeSync = null;
     }
 
+    async _dbSet(key, value) {
+        try {
+            await this._dbSet(key, value);
+        } catch (e) {
+            console.error(`IndexedDB write error (${key})`, e);
+        }
+    }
+
     async updateUserSettings(userSettings) {
         // Usable immediately and synchronously by the entire application.
         this.userSettings = userSettings;
@@ -62,11 +70,22 @@ class Store {
     }
 
     async getHistoryItems() {
-        return await get('historyItems') || [];
+        try {
+            return await get('historyItems') || [];
+        } catch (e) {
+            console.error('IndexedDB read error (historyItems)', e);
+            return [];
+        }
     }
 
     async getFavourites() {
-        let items = await get('favouriteItems') || [];
+        let items;
+        try {
+            items = await get('favouriteItems') || [];
+        } catch (e) {
+            console.error('IndexedDB read error (favouriteItems)', e);
+            return [];
+        }
         // Migrate items that still use the old folderId model → convert folder name to tag
         const needsMigration = items.some(item => item.folderId !== undefined);
         if (needsMigration) {
@@ -81,8 +100,8 @@ class Store {
                 }
                 return item;
             });
-            await set('favouriteItems', items);
-            await set('favouriteFolders', []);
+            await this._dbSet('favouriteItems', items);
+            await this._dbSet('favouriteFolders', []);
             if (this.currentUser) pushFavourites(this.currentUser.uid, items);
         }
         return items;
@@ -98,7 +117,7 @@ class Store {
         if (item) {
             if (!item.tags) item.tags = [];
             if (!item.tags.includes(tag)) item.tags.push(tag);
-            await set('favouriteItems', items);
+            await this._dbSet('favouriteItems', items);
             if (this.currentUser) pushFavourites(this.currentUser.uid, items);
         }
     }
@@ -117,7 +136,7 @@ class Store {
         const item = items.find(f => String(f.result.settingID) === settingID);
         if (item && item.tags) {
             item.tags = item.tags.filter(t => t !== tag);
-            await set('favouriteItems', items);
+            await this._dbSet('favouriteItems', items);
             if (this.currentUser) pushFavourites(this.currentUser.uid, items);
         }
     }
@@ -132,7 +151,7 @@ class Store {
                 item.tags = item.tags.map(t => (t === oldName ? newName : t));
             }
         });
-        await set('favouriteItems', items);
+        await this._dbSet('favouriteItems', items);
         if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
@@ -142,7 +161,7 @@ class Store {
         items.forEach(item => {
             if (item.tags) item.tags = item.tags.filter(t => t !== name);
         });
-        await set('favouriteItems', items);
+        await this._dbSet('favouriteItems', items);
         if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
@@ -157,7 +176,7 @@ class Store {
             // Clean up any items with invalid settingIDs (stored from a previous bug)
             const clean = items.filter(f => this._isValidSettingID(f.result.settingID));
             if (clean.length !== items.length) {
-                await set('favouriteItems', clean);
+                await this._dbSet('favouriteItems', clean);
                 items = clean;
             }
             this._favouriteIDs = new Set(items.map(f => String(f.result.settingID)));
@@ -201,7 +220,7 @@ class Store {
         if (!ids.has(result.settingID)) {
             const items = await this.getFavourites();
             items.unshift(new FavouriteItem(result));
-            await set('favouriteItems', items);
+            await this._dbSet('favouriteItems', items);
             ids.add(result.settingID);
             if (this._favouriteTuneIDs && result.setting && result.setting.tune_id) {
                 this._favouriteTuneIDs.add(String(result.setting.tune_id));
@@ -213,7 +232,7 @@ class Store {
     async removeFavourite(settingID) {
         settingID = String(settingID);
         const items = (await this.getFavourites()).filter(f => String(f.result.settingID) !== settingID);
-        await set('favouriteItems', items);
+        await this._dbSet('favouriteItems', items);
         // Invalidate both caches — tune may still be favourited via another setting
         this._invalidateFavouriteCache();
         if (this.currentUser) pushFavourites(this.currentUser.uid, items);
@@ -244,7 +263,7 @@ class Store {
     }
 
     async clearHistory() {
-        await set('historyItems', []);
+        await this._dbSet('historyItems', []);
     }
 
     async addToHistory(tuneHistoryItem) {
@@ -263,7 +282,7 @@ class Store {
         historyItems.unshift(tuneHistoryItem);
         historyItems = historyItems.slice(0, 100);
 
-        await set('historyItems', historyItems);
+        await this._dbSet('historyItems', historyItems);
     }
 
     async exportUserData() {
@@ -282,10 +301,10 @@ class Store {
         if (payload.version !== 1 && payload.version !== 2 && payload.version !== 3) {
             throw new Error(`Unsupported data version: ${payload.version}`);
         }
-        await set('historyItems', payload.historyItems || []);
+        await this._dbSet('historyItems', payload.historyItems || []);
         // v1/v2 exports may have folderId on items; getFavourites() will migrate them on next load
-        await set('favouriteItems', payload.favouriteItems || []);
-        if (payload.favouriteFolders) await set('favouriteFolders', payload.favouriteFolders);
+        await this._dbSet('favouriteItems', payload.favouriteItems || []);
+        if (payload.favouriteFolders) await this._dbSet('favouriteFolders', payload.favouriteFolders);
         await this.updateUserSettings(payload.userSettings || this.userSettings);
         this._invalidateFavouriteCache();
     }
@@ -300,7 +319,7 @@ class Store {
         const localFavs = await this.getFavourites();
         this._unsubscribeSync = syncSubscribe(user.uid, localFavs, async (type, items) => {
             if (type === 'favourites') {
-                await set('favouriteItems', items);
+                await this._dbSet('favouriteItems', items);
                 this._invalidateFavouriteCache();
                 eventBus.$emit('syncComplete');
             }

@@ -259,10 +259,11 @@ export default {
     }),
     created: function() {
         this.ua = utils.checkUserAgent();
-        eventBus.$on('authStateChanged', user => { this.currentUser = user; });
+        this._onAuthStateChanged = user => { this.currentUser = user; };
+        eventBus.$on('authStateChanged', this._onAuthStateChanged);
     },
     beforeDestroy() {
-        eventBus.$off('authStateChanged');
+        eventBus.$off('authStateChanged', this._onAuthStateChanged);
     },
     methods: {
         settingsChanged() {

@@ -146,27 +146,32 @@ export default {
     created: function () {
         eventBus.$emit('parentViewActivated');
 
-        if(!this.indexLoaded) {
-            eventBus.$on('indexLoaded', () => {
-                this.indexLoaded = true;
-            });
-        }
-
-        eventBus.$on('searchError', (errorMsg) => {
+        this._onIndexLoaded = () => { this.indexLoaded = true; };
+        this._onSearchError = (errorMsg) => {
             this.snackbar = true;
             this.snackbarText = errorMsg || 'An error ocurred 😟';
-        });
-
-        eventBus.$on('setSearchState', () => {
+        };
+        this._onSetSearchState = () => {
             this.searchState = store.searchState;
             if (store.isListening()) {
                 this._startPulse();
             }
-        });
+        };
+
+        if (!this.indexLoaded) {
+            eventBus.$on('indexLoaded', this._onIndexLoaded);
+        }
+        eventBus.$on('searchError', this._onSearchError);
+        eventBus.$on('setSearchState', this._onSetSearchState);
 
         if (store.isListening()) {
             this._startPulse();
         }
+    },
+    beforeDestroy() {
+        eventBus.$off('indexLoaded', this._onIndexLoaded);
+        eventBus.$off('searchError', this._onSearchError);
+        eventBus.$off('setSearchState', this._onSetSearchState);
     },
     methods: {
         _startPulse() {

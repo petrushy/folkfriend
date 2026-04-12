@@ -200,6 +200,12 @@ export default {
         this.name = this.displayableAliases.splice(primaryAliasIndex, 1)[0];
 
         // Load favourite state and tags for all settings, then decide which panel to open
+        // Pre-declare per-setting menu/input keys so Vue 2 reactivity tracks them from the start.
+        this.settings.forEach(s => {
+            this.$set(this.addTagMenus, s.setting_id, false);
+            this.$set(this.tagInputValues, s.setting_id, null);
+        });
+
         [this.allTags] = await Promise.all([
             store.getAllTags(),
             ...this.settings.map(async s => {

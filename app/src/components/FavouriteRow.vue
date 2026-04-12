@@ -143,13 +143,17 @@ export default {
                 }
                 body = filtered.join('\n');
             }
-            // Take only the first 2 actual bars (count 3 '|' chars to skip the
-            // leading '|:' repeat marker without consuming a real bar).
-            // 2 bars reliably fits on one staff line at any preview width.
+            // Show more bars when more space is available.
+            // Each bar is roughly 110px at scale 0.65, so derive bar count from width.
+            // +1 to account for the leading |: repeat marker which counts as a pipe but isn't a bar.
+            const maxBars = this.abcPreviewDisplayWidth < 300 ? 2
+                          : this.abcPreviewDisplayWidth < 390 ? 3
+                          : 4;
+            const targetPipes = maxBars + 1;
             let count = 0;
             let cutAt = body.length;
             for (let i = 0; i < body.length; i++) {
-                if (body[i] === '|' && ++count >= 3) { cutAt = i + 1; break; }
+                if (body[i] === '|' && ++count >= targetPipes) { cutAt = i + 1; break; }
             }
             lines.push(body.slice(0, cutAt));
 

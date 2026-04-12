@@ -43,10 +43,9 @@ class FolkFriendWASMWrapper {
         if (process.env.NODE_ENV === 'production') {
             url = 'https://folkfriend-app-data.web.app/nud-meta.json';
         }
-        let indexData = await fetch(url)
-            .then((response) => response.json())
-            .catch((err) => console.log(err));
-        return indexData;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Failed to fetch tune index metadata: ${response.status}`);
+        return response.json();
     }
 
     async fetchTuneIndexData() {
@@ -60,9 +59,9 @@ class FolkFriendWASMWrapper {
         }
 
         // Fetch
-        let indexData = await fetch(url)
-            .then((response) => response.json())
-            .catch((err) => console.log(err));
+        const fetchResponse = await fetch(url);
+        if (!fetchResponse.ok) throw new Error(`Failed to fetch tune index: ${fetchResponse.status}`);
+        let indexData = await fetchResponse.json();
 
         // Lightly postprocess. ABC strings don't go to WASM because
         //  of slow memory loading in WebAssembly.        

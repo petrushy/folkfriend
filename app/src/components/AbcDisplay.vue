@@ -136,15 +136,23 @@ export default {
     mounted: async function () {
         const abcJsWrapperDiv = this.$el.childNodes[1];
         const svgDiv = abcJsWrapperDiv.firstChild;
-        const midDiv = abcJsWrapperDiv.lastChild;
 
         this.abcVisual = ABCJS.renderAbc(svgDiv, this.abcText, { responsive: 'resize' })[0];
         this.$emit('abcRendered');
 
-        eventBus.$on("stopSynthPlayback", () => {
+        this._onStopSynthPlayback = () => {
             this.stopPlaying();
             delete this.midiBuffer;
-        });
+        };
+        eventBus.$on('stopSynthPlayback', this._onStopSynthPlayback);
+    },
+    beforeDestroy() {
+        eventBus.$off('stopSynthPlayback', this._onStopSynthPlayback);
+        this.stopPlaying();
+        if (this.audioContext) {
+            this.audioContext.close();
+            this.audioContext = null;
+        }
     },
     methods: {
         playButton: function() {
@@ -209,7 +217,6 @@ export default {
             this.paused = true;
             if (this.midiBuffer) {
                 this.midiBuffer.stop();
-                this.pause = false;
             }
         },
         goFullScreen: function () {

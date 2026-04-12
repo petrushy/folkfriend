@@ -111,12 +111,15 @@ export default {
         },
     },
     created: function() {
-        let rb = this;
-        eventBus.$on('setSearchState', () => {
-            rb.buttonReady = store.isReady();
-            rb.buttonWorking = store.isWorking();
-            rb.buttonRecording = store.isRecording();
-        });
+        this._onSetSearchState = () => {
+            this.buttonReady = store.isReady();
+            this.buttonWorking = store.isWorking();
+            this.buttonRecording = store.isRecording();
+        };
+        eventBus.$on('setSearchState', this._onSetSearchState);
+    },
+    beforeDestroy() {
+        eventBus.$off('setSearchState', this._onSetSearchState);
     },
     methods: {
         clicked: async function () {
