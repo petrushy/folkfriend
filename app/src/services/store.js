@@ -314,6 +314,11 @@ class Store {
     }
 
     async onSignedIn(user) {
+        // Defensively clear any existing sync listener before creating a new one.
+        if (this._unsubscribeSync) {
+            this._unsubscribeSync();
+            this._unsubscribeSync = null;
+        }
         this.currentUser = user;
         eventBus.$emit('authStateChanged', user);
         const localFavs = await this.getFavourites();

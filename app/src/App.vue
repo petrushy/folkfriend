@@ -338,8 +338,11 @@ async function initSetup() {
         store.state.backendVersion = version;
         console.info('Loaded folkfriend backend version', version);
     });
-    await ffBackend.setupTuneIndex();
+    // Auth must be initialised immediately — do not wait for tune index setup,
+    // which can take seconds. A user tapping "Sign in" before auth is ready
+    // would hit store.signIn() with this.auth === null and crash.
     await initAnalytics();
+    await ffBackend.setupTuneIndex();
 }
 </script>
 

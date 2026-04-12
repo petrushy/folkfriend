@@ -50,7 +50,7 @@
                 <v-icon small class="mr-1">{{ icons.metronome }}</v-icon>
                 <v-slider
                     v-model="tempoPercent"
-                    min="50"
+                    min="25"
                     max="200"
                     step="5"
                     hide-details
@@ -196,9 +196,11 @@ export default {
                 }).then(() => {
                     this.midiBuffer.start();
                     this.midiBuffer.onEnded = () => {
-                        if (!this.paused) {
-                            this.stopPlaying();
-                        }
+                        // Tune finished naturally — reset to idle state so the
+                        // play button returns to ▶ and the next press starts fresh.
+                        // Must set to null (not delete) so Vue 2 reactivity triggers a re-render.
+                        this.paused = true;
+                        this.midiBuffer = null;
                     };
                 }).catch(error => {
                     console.error('AudioContext error', error);

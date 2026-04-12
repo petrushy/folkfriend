@@ -128,7 +128,7 @@ This fork uses a separate Firebase project (`folkfriend-petrush-fork`) — not t
 
 ### Firebase services enabled
 
-- **Authentication:** Google sign-in provider; authorized domains include `localhost` and `folkfriend-petrush-fork.web.app`
+- **Authentication:** Google sign-in provider; authorized domains include `localhost` and `folkfriend-petrush-fork.web.app`. The local HTTPS IP (e.g. `192.168.0.99`) is **not** an authorized domain — auth only works on the deployed URL or localhost, not the local IP serve.
 - **Firestore:** production mode; security rules in `firestore.rules` (users can only read/write their own data)
 - **Analytics:** inherited from original app, wired through `store.loadAnalytics()`
 
@@ -161,11 +161,12 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 
 **How it works:**
 
-- On sign-in: `sync.subscribe()` sets up `onSnapshot` listeners on `users/{uid}/data/favourites` and `users/{uid}/data/history`
-- First snapshot: if Firestore is empty (first device ever), seeds from local IndexedDB; otherwise replaces local with Firestore data
-- Subsequent snapshots: fire in real-time when any device writes, update IndexedDB and emit `syncComplete` on `eventBus`
-- On every write (`addFavourite`, `removeFavourite`, `addToHistory`): pushes the full updated array to Firestore immediately
-- On sign-out: `onSnapshot` listeners are unsubscribed
+- On sign-in: `sync.subscribe()` sets up an `onSnapshot` listener on `users/{uid}/data/favourites` only — **history is NOT synced in real-time**
+- First snapshot: if Firestore has no data (first device ever), seeds from local IndexedDB; otherwise replaces local with Firestore data
+- Subsequent snapshots: fire in real-time when any device writes favourites, update IndexedDB and emit `syncComplete` on `eventBus`
+- On every favourites write (`addFavourite`, `removeFavourite`): pushes the full updated array to Firestore immediately
+- History is written to Firestore on each `addToHistory` call but there is no `onSnapshot` listener — history changes from another device are not pulled in automatically
+- On sign-out: the `onSnapshot` listener is unsubscribed
 - Firestore is the source of truth — deletions propagate correctly; no additive-merge that would re-add removed items
 - Firestore SDK queues writes made offline and replays them when connectivity returns
 

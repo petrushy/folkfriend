@@ -24,6 +24,8 @@ export function subscribe(uid, localFavs, onChange) {
             const data = snap.data();
             onChange('favourites', data.items || []);
         }
+    }, err => {
+        console.error('Firestore favourites snapshot error:', err.code, err.message);
     });
 
     return () => { unsubFav(); };
