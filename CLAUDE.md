@@ -132,6 +132,26 @@ This fork uses a separate Firebase project (`folkfriend-petrush-fork`) — not t
 - **Firestore:** production mode; security rules in `firestore.rules` (users can only read/write their own data)
 - **Analytics:** inherited from original app, wired through `store.loadAnalytics()`
 
+### Google sign-in on iOS — IMPORTANT
+
+**What works:** `signInWithPopup` with `browserPopupRedirectResolver` passed explicitly as the third argument. This is required on both Safari iOS and iOS PWA (WKWebView).
+
+```js
+import { signInWithPopup, browserPopupRedirectResolver } from 'firebase/auth';
+await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
+```
+
+**Why:** WKWebView (iOS PWA) and some Safari environments cannot auto-detect the popup resolver — Firebase throws `"null is not an object (evaluating 't_popupRedirectResolver')"` without it. Passing it explicitly fixes both.
+
+**What does NOT work on iOS:**
+
+- `signInWithRedirect` — Google redirects back to Safari, not the PWA, so `getRedirectResult()` inside the PWA never sees the result. The page just flashes blank and returns to Settings with no auth state change.
+- Detecting Safari via user-agent and switching to redirect — too broad, breaks desktop Safari.
+- Detecting PWA via `window.navigator.standalone` and using redirect — same redirect problem.
+- `initializeAuth()` with explicit persistence/resolver options instead of `getAuth()` — caused regressions.
+
+**The auth instance** is created once in `app/src/services/firebase.js` via `getAuth(firebaseApp)` and exported as `firebaseAuth`. App.vue imports it directly — do not call `getAuth()` a second time elsewhere.
+
 ### Google sync architecture
 
 **New files:**
