@@ -92,10 +92,13 @@ export default {
         return {
             abcVisual: null,
             midiBuffer: null,
+            playbackTimer: null,
+            playbackSyncFrame: null,
             audioContext: null,
             paused: true,
             fullscreen: false,
             tempoPercent: 100,
+            highlightedNoteEls: [],
 
             icons: {
                 fullscreen: mdiArrowExpand,
@@ -149,21 +152,123 @@ export default {
     beforeDestroy() {
         eventBus.$off('stopSynthPlayback', this._onStopSynthPlayback);
         this.stopPlaying();
+        this._clearHighlightedNotes();
         if (this.audioContext) {
             this.audioContext.close();
             this.audioContext = null;
         }
     },
     methods: {
+        _msPerMeasureToQpm(millisecondsPerMeasure) {
+            if (!this.abcVisual || !millisecondsPerMeasure) return null;
+            return this.abcVisual.getBeatsPerMeasure() / millisecondsPerMeasure * 60000;
+        },
+        _clearHighlightedNotes() {
+            this.highlightedNoteEls.forEach(el => el.classList.remove('abcjs-current-note'));
+            this.highlightedNoteEls = [];
+        },
+        _highlightTimingEvent(event) {
+            this._clearHighlightedNotes();
+            if (!event || !event.elements || !event.midiPitches || event.midiPitches.length === 0) return;
+
+            const noteEls = event.elements
+                .flat()
+                .filter(el => el && el.classList);
+
+            noteEls.forEach(el => el.classList.add('abcjs-current-note'));
+            this.highlightedNoteEls = noteEls;
+        },
+        _createPlaybackTimer(millisecondsPerMeasure) {
+            const qpm = this._msPerMeasureToQpm(millisecondsPerMeasure);
+            return new ABCJS.TimingCallbacks(this.abcVisual, {
+                qpm,
+                eventCallback: (event) => {
+                    if (event === null) {
+                        this._clearHighlightedNotes();
+                        return;
+                    }
+                    this._highlightTimingEvent(event);
+                },
+            });
+        },
+        _syncPlaybackTimerToAudio() {
+            if (!this.playbackTimer || !this.midiBuffer || this.paused || !this.audioContext) {
+                this.playbackSyncFrame = null;
+                return;
+            }
+
+            if (typeof this.midiBuffer.startTimeSec === 'number') {
+                const elapsedSeconds = Math.max(0, this.audioContext.currentTime - this.midiBuffer.startTimeSec);
+                this.playbackTimer.setProgress(elapsedSeconds, 'seconds');
+            }
+
+            this.playbackSyncFrame = window.requestAnimationFrame(() => this._syncPlaybackTimerToAudio());
+        },
+        _startPlaybackSyncLoop() {
+            if (this.playbackSyncFrame !== null) {
+                window.cancelAnimationFrame(this.playbackSyncFrame);
+            }
+            this.playbackSyncFrame = window.requestAnimationFrame(() => this._syncPlaybackTimerToAudio());
+        },
+        _stopPlaybackSyncLoop() {
+            if (this.playbackSyncFrame !== null) {
+                window.cancelAnimationFrame(this.playbackSyncFrame);
+                this.playbackSyncFrame = null;
+            }
+        },
+        _startPlaybackTimer(millisecondsPerMeasure, offset, units) {
+            this._stopPlaybackSyncLoop();
+            if (this.playbackTimer) {
+                this.playbackTimer.stop();
+            }
+            this.playbackTimer = this._createPlaybackTimer(millisecondsPerMeasure);
+            if (offset !== undefined) {
+                this.playbackTimer.setProgress(offset, units);
+            } else {
+                this.playbackTimer.setProgress(0, 'seconds');
+            }
+            this._startPlaybackSyncLoop();
+        },
+        _pausePlaybackTimer() {
+            this._stopPlaybackSyncLoop();
+            if (
+                this.playbackTimer &&
+                this.midiBuffer &&
+                this.audioContext &&
+                typeof this.midiBuffer.startTimeSec === 'number'
+            ) {
+                const elapsedSeconds = Math.max(0, this.audioContext.currentTime - this.midiBuffer.startTimeSec);
+                this.playbackTimer.setProgress(elapsedSeconds, 'seconds');
+            }
+        },
+        _resumePlaybackTimer() {
+            this._startPlaybackSyncLoop();
+        },
+        _stopPlaybackTimer() {
+            this._stopPlaybackSyncLoop();
+            if (this.playbackTimer) {
+                this.playbackTimer.stop();
+                this.playbackTimer = null;
+            }
+            this._clearHighlightedNotes();
+        },
+        _handlePlaybackEnded() {
+            this.paused = true;
+            this.midiBuffer = null;
+            this._stopPlaybackTimer();
+            this.$forceUpdate();
+        },
         playButton: function() {
             if (!this.midiBuffer) {
                 this.startPlaying();
             } else if(this.paused) {
                 this.paused = false;
+                this._resumePlaybackTimer();
                 this.midiBuffer.resume();
             } else {
                 this.paused = true;
                 this.midiBuffer.pause();
+                this._pausePlaybackTimer();
             }
         },
         startPlaying: function () {
@@ -184,25 +289,23 @@ export default {
 
             this.audioContext.resume().then(() => {
                 this.midiBuffer = new ABCJS.synth.CreateSynth();
+                const millisecondsPerMeasure = this.abcVisual.millisecondsPerMeasure() * (100 / this.tempoPercent);
 
                 return this.midiBuffer.init({
                     visualObj: this.abcVisual,
                     audioContext: this.audioContext,
-                    millisecondsPerMeasure: this.abcVisual.millisecondsPerMeasure() * (100 / this.tempoPercent),
+                    millisecondsPerMeasure,
                     // onEnded must be nested under options.options — ABCJS reads it as
                     // params = options.options and then params.onEnded.
                     options: {
-                        onEnded: () => {
-                            this.paused = true;
-                            this.midiBuffer = null;
-                            this.$forceUpdate();
-                        },
+                        onEnded: () => this._handlePlaybackEnded(),
                     },
                 }).then(() => {
                     return this.midiBuffer.prime();
                 }).then(() => {
                     return this.audioContext.resume();
                 }).then(() => {
+                    this._startPlaybackTimer(millisecondsPerMeasure);
                     this.midiBuffer.start();
                 }).catch(error => {
                     console.error('AudioContext error', error);
@@ -217,11 +320,7 @@ export default {
             // keeps playing. When ready, get the current position, stop the old
             // one, seek the new one to that position, and start it.
             const msPerMeasure = this.abcVisual.millisecondsPerMeasure() * (100 / this.tempoPercent);
-            const onEnded = () => {
-                this.paused = true;
-                this.midiBuffer = null;
-                this.$forceUpdate();
-            };
+            const onEnded = () => this._handlePlaybackEnded();
             const newBuffer = new ABCJS.synth.CreateSynth();
             newBuffer.init({
                 visualObj: this.abcVisual,
@@ -247,6 +346,7 @@ export default {
                 }
                 this.midiBuffer = newBuffer;
                 if (positionBeats) newBuffer.seek(positionBeats, 'beats');
+                this._startPlaybackTimer(msPerMeasure, positionBeats, 'beats');
                 newBuffer.start();
             }).catch(error => {
                 console.error('Tempo change error', error);
@@ -254,6 +354,7 @@ export default {
         },
         stopPlaying: function () {
             this.paused = true;
+            this._stopPlaybackTimer();
             if (this.midiBuffer) {
                 this.midiBuffer.stop();
             }
@@ -294,6 +395,11 @@ export default {
 
 .FullScreenAbcDisplay > div {
     min-height: 100%;
+}
+
+:deep(.abcjs-current-note .abcjs-notehead) {
+    fill: #d32f2f;
+    stroke: #d32f2f;
 }
 
 .abcControls {
