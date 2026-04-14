@@ -297,8 +297,13 @@ export default {
                     millisecondsPerMeasure,
                     // onEnded must be nested under options.options — ABCJS reads it as
                     // params = options.options and then params.onEnded.
+                    // soundFontUrl points to the locally bundled FluidR3_GM subset;
+                    // soundFontVolumeMultiplier must be set explicitly because ABCJS
+                    // only auto-applies 3.0 for the known remote CDN URL.
                     options: {
                         onEnded: () => this._handlePlaybackEnded(),
+                        soundFontUrl: '/soundfont/',
+                        soundFontVolumeMultiplier: 3.0,
                     },
                 }).then(() => {
                     return this.midiBuffer.prime();
@@ -326,7 +331,7 @@ export default {
                 visualObj: this.abcVisual,
                 audioContext: this.audioContext,
                 millisecondsPerMeasure: msPerMeasure,
-                options: { onEnded },
+                options: { onEnded, soundFontUrl: '/soundfont/', soundFontVolumeMultiplier: 3.0 },
             }).then(() => {
                 return newBuffer.prime();
             }).then(() => {
