@@ -53,17 +53,6 @@ module.exports = {
                 options: {
                     cacheName: 'folkfriend-tune-data',
                 },
-            }, {
-                urlPattern: /^https:\/\/paulrosen\.github\.io\/midi-js-soundfonts\//,
-                // Individual note MP3s — cache on first play, serve offline after.
-                handler: 'CacheFirst',
-                options: {
-                    cacheName: 'abcjs-soundfonts',
-                    expiration: {
-                        maxEntries: 500,
-                        maxAgeSeconds: 60 * 60 * 24 * 365, // 1 year
-                    },
-                },
             }],
         },
     },
