@@ -182,6 +182,38 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 
 ## Recent changes
 
+### Folkwiki integration and source links (April 2026)
+
+Swedish folk music from folkwiki.se is included in the tune index. See `folkfriend-app-data/CLAUDE.md` for the full data pipeline description.
+
+**App-side changes:**
+
+- **`app/src/js/source.mjs`** — NEW helper module for source URL and label logic. Exports `isThesessionTuneID`, `sourceNameForTuneID`, `tuneSourceUrl`, `settingSourceUrl`. All source URL construction is centralised here.
+  - For thesession tunes: `https://thesession.org/tunes/{tuneID}[#setting{settingID}]`
+  - For folkwiki tunes: uses `source_url` from the index when set (72% of tunes get `/Musik/{pageID}`); falls back to title-based URL otherwise.
+  - Tested in `app/test/source-links.test.mjs` (run with `node app/test/source-links.test.mjs`).
+
+- **`app/src/views/Tune.vue`** — Source chip label changes to `thesession` or `folkwiki` based on tune origin. `sourceUrl` and `settingSourceUrl` now use `source.mjs`. Full-screen exit: added visible ✕ button (`exitFullScreenBtn`) and toggle icon on the expand button (`mdiArrowCollapse`).
+
+- **`app/src/components/AbcDisplay.vue`** — Added `ref="abcTarget"` to the inner render div (fixes a Vue 2 `v-if` comment-node bug where `firstChild` traversal broke ABCJS rendering when the exit button was added).
+
+- **`app/src/views/Favourites.vue`** — Share/export URLs now use `source.mjs` (supports folkwiki tunes correctly).
+
+- **`app/src/services/worker.js`** — Extracts `source_url` from each setting as a sideband (same pattern as `abc`), stored in `sourceUrlBySetting`. Re-attached in `settingsFromTuneID`. Production data URLs updated to `https://folkfriend-data.web.app/...`. Update threshold changed from `daysSinceUpdate >= 28` to `remoteVersion > localVersion`.
+
+- **`app/vue.config.js`** — Added `StaleWhileRevalidate` runtime cache entry for `https://folkfriend-data.web.app/folkfriend-non-user-data.json`.
+
+- **`docs/system-architecture.md`** — NEW: end-to-end architecture overview (repos, topology, data flow, service worker, Firebase, Rust/WASM).
+
+### Firebase Hosting — multi-site deployment
+
+Two sites in the `folkfriend-petrush-fork` Firebase project:
+
+- **`folkfriend-data.web.app`** — hosts the tune index JSON. Deploy: `cd folkfriend-app-data && firebase deploy --only hosting`
+- **`folkfriend-petrush-fork.web.app`** — hosts the Vue app. Deploy: `cd folkfriend/app && npm run build && firebase deploy --only hosting`
+
+The data site is separate to avoid the SPA rewrite rule (`"**": "/index.html"`) intercepting static JSON requests.
+
 ### CLI: settingID in query output (`rust/src/bin.rs`)
 
 The `query` command outputs 4 tab-separated columns: `tune_id`, `setting_id`, `display_name`, `score`.
