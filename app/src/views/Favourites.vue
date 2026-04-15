@@ -211,6 +211,7 @@ import eventBus from '@/eventBus';
 import store from '@/services/store';
 import FavouriteRow from '@/components/FavouriteRow';
 import utils from '@/js/utils';
+import { settingSourceUrl } from '@/js/source.mjs';
 import router from '@/router/index.js';
 
 export default {
@@ -442,7 +443,12 @@ export default {
                 const text = selected.map((item) => {
                     const name = utils.parseDisplayableName(item.result.displayName);
                     const descriptor = utils.parseDisplayableDescription(item.result.setting);
-                    const url = `https://thesession.org/tunes/${item.result.setting.tune_id}#setting${item.result.settingID}`;
+                    const url = settingSourceUrl({
+                        tuneID: item.result.setting.tune_id,
+                        settingID: item.result.settingID,
+                        displayName: item.result.displayName,
+                        sourceUrl: item.result.setting.source_url,
+                    });
                     return `${name} — ${descriptor}\n${url}`;
                 }).join('\n\n');
                 navigator.share({ title: 'FolkFriend — Shared Tunes', text });
@@ -454,9 +460,12 @@ export default {
             const renderItem = (item) => {
                 const name = escapeHtml(utils.parseDisplayableName(item.result.displayName));
                 const descriptor = escapeHtml(utils.parseDisplayableDescription(item.result.setting));
-                const tuneID = parseInt(item.result.setting.tune_id, 10);
-                const settingID = parseInt(item.result.settingID, 10);
-                const url = `https://thesession.org/tunes/${tuneID}#setting${settingID}`;
+                const url = settingSourceUrl({
+                    tuneID: item.result.setting.tune_id,
+                    settingID: item.result.settingID,
+                    displayName: item.result.displayName,
+                    sourceUrl: item.result.setting.source_url,
+                });
                 const svg = this._renderAbcSvg(item.result.setting);
                 const tagsHtml = (item.tags && item.tags.length > 0)
                     ? `<p class="tags">${item.tags.map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</p>`

@@ -5,8 +5,7 @@ mkdir -p public/res/
 cd public/res/
 
 # Data lives in a completely separate Firebase project.
-wget https://folkfriend-app-data.web.app/nud-meta.json
-wget https://folkfriend-app-data.web.app/folkfriend-non-user-data.json
+wget https://folkfriend-data.web.app/nud-meta.json
+wget https://folkfriend-data.web.app/folkfriend-non-user-data.json
 
 cd -
-

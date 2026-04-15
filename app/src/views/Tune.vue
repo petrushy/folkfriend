@@ -110,6 +110,7 @@
 
 <script>
 import utils from '@/js/utils.js';
+import { sourceNameForTuneID, settingSourceUrl, tuneSourceUrl } from '@/js/source.mjs';
 import AbcDisplay from '@/components/AbcDisplay';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus';
@@ -164,19 +165,28 @@ export default {
         };
     },
     computed: {
-        isThesessionTune() {
-            return parseInt(this.tuneID) < 1_000_000;
-        },
         sourceName() {
-            return this.isThesessionTune ? 'thesession' : 'folkwiki';
+            return sourceNameForTuneID(this.tuneID);
         },
         sourceUrl() {
-            if (this.isThesessionTune) {
-                return `https://thesession.org/tunes/${this.tuneID}`;
+            const selectedSetting = this.currentSettingForSource;
+            return tuneSourceUrl({
+                tuneID: this.tuneID,
+                displayName: this.name || this.displayName,
+                sourceUrl: selectedSetting ? selectedSetting.source_url : '',
+            });
+        },
+        currentSettingForSource() {
+            if (!this.settings || this.settings.length === 0) {
+                return null;
             }
-            // Folkwiki wiki page: /Musik/{TuneName} with spaces → underscores
-            const slug = (this.name || '').replace(/ /g, '_').replace(/[?#]/g, '');
-            return `http://www.folkwiki.se/Musik/${slug}`;
+
+            const expandedIndex = this.expandedIndex[0];
+            if (typeof expandedIndex === 'number' && this.settings[expandedIndex]) {
+                return this.settings[expandedIndex];
+            }
+
+            return this.settings[0];
         },
     },
     created: async function () {
@@ -309,10 +319,12 @@ export default {
             window.open(this.sourceUrl);
         },
         settingSourceUrl: function (settingData) {
-            if (this.isThesessionTune) {
-                return `https://thesession.org/tunes/${this.tuneID}#setting${settingData.setting_id}`;
-            }
-            return this.sourceUrl;
+            return settingSourceUrl({
+                tuneID: this.tuneID,
+                settingID: settingData.setting_id,
+                displayName: this.name || this.displayName,
+                sourceUrl: settingData.source_url,
+            });
         },
         $openUrl: function (url) {
             window.open(url);

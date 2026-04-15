@@ -22,6 +22,10 @@ I shall soon add some precompiled executables for windows + linux so compiling f
 
 Note that if you are unfamiliar with rust, you can find implementations of all the key parts of FolkFriend in Python 3 in the commit history of this repository (I originally wrote FolkFriend in Python and learned rust as I went about translating into a WASM friendly language). The Python code is unmaintained and may be out of date.
 
+# Architecture Documentation
+
+- System architecture: [docs/system-architecture.md](docs/system-architecture.md)
+
 # Using Rust
 
 1. [Install Rust](https://www.rust-lang.org/tools/install).
