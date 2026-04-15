@@ -46,6 +46,12 @@ module.exports = {
             // serve from cache instantly with no network round-trip.
             runtimeCaching: [{
                 urlPattern: /\/res\/folkfriend-non-user-data\.json/,
+                handler: 'StaleWhileRevalidate',
+                options: {
+                    cacheName: 'folkfriend-tune-data',
+                },
+            }, {
+                urlPattern: /https:\/\/folkfriend-data\.web\.app\/folkfriend-non-user-data\.json/,
                 // Serve from cache immediately for fast startup, but fetch a
                 // fresh copy in the background. The updated version is used on
                 // the next app open.

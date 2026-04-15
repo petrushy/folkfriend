@@ -9,10 +9,12 @@
         <div
             :class="{ FullScreenAbcDisplay: fullscreen }"
             class="abcSheetMusic"
-            @click="exitFullScreen"
         >
+            <button v-if="fullscreen" class="exitFullScreenBtn" @click.stop="exitFullScreen">
+                ✕
+            </button>
             <!-- Render ABC sheet music here -->
-            <div />
+            <div ref="abcTarget" />
         </div>
         <v-row
             wrap
@@ -42,9 +44,9 @@
             <v-btn
                 small
                 class="mx-1 px-2 abcControls"
-                @click="goFullScreen"
+                @click="fullscreen ? exitFullScreen() : goFullScreen()"
             >
-                <v-icon small>{{ icons.fullscreen }}</v-icon>
+                <v-icon small>{{ fullscreen ? icons.fullscreenExit : icons.fullscreen }}</v-icon>
             </v-btn>
             <div class="ml-auto d-flex align-center tempoControl">
                 <v-icon small class="mr-1">{{ icons.metronome }}</v-icon>
@@ -65,7 +67,7 @@
 </template>
 
 <script>
-import { mdiArrowExpand, mdiPause, mdiPlay, mdiStop, mdiMetronome } from '@mdi/js';
+import { mdiArrowExpand, mdiArrowCollapse, mdiPause, mdiPlay, mdiStop, mdiMetronome } from '@mdi/js';
 import store from '@/services/store.js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
@@ -102,6 +104,7 @@ export default {
 
             icons: {
                 fullscreen: mdiArrowExpand,
+                fullscreenExit: mdiArrowCollapse,
                 metronome: mdiMetronome,
                 pause: mdiPause,
                 play: mdiPlay,
@@ -137,8 +140,7 @@ export default {
         },
     },
     mounted: async function () {
-        const abcJsWrapperDiv = this.$el.childNodes[1];
-        const svgDiv = abcJsWrapperDiv.firstChild;
+        const svgDiv = this.$refs.abcTarget;
 
         this.abcVisual = ABCJS.renderAbc(svgDiv, this.abcText, { responsive: 'resize' })[0];
         this.$emit('abcRendered');
@@ -400,6 +402,25 @@ export default {
 
 .FullScreenAbcDisplay > div {
     min-height: 100%;
+}
+
+.exitFullScreenBtn {
+    position: fixed;
+    top: max(12px, env(safe-area-inset-top, 12px));
+    right: max(12px, env(safe-area-inset-right, 12px));
+    z-index: 11;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: none;
+    background: rgba(0, 0, 0, 0.55);
+    color: white;
+    font-size: 18px;
+    line-height: 1;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 :deep(.abcjs-current-note .abcjs-notehead) {

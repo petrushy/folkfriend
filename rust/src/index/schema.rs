@@ -17,4 +17,6 @@ pub struct Setting {
     pub abc: String,
     pub dance: String,
     pub contour: String,
+    #[serde(default)]
+    pub origin: String,
 }

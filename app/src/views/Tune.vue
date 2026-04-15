@@ -10,14 +10,14 @@
                 {{ alias }}
             </v-chip>
             <v-chip small class="sourceChip ma-1 px-2" @click="sourceClicked">
-                Source&nbsp;<v-icon small>
+                {{ sourceName }}&nbsp;<v-icon small>
                     {{ icons.openInNew }}
                 </v-icon>
             </v-chip>
         </v-container>
         <v-container v-else class="mt-0 mb-2 py-0">
             <v-chip small class="sourceChip ma-1 px-2 py-2" @click="sourceClicked">
-                Source&nbsp;<v-icon small>
+                {{ sourceName }}&nbsp;<v-icon small>
                     {{ icons.openInNew }}
                 </v-icon>
             </v-chip>
@@ -87,8 +87,8 @@
                             $vuetify.icons.tabChord
                         </v-icon>
                         <v-chip v-if="expandedIndex.includes(i)" small class="sourceChip settingSourceChip px-2"
-                            @click.stop="$openUrl(`https://thesession.org/tunes/${tuneID}#setting${settingData.setting_id}`)">
-                            Source&nbsp;<v-icon small>{{ icons.openInNew }}</v-icon>
+                            @click.stop="$openUrl(settingSourceUrl(settingData))">
+                            {{ sourceName }}&nbsp;<v-icon small>{{ icons.openInNew }}</v-icon>
                         </v-chip>
                     </div>
                 </v-expansion-panel-header>
@@ -161,8 +161,23 @@ export default {
                 starOutline: mdiStarOutline,
                 tagPlus: mdiTagPlusOutline,
             },
-            sourceTheSession: `https://thesession.org/tunes/${this.tuneID}`
         };
+    },
+    computed: {
+        isThesessionTune() {
+            return parseInt(this.tuneID) < 1_000_000;
+        },
+        sourceName() {
+            return this.isThesessionTune ? 'thesession' : 'folkwiki';
+        },
+        sourceUrl() {
+            if (this.isThesessionTune) {
+                return `https://thesession.org/tunes/${this.tuneID}`;
+            }
+            // Folkwiki wiki page: /Musik/{TuneName} with spaces → underscores
+            const slug = (this.name || '').replace(/ /g, '_').replace(/[?#]/g, '');
+            return `http://www.folkwiki.se/Musik/${slug}`;
+        },
     },
     created: async function () {
         eventBus.$emit('childViewActivated');
@@ -291,7 +306,13 @@ export default {
             });
         },
         sourceClicked: function () {
-            window.open(this.sourceTheSession);
+            window.open(this.sourceUrl);
+        },
+        settingSourceUrl: function (settingData) {
+            if (this.isThesessionTune) {
+                return `https://thesession.org/tunes/${this.tuneID}#setting${settingData.setting_id}`;
+            }
+            return this.sourceUrl;
         },
         $openUrl: function (url) {
             window.open(url);

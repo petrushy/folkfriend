@@ -9,6 +9,7 @@ class FolkFriendWASMWrapper {
     constructor() {
         this.folkfriendWASM = null;
         this.abcStringBySetting = {};
+        this.sourceUrlBySetting = {};
 
         this.loadedWASM = new Promise(resolve => {
             this.setLoadedWASM = resolve;
@@ -41,7 +42,7 @@ class FolkFriendWASMWrapper {
         let url = '/res/nud-meta.json';
         // eslint-disable-next-line no-undef
         if (process.env.NODE_ENV === 'production') {
-            url = 'https://folkfriend-app-data.web.app/nud-meta.json';
+            url = 'https://folkfriend-data.web.app/nud-meta.json';
         }
         const response = await fetch(url);
         if (!response.ok) throw new Error(`Failed to fetch tune index metadata: ${response.status}`);
@@ -55,7 +56,7 @@ class FolkFriendWASMWrapper {
 
         // eslint-disable-next-line no-undef
         if (process.env.NODE_ENV === 'production') {
-            url = 'https://folkfriend-app-data.web.app/folkfriend-non-user-data.json';
+            url = 'https://folkfriend-data.web.app/folkfriend-non-user-data.json';
         }
 
         // Fetch
@@ -63,17 +64,23 @@ class FolkFriendWASMWrapper {
         if (!fetchResponse.ok) throw new Error(`Failed to fetch tune index: ${fetchResponse.status}`);
         let indexData = await fetchResponse.json();
 
-        // Lightly postprocess. ABC strings don't go to WASM because
-        //  of slow memory loading in WebAssembly.        
+        // Lightly postprocess. ABC strings and source URLs don't go to WASM
+        //  because of slow memory loading in WebAssembly.
         let abcStringBySetting = {};
+        let sourceUrlBySetting = {};
         for (let settingID in indexData.settings) {
             abcStringBySetting[settingID] = indexData.settings[settingID].abc;
             indexData.settings[settingID].abc = '';
+            if (indexData.settings[settingID].source_url) {
+                sourceUrlBySetting[settingID] = indexData.settings[settingID].source_url;
+                delete indexData.settings[settingID].source_url;
+            }
         }
 
         const downloadedTuneIndex = {
             indexData: indexData,
-            abcStrings: abcStringBySetting
+            abcStrings: abcStringBySetting,
+            sourceUrls: sourceUrlBySetting,
         };
 
         console.timeEnd('index-fetch');
@@ -142,13 +149,11 @@ class FolkFriendWASMWrapper {
                 const daysSinceUpdate = remoteVersion - localVersion;
                 console.debug(`Tune index was ${daysSinceUpdate} days out of date`);
 
-                // Folkfriend's TuneIndex (at time of writing) updates once a week,
-                //  scheduled to update just after the latest data dump on Github
-                //  from thesession.org. Having all users automatically update the 
-                //  whole index every week is a little overkill though and uses a
-                //  lot of bandwidth (which may not be free). Only auto-update if
-                //  it's been a while since the last update. A while = 4 weeks.
-                if (daysSinceUpdate >= 28) {
+                // Update whenever the remote version is strictly newer than the
+                //  cached version. The dataset is large (~38 MB) but only
+                //  re-fetched when v actually increases, so bandwidth is bounded
+                //  by how often the data pipeline runs.
+                if (remoteVersion > localVersion) {
                     console.debug('Upgrading tune index');
                     const downloadedTuneIndex = await this.fetchTuneIndexData();
                     await set('tuneIndex', downloadedTuneIndex);
@@ -178,6 +183,7 @@ class FolkFriendWASMWrapper {
         await this.loadedWASM;
         await this.folkfriendWASM.load_index_from_json_obj(tuneIndex.indexData);
         this.abcStringBySetting = tuneIndex.abcStrings;
+        this.sourceUrlBySetting = tuneIndex.sourceUrls || {};
         this.setLoadedIndex();
         console.timeEnd('tune-index-to-wasm');
     }
@@ -272,6 +278,7 @@ class FolkFriendWASMWrapper {
         let settingsIncludingAbc = settings.map(([settingID, setting]) => {
             setting['setting_id'] = settingID;
             setting['abc'] = this.abcStringBySetting[settingID];
+            setting['source_url'] = this.sourceUrlBySetting[settingID] || '';
             return setting;
         });
 
