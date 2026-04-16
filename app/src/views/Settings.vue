@@ -131,10 +131,18 @@
             <h1 class="pb-3">
                 Tune Data
             </h1>
-            <p>
-                The tune index is downloaded and cached on your device.
-                Use this to force a fresh download if search results seem out of date.
-            </p>
+            <v-simple-table dense class="mb-4">
+                <tbody>
+                    <tr>
+                        <td class="text--secondary pr-4">Cached</td>
+                        <td>{{ localTuneDataLabel }}</td>
+                    </tr>
+                    <tr>
+                        <td class="text--secondary pr-4">Available</td>
+                        <td>{{ remoteTuneDataLabel }}</td>
+                    </tr>
+                </tbody>
+            </v-simple-table>
             <v-btn :loading="refreshingTuneData" @click="refreshTuneData">
                 <v-icon left>{{ icons.refresh }}</v-icon>
                 Refresh tune data
@@ -256,6 +264,7 @@ export default {
         importError: false,
         refreshingTuneData: false,
         refreshMessage: null,
+        remoteMetadata: null,
         icons: {
             account: mdiAccountCircle,
             google: mdiGoogle,
@@ -279,17 +288,49 @@ export default {
         isPWA: utils.checkStandalone(),
         restoreMessage: null,
     }),
+    computed: {
+        localTuneDataLabel() {
+            const v = store.state.tuneIndexVersion;
+            const date = store.state.tuneIndexDate;
+            if (!v) return 'loading…';
+            const dateStr = date
+                ? new Date(date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+                : `v${v}`;
+            return `v${v} · ${dateStr}`;
+        },
+        remoteTuneDataLabel() {
+            if (!this.remoteMetadata) return 'checking…';
+            const { v, date } = this.remoteMetadata;
+            const dateStr = date
+                ? new Date(date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+                : `v${v}`;
+            return `v${v} · ${dateStr}`;
+        },
+    },
     created: function() {
         this.ua = utils.checkUserAgent();
         // Read current value immediately in case authStateChanged already fired before mount.
         this.currentUser = store.currentUser;
         this._onAuthStateChanged = user => { this.currentUser = user; };
         eventBus.$on('authStateChanged', this._onAuthStateChanged);
+        this._fetchRemoteMetadata();
     },
     beforeDestroy() {
         eventBus.$off('authStateChanged', this._onAuthStateChanged);
     },
     methods: {
+        async _fetchRemoteMetadata() {
+            try {
+                // eslint-disable-next-line no-undef
+                const url = process.env.NODE_ENV === 'production'
+                    ? 'https://folkfriend-data.web.app/nud-meta.json'
+                    : '/res/nud-meta.json';
+                const res = await fetch(url);
+                if (res.ok) this.remoteMetadata = await res.json();
+            } catch (e) {
+                this.remoteMetadata = { v: '?', date: null };
+            }
+        },
         async refreshTuneData() {
             this.refreshingTuneData = true;
             this.refreshMessage = null;
