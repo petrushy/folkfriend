@@ -93,6 +93,14 @@
                     </div>
                 </v-expansion-panel-header>
                 <v-expansion-panel-content>
+                    <div v-if="settingData.composer || settingData.origin" class="settingMeta">
+                        <span v-if="settingData.composer" class="settingMetaItem">
+                            <span class="settingMetaLabel">Composer</span> {{ settingData.composer }}
+                        </span>
+                        <span v-if="settingData.origin" class="settingMetaItem">
+                            <span class="settingMetaLabel">Origin</span> {{ settingData.origin }}
+                        </span>
+                    </div>
                     <AbcDisplay :abc="settingData.abc" :mode="settingData.mode" :meter="settingData.meter"
                         @abcGoFullScreen="abcGoFullScreen" @abcExitFullScreen="abcExitFullScreen"
                         @abcRendered="scrollIntoView" />
@@ -387,5 +395,19 @@ h1 {
 .akaSpan {
     font-size: smaller;
     font-style: italic;
+}
+
+.settingMeta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 8px 0 4px;
+    font-size: 0.85em;
+    color: rgba(0, 0, 0, 0.6);
+}
+
+.settingMetaLabel {
+    font-weight: 600;
+    margin-right: 4px;
 }
 </style>

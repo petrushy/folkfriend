@@ -45,16 +45,16 @@ module.exports = {
             // cold start → fetch from network + cache; all subsequent loads →
             // serve from cache instantly with no network round-trip.
             runtimeCaching: [{
-                urlPattern: /\/res\/folkfriend-non-user-data\.json/,
+                // Match only the bare URL (no query string). Requests with
+                // ?v=N (used for forced updates) bypass this cache entirely.
+                urlPattern: /\/res\/folkfriend-non-user-data\.json$/,
                 handler: 'StaleWhileRevalidate',
                 options: {
                     cacheName: 'folkfriend-tune-data',
                 },
             }, {
-                urlPattern: /https:\/\/folkfriend-data\.web\.app\/folkfriend-non-user-data\.json/,
-                // Serve from cache immediately for fast startup, but fetch a
-                // fresh copy in the background. The updated version is used on
-                // the next app open.
+                // Same for the production CDN URL.
+                urlPattern: /https:\/\/folkfriend-data\.web\.app\/folkfriend-non-user-data\.json$/,
                 handler: 'StaleWhileRevalidate',
                 options: {
                     cacheName: 'folkfriend-tune-data',

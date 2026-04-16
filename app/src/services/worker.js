@@ -49,7 +49,7 @@ class FolkFriendWASMWrapper {
         return response.json();
     }
 
-    async fetchTuneIndexData() {
+    async fetchTuneIndexData(bypassCacheVersion = null) {
         console.time('index-fetch');
 
         let url = '/res/folkfriend-non-user-data.json';
@@ -57,6 +57,13 @@ class FolkFriendWASMWrapper {
         // eslint-disable-next-line no-undef
         if (process.env.NODE_ENV === 'production') {
             url = 'https://folkfriend-data.web.app/folkfriend-non-user-data.json';
+        }
+
+        // Append ?v=N when forcing an update so the service worker's
+        // StaleWhileRevalidate cache (which matches the bare URL) is bypassed
+        // and we always get the freshly deployed version from the network.
+        if (bypassCacheVersion !== null) {
+            url += `?v=${bypassCacheVersion}`;
         }
 
         // Fetch
@@ -157,7 +164,8 @@ class FolkFriendWASMWrapper {
                 //  by how often the data pipeline runs.
                 if (remoteVersion > localVersion) {
                     console.debug('Upgrading tune index');
-                    const downloadedTuneIndex = await this.fetchTuneIndexData();
+                    const downloadedTuneIndex = await this.fetchTuneIndexData(remoteVersion);
+                    await this.loadTuneIndex(downloadedTuneIndex);
                     await set('tuneIndex', downloadedTuneIndex);
                     await set('tuneIndexMetadata', tuneIndexMetadataRemote);
                     analyticsData['days_since_update'] = 0;
