@@ -119,6 +119,7 @@ class FolkFriendWASMWrapper {
 
             analyticsData['days_since_update'] = 0;
             analyticsData['tune_index_metadata_version'] = tuneIndexMetadata['v'];
+            analyticsData['tune_index_metadata_date'] = tuneIndexMetadata['date'] || null;
             analyticsData['newly_installed'] = true;
         } else {
             console.debug('Found cached tune index');
@@ -131,7 +132,7 @@ class FolkFriendWASMWrapper {
             let tuneIndexMetadataLocal = await get('tuneIndexMetadata');
 
             if (typeof tuneIndexMetadataLocal === 'undefined') {
-                // This is a near-impossible state, only reached by people 
+                // This is a near-impossible state, only reached by people
                 //  selectively deleting from IndexedDB. As browsers do delete
                 //   from IndexedDB when under storage pressure it's best to
                 //   cover this case and be safe.
@@ -142,6 +143,7 @@ class FolkFriendWASMWrapper {
 
             const localVersion = tuneIndexMetadataLocal['v'];
             analyticsData['tune_index_metadata_version'] = localVersion;
+            analyticsData['tune_index_metadata_date'] = tuneIndexMetadataLocal['date'] || null;
 
             try {
                 const tuneIndexMetadataRemote = await this.fetchTuneIndexMetadata();
@@ -160,6 +162,7 @@ class FolkFriendWASMWrapper {
                     await set('tuneIndexMetadata', tuneIndexMetadataRemote);
                     analyticsData['days_since_update'] = 0;
                     analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
+                    analyticsData['tune_index_metadata_date'] = tuneIndexMetadataRemote['date'] || null;
                     analyticsData['newly_updated'] = true;
                 } else {
                     analyticsData['days_since_update'] = daysSinceUpdate;

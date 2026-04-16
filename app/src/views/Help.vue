@@ -90,9 +90,13 @@ export default {
             return ffConfig.FRONTEND_VERSION;
         },
         tuneIndexDate() {
+            const date = store.state.tuneIndexDate;
+            if (date) {
+                return new Date(date).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+            }
             const v = store.state.tuneIndexVersion;
             if (!v) return 'loading…';
-            // v = days since 2020-01-01
+            // v = days since 2020-01-01 (fallback for old metadata without date field)
             const ms = (1577836800 + v * 86400) * 1000;
             return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
         },

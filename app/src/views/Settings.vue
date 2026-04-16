@@ -127,6 +127,23 @@
             </p>
         </v-card>
 
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
+                Tune Data
+            </h1>
+            <p>
+                The tune index is downloaded and cached on your device.
+                Use this to force a fresh download if search results seem out of date.
+            </p>
+            <v-btn :loading="refreshingTuneData" @click="refreshTuneData">
+                <v-icon left>{{ icons.refresh }}</v-icon>
+                Refresh tune data
+            </v-btn>
+            <p v-if="refreshMessage" class="mt-3 mb-0">
+                {{ refreshMessage }}
+            </p>
+        </v-card>
+
         <v-card
             class="pa-5 my-2"
         >
@@ -197,6 +214,7 @@ import store from '@/services/store.js';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
+import { del } from 'idb-keyval';
 import {
     // mdiCellphoneArrowDownVariant,
     mdiAccountCircle,
@@ -210,6 +228,7 @@ import {
     mdiLogout,
     // mdiMonitorArrowDownVariant,
     mdiPlusBoxOutline,
+    mdiRefresh,
     mdiUpload,
 } from '@mdi/js';
 
@@ -235,6 +254,8 @@ export default {
         importing: false,
         importStatus: null,
         importError: false,
+        refreshingTuneData: false,
+        refreshMessage: null,
         icons: {
             account: mdiAccountCircle,
             google: mdiGoogle,
@@ -250,6 +271,7 @@ export default {
             installMobile: mdiCellphoneArrowDown,
             dotsVertical: mdiDotsVertical,
             download: mdiDownload,
+            refresh: mdiRefresh,
             upload: mdiUpload,
         },
         settingsLoaded: false,
@@ -268,6 +290,19 @@ export default {
         eventBus.$off('authStateChanged', this._onAuthStateChanged);
     },
     methods: {
+        async refreshTuneData() {
+            this.refreshingTuneData = true;
+            this.refreshMessage = null;
+            try {
+                await del('tuneIndex');
+                await del('tuneIndexMetadata');
+                this.refreshMessage = 'Tune data cleared. Reloading…';
+                setTimeout(() => window.location.reload(), 800);
+            } catch (e) {
+                this.refreshMessage = 'Failed to clear tune data. Try clearing site data manually.';
+                this.refreshingTuneData = false;
+            }
+        },
         settingsChanged() {
             store.updateUserSettings(this.userSettings);
         },
