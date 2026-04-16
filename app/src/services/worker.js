@@ -113,21 +113,27 @@ class FolkFriendWASMWrapper {
         if (typeof localTuneIndex === 'undefined') {
             console.debug('No tune index was cached, requesting download');
 
-            const downloadedTuneIndex = await this.fetchTuneIndexData();
+            try {
+                const downloadedTuneIndex = await this.fetchTuneIndexData();
 
-            // Load (so the user can start using the application)
-            await this.loadTuneIndex(downloadedTuneIndex);
-            console.timeEnd('tune-index-load');
+                // Load (so the user can start using the application)
+                await this.loadTuneIndex(downloadedTuneIndex);
+                console.timeEnd('tune-index-load');
 
-            // Store the version of this newly downloaded tune index
-            const tuneIndexMetadata = await this.fetchTuneIndexMetadata();
-            await set('tuneIndex', downloadedTuneIndex);
-            await set('tuneIndexMetadata', tuneIndexMetadata);
+                // Store the version of this newly downloaded tune index
+                const tuneIndexMetadata = await this.fetchTuneIndexMetadata();
+                await set('tuneIndex', downloadedTuneIndex);
+                await set('tuneIndexMetadata', tuneIndexMetadata);
 
-            analyticsData['days_since_update'] = 0;
-            analyticsData['tune_index_metadata_version'] = tuneIndexMetadata['v'];
-            analyticsData['tune_index_metadata_date'] = tuneIndexMetadata['date'] || null;
-            analyticsData['newly_installed'] = true;
+                analyticsData['days_since_update'] = 0;
+                analyticsData['tune_index_metadata_version'] = tuneIndexMetadata['v'];
+                analyticsData['tune_index_metadata_date'] = tuneIndexMetadata['date'] || null;
+                analyticsData['newly_installed'] = true;
+            } catch (e) {
+                console.error('Failed to download or load tune index on first install', e);
+                cb({ error: 'Could not load tune index. Please check your connection and refresh.' });
+                return;
+            }
         } else {
             console.debug('Found cached tune index');
 
@@ -164,14 +170,20 @@ class FolkFriendWASMWrapper {
                 //  by how often the data pipeline runs.
                 if (remoteVersion > localVersion) {
                     console.debug('Upgrading tune index');
-                    const downloadedTuneIndex = await this.fetchTuneIndexData(remoteVersion);
-                    await this.loadTuneIndex(downloadedTuneIndex);
-                    await set('tuneIndex', downloadedTuneIndex);
-                    await set('tuneIndexMetadata', tuneIndexMetadataRemote);
-                    analyticsData['days_since_update'] = 0;
-                    analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
-                    analyticsData['tune_index_metadata_date'] = tuneIndexMetadataRemote['date'] || null;
-                    analyticsData['newly_updated'] = true;
+                    try {
+                        const downloadedTuneIndex = await this.fetchTuneIndexData(remoteVersion);
+                        await this.loadTuneIndex(downloadedTuneIndex);
+                        await set('tuneIndex', downloadedTuneIndex);
+                        await set('tuneIndexMetadata', tuneIndexMetadataRemote);
+                        analyticsData['days_since_update'] = 0;
+                        analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
+                        analyticsData['tune_index_metadata_date'] = tuneIndexMetadataRemote['date'] || null;
+                        analyticsData['newly_updated'] = true;
+                    } catch (e) {
+                        // Non-fatal: the cached index is already loaded and usable.
+                        console.warn('Failed to update tune index, continuing with cached version', e);
+                        analyticsData['days_since_update'] = daysSinceUpdate;
+                    }
                 } else {
                     analyticsData['days_since_update'] = daysSinceUpdate;
                 }
@@ -192,11 +204,16 @@ class FolkFriendWASMWrapper {
     async loadTuneIndex(tuneIndex) {
         console.time('tune-index-to-wasm');
         await this.loadedWASM;
-        await this.folkfriendWASM.load_index_from_json_obj(tuneIndex.indexData);
-        this.abcStringBySetting = tuneIndex.abcStrings;
-        this.sourceUrlBySetting = tuneIndex.sourceUrls || {};
-        this.setLoadedIndex();
-        console.timeEnd('tune-index-to-wasm');
+        try {
+            await this.folkfriendWASM.load_index_from_json_obj(tuneIndex.indexData);
+            this.abcStringBySetting = tuneIndex.abcStrings;
+            this.sourceUrlBySetting = tuneIndex.sourceUrls || {};
+        } finally {
+            // Always resolve so any concurrent waiters (e.g. onIndexLoad) don't
+            // hang forever. Errors propagate to the caller (setupTuneIndex).
+            this.setLoadedIndex();
+            console.timeEnd('tune-index-to-wasm');
+        }
     }
 
     async setSampleRate(sampleRate) {

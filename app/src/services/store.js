@@ -269,7 +269,13 @@ class Store {
     }
 
     async addToHistory(tuneHistoryItem) {
-        let historyItems = await get('historyItems') || [];
+        let historyItems;
+        try {
+            historyItems = await get('historyItems') || [];
+        } catch (e) {
+            console.error('IndexedDB read error (historyItems)', e);
+            historyItems = [];
+        }
 
         if (tuneHistoryItem.result.setting && tuneHistoryItem.result.setting.tune_id) {
             let newTuneID = tuneHistoryItem.result.setting.tune_id;
@@ -299,7 +305,12 @@ class Store {
     }
 
     async importUserData(jsonString) {
-        const payload = JSON.parse(jsonString);
+        let payload;
+        try {
+            payload = JSON.parse(jsonString);
+        } catch (e) {
+            throw new Error('Could not parse import file: invalid JSON.');
+        }
         if (payload.version !== 1 && payload.version !== 2 && payload.version !== 3) {
             throw new Error(`Unsupported data version: ${payload.version}`);
         }

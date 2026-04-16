@@ -108,6 +108,9 @@
             </v-expansion-panel>
         </v-expansion-panels>
     </v-container>
+    <v-container v-else-if="loadError" class="px-10">
+        <p>{{ loadError }}</p>
+    </v-container>
     <!-- This actually shouldn't ever happen unless the user manually navigates to /tunes -->
     <v-container v-else-if="!tuneID">
         <p class="px-10">
@@ -156,6 +159,7 @@ export default {
             name: null,
             displayableAliases: [],
             abcFullScreen: false,
+            loadError: null,
 
             expandedIndex: [],
             favouritedSettings: {},
@@ -204,67 +208,72 @@ export default {
             return;
         }
 
-        this.settings = await ffBackend.settingsFromTuneID(this.tuneID);
-        let aliases = await ffBackend.aliasesFromTuneID(this.tuneID);
+        try {
+            this.settings = await ffBackend.settingsFromTuneID(this.tuneID);
+            let aliases = await ffBackend.aliasesFromTuneID(this.tuneID);
 
-        // Detect chord symbols in ABC notation — chords are written as
-        // double-quoted strings e.g. "Am", "Gmaj7", "C#dim", "G/B".
-        // The pattern matches a full chord name to avoid false positives
-        // from other quoted strings (e.g. text annotations).
-        const chordPattern = /"[ABCDEFG]b?#?m?(in|aj)?7?(dim)?(\/[ABCDEFG]b?#?m?(in|aj)?7?(dim)?)?"/;
-        this.settings = this.settings.map((settingData) => {
-            settingData.hasChords = chordPattern.test(settingData.abc);
-            return settingData;
-        });
+            // Detect chord symbols in ABC notation — chords are written as
+            // double-quoted strings e.g. "Am", "Gmaj7", "C#dim", "G/B".
+            // The pattern matches a full chord name to avoid false positives
+            // from other quoted strings (e.g. text annotations).
+            const chordPattern = /"[ABCDEFG]b?#?m?(in|aj)?7?(dim)?(\/[ABCDEFG]b?#?m?(in|aj)?7?(dim)?)?"/;
+            this.settings = this.settings.map((settingData) => {
+                settingData.hasChords = chordPattern.test(settingData.abc);
+                return settingData;
+            });
 
-        let primaryAliasIndex = 0;
+            let primaryAliasIndex = 0;
 
-        if (typeof this.displayName !== 'undefined') {
-            primaryAliasIndex = aliases.indexOf(this.displayName);
-            if (primaryAliasIndex == -1) {
-                console.warn('Display name was not found in aliases!');
-                primaryAliasIndex = 0;
-            }
-        }
-
-        this.displayableAliases = aliases.map((a) =>
-            utils.parseDisplayableName(a)
-        );
-        this.name = this.displayableAliases.splice(primaryAliasIndex, 1)[0];
-
-        // Load favourite state and tags for all settings, then decide which panel to open
-        // Pre-declare per-setting menu/input keys so Vue 2 reactivity tracks them from the start.
-        this.settings.forEach(s => {
-            this.$set(this.addTagMenus, s.setting_id, false);
-            this.$set(this.tagInputValues, s.setting_id, null);
-        });
-
-        [this.allTags] = await Promise.all([
-            store.getAllTags(),
-            ...this.settings.map(async s => {
-                const [v, tags] = await Promise.all([
-                    store.isFavourite(s.setting_id),
-                    store.getTagsForSetting(s.setting_id),
-                ]);
-                this.$set(this.favouritedSettings, s.setting_id, v);
-                this.$set(this.settingTags, s.setting_id, tags);
-            }),
-        ]);
-
-        // Auto-pop open the matched setting:
-        // 1. If a specific settingID was passed (e.g. from audio results or favourites list), use it
-        // 2. Else if any setting is favourited, open the first favourited one
-        // 3. Otherwise open the first setting
-        if (this.settingID) {
-            for (const [i, setting] of this.settings.entries()) {
-                if (setting.setting_id === this.settingID) {
-                    this.expandedIndex = [i];
-                    break;
+            if (typeof this.displayName !== 'undefined') {
+                primaryAliasIndex = aliases.indexOf(this.displayName);
+                if (primaryAliasIndex == -1) {
+                    console.warn('Display name was not found in aliases!');
+                    primaryAliasIndex = 0;
                 }
             }
-        } else {
-            let favouritedIndex = this.settings.findIndex(s => this.favouritedSettings[s.setting_id]);
-            this.expandedIndex = [favouritedIndex >= 0 ? favouritedIndex : 0];
+
+            this.displayableAliases = aliases.map((a) =>
+                utils.parseDisplayableName(a)
+            );
+            this.name = this.displayableAliases.splice(primaryAliasIndex, 1)[0];
+
+            // Load favourite state and tags for all settings, then decide which panel to open
+            // Pre-declare per-setting menu/input keys so Vue 2 reactivity tracks them from the start.
+            this.settings.forEach(s => {
+                this.$set(this.addTagMenus, s.setting_id, false);
+                this.$set(this.tagInputValues, s.setting_id, null);
+            });
+
+            [this.allTags] = await Promise.all([
+                store.getAllTags(),
+                ...this.settings.map(async s => {
+                    const [v, tags] = await Promise.all([
+                        store.isFavourite(s.setting_id),
+                        store.getTagsForSetting(s.setting_id),
+                    ]);
+                    this.$set(this.favouritedSettings, s.setting_id, v);
+                    this.$set(this.settingTags, s.setting_id, tags);
+                }),
+            ]);
+
+            // Auto-pop open the matched setting:
+            // 1. If a specific settingID was passed (e.g. from audio results or favourites list), use it
+            // 2. Else if any setting is favourited, open the first favourited one
+            // 3. Otherwise open the first setting
+            if (this.settingID) {
+                for (const [i, setting] of this.settings.entries()) {
+                    if (setting.setting_id === this.settingID) {
+                        this.expandedIndex = [i];
+                        break;
+                    }
+                }
+            } else {
+                let favouritedIndex = this.settings.findIndex(s => this.favouritedSettings[s.setting_id]);
+                this.expandedIndex = [favouritedIndex >= 0 ? favouritedIndex : 0];
+            }
+        } catch (e) {
+            console.error('Failed to load tune', e);
+            this.loadError = 'Could not load tune. Please go back and try again.';
         }
     },
     beforeRouteLeave: function (_to, _from, next) {

@@ -94,10 +94,14 @@
 
         <v-container class="tuneProgress">
             <v-progress-linear
+                v-if="!indexError"
                 :class="{ Transparent: indexLoaded }"
                 indeterminate
                 rounded
             />
+            <p v-else class="indexErrorMsg">
+                {{ indexError }}
+            </p>
         </v-container>
 
         <v-snackbar
@@ -132,6 +136,7 @@ export default {
             textQuery: '',
             offlineButton: true,
             indexLoaded: store.state.indexLoaded,
+            indexError: null,
             searchState: store.searchState,
             analyzeScale: 1.0,
 
@@ -147,6 +152,7 @@ export default {
         eventBus.$emit('parentViewActivated');
 
         this._onIndexLoaded = () => { this.indexLoaded = true; };
+        this._onIndexError = (msg) => { this.indexError = msg; };
         this._onSearchError = (errorMsg) => {
             this.snackbar = true;
             this.snackbarText = errorMsg || 'An error ocurred 😟';
@@ -161,6 +167,7 @@ export default {
         if (!this.indexLoaded) {
             eventBus.$on('indexLoaded', this._onIndexLoaded);
         }
+        eventBus.$on('tuneIndexError', this._onIndexError);
         eventBus.$on('searchError', this._onSearchError);
         eventBus.$on('setSearchState', this._onSetSearchState);
 
@@ -171,6 +178,7 @@ export default {
     beforeDestroy() {
         this._destroyed = true;
         eventBus.$off('indexLoaded', this._onIndexLoaded);
+        eventBus.$off('tuneIndexError', this._onIndexError);
         eventBus.$off('searchError', this._onSearchError);
         eventBus.$off('setSearchState', this._onSetSearchState);
     },
@@ -268,6 +276,13 @@ export default {
 
 .Transparent {
     opacity: 0;
+}
+
+.indexErrorMsg {
+    text-align: center;
+    color: #c62828;
+    font-size: 0.9em;
+    margin: 4px 0 0;
 }
 
 .noFlexGrow {
