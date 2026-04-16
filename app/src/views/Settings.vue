@@ -265,6 +265,8 @@ export default {
         refreshingTuneData: false,
         refreshMessage: null,
         remoteMetadata: null,
+        localVersion: store.state.tuneIndexVersion,
+        localDate: store.state.tuneIndexDate,
         icons: {
             account: mdiAccountCircle,
             google: mdiGoogle,
@@ -290,13 +292,11 @@ export default {
     }),
     computed: {
         localTuneDataLabel() {
-            const v = store.state.tuneIndexVersion;
-            const date = store.state.tuneIndexDate;
-            if (!v) return 'loading…';
-            const dateStr = date
-                ? new Date(date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
-                : `v${v}`;
-            return `v${v} · ${dateStr}`;
+            if (!this.localVersion) return 'loading…';
+            const dateStr = this.localDate
+                ? new Date(this.localDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
+                : `v${this.localVersion}`;
+            return `v${this.localVersion} · ${dateStr}`;
         },
         remoteTuneDataLabel() {
             if (!this.remoteMetadata) return 'checking…';
@@ -309,14 +309,19 @@ export default {
     },
     created: function() {
         this.ua = utils.checkUserAgent();
-        // Read current value immediately in case authStateChanged already fired before mount.
         this.currentUser = store.currentUser;
         this._onAuthStateChanged = user => { this.currentUser = user; };
         eventBus.$on('authStateChanged', this._onAuthStateChanged);
+        this._onTuneIndexReady = () => {
+            this.localVersion = store.state.tuneIndexVersion;
+            this.localDate = store.state.tuneIndexDate;
+        };
+        eventBus.$on('tuneIndexReady', this._onTuneIndexReady);
         this._fetchRemoteMetadata();
     },
     beforeDestroy() {
         eventBus.$off('authStateChanged', this._onAuthStateChanged);
+        eventBus.$off('tuneIndexReady', this._onTuneIndexReady);
     },
     methods: {
         async _fetchRemoteMetadata() {

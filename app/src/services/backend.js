@@ -41,6 +41,7 @@ class FFBackend {
         store.logAnalyticsEvent('tune_index_init', analyticsData).then();
         store.state.tuneIndexVersion = analyticsData['tune_index_metadata_version'];
         store.state.tuneIndexDate = analyticsData['tune_index_metadata_date'] || null;
+        eventBus.$emit('tuneIndexReady');
     }
 
     async setSampleRate(sampleRate) {
