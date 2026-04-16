@@ -177,6 +177,19 @@
         <v-main>
             <router-view />
         </v-main>
+
+        <!-- Persistent banner when a new app version is available -->
+        <v-snackbar v-model="updateBanner" :timeout="-1" bottom>
+            A new version is available.
+            <template #action="{ attrs }">
+                <v-btn text small v-bind="attrs" @click="reloadApp">Reload</v-btn>
+            </template>
+        </v-snackbar>
+
+        <!-- Transient banner for Firestore sync errors -->
+        <v-snackbar v-model="syncErrorSnackbar" :timeout="5000" bottom>
+            {{ syncErrorText }}
+        </v-snackbar>
     </v-app>
 </template>
 
@@ -220,6 +233,9 @@ export default {
             cancel: 'cancel',
         },
         hamburgerState: 'hamburger',
+        updateBanner: false,
+        syncErrorSnackbar: false,
+        syncErrorText: '',
         icons: {
             chevronLeft: mdiChevronLeft,
             cog: mdiCog,
@@ -286,8 +302,20 @@ export default {
         eventBus.$on('indexLoaded', () => {
             store.state.indexLoaded = true;
         });
+
+        eventBus.$on('swUpdated', () => {
+            this.updateBanner = true;
+        });
+
+        eventBus.$on('syncError', (msg) => {
+            this.syncErrorText = msg;
+            this.syncErrorSnackbar = true;
+        });
     },
     methods: {
+        reloadApp() {
+            window.location.reload();
+        },
         hamburgerBack() {
             router.back();
         },

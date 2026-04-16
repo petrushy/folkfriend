@@ -1,5 +1,6 @@
 import { getFirestore, doc, setDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import firebaseApp from './firebase.js';
+import eventBus from '@/eventBus';
 
 const db = getFirestore(firebaseApp);
 
@@ -26,6 +27,7 @@ export function subscribe(uid, localFavs, onChange) {
         }
     }, err => {
         console.error('Firestore favourites snapshot error:', err.code, err.message);
+        eventBus.$emit('syncError', 'Sync error — favourites may be out of date.');
     });
 
     return () => { unsubFav(); };
