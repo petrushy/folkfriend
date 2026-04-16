@@ -300,6 +300,7 @@ export default {
         },
         remoteTuneDataLabel() {
             if (!this.remoteMetadata) return 'checking…';
+            if (this.remoteMetadata.unavailable) return 'unavailable (offline)';
             const { v, date } = this.remoteMetadata;
             const dateStr = date
                 ? new Date(date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
@@ -332,11 +333,16 @@ export default {
                     : '/res/nud-meta.json';
                 const res = await fetch(url);
                 if (res.ok) this.remoteMetadata = await res.json();
+                else this.remoteMetadata = { unavailable: true };
             } catch (e) {
-                this.remoteMetadata = { v: '?', date: null };
+                this.remoteMetadata = { unavailable: true };
             }
         },
         async refreshTuneData() {
+            if (!navigator.onLine) {
+                this.refreshMessage = 'Cannot refresh while offline — current tune data is unchanged.';
+                return;
+            }
             this.refreshingTuneData = true;
             this.refreshMessage = null;
             try {
