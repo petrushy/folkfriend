@@ -276,14 +276,26 @@ class FolkFriendWASMWrapper {
         await this.loadedWASM;
         await this.loadedIndex;
         const response = await this.folkfriendWASM.run_transcription_query(query);
-        cb(JSON.parse(response));
+        const results = JSON.parse(response);
+        for (const result of results) {
+            if (result.setting && result.setting_id !== undefined) {
+                result.setting.abc = this.abcStringBySetting[String(result.setting_id)] || '';
+            }
+        }
+        cb(results);
     }
 
     async runNameQuery(query, cb) {
         await this.loadedWASM;
         await this.loadedIndex;
         const response = await this.folkfriendWASM.run_name_query(query);
-        cb(JSON.parse(response));
+        const results = JSON.parse(response);
+        for (const result of results) {
+            if (result.setting && result.setting_id !== undefined) {
+                result.setting.abc = this.abcStringBySetting[String(result.setting_id)] || '';
+            }
+        }
+        cb(results);
     }
 
     async contourToAbc(contour, cb) {

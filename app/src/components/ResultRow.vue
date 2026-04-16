@@ -1,7 +1,7 @@
 <template>
-    <div class="result-row-wrapper d-flex align-center">
+    <div ref="rowEl" class="result-row-wrapper d-flex align-center">
         <router-link
-            class="flex-grow-1"
+            class="flex-grow-1 d-flex align-center result-link"
             :to="{
                 name: 'tune',
                 params: {
@@ -13,6 +13,8 @@
         >
             <v-container
                 v-ripple
+                class="flex-shrink-1"
+                style="min-width: 0"
                 @click="addToHistory"
             >
                 <v-row class="pt-1 pb-0">
@@ -38,6 +40,10 @@
                     </v-col>
                 </v-row>
             </v-container>
+
+            <!-- ABC thumbnail — only shown when the row is wide enough -->
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <div v-if="showAbcPreview" class="abc-preview" :style="{ width: abcPreviewDisplayWidth + 'px' }" @click="addToHistory" v-html="abcSvg" />
         </router-link>
         <v-btn icon class="mr-2" :disabled="!hasValidSettingID && !favourited" @click.stop="toggleFavourite">
             <v-icon :color="favourited ? 'amber darken-1' : 'grey lighten-1'">
@@ -48,11 +54,16 @@
 </template>
 
 <script>
-import {mdiStar, mdiStarOutline} from '@mdi/js';
+import { mdiStar, mdiStarOutline } from '@mdi/js';
+import ABCJS from 'abcjs';
 import utils from '@/js/utils.js';
 import store from '@/services/store.js';
 import ffBackend from '@/services/backend.js';
-import {HistoryItem} from '@/js/schema';
+import { HistoryItem } from '@/js/schema';
+
+// Minimum row width (px) before showing the ABC preview.
+// Reserved: min text (~180) + star btn (~52) + preview min (~200) = ~432; use 480.
+const ABC_PREVIEW_MIN_ROW_WIDTH = 480;
 
 export default {
     name: 'ResultRow',
@@ -80,9 +91,35 @@ export default {
         return {
             favourited: false,
             tags: [],
+            rowWidth: 0,
+            // ABC for the thumbnail. Pre-populated by worker.js for transcription
+            // results (which have setting_id). For name results (no setting_id)
+            // or stale cached workers, we lazy-fetch it on mount.
+            loadedAbc: (this.setting && this.setting.abc) || '',
             starIcon: mdiStar,
             starOutlineIcon: mdiStarOutline,
         };
+    },
+    mounted() {
+        if (window.ResizeObserver) {
+            this._ro = new ResizeObserver(entries => {
+                this.rowWidth = entries[0].contentRect.width;
+            });
+            this._ro.observe(this.$refs.rowEl);
+        }
+        // Lazily fetch ABC if not already present (name query results lack
+        // setting_id so worker.js cannot pre-populate it)
+        if (!this.loadedAbc && this.setting && this.setting.tune_id) {
+            ffBackend.settingsFromTuneID(this.setting.tune_id).then(settings => {
+                const target = this.settingID
+                    ? settings.find(s => String(s.setting_id) === String(this.settingID))
+                    : settings[0];
+                if (target && target.abc) this.loadedAbc = target.abc;
+            }).catch(() => {});
+        }
+    },
+    beforeDestroy() {
+        if (this._ro) this._ro.disconnect();
     },
     created() {
         store.isTuneFavourite(this.setting.tune_id).then(v => {
@@ -96,6 +133,55 @@ export default {
         },
         name: function () {
             return utils.parseDisplayableName(this.displayName);
+        },
+        abcPreviewDisplayWidth() {
+            const reserved = 180 + 52; // min text + star btn
+            const available = this.rowWidth - reserved;
+            return Math.min(480, Math.max(200, Math.floor(available * 0.7)));
+        },
+        showAbcPreview() {
+            return this.rowWidth >= ABC_PREVIEW_MIN_ROW_WIDTH && !!this.loadedAbc;
+        },
+        abcSvg() {
+            if (!this.loadedAbc) return '';
+            const lines = [];
+            if (this.setting.mode) lines.push(`K:${this.setting.mode}`);
+            if (this.setting.meter) lines.push(`M:${this.setting.meter}`);
+            if (!/^L:/m.test(this.loadedAbc)) lines.push('L:1/8');
+            let body = this.loadedAbc;
+            body = body.replace(/^Q:[^\n]*/gm, '');
+            body = body.replace(/"[^"]*"/g, '');
+            if (/^V:/m.test(body)) {
+                const filtered = [];
+                let inV1 = true;
+                for (const line of body.split('\n')) {
+                    if (/^V:1/.test(line)) { inV1 = true; continue; }
+                    if (/^V:/.test(line))  { inV1 = false; continue; }
+                    if (inV1) filtered.push(line);
+                }
+                body = filtered.join('\n');
+            }
+            const maxBars = this.abcPreviewDisplayWidth < 300 ? 2
+                          : this.abcPreviewDisplayWidth < 390 ? 3
+                          : 4;
+            const targetPipes = maxBars + 1;
+            let count = 0;
+            let cutAt = body.length;
+            for (let i = 0; i < body.length; i++) {
+                if (body[i] === '|' && ++count >= targetPipes) { cutAt = i + 1; break; }
+            }
+            lines.push(body.slice(0, cutAt));
+            const div = document.createElement('div');
+            ABCJS.renderAbc(div, lines.join('\n'), {
+                staffwidth: this.abcPreviewDisplayWidth,
+                scale: 0.65,
+                paddingtop: 0,
+                paddingbottom: 0,
+                paddingleft: 0,
+                paddingright: 0,
+                wrap: { minSpacing: 1, maxSpacing: 3, preferredMeasuresPerLine: 8 },
+            });
+            return div.innerHTML;
         },
         scoreLabel: function () {
             if (this.score > 0.65) {
@@ -188,12 +274,25 @@ export default {
   font-style: italic;
 }
 
-.result-row-wrapper a {
+.result-link {
   text-decoration: none;
   color: inherit;
 }
 
-.result-row-wrapper a div {
+.result-link div {
   background: inherit;
+}
+
+.abc-preview {
+  overflow: hidden;
+  max-height: 80px;
+  opacity: 0.75;
+  margin: 0 6px;
+  flex-shrink: 0;
+  align-self: center;
+}
+
+.abc-preview :deep(svg) {
+  display: block;
 }
 </style>
