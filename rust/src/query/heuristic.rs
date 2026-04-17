@@ -10,26 +10,56 @@ pub struct ScoredName {
     pub ngram_score: f32,
 }
 
+/// Collapse consecutive identical characters: "vvvvssssoo" → "vsо".
+/// Both folkwiki stored contours (L:1/16, 4 chars/note) and audio queries
+/// (1 char/note) collapse to the same pitch sequence, fixing the mismatch.
+pub fn dedup_runs(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut last = '\0';
+    for c in s.chars() {
+        if c != last {
+            result.push(c);
+            last = c;
+        }
+    }
+    result
+}
+
 pub fn run_transcription_query(
     query: &String,
-    // settings_feats: &SettingsFeats,
     tune_index: &TuneIndex,
 ) -> Vec<(SettingID, usize)> {
-    // let query = trigrams_fast(query);
-    let ngrams = ngrams_str(query, ff_config::QUERY_NGRAM_SIZE_CONTOUR);
+    // Collapse runs so folkwiki stored contours (4 chars/note due to L:1/16)
+    // and audio query contours (1 char/note) use the same representation.
+    let query = dedup_runs(query);
+
+    // Deduplicate query n-grams: repeated patterns in the query (common in
+    // repetitive tunes) must not be counted multiple times per candidate.
+    let raw_ngrams = ngrams_str(&query, ff_config::QUERY_NGRAM_SIZE_CONTOUR);
+    let mut seen = std::collections::HashSet::new();
+    let ngrams: Vec<String> = raw_ngrams
+        .into_iter()
+        .filter(|g| seen.insert(g.clone()))
+        .collect();
+
     let mut ranked_settings: HashMap<SettingID, usize> = HashMap::new();
     let ac = AhoCorasick::new_auto_configured(&ngrams);
+
     for (setting_id, setting) in &tune_index.settings {
-        let score = ac
-            .find_overlapping_iter(&setting.contour)
-            .collect::<Vec<Match>>()
-            .len();
-        ranked_settings.insert(setting_id.to_string(), score);
+        // Count how many DISTINCT query patterns appear in this candidate.
+        // Using raw overlapping match counts rewarded long/repetitive contours
+        // disproportionately, causing exact self-matches to rank below #90.
+        let mut matched: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        for m in ac.find_overlapping_iter(&dedup_runs(&setting.contour)) {
+            matched.insert(m.pattern());
+        }
+        ranked_settings.insert(setting_id.to_string(), matched.len());
     }
 
     let mut sorted_rankings: Vec<_> = ranked_settings.into_iter().collect();
     sorted_rankings.sort_by(|x, y| y.1.cmp(&x.1));
-    return sorted_rankings;
+    sorted_rankings
 }
 
 pub fn run_name_query(query: &String, tune_index: &TuneIndex) -> Vec<ScoredName> {

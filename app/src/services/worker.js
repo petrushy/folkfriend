@@ -120,8 +120,19 @@ class FolkFriendWASMWrapper {
                 await this.loadTuneIndex(downloadedTuneIndex);
                 console.timeEnd('tune-index-load');
 
-                // Store the version of this newly downloaded tune index
-                const tuneIndexMetadata = await this.fetchTuneIndexMetadata();
+                // Store the version of this newly downloaded tune index. If
+                // metadata fetch fails we can still proceed with the loaded
+                // index and persist a safe fallback metadata record.
+                let tuneIndexMetadata;
+                try {
+                    tuneIndexMetadata = await this.fetchTuneIndexMetadata();
+                } catch (e) {
+                    console.warn('Could not fetch tune index metadata on first install, using fallback metadata', e);
+                    tuneIndexMetadata = {
+                        v: 0,
+                        date: null,
+                    };
+                }
                 await set('tuneIndex', downloadedTuneIndex);
                 await set('tuneIndexMetadata', tuneIndexMetadata);
 

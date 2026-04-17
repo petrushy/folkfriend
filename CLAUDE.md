@@ -182,6 +182,72 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 
 ## Recent changes
 
+### Folkwiki audio detection fix (April 2026) — three-layer fix
+
+This was a multi-cause failure: folkwiki tunes were not detectable from real audio at all. Three independent bugs were found and fixed.
+
+#### 1. Heuristic scoring: distinct n-gram counts (`rust/src/query/heuristic.rs`)
+
+**Root cause:** `ac.find_overlapping_iter(...).count()` counted raw overlapping occurrences. Long/repetitive tunes scored disproportionately high, causing an exact self-match to rank #94. Real-audio queries were worse, pushing correct matches below the 2000-result NW cutoff.
+
+**Fix:** Two changes:
+
+1. Deduplicate query n-grams before building the Aho-Corasick automaton.
+2. Count **distinct** query patterns matched per candidate via `HashSet<usize>` over `m.pattern()`.
+
+#### 2. Stored contour length mismatch: `dedup_runs` (`rust/src/query/heuristic.rs`)
+
+**Root cause:** Folkwiki ABC files use `L:1/16` (sixteenth notes); thesession uses `L:1/8` (eighth notes). abc2midi quantises to `L:1/8` quavers in both cases, so a folkwiki dotted note like `A>B` stored 4 chars (`vvvt`) while audio transcription always produces 1 char per note (`vt`). The heuristic n-gram match rate was near zero.
+
+**Fix:** Added `dedup_runs()` (collapses consecutive identical chars: `vvvt` → `vt`). Applied to both query and stored contour **in the heuristic only** before n-gram matching. Not applied in the NW second pass (see point 4 below).
+
+#### 3. Contour data quality: two bugs fixed in `folkfriend-app-data`
+
+**Chord symbol contamination** (`build/src/build_folkwiki_data.py` and `build/src/build_non_user_data.py`): Folkwiki (and some thesession) ABC has inline chord annotations (`"D"`, `"Am"`). abc2midi plays these as real MIDI notes on a second channel. Fix: `re.sub(r'"[^"]*"', '', abc_body)` before passing to abc2midi. Applied in both pipelines.
+
+**Passing note dropout** (`build/src/midi.py`): `to_midi_contour`'s sync logic skipped short notes (e.g. B in `A>B`) when the preceding dotted note was rounded up, pushing `output_time` past the short note's end. Audio transcription always retains passing notes. Fix: instead of `continue`, always include the note as 1 quaver:
+
+```python
+if music_time <= output_time:
+    output_time += quaver_duration
+    midi_contour.append(note.rel_pitch())
+    continue
+```
+
+After these fixes the data was rebuilt (60k settings) and copied to `app/public/res/`.
+
+#### 4. NW score inflation fix (`rust/src/query/mod.rs`)
+
+**Root cause:** After adding `dedup_runs` to the heuristic, it was also applied to both sides of the NW second pass. Shorter dedup'd strings reach the NW score ceiling more easily, inflating scores across the board — too many unrelated tunes showed "Very Close" in the web app.
+
+**Fix:** Removed `dedup_runs` from the NW step entirely. The NW pass now uses raw contours. The rebuilt stored contours already include passing notes and are chord-stripped, so density matches audio-transcribed contours well enough for NW to work correctly without deduplication.
+
+**Rule:** `dedup_runs` is used **only in the heuristic** (for discovery), never in NW (for scoring).
+
+#### Integration tests (`rust/tests/integration_tests.rs`)
+
+- `heuristic_self_match_ranks_first` — folkwiki settings 974588901 and 1402836401 must rank #1 or #2
+- `thesession_self_match_ranks_first` — Kesh, Morning Dew, Silver Spear, Butterfly must rank top 3
+- `audio_gumboda_schottis_detected` — real WAV recording (`rust/wavs/gumboda_schottis.wav`) must rank 974588901 in top 10
+- Test WAV: `rust/wavs/gumboda_schottis.wav` — user-provided recording, converted from MP3 via ffmpeg at 48kHz mono
+
+### ABC thumbnails in search results (April 2026)
+
+**`app/src/components/ResultRow.vue`** — Search result rows now show an ABC score preview thumbnail, matching the `FavouriteRow` pattern.
+
+- `loadedAbc` reactive data property: pre-populated from `result.setting.abc` when the worker pre-attaches it (transcription results), otherwise lazily fetched via `ffBackend.settingsFromTuneID`.
+- `ResizeObserver` tracks row width; thumbnail shown only when row ≥ 480 px (constant `ABC_PREVIEW_MIN_ROW_WIDTH`).
+- `abcSvg` computed: strips chords/tempo, filters to voice 1, clips to 4 bars, renders via ABCJS at scale 0.65.
+- **`app/src/views/Results.vue`** — fixed striping CSS selector from `.resultsTable > a:nth-child(odd)` to `.resultsTable > div:nth-child(odd)` (ResultRow root is a `div`).
+- **`app/src/services/worker.js`** — `runTranscriptionQuery` and `runNameQuery` now re-attach ABC strings from `abcStringBySetting` to results that have a `setting_id`.
+
+### Offline guard in Settings (April 2026)
+
+**`app/src/views/Settings.vue`** — Two offline edge cases fixed:
+
+- `_fetchRemoteMetadata` sets `{ unavailable: true }` on network failure; `remoteTuneDataLabel` returns `'unavailable (offline)'` instead of `'v? · v?'`.
+- `refreshTuneData` checks `navigator.onLine` and returns an explanatory message rather than clearing IndexedDB when offline.
+
 ### Composer/origin display and cache-update fixes (April 2026)
 
 **`app/src/views/Tune.vue`** — Composer and origin fields are now shown above the ABC score in each expansion panel, when present. Styled with `.settingMeta` / `.settingMetaLabel` CSS classes.
