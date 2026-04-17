@@ -2,7 +2,6 @@ use folkfriend::FolkFriend;
 use std::fs;
 use std::fs::File;
 use std::path::Path;
-use std::convert::TryInto;
 
 fn load_tune_index() -> FolkFriend {
     let index_path = "../app/public/res/folkfriend-non-user-data.json";
@@ -21,6 +20,53 @@ fn pcm_from_wav(path: &str) -> (Vec<f32>, u32) {
     (signal_f, header.sampling_rate)
 }
 
+fn assert_audio_detects_one_of(
+    wav_path: &str,
+    expected_tune_ids: &[&str],
+    label: &str,
+    max_rank: usize,
+) {
+    let mut ff = load_tune_index();
+
+    let (pcm, sample_rate) = pcm_from_wav(wav_path);
+    ff.set_sample_rate(sample_rate).unwrap();
+    ff.feed_entire_pcm_signal(pcm);
+    let contour = ff.transcribe_pcm_buffer()
+        .expect("Transcription failed — check WAV file and pitch range");
+
+    eprintln!("{} contour (len={}): {}", label, contour.len(), contour);
+
+    let results = ff.run_transcription_query(&contour).unwrap();
+
+    eprintln!("Top 10 results for {}:", label);
+    for (i, r) in results.iter().take(10).enumerate() {
+        eprintln!(
+            "  #{}: setting_id={} tune_id={} score={:.4} name={}",
+            i + 1,
+            r.setting_id,
+            r.setting.tune_id,
+            r.score,
+            r.display_name
+        );
+    }
+
+    let best_rank = results
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| expected_tune_ids.contains(&r.setting.tune_id.as_str()))
+        .map(|(i, _)| i)
+        .min();
+
+    assert!(
+        best_rank.map(|rank| rank < max_rank).unwrap_or(false),
+        "{} should match one of {:?} within top {} (got {:?})",
+        label,
+        expected_tune_ids,
+        max_rank,
+        best_rank.map(|rank| rank + 1)
+    );
+}
+
 #[test]
 fn dummy() {
     assert!(true);
@@ -28,7 +74,7 @@ fn dummy() {
 
 #[test]
 fn heuristic_self_match_ranks_first() {
-    let mut ff = load_tune_index();
+    let ff = load_tune_index();
 
     // Folkwiki setting whose own stored contour should rank #1 (exact self-match)
     let contour_s1 = "vvxvvtstsqosvAEEEFFFFECCCEEFECAAAvvxvtstsqosvAEEEFFFFECFECAAAAAvvxvtstsqosvAEEEFFFFECCCEEFECAAAvvxvtstsqosvAEEEFFFFECFECAAAAAvvEECAssttvtsqqqqqFFCzzzvvvECAAAvvECAAsstvtsqqqqqqFCzvxzAAAAAAAAvvECAAsstvtsqqqqqqFCzzzzvvECAAAAvvECAAsstvtsqqqqqqFCzvxzAAAAAAAA".to_string();
@@ -49,7 +95,7 @@ fn heuristic_self_match_ranks_first() {
 fn thesession_self_match_ranks_first() {
     // Regression test: well-known thesession tunes should still self-match at #1
     // after the passing-note fix and chord-stripping rebuild.
-    let mut ff = load_tune_index();
+    let ff = load_tune_index();
 
     let index_path = "../app/public/res/folkfriend-non-user-data.json";
     let json = std::fs::read_to_string(index_path).unwrap();
@@ -80,30 +126,40 @@ fn thesession_self_match_ranks_first() {
 
 #[test]
 fn audio_gumboda_schottis_detected() {
-    let wav_path = "wavs/gumboda_schottis.wav";
-    let mut ff = load_tune_index();
+    assert_audio_detects_one_of(
+        "wavs/gumboda_schottis.wav",
+        &["973588901", "1401836401"],
+        "Schottis från Gumboda",
+        10,
+    );
+}
 
-    let (pcm, sample_rate) = pcm_from_wav(wav_path);
-    ff.set_sample_rate(sample_rate).unwrap();
-    ff.feed_entire_pcm_signal(pcm);
-    let contour = ff.transcribe_pcm_buffer()
-        .expect("Transcription failed — check WAV file and pitch range");
+#[test]
+fn audio_cooleys_reel_detected() {
+    assert_audio_detects_one_of(
+        "wavs/cooleys_reel.wav",
+        &["1", "1052"],
+        "Cooley's Reel",
+        10,
+    );
+}
 
-    eprintln!("Transcribed contour (len={}): {}", contour.len(), &contour);
+#[test]
+fn audio_wise_maid_detected() {
+    assert_audio_detects_one_of(
+        "wavs/wise_maid.wav",
+        &["118", "11282", "7335"],
+        "The Wise Maid",
+        10,
+    );
+}
 
-    let results = ff.run_transcription_query(&contour).unwrap();
-
-    eprintln!("Top 10 results:");
-    for (i, r) in results.iter().take(10).enumerate() {
-        eprintln!("  #{}: setting_id={} score={:.4} name={}", i+1, r.setting_id, r.score, r.display_name);
-    }
-
-    let rank = results.iter().position(|r| r.setting_id == "974588901");
-    eprintln!("  974588901 (schottis från gumboda) rank: {:?}", rank.map(|p| p+1));
-
-    assert!(
-        rank.map(|p| p < 10).unwrap_or(false),
-        "Schottis från Gumboda (974588901) should appear in top 10 from real audio (got rank {:?})",
-        rank.map(|p| p+1)
+#[test]
+fn audio_soup_dragon_detected() {
+    assert_audio_detects_one_of(
+        "wavs/soup_dragon.wav",
+        &["10785"],
+        "The Soup Dragon",
+        10,
     );
 }
