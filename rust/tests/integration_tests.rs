@@ -16,7 +16,12 @@ fn pcm_from_wav(path: &str) -> (Vec<f32>, u32) {
     let mut f = File::open(Path::new(path)).expect("WAV file not found");
     let (header, data) = wav::read(&mut f).unwrap();
     let signal: Vec<i16> = data.try_into_sixteen().unwrap();
-    let signal_f: Vec<f32> = signal.iter().map(|&s| s as f32 / 32768.0).collect();
+    let channels = header.channel_count as usize;
+    // Mix stereo/multi-channel down to mono
+    let signal_f: Vec<f32> = signal
+        .chunks(channels)
+        .map(|frame| frame.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / channels as f32)
+        .collect();
     (signal_f, header.sampling_rate)
 }
 
@@ -138,9 +143,9 @@ fn audio_gumboda_schottis_detected() {
 fn audio_cooleys_reel_detected() {
     assert_audio_detects_one_of(
         "wavs/cooleys_reel.wav",
-        &["1", "1052"],
+        &["1"],
         "Cooley's Reel",
-        10,
+        5,
     );
 }
 
@@ -148,9 +153,39 @@ fn audio_cooleys_reel_detected() {
 fn audio_wise_maid_detected() {
     assert_audio_detects_one_of(
         "wavs/wise_maid.wav",
-        &["118", "11282", "7335"],
+        &["118"],
         "The Wise Maid",
-        10,
+        5,
+    );
+}
+
+#[test]
+fn audio_salamanca_detected() {
+    assert_audio_detects_one_of(
+        "wavs/salamanca.wav",
+        &["99"],
+        "The Salamanca",
+        5,
+    );
+}
+
+#[test]
+fn audio_hut_on_staffin_island_detected() {
+    assert_audio_detects_one_of(
+        "wavs/hut_on_staffin_island.wav",
+        &["2067"],
+        "The Hut on Staffin Island",
+        5,
+    );
+}
+
+#[test]
+fn audio_glen_cottage_detected() {
+    assert_audio_detects_one_of(
+        "wavs/ithe_glen_cottage.wav",
+        &["5278"],
+        "The Glen Cottage",
+        5,
     );
 }
 
