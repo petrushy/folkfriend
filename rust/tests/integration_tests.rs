@@ -48,11 +48,7 @@ fn assert_audio_detects_one_of(
     for (i, r) in results.iter().take(10).enumerate() {
         eprintln!(
             "  #{}: setting_id={} tune_id={} score={:.4} name={}",
-            i + 1,
-            r.setting_id,
-            r.setting.tune_id,
-            r.score,
-            r.display_name
+            i + 1, r.setting_id, r.setting.tune_id, r.score, r.display_name
         );
     }
 
@@ -76,7 +72,7 @@ fn assert_audio_detects_one_of(
 
     assert!(
         best_score >= min_score,
-        "{} score {:.4} is below minimum {:.4} (≥95% of baseline)",
+        "{} score {:.4} is below minimum {:.4} (≥99% of baseline)",
         label, best_score, min_score
     );
 }
@@ -127,7 +123,6 @@ fn thesession_self_match_ranks_first() {
         let tune_id = settings[*sid]["tune_id"].as_str().unwrap();
         let contour = settings[*sid]["contour"].as_str().unwrap().to_string();
         let results = ff.run_transcription_query(&contour).unwrap();
-        // Results are deduplicated by tune_id, so check the tune appears (any setting)
         let rank = results.iter().position(|r| r.setting.tune_id == tune_id);
         eprintln!("  {}: rank={:?}", label, rank.map(|p| p+1));
         assert!(
@@ -137,6 +132,10 @@ fn thesession_self_match_ranks_first() {
         );
     }
 }
+
+// --- Audio detection tests ---
+// min_score is 99% of the baseline score measured at time of writing.
+// Scores are deterministic for a given WAV + index; a drop signals regression.
 
 #[test]
 fn audio_gumboda_schottis_detected() {
@@ -212,5 +211,93 @@ fn audio_soup_dragon_detected() {
         "The Soup Dragon",
         10,
         0.679, // 99% of 0.6860
+    );
+}
+
+#[test]
+fn audio_skallmansarn_detected() {
+    assert_audio_detects_one_of(
+        "wavs/Skållmånsarn.wav",
+        &["598100601"],
+        "Skållmånsarn",
+        5,
+        0.552, // 99% of 0.5580
+    );
+}
+
+#[test]
+fn audio_gazaremsan_detected() {
+    assert_audio_detects_one_of(
+        "wavs/gazaremsan.wav",
+        &["1604843401", "1596117401", "1546819101"],
+        "Gazaremsan",
+        5,
+        0.339, // 99% of 0.3429
+    );
+}
+
+#[test]
+fn audio_naspolskan_detected() {
+    assert_audio_detects_one_of(
+        "wavs/nåspolskan.wav",
+        &["56869501", "767879601"],
+        "Nåspolskan",
+        5,
+        0.571, // 99% of 0.5769
+    );
+}
+
+#[test]
+fn audio_polska_efter_kristian_oskarsson_detected() {
+    assert_audio_detects_one_of(
+        "wavs/polska_efter_kristian_oskarsson.wav",
+        &["1027010001", "892357901"],
+        "Polska efter Kristian Oskarsson",
+        5,
+        0.694, // 99% of 0.7016
+    );
+}
+
+#[test]
+fn audio_polska_efter_snickar_erik_detected() {
+    assert_audio_detects_one_of(
+        "wavs/polska_efter_snickar_erik.wav",
+        &["1013016301"],
+        "Polska efter Snickar Erik",
+        5,
+        0.765, // 99% of 0.7736
+    );
+}
+
+#[test]
+fn audio_blarney_pilgrim_detected() {
+    assert_audio_detects_one_of(
+        "wavs/blarney_pilgrim.wav",
+        &["5"],
+        "The Blarney Pilgrim",
+        5,
+        0.792, // 99% of 0.8000
+    );
+}
+
+#[test]
+fn audio_mist_covered_mountain_detected() {
+    assert_audio_detects_one_of(
+        "wavs/mist_covered_mountain.wav",
+        &["256"],
+        "Mist Covered Mountain",
+        5,
+        0.891, // 99% of 0.9000
+    );
+}
+
+#[test]
+fn audio_windbroke_detected() {
+    assert_audio_detects_one_of(
+        "wavs/windbroke.wav",
+        &["910"],
+        "Windbroke",
+        5,
+        0.789, // 99% of 0.7975
     );
 }
