@@ -30,6 +30,7 @@ fn assert_audio_detects_one_of(
     expected_tune_ids: &[&str],
     label: &str,
     max_rank: usize,
+    min_score: f32,
 ) {
     let mut ff = load_tune_index();
 
@@ -55,20 +56,28 @@ fn assert_audio_detects_one_of(
         );
     }
 
-    let best_rank = results
+    let best = results
         .iter()
         .enumerate()
         .filter(|(_, r)| expected_tune_ids.contains(&r.setting.tune_id.as_str()))
-        .map(|(i, _)| i)
-        .min();
+        .map(|(i, r)| (i, r.score))
+        .next();
+
+    let (best_rank, best_score) = match best {
+        Some(v) => v,
+        None => panic!("{} — none of {:?} appeared in results", label, expected_tune_ids),
+    };
 
     assert!(
-        best_rank.map(|rank| rank < max_rank).unwrap_or(false),
-        "{} should match one of {:?} within top {} (got {:?})",
-        label,
-        expected_tune_ids,
-        max_rank,
-        best_rank.map(|rank| rank + 1)
+        best_rank < max_rank,
+        "{} should match one of {:?} within top {} (got rank {})",
+        label, expected_tune_ids, max_rank, best_rank + 1
+    );
+
+    assert!(
+        best_score >= min_score,
+        "{} score {:.4} is below minimum {:.4} (≥95% of baseline)",
+        label, best_score, min_score
     );
 }
 
@@ -136,6 +145,7 @@ fn audio_gumboda_schottis_detected() {
         &["973588901", "1401836401"],
         "Schottis från Gumboda",
         10,
+        0.632, // 99% of 0.6385
     );
 }
 
@@ -146,6 +156,7 @@ fn audio_cooleys_reel_detected() {
         &["1"],
         "Cooley's Reel",
         5,
+        0.598, // 99% of 0.6042
     );
 }
 
@@ -156,6 +167,7 @@ fn audio_wise_maid_detected() {
         &["118"],
         "The Wise Maid",
         5,
+        0.572, // 99% of 0.5778
     );
 }
 
@@ -166,6 +178,7 @@ fn audio_salamanca_detected() {
         &["99"],
         "The Salamanca",
         5,
+        0.690, // 99% of 0.6975
     );
 }
 
@@ -176,6 +189,7 @@ fn audio_hut_on_staffin_island_detected() {
         &["2067"],
         "The Hut on Staffin Island",
         5,
+        0.817, // 99% of 0.8254
     );
 }
 
@@ -186,6 +200,7 @@ fn audio_glen_cottage_detected() {
         &["5278"],
         "The Glen Cottage",
         5,
+        0.759, // 99% of 0.7674
     );
 }
 
@@ -196,5 +211,6 @@ fn audio_soup_dragon_detected() {
         &["10785"],
         "The Soup Dragon",
         10,
+        0.679, // 99% of 0.6860
     );
 }
