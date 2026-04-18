@@ -1,3 +1,18 @@
+/// Heuristic first-pass query.
+///
+/// Reduces ~60 k candidates to a shortlist of ~2000 using fast Aho-Corasick
+/// n-gram matching.  The shortlist is then re-scored by the slower but accurate
+/// Needleman-Wunsch aligner in `mod.rs`.
+///
+/// Key design choices:
+/// - `dedup_runs` collapses consecutive identical characters before n-gram matching
+///   to bridge the density mismatch between stored contours (where a long note may
+///   be 4 chars) and audio queries (always 1 char per detected note).
+/// - Query n-grams are deduplicated so a pattern repeated in the query counts once
+///   per candidate, not once per repetition.
+/// - Candidates are scored by the count of *distinct* query n-gram patterns found,
+///   not by raw overlapping match count.  Raw counts reward long/repetitive stored
+///   contours disproportionately — before this fix, an exact self-match ranked #94.
 use crate::ff_config;
 use crate::index::schema::*;
 use crate::index::TuneIndex;

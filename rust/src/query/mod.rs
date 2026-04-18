@@ -1,3 +1,15 @@
+/// Two-pass tune retrieval engine.
+///
+/// **Pass 1 — heuristic (`heuristic.rs`):** Aho-Corasick n-gram scan over all
+/// ~60 k stored contours.  Fast O(n) scan; returns a ranked shortlist of up to
+/// `QUERY_REPASS_SIZE` (2000) candidates scored by distinct matched query n-grams.
+///
+/// **Pass 2 — Needleman-Wunsch (`nw.rs`):** Semi-global sequence alignment on
+/// the shortlist only.  Accurate but O(m×n) per candidate; feasible only because
+/// pass 1 has already eliminated ~97% of the index.
+///
+/// Results are deduplicated by `tune_id` (highest-scoring setting wins) and
+/// capped at 100 entries.
 mod heuristic;
 mod nw;
 
