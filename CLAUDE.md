@@ -231,6 +231,26 @@ After these fixes the data was rebuilt (60k settings) and copied to `app/public/
 - `audio_gumboda_schottis_detected` — real WAV recording (`rust/wavs/gumboda_schottis.wav`) must rank 974588901 in top 10
 - Test WAV: `rust/wavs/gumboda_schottis.wav` — user-provided recording, converted from MP3 via ffmpeg at 48kHz mono
 
+### Grace note stripping in contour pipeline (April 2026)
+
+ABC grace notes (`{g}e2{f}e2…`) were being included in stored contours as extra characters, causing NW alignment mismatches against real-audio queries (which have no ornaments).
+
+**Root cause:** Grace notes produce ~59 ms MIDI events. In `to_midi_contour`, `rel_duration ≈ 0.25 < 1.0` hit the "sub-quaver → emit as 1 quaver" path, inserting extra chars between melody notes. 18.7% of folkwiki ABCs contain `{...}` and 8.5% of their notes were sub-quaver ornaments.
+
+**Fix — two-layer:**
+
+1. **Strip `{...}` before abc2midi** (`build_folkwiki_data.py` and `build_non_user_data.py`):
+
+   ```python
+   abc_body = re.sub(r'\{[^}]*\}', '', abc_body)  # strip grace notes
+   ```
+
+   Applied after the existing chord-symbol and bracket-chord strips.
+
+2. **Sub-quaver skip threshold in `midi.py`** (`to_midi_contour`): notes with `rel_duration < 0.35` are silently skipped instead of emitted as 1 quaver. Grace notes ≈ 0.25 quavers; semiquavers ≥ 0.5 — the threshold cleanly separates them.
+
+Both pipelines rebuilt; 18 integration tests pass at ≥99% baseline thresholds.
+
 ### ABC thumbnails in search results (April 2026)
 
 **`app/src/components/ResultRow.vue`** — Search result rows now show an ABC score preview thumbnail, matching the `FavouriteRow` pattern.

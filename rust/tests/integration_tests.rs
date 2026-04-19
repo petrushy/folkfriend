@@ -133,6 +133,38 @@ fn thesession_self_match_ranks_first() {
     }
 }
 
+#[test]
+fn folkwiki_grace_note_self_match() {
+    // Verify that tunes with heavy ABC grace-note ornamentation self-match at #1.
+    // Before the grace-note stripping fix, these would rank poorly because extra
+    // ornament chars in the stored contour misaligned against any clean query.
+    let ff = load_tune_index();
+
+    let index_path = "../app/public/res/folkfriend-non-user-data.json";
+    let json = std::fs::read_to_string(index_path).unwrap();
+    let data: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let settings = data["settings"].as_object().unwrap();
+
+    let test_cases = [
+        ("301182001",  "highland cathedral (46 grace notes)"),
+        ("786483201",  "polska efter lapp-nils (19 grace notes)"),
+        ("1353201301", "säbb johns gånglåt (20 grace notes)"),
+    ];
+
+    for (sid, label) in &test_cases {
+        let tune_id = settings[*sid]["tune_id"].as_str().unwrap();
+        let contour = settings[*sid]["contour"].as_str().unwrap().to_string();
+        let results = ff.run_transcription_query(&contour).unwrap();
+        let rank = results.iter().position(|r| r.setting.tune_id == tune_id);
+        eprintln!("  {}: rank={:?}", label, rank.map(|p| p+1));
+        assert!(
+            rank.map(|p| p < 3).unwrap_or(false),
+            "{} (tune {}) should rank in top 3 for self-match (got {:?})",
+            label, tune_id, rank.map(|p| p+1)
+        );
+    }
+}
+
 // --- Audio detection tests ---
 // min_score is 99% of the baseline score measured at time of writing.
 // Scores are deterministic for a given WAV + index; a drop signals regression.

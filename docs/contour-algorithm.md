@@ -57,6 +57,11 @@ ABC text
    │    31% of folkwiki settings use these; abc2midi plays all voices,
    │    inserting extra notes between main melody pitches.
    │
+   ├─ Strip grace notes             {g}e → e  (remove {…} blocks)
+   │    18.7% of folkwiki ABCs use grace notes; abc2midi produces ~59 ms
+   │    MIDI events for each ornament that would otherwise be included as
+   │    1 quaver in the stored contour.  Audio queries never contain them.
+   │
    ├─ abc2midi                      ABC text → MIDI file
    │    Uses the tune's M: (meter) and K: (key) from the ABC header.
    │    L: (default note length) affects duration calculation.
@@ -79,12 +84,16 @@ The function maintains two clocks:
 For each note:
 1. Advance `music_time` by the note's real duration.
 2. Compute `rel_duration = note.duration / quaver_duration`.
-3. If `music_time ≤ output_time` (output is ahead — the previous note was rounded up
+3. If `rel_duration < 0.35`: **skip entirely**.  Notes this short (≈ 84 ms at 125 BPM)
+   are ornamental grace notes that slipped through the ABC-level `{…}` stripping.
+   Grace notes ≈ 0.25 quavers; the shortest real melody notes (semiquavers) ≈ 0.5.
+   The 0.35 threshold sits cleanly between them.
+4. If `music_time ≤ output_time` (output is ahead — the previous note was rounded up
    and "ate into" this note's slot): emit this note as **one quaver** regardless.
    This is critical for preserving **passing notes** in dotted-rhythm patterns like
    `A>B` where B is very short.  Dropping passing notes causes stored contours to
    diverge from audio-transcribed contours, which always retain them.
-4. Otherwise: round to the nearest integer number of quavers (ceil if music is
+5. Otherwise: round to the nearest integer number of quavers (ceil if music is
    behind, floor if music is ahead) and emit that many copies of the character.
 
 ### Folkwiki-specific note
@@ -205,9 +214,9 @@ for TheSession tunes.  Causes:
   (`>`), and multi-voice chords that abc2midi may render differently from how a player
   performs the tune.
 - **Heavy ornamentation:** Swedish folk style includes many grace notes and trills
-  written explicitly in the ABC.  abc2midi renders them as brief MIDI notes that
-  appear in the stored contour; the audio pitch detector does not resolve them as
-  separate pitches, so the stored contour has extra notes that audio never produces.
+  written explicitly in the ABC.  Mitigated by stripping `{…}` blocks before abc2midi
+  and by the `rel_duration < 0.35` skip threshold in `to_midi_contour`.  Trills and
+  other ornaments that abc2midi renders as longer notes are not filtered.
 - **ABC quality variance:** some folkwiki files have structural issues (e.g. bare
   `K:` lines mid-body) that cause abc2midi to mis-render sections.
 
