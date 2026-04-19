@@ -1,0 +1,179 @@
+{
+  "commit": "1b23f68",
+  "commit_message": "thumbnails in search results",
+  "date": "2026-04-16",
+  "dataset_sha256": "6b7ef853a313011b12e163fec91966ac1e774f05965fcd0101e2bf55c32fd443",
+  "dataset_bytes": 42218174,
+  "results": [
+    {
+      "wav": "gumboda_schottis.wav",
+      "label": "Schottis från Gumboda",
+      "expected_tune_ids": [
+        "973588901",
+        "1401836401"
+      ],
+      "max_rank": 10,
+      "rank": 1,
+      "score": 0.63846153,
+      "detected": true
+    },
+    {
+      "wav": "cooleys_reel.wav",
+      "label": "Cooley's Reel",
+      "expected_tune_ids": [
+        "1"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "wise_maid.wav",
+      "label": "The Wise Maid",
+      "expected_tune_ids": [
+        "118"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "salamanca.wav",
+      "label": "The Salamanca",
+      "expected_tune_ids": [
+        "99"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "hut_on_staffin_island.wav",
+      "label": "The Hut on Staffin Island",
+      "expected_tune_ids": [
+        "2067"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "ithe_glen_cottage.wav",
+      "label": "I the Glen Cottage",
+      "expected_tune_ids": [
+        "5278"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.25,
+      "detected": true
+    },
+    {
+      "wav": "soup_dragon.wav",
+      "label": "Soup Dragon",
+      "expected_tune_ids": [
+        "10785"
+      ],
+      "max_rank": 10,
+      "rank": 1,
+      "score": 0.68604654,
+      "detected": true
+    },
+    {
+      "wav": "Skållmånsarn.wav",
+      "label": "Skållmånsarn",
+      "expected_tune_ids": [
+        "598100601"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "gazaremsan.wav",
+      "label": "Gazaremsan",
+      "expected_tune_ids": [
+        "1604843401",
+        "1596117401",
+        "1546819101"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "nåspolskan.wav",
+      "label": "Nåspolskan",
+      "expected_tune_ids": [
+        "56869501",
+        "767879601"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "polska_efter_kristian_oskarsson.wav",
+      "label": "Polska efter Kristian Oskarsson",
+      "expected_tune_ids": [
+        "1027010001",
+        "892357901"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "polska_efter_snickar_erik.wav",
+      "label": "Polska efter Snickar Erik",
+      "expected_tune_ids": [
+        "1013016301"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "blarney_pilgrim.wav",
+      "label": "The Blarney Pilgrim",
+      "expected_tune_ids": [
+        "5"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "mist_covered_mountain.wav",
+      "label": "The Mist Covered Mountain",
+      "expected_tune_ids": [
+        "256"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "windbroke.wav",
+      "label": "The Windbroke",
+      "expected_tune_ids": [
+        "910"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    }
+  ]
+}

@@ -123,7 +123,25 @@ def prepare_worktree(full_commit: str, short_commit: str) -> Path:
     target_index.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(source_index, target_index)
 
+    source_tunes = REPO_ROOT / TUNE_REGISTRY_RELATIVE
+    target_tunes = worktree_root / TUNE_REGISTRY_RELATIVE
+    target_tunes.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source_tunes, target_tunes)
+
+    source_wavs = REPO_ROOT / WAVS_RELATIVE
+    target_wavs = worktree_root / WAVS_RELATIVE
+    if source_wavs.exists():
+        shutil.copytree(source_wavs, target_wavs, dirs_exist_ok=True)
+
     build_binary(worktree_root)
+
+    # Pre-populate ~/.folkfriend/ so old binaries (pre --index flag) can find
+    # the index without a network download.
+    import pathlib
+    home_ff = pathlib.Path.home() / ".folkfriend"
+    home_ff.mkdir(exist_ok=True)
+    shutil.copy2(source_index, home_ff / "folkfriend-non-user-data.json")
+
     return worktree_root
 
 
@@ -192,31 +210,36 @@ def run_single_query(
     wav_relative_path: Path,
     expected_tune_ids: set[str],
 ) -> tuple[int | None, float | None]:
-    try:
-        result = subprocess.run(
-            [
-                str(binary_path),
-                "--index",
-                INDEX_RELATIVE.as_posix(),
-                "query",
-                wav_relative_path.as_posix(),
-            ],
-            cwd=benchmark_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except OSError as exc:
-        print(f"Failed to execute {binary_path}: {exc}", file=sys.stderr)
-        return None, None
+    # Try with --index flag first; fall back for old binaries that lack it.
+    for cmd in (
+        [str(binary_path), "--index", INDEX_RELATIVE.as_posix(), "query", wav_relative_path.as_posix()],
+        [str(binary_path), "query", wav_relative_path.as_posix()],
+    ):
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=benchmark_root,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except OSError as exc:
+            print(f"Failed to execute {binary_path}: {exc}", file=sys.stderr)
+            return None, None
 
-    if result.returncode != 0:
-        error_output = result.stderr.strip() or result.stdout.strip() or "unknown error"
-        print(
-            f"Query failed for {wav_relative_path.as_posix()}: {error_output}",
-            file=sys.stderr,
-        )
-        return None, None
+        if result.returncode != 0 and "--index" in result.stderr:
+            # Old binary doesn't understand --index — retry without it.
+            continue
+
+        if result.returncode != 0:
+            error_output = result.stderr.strip() or result.stdout.strip() or "unknown error"
+            print(
+                f"Query failed for {wav_relative_path.as_posix()}: {error_output}",
+                file=sys.stderr,
+            )
+            return None, None
+
+        break  # success
 
     parsed_rows = parse_query_output(result.stdout)
     for row_index, row in enumerate(parsed_rows, start=1):
