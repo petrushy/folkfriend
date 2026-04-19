@@ -24,6 +24,12 @@
     "max_rank": 5
   },
   {
+    "wav": "salamanca2.wav",
+    "label": "The Salamanca (recording 2)",
+    "expected_tune_ids": ["99"],
+    "max_rank": 5
+  },
+  {
     "wav": "hut_on_staffin_island.wav",
     "label": "The Hut on Staffin Island",
     "expected_tune_ids": ["2067"],
@@ -87,6 +93,90 @@
     "wav": "windbroke.wav",
     "label": "The Windbroke",
     "expected_tune_ids": ["910"],
+    "max_rank": 5
+  },
+  {
+    "wav": "äppelbo_gånglåt.wav",
+    "label": "Äppelbo Gånglåt",
+    "expected_tune_ids": ["1292412001"],
+    "max_rank": 15
+  },
+  {
+    "wav": "banks_of_lough_gowna.wav",
+    "label": "The Banks of Lough Gowna",
+    "expected_tune_ids": ["775"],
+    "max_rank": 5
+  },
+  {
+    "wav": "björnes_schottis.wav",
+    "label": "Björnes Schottis",
+    "expected_tune_ids": ["698147501"],
+    "max_rank": 5
+  },
+  {
+    "wav": "calums_road.wav",
+    "label": "Calum's Road",
+    "expected_tune_ids": ["3016"],
+    "max_rank": 5
+  },
+  {
+    "wav": "cup_of_team.wav",
+    "label": "The Cup of Tea",
+    "expected_tune_ids": ["20"],
+    "max_rank": 5
+  },
+  {
+    "wav": "john_brosnan.wav",
+    "label": "John Brosnan's",
+    "expected_tune_ids": ["3835"],
+    "max_rank": 5
+  },
+  {
+    "wav": "john_ryans.wav",
+    "label": "John Ryan's",
+    "expected_tune_ids": ["441"],
+    "max_rank": 5
+  },
+  {
+    "wav": "killavi_jig.wav",
+    "label": "The Killavil Jig",
+    "expected_tune_ids": ["667"],
+    "max_rank": 5
+  },
+  {
+    "wav": "maggie_in_the_woods.wav",
+    "label": "Maggie in the Woods",
+    "expected_tune_ids": ["291"],
+    "max_rank": 5
+  },
+  {
+    "wav": "sally_garden.wav",
+    "label": "Down by the Sally Gardens",
+    "expected_tune_ids": ["118"],
+    "max_rank": 5
+  },
+  {
+    "wav": "the_banshee.wav",
+    "label": "The Banshee",
+    "expected_tune_ids": ["8"],
+    "max_rank": 5
+  },
+  {
+    "wav": "the_galway_belle.wav",
+    "label": "The Galway Belle",
+    "expected_tune_ids": ["679"],
+    "max_rank": 5
+  },
+  {
+    "wav": "the_glenside.wav",
+    "label": "The Glenside",
+    "expected_tune_ids": ["534"],
+    "max_rank": 5
+  },
+  {
+    "wav": "the_linting_banshee.wav",
+    "label": "The Lilting Banshee",
+    "expected_tune_ids": ["60"],
     "max_rank": 5
   }
 ]
