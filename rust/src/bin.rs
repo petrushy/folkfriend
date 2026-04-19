@@ -34,14 +34,22 @@ fn main() {
                 .takes_value(false)
                 .help("Write out PNG files showing intermediate steps of transcription"),
         )
+        .arg(
+            Arg::with_name("index")
+                .long("index")
+                .required(false)
+                .takes_value(true)
+                .help("Path to local folkfriend-non-user-data.json (skips network download)"),
+        )
         .get_matches();
 
     let command = matches.value_of("command").unwrap();
     let input = matches.value_of("input").unwrap().to_string();
     let debug = matches.is_present("debug");
+    let index_path = matches.value_of("index");
 
     let mut ff = FolkFriend::new();
-    let tune_index_json = get_tune_index_json();
+    let tune_index_json = get_tune_index_json(index_path);
     ff.load_index_from_json_string(tune_index_json);
 
     let now = Instant::now();
@@ -197,14 +205,12 @@ fn process_audio_files(ff: FolkFriend, input: String, with_transcription_query: 
 fn pcm_signal_from_wav(wav_file_path: &PathBuf) -> (Vec<f32>, u32) {
     let mut inp_file = File::open(Path::new(&wav_file_path)).unwrap();
     let (header, data) = wav::read(&mut inp_file).unwrap();
-
     let signal: Vec<i16> = data.try_into_sixteen().unwrap();
-
-    let mut signal_f: Vec<f32> = vec![0.; signal.len()];
-    for i in 0..signal.len() {
-        signal_f[i] = (signal[i] as f32) / 32768.;
-    }
-
+    let channels = header.channel_count as usize;
+    let signal_f: Vec<f32> = signal
+        .chunks(channels)
+        .map(|frame| frame.iter().map(|&s| s as f32 / 32768.0).sum::<f32>() / channels as f32)
+        .collect();
     return (signal_f, header.sampling_rate);
 }
 
@@ -228,13 +234,17 @@ fn name_query(ff: FolkFriend, name: String) {
     }
 }
 
-pub fn get_tune_index_json() -> String {
+pub fn get_tune_index_json(local_path: Option<&str>) -> String {
+    if let Some(path) = local_path {
+        return fs::read_to_string(path)
+            .unwrap_or_else(|_| panic!("Couldn't read index from {}", path));
+    }
+
     let mut folkfriend_index: PathBuf = dirs::home_dir().unwrap();
     folkfriend_index.push(".folkfriend");
     std::fs::create_dir_all(&folkfriend_index).unwrap();
 
     folkfriend_index.push("folkfriend-non-user-data.json");
-    // let index_url = "https://raw.githubusercontent.com/TomWyllie/folkfriend-app-data/master/folkfriend-non-user-data.json";
     let index_url = "https://folkfriend-app-data.web.app/folkfriend-non-user-data.json";
     if !folkfriend_index.exists() {
         let resp = reqwest::blocking::get(index_url).unwrap().text().unwrap();

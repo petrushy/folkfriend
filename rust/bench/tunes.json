@@ -1,0 +1,92 @@
+[
+  {
+    "wav": "gumboda_schottis.wav",
+    "label": "Schottis från Gumboda",
+    "expected_tune_ids": ["973588901", "1401836401"],
+    "max_rank": 10
+  },
+  {
+    "wav": "cooleys_reel.wav",
+    "label": "Cooley's Reel",
+    "expected_tune_ids": ["1"],
+    "max_rank": 5
+  },
+  {
+    "wav": "wise_maid.wav",
+    "label": "The Wise Maid",
+    "expected_tune_ids": ["118"],
+    "max_rank": 5
+  },
+  {
+    "wav": "salamanca.wav",
+    "label": "The Salamanca",
+    "expected_tune_ids": ["99"],
+    "max_rank": 5
+  },
+  {
+    "wav": "hut_on_staffin_island.wav",
+    "label": "The Hut on Staffin Island",
+    "expected_tune_ids": ["2067"],
+    "max_rank": 5
+  },
+  {
+    "wav": "ithe_glen_cottage.wav",
+    "label": "I the Glen Cottage",
+    "expected_tune_ids": ["5278"],
+    "max_rank": 5
+  },
+  {
+    "wav": "soup_dragon.wav",
+    "label": "Soup Dragon",
+    "expected_tune_ids": ["10785"],
+    "max_rank": 10
+  },
+  {
+    "wav": "Skållmånsarn.wav",
+    "label": "Skållmånsarn",
+    "expected_tune_ids": ["598100601"],
+    "max_rank": 5
+  },
+  {
+    "wav": "gazaremsan.wav",
+    "label": "Gazaremsan",
+    "expected_tune_ids": ["1604843401", "1596117401", "1546819101"],
+    "max_rank": 5
+  },
+  {
+    "wav": "nåspolskan.wav",
+    "label": "Nåspolskan",
+    "expected_tune_ids": ["56869501", "767879601"],
+    "max_rank": 5
+  },
+  {
+    "wav": "polska_efter_kristian_oskarsson.wav",
+    "label": "Polska efter Kristian Oskarsson",
+    "expected_tune_ids": ["1027010001", "892357901"],
+    "max_rank": 5
+  },
+  {
+    "wav": "polska_efter_snickar_erik.wav",
+    "label": "Polska efter Snickar Erik",
+    "expected_tune_ids": ["1013016301"],
+    "max_rank": 5
+  },
+  {
+    "wav": "blarney_pilgrim.wav",
+    "label": "The Blarney Pilgrim",
+    "expected_tune_ids": ["5"],
+    "max_rank": 5
+  },
+  {
+    "wav": "mist_covered_mountain.wav",
+    "label": "The Mist Covered Mountain",
+    "expected_tune_ids": ["256"],
+    "max_rank": 5
+  },
+  {
+    "wav": "windbroke.wav",
+    "label": "The Windbroke",
+    "expected_tune_ids": ["910"],
+    "max_rank": 5
+  }
+]

@@ -3,6 +3,7 @@ node_modules
 /dist
 public/wasm/*
 public/res/*.json*
+!public/res/folkfriend-non-user-data.json
 public/res/*.mp3
 public/soundfont/
 src/wasm/*
