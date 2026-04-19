@@ -148,9 +148,9 @@ export default {
             default: ''
         },
         settingID: {
-            type: Number,
+            type: String,
             required: false,
-            default: null
+            default: ''
         },
     },
     data: function () {
@@ -261,8 +261,9 @@ export default {
             // 2. Else if any setting is favourited, open the first favourited one
             // 3. Otherwise open the first setting
             if (this.settingID) {
+                const requestedSettingID = String(this.settingID);
                 for (const [i, setting] of this.settings.entries()) {
-                    if (setting.setting_id === this.settingID) {
+                    if (String(setting.setting_id) === requestedSettingID) {
                         this.expandedIndex = [i];
                         break;
                     }

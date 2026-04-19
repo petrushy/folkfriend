@@ -190,6 +190,47 @@ class FFBackend {
         });
     }
 
+    async transcribeAndQueryPCMSignal(PCMSignal) {
+        await this.flushPCMBuffer();
+
+        try {
+            await this.feedEntirePCMSignal(PCMSignal);
+        } catch (e) {
+            await this.flushPCMBuffer();
+            return {
+                error: e && e.message ? e.message : String(e),
+                contour: '',
+                results: [],
+            };
+        }
+
+        const contour = await this.transcribePCMBuffer();
+
+        try {
+            const maybeError = JSON.parse(contour);
+            if (maybeError && maybeError.error) {
+                await this.flushPCMBuffer();
+                return {
+                    error: maybeError.error,
+                    contour: '',
+                    results: [],
+                };
+            }
+        } catch (e) {
+            if (!(e instanceof SyntaxError)) {
+                await this.flushPCMBuffer();
+                throw e;
+            }
+        }
+
+        const results = await this.runTranscriptionQuery(contour);
+        return {
+            error: null,
+            contour,
+            results,
+        };
+    }
+
     async analyzeRingBuffer(pcm) {
         await this.feedEntirePCMSignal(pcm);
         await this.submitFilledBuffer(true);

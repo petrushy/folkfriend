@@ -88,7 +88,7 @@ export default {
     props: {
         name: { type: String, required: true },
         descriptor: { type: String, required: true },
-        settingID: { type: Number, required: true },
+        settingID: { type: String, required: true },
         timestamp: { type: Number, required: true },
         selected: { type: Boolean, default: false },
         tags: { type: Array, default: () => [] },
@@ -174,15 +174,26 @@ export default {
         },
     },
     mounted() {
-        if (window.ResizeObserver) {
-            this._ro = new ResizeObserver(entries => {
-                this.rowWidth = entries[0].contentRect.width;
+        this._syncRowWidth = () => {
+            if (!this.$refs.rowEl) return;
+            const nextWidth = Math.round(this.$refs.rowEl.getBoundingClientRect().width);
+            if (this.rowWidth !== nextWidth) {
+                this.rowWidth = nextWidth;
+            }
+        };
+        this._queueRowWidthSync = () => {
+            if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
+            this._resizeFrame = requestAnimationFrame(() => {
+                this._syncRowWidth();
+                this._resizeFrame = null;
             });
-            this._ro.observe(this.$refs.rowEl);
-        }
+        };
+        window.addEventListener('resize', this._queueRowWidthSync, { passive: true });
+        this.$nextTick(() => this._queueRowWidthSync());
     },
     beforeDestroy() {
-        if (this._ro) this._ro.disconnect();
+        window.removeEventListener('resize', this._queueRowWidthSync);
+        if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
     },
     methods: {
         favouriteItemClicked() {

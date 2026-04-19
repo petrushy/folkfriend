@@ -53,6 +53,21 @@
                     </v-list-item>
                 </router-link>
 
+                <router-link to="/session-analysis">
+                    <v-list-item @click="0">
+                        <v-list-item-action>
+                            <v-icon medium>
+                                {{ icons.waveform }}
+                            </v-icon>
+                        </v-list-item-action>
+                        <v-list-item-content>
+                            <v-list-item-title class="navBarEntry">
+                                Session Analysis
+                            </v-list-item-title>
+                        </v-list-item-content>
+                    </v-list-item>
+                </router-link>
+
                 <router-link to="/history">
                     <v-list-item @click="0">
                         <v-list-item-action>
@@ -218,6 +233,7 @@ import {
     mdiMicrophone,
     mdiMusicNote,
     mdiStar,
+    mdiWaveform,
     // mdiShareVariant,
 } from '@mdi/js';
 import utils from '@/js/utils.js';
@@ -250,6 +266,7 @@ export default {
             microphone: mdiMicrophone,
             musicNote: mdiMusicNote,
             star: mdiStar,
+            waveform: mdiWaveform,
             // shareVariant: mdiShareVariant,
         },
         isPWA: utils.checkStandalone(),

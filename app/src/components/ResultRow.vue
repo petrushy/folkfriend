@@ -4,7 +4,7 @@
             class="flex-grow-1 d-flex align-center result-link"
             :to="{
                 name: 'tune',
-                params: {
+                query: {
                     settingID: settingID,
                     tuneID: setting.tune_id,
                     displayName: displayName,
@@ -77,8 +77,8 @@ export default {
             required: true
         },
         settingID: {
-            type: Number,
-            default: null,
+            type: String,
+            default: '',
             required: false
         },
         score: {
@@ -101,12 +101,22 @@ export default {
         };
     },
     mounted() {
-        if (window.ResizeObserver) {
-            this._ro = new ResizeObserver(entries => {
-                this.rowWidth = entries[0].contentRect.width;
+        this._syncRowWidth = () => {
+            if (!this.$refs.rowEl) return;
+            const nextWidth = Math.round(this.$refs.rowEl.getBoundingClientRect().width);
+            if (this.rowWidth !== nextWidth) {
+                this.rowWidth = nextWidth;
+            }
+        };
+        this._queueRowWidthSync = () => {
+            if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
+            this._resizeFrame = requestAnimationFrame(() => {
+                this._syncRowWidth();
+                this._resizeFrame = null;
             });
-            this._ro.observe(this.$refs.rowEl);
-        }
+        };
+        window.addEventListener('resize', this._queueRowWidthSync, { passive: true });
+        this.$nextTick(() => this._queueRowWidthSync());
         // Lazily fetch ABC if not already present (name query results lack
         // setting_id so worker.js cannot pre-populate it)
         if (!this.loadedAbc && this.setting && this.setting.tune_id) {
@@ -119,7 +129,8 @@ export default {
         }
     },
     beforeDestroy() {
-        if (this._ro) this._ro.disconnect();
+        window.removeEventListener('resize', this._queueRowWidthSync);
+        if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
     },
     created() {
         store.isTuneFavourite(this.setting.tune_id).then(v => {

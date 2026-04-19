@@ -53,6 +53,15 @@ class AudioService {
         //  https://github.com/WebAudio/web-audio-api/issues/30
         return decodedBuffer.getChannelData(0);
     }
+
+    async fileToTimeDomainData(file) {
+        const url = URL.createObjectURL(file);
+        try {
+            return await this.urlToTimeDomainData(url);
+        } finally {
+            URL.revokeObjectURL(url);
+        }
+    }
 }
 
 const audioService = new AudioService();

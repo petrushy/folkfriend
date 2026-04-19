@@ -290,7 +290,9 @@ class FolkFriendWASMWrapper {
         const results = JSON.parse(response);
         for (const result of results) {
             if (result.setting && result.setting_id !== undefined) {
-                result.setting.abc = this.abcStringBySetting[String(result.setting_id)] || '';
+                const settingID = String(result.setting_id);
+                result.setting.abc = this.abcStringBySetting[settingID] || '';
+                result.setting.source_url = this.sourceUrlBySetting[settingID] || '';
             }
         }
         cb(results);
@@ -303,7 +305,9 @@ class FolkFriendWASMWrapper {
         const results = JSON.parse(response);
         for (const result of results) {
             if (result.setting && result.setting_id !== undefined) {
-                result.setting.abc = this.abcStringBySetting[String(result.setting_id)] || '';
+                const settingID = String(result.setting_id);
+                result.setting.abc = this.abcStringBySetting[settingID] || '';
+                result.setting.source_url = this.sourceUrlBySetting[settingID] || '';
             }
         }
         cb(results);

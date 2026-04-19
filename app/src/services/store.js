@@ -29,6 +29,7 @@ class Store {
             backendVersion: 'not loaded',
             tuneIndexVersion: null,
             tuneIndexDate: null,
+            sessionAnalysis: null,
         };
 
         this.searchStates = {
@@ -400,6 +401,14 @@ class Store {
             console.error(`Invalid state ${state}`);
         }
         eventBus.$emit('setSearchState');
+    }
+
+    setSessionAnalysisState(sessionAnalysisState) {
+        this.state.sessionAnalysis = sessionAnalysisState;
+    }
+
+    clearSessionAnalysisState() {
+        this.state.sessionAnalysis = null;
     }
 }
 

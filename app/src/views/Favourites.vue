@@ -384,7 +384,7 @@ export default {
             if (item) {
                 router.push({
                     name: 'tune',
-                    params: {
+                    query: {
                         tuneID: item.result.setting.tune_id,
                         settingID: item.result.settingID,
                         displayName: item.result.displayName,
