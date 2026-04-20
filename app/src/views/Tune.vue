@@ -102,6 +102,7 @@
                         </span>
                     </div>
                     <AbcDisplay :abc="settingData.abc" :mode="settingData.mode" :meter="settingData.meter"
+                        :title="name"
                         @abcGoFullScreen="abcGoFullScreen" @abcExitFullScreen="abcExitFullScreen"
                         @abcRendered="scrollIntoView" />
                 </v-expansion-panel-content>

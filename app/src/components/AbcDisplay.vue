@@ -13,39 +13,22 @@
             <button v-if="fullscreen" class="exitFullScreenBtn" @click.stop="exitFullScreen">
                 ✕
             </button>
+            <h2 v-if="fullscreen && title" class="fullScreenTitle">
+                {{ title }}
+            </h2>
             <!-- Render ABC sheet music here -->
             <div ref="abcTarget" />
         </div>
-        <v-row
-            wrap
-            justify="center"
-            align="center"
-            class="py-2 px-2"
-        >
-            <v-btn
-                small
-                class="mx-1 px-2 abcControls"
-                @click="playButton"
-            >
-                <v-icon small v-if="paused">
-                    {{ icons.play }}
-                </v-icon>
-                <v-icon small v-else>
-                    {{ icons.pause }}
-                </v-icon>
+        <!-- Controls bar — sibling of the full-screen div so fixed positioning works correctly -->
+        <div :class="fullscreen ? 'fullScreenControls' : 'inlineControls'">
+            <v-btn small class="mx-1 px-2 abcControls" @click="playButton">
+                <v-icon small v-if="paused">{{ icons.play }}</v-icon>
+                <v-icon small v-else>{{ icons.pause }}</v-icon>
             </v-btn>
-            <v-btn
-                small
-                class="mx-1 px-2 abcControls"
-                @click="stopPlaying"
-            >
+            <v-btn small class="mx-1 px-2 abcControls" @click="stopPlaying">
                 <v-icon small>{{ icons.stop }}</v-icon>
             </v-btn>
-            <v-btn
-                small
-                class="mx-1 px-2 abcControls"
-                @click="fullscreen ? exitFullScreen() : goFullScreen()"
-            >
+            <v-btn small class="mx-1 px-2 abcControls" @click="fullscreen ? exitFullScreen() : goFullScreen()">
                 <v-icon small>{{ fullscreen ? icons.fullscreenExit : icons.fullscreen }}</v-icon>
             </v-btn>
             <div class="ml-auto d-flex align-center tempoControl">
@@ -62,7 +45,7 @@
                 />
                 <span class="ml-1 tempoLabel">{{ tempoPercent }}%</span>
             </div>
-        </v-row>
+        </div>
     </v-card>
 </template>
 
@@ -85,6 +68,11 @@ export default {
             default: null
         },
         meter: {
+            type: String,
+            required: false,
+            default: null
+        },
+        title: {
             type: String,
             required: false,
             default: null
@@ -140,6 +128,13 @@ export default {
         },
     },
     mounted: async function () {
+        this._onKeyDown = (e) => {
+            if (e.key === 'Escape' && this.fullscreen) {
+                this.exitFullScreen();
+            }
+        };
+        document.addEventListener('keydown', this._onKeyDown);
+
         const svgDiv = this.$refs.abcTarget;
 
         this.abcVisual = ABCJS.renderAbc(svgDiv, this.abcText, { responsive: 'resize' })[0];
@@ -152,6 +147,7 @@ export default {
         eventBus.$on('stopSynthPlayback', this._onStopSynthPlayback);
     },
     beforeDestroy() {
+        document.removeEventListener('keydown', this._onKeyDown);
         eventBus.$off('stopSynthPlayback', this._onStopSynthPlayback);
         this.stopPlaying();
         this._clearHighlightedNotes();
@@ -402,6 +398,36 @@ export default {
 
 .FullScreenAbcDisplay > div {
     min-height: 100%;
+}
+
+.fullScreenTitle {
+    padding: max(16px, env(safe-area-inset-top, 16px)) 64px 4px 20px;
+    font-size: 1.25rem;
+    font-weight: 500;
+    color: #1a1a1a;
+}
+
+.inlineControls {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    align-items: center;
+    padding: 8px;
+}
+
+.fullScreenControls {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    padding: 8px max(12px, env(safe-area-inset-right, 12px)) max(8px, env(safe-area-inset-bottom, 8px)) max(12px, env(safe-area-inset-left, 12px));
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(6px);
+    z-index: 11;
+    border-top: 1px solid rgba(0, 0, 0, 0.08);
 }
 
 .exitFullScreenBtn {
