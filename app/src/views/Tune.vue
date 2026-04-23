@@ -38,7 +38,7 @@
                             }}
                         </h3>
                         <div
-                            v-if="expandedIndex.includes(i) && settingTags[settingData.setting_id] && settingTags[settingData.setting_id].length > 0"
+                            v-if="settingTags[settingData.setting_id] && settingTags[settingData.setting_id].length > 0"
                             class="settingTagRow"
                         >
                             <v-chip
@@ -78,7 +78,7 @@
                                 />
                             </v-card>
                         </v-menu>
-                        <v-icon v-if="expandedIndex.includes(i)" class="settingStarIcon"
+                        <v-icon v-if="expandedIndex.includes(i) || favouritedSettings[settingData.setting_id]" class="settingStarIcon"
                             :color="favouritedSettings[settingData.setting_id] ? 'amber darken-1' : 'grey lighten-1'"
                             @click.stop="toggleFavourite(settingData)">
                             {{ favouritedSettings[settingData.setting_id] ? icons.star : icons.starOutline }}
