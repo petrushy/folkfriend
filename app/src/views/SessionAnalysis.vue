@@ -391,6 +391,7 @@ export default {
         },
     },
     created() {
+        this._pcm = null;
         this._onIndexLoaded = () => {
             this.indexLoaded = true;
         };
@@ -399,6 +400,7 @@ export default {
         eventBus.$emit('parentViewActivated');
     },
     beforeDestroy() {
+        this._pcm = null;
         this.persistState();
         eventBus.$off('indexLoaded', this._onIndexLoaded);
     },
@@ -579,10 +581,17 @@ export default {
                 total: 0,
                 currentTimeSeconds: 0,
             };
+
+            // Release any PCM buffer from a previous run before allocating a new one.
+            // Yielding after the null lets the GC collect it before the large decode.
+            this._pcm = null;
+            await new Promise(resolve => setTimeout(resolve, 0));
+
             this.persistState();
 
             try {
-                const pcm = await audioService.fileToTimeDomainData(this.audioFile);
+                this._pcm = await audioService.fileToTimeDomainData(this.audioFile);
+                const pcm = this._pcm;
                 const sampleRate = audioService.sampleRate;
                 const durationSeconds = pcm.length / sampleRate;
                 const options = this.resolveAnalysisOptions(durationSeconds);
@@ -670,6 +679,8 @@ export default {
                 this.analysisStage = 'idle';
                 this.analysisError = e && e.message ? e.message : 'Could not analyze the recording.';
                 this.persistState();
+            } finally {
+                this._pcm = null;
             }
         },
         removeDetection(id) {
