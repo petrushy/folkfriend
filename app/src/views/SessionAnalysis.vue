@@ -154,6 +154,10 @@
                 >
                     Stop
                 </v-btn>
+                <VolumeMeter
+                    v-if="liveMode && liveMicActive && !liveIsPaused"
+                    :active="liveMode && liveMicActive && !liveIsPaused"
+                />
                 <div class="text--secondary">
                     Tune index: {{ indexStatusText }}
                 </div>
@@ -174,6 +178,7 @@
             <div class="d-flex flex-wrap align-center" style="gap: 16px;">
                 <v-switch
                     v-model="customAnalysisSettings"
+                    :disabled="liveMicActive"
                     inset
                     hide-details
                     class="mt-0 pt-0"
@@ -181,7 +186,7 @@
                 />
                 <v-text-field
                     v-model.number="analysisSettings.windowSeconds"
-                    :disabled="!customAnalysisSettings"
+                    :disabled="!customAnalysisSettings || liveMicActive"
                     type="number"
                     min="3"
                     step="1"
@@ -192,7 +197,7 @@
                 />
                 <v-text-field
                     v-model.number="analysisSettings.stepSeconds"
-                    :disabled="!customAnalysisSettings"
+                    :disabled="!customAnalysisSettings || liveMicActive"
                     type="number"
                     min="1"
                     step="1"
@@ -351,6 +356,7 @@ import eventBus from '@/eventBus.js';
 import { mdiOpenInNew, mdiMicrophone } from '@mdi/js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
+import VolumeMeter from '@/components/VolumeMeter.vue';
 import {
     buildTuneListText,
     buildUpdatedXsc,
@@ -364,6 +370,7 @@ const SESSION_ANALYSIS_STATE_VERSION = 3;
 
 export default {
     name: 'SessionAnalysisView',
+    components: { VolumeMeter },
     data() {
         return {
             dragActive: false,
@@ -675,9 +682,9 @@ export default {
             this.progress = { current: 0, total: 0, currentTimeSeconds: 0 };
             this.analysisSummary = { acceptedWindows: 0, durationSeconds: 0, options: null };
         },
-        cancelAnalysis() {
+        async cancelAnalysis() {
             if (this.liveMode) {
-                liveAnalysisService.stop();
+                await liveAnalysisService.stop();
             } else {
                 fileSessionAnalysisService.cancel();
             }

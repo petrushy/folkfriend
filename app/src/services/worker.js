@@ -11,6 +11,12 @@ class FolkFriendWASMWrapper {
         this.abcStringBySetting = {};
         this.sourceUrlBySetting = {};
 
+        // Reusable per-frame PCM buffer in WASM linear memory. Allocated once
+        // (lazily on first feed) and reused forever — previous code allocated
+        // a fresh buffer per frame which the Rust side forgot, leaking ~2 MB
+        // of WASM heap per analysis cycle.
+        this._pcmWindowPtr = null;
+
         this.loadedWASM = new Promise(resolve => {
             this.setLoadedWASM = resolve;
         });
@@ -241,29 +247,46 @@ class FolkFriendWASMWrapper {
     }
 
     async feedEntirePCMSignal(PCMSignal) {
-        const frames = Math.floor(PCMSignal.length / ffConfig.SPEC_WINDOW_SIZE);
+        const windowSize = ffConfig.SPEC_WINDOW_SIZE;
+        const frames = Math.floor(PCMSignal.length / windowSize);
         if (frames === 0) {
             throw 'PCM signal too short';
         }
+        await this.loadedWASM;
+        await this.loadedSampleRate;
+
+        // Allocate the reusable WASM-side PCM buffer once (idempotent across
+        // calls). The Rust-side allocator forgets the buffer so it persists
+        // for the lifetime of the worker.
+        if (this._pcmWindowPtr === null) {
+            this._pcmWindowPtr = this.folkfriendWASM.alloc_single_pcm_window();
+        }
+        const ptr = this._pcmWindowPtr;
+        const wasm = this.folkfriendWASM;
+
+        // The view is re-fetched inside the loop because WASM linear memory
+        // may grow underneath us; resizing detaches existing views. Cheap to
+        // re-create — it's just a typed-array header over the same memory.
         for (let i = 0; i < frames; i++) {
-            const PCMWindow = PCMSignal.slice(
-                ffConfig.SPEC_WINDOW_SIZE * i,
-                ffConfig.SPEC_WINDOW_SIZE * (i + 1)
-            );
-            await this.feedSinglePCMWindow(PCMWindow);
+            const start = windowSize * i;
+            const view = wasm.get_allocated_pcm_window(ptr);
+            view.set(PCMSignal.subarray(start, start + windowSize));
+            wasm.feed_single_pcm_window(ptr);
         }
     }
 
     async feedSinglePCMWindow(PCMWindow) {
+        // Kept for the live-recording mic processor which feeds frames as they
+        // arrive. Uses the same reusable WASM buffer.
         await this.loadedWASM;
         await this.loadedSampleRate;
-        const ptr = await this.folkfriendWASM.alloc_single_pcm_window();
-        const arr = await this.folkfriendWASM.get_allocated_pcm_window(ptr);
-
-        arr.set(PCMWindow);
-
-        await this.folkfriendWASM.feed_single_pcm_window(ptr);
-        // console.debug("feedSinglePCMWindow: complete");
+        if (this._pcmWindowPtr === null) {
+            this._pcmWindowPtr = this.folkfriendWASM.alloc_single_pcm_window();
+        }
+        const ptr = this._pcmWindowPtr;
+        const view = this.folkfriendWASM.get_allocated_pcm_window(ptr);
+        view.set(PCMWindow);
+        this.folkfriendWASM.feed_single_pcm_window(ptr);
     }
 
     async flushPCMBuffer() {

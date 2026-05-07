@@ -16,6 +16,34 @@ class MicService {
         this.bufferSize = 1024;
 
         this.recordingTimer = null;
+
+        // Running RMS accumulator. Both startRecording() and startContinuous()
+        // feed every chunk through _accumulateRms(); UI components call
+        // getRmsLevel() at their poll rate (e.g. once per second) to get the
+        // integrated level since the last read.
+        this._rmsSquaredSum = 0;
+        this._rmsSampleCount = 0;
+    }
+
+    _accumulateRms(samples) {
+        let sum = 0;
+        for (let i = 0; i < samples.length; i++) {
+            sum += samples[i] * samples[i];
+        }
+        this._rmsSquaredSum += sum;
+        this._rmsSampleCount += samples.length;
+    }
+
+    // Returns the integrated RMS level since the last call (linear amplitude,
+    // 0..1). Resets the accumulator. If no audio has flowed since the last
+    // read, returns 0. Designed for a single consumer at a time — concurrent
+    // consumers would each see partial readings.
+    getRmsLevel() {
+        if (this._rmsSampleCount === 0) return 0;
+        const rms = Math.sqrt(this._rmsSquaredSum / this._rmsSampleCount);
+        this._rmsSquaredSum = 0;
+        this._rmsSampleCount = 0;
+        return rms;
     }
 
     async startRecording() {
@@ -76,9 +104,10 @@ class MicService {
         //  it yet. But the cognoscente (rtoy) reckon it's not going anywhere 
         //  anytime soon; https://github.com/WebAudio/web-audio-api/issues/2391.
         this.micProcessor = this.audioCtx.createScriptProcessor(this.bufferSize, 1, 1);
+        const self = this;
         this.micProcessor.onaudioprocess = function(audioProcessingEvent) {
             let channelData = audioProcessingEvent.inputBuffer.getChannelData(0);
-            // console.debug("audioProcessingEvent");
+            self._accumulateRms(channelData);
             ffBackend.feedSinglePCMWindow(channelData);
         };
 
@@ -107,50 +136,60 @@ class MicService {
     }
 
     async startContinuous(durationSecs) {
+        // Serialise against any in-flight startContinuous/stopContinuous so a
+        // rapid toggle cannot leave two AudioContexts alive at once.
+        if (this._continuousTransition) await this._continuousTransition;
         if (store.isListening()) return;
-        store.setSearchState(store.searchStates.LISTENING);
 
-        this._ringBuffer = [];
+        this._continuousTransition = (async () => {
+            store.setSearchState(store.searchStates.LISTENING);
+            this._ringBuffer = [];
 
-        if (!navigator || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-            alert('Missing support for navigator.mediaDevices.getUserMedia');
-            throw 'Missing support for navigator.mediaDevices.getUserMedia';
-        }
-
-        try {
-            this.micStream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
-        } catch (e) {
-            store.setSearchState(store.searchStates.READY);
-            throw e;
-        }
-
-        this.audioCtx = new AudioContext();
-        this.micProcessor = this.audioCtx.createScriptProcessor(this.bufferSize, 1, 1);
-
-        const sampleRate = this.audioCtx.sampleRate;
-        this._ringBufferMaxChunks = Math.ceil(
-            (durationSecs || store.userSettings.recordingTimeLimitSecs || 10) * sampleRate / this.bufferSize
-        );
-
-        this.micProcessor.onaudioprocess = (audioProcessingEvent) => {
-            const channelData = audioProcessingEvent.inputBuffer.getChannelData(0);
-            this._ringBuffer.push(new Float32Array(channelData)); // copy
-            if (this._ringBuffer.length > this._ringBufferMaxChunks) {
-                this._ringBuffer.shift();
+            if (!navigator || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                alert('Missing support for navigator.mediaDevices.getUserMedia');
+                throw 'Missing support for navigator.mediaDevices.getUserMedia';
             }
-        };
 
-        this.micSource = this.audioCtx.createMediaStreamSource(this.micStream);
-        this.micSource.connect(this.micProcessor);
-        this.micProcessor.connect(this.audioCtx.destination);
+            try {
+                this.micStream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+            } catch (e) {
+                store.setSearchState(store.searchStates.READY);
+                throw e;
+            }
 
-        try {
+            this.audioCtx = new AudioContext();
+            this.micProcessor = this.audioCtx.createScriptProcessor(this.bufferSize, 1, 1);
+
+            const sampleRate = this.audioCtx.sampleRate;
+            this._ringBufferMaxChunks = Math.ceil(
+                (durationSecs || store.userSettings.recordingTimeLimitSecs || 10) * sampleRate / this.bufferSize
+            );
+
+            this.micProcessor.onaudioprocess = (audioProcessingEvent) => {
+                const channelData = audioProcessingEvent.inputBuffer.getChannelData(0);
+                this._accumulateRms(channelData);
+                this._ringBuffer.push(new Float32Array(channelData)); // copy
+                if (this._ringBuffer.length > this._ringBufferMaxChunks) {
+                    this._ringBuffer.shift();
+                }
+            };
+
+            this.micSource = this.audioCtx.createMediaStreamSource(this.micStream);
+            this.micSource.connect(this.micProcessor);
+            this.micProcessor.connect(this.audioCtx.destination);
+
             console.debug(`Continuous mode: sample rate ${sampleRate}, max chunks ${this._ringBufferMaxChunks}`);
             await ffBackend.setSampleRate(sampleRate);
+        })();
+
+        try {
+            await this._continuousTransition;
         } catch (e) {
+            this._continuousTransition = null;
             await this.stopContinuous();
             throw e;
         }
+        this._continuousTransition = null;
     }
 
     getContinuousAudio() {
@@ -166,7 +205,14 @@ class MicService {
     }
 
     async stopContinuous() {
+        if (this._continuousTransition) {
+            // Wait for any in-flight start before tearing down — otherwise we
+            // may try to disconnect resources that haven't been wired up yet.
+            try { await this._continuousTransition; } catch (_) { /* swallow */ }
+        }
         this._ringBuffer = [];
+        this._rmsSquaredSum = 0;
+        this._rmsSampleCount = 0;
         if (this.micProcessor) {
             this.micProcessor.disconnect();
             this.micProcessor = null;
@@ -191,6 +237,9 @@ class MicService {
         // Make sure we don't try to close whilst in the process
         //  of opening.
         await this.opening;
+
+        this._rmsSquaredSum = 0;
+        this._rmsSampleCount = 0;
 
         if (this.micProcessor) {
             this.micProcessor.disconnect();

@@ -22,6 +22,20 @@ class FFBackend {
         this.folkfriendWorker.onIndexLoad(Comlink.proxy(() => {
             eventBus.$emit('indexLoaded');
         }));
+
+        // Serialises compound PCM-buffer pipelines (flush → feed → transcribe → query)
+        // so two callers cannot interleave and corrupt each other's WASM buffer.
+        // Only wraps operations that touch the shared PCM buffer; index lookups
+        // (name search, settings-by-tune-id, etc.) run unguarded.
+        this._pcmBufferLock = Promise.resolve();
+    }
+
+    _withPCMBufferLock(fn) {
+        const prev = this._pcmBufferLock;
+        let release;
+        const next = new Promise(resolve => { release = resolve; });
+        this._pcmBufferLock = next;
+        return prev.then(fn).finally(release);
     }
 
     async version() {
@@ -94,7 +108,11 @@ class FFBackend {
         });
     }
 
-    async submitFilledBuffer(skipHistory = false) {
+    submitFilledBuffer(skipHistory = false) {
+        return this._withPCMBufferLock(() => this._submitFilledBufferUnlocked(skipHistory));
+    }
+
+    async _submitFilledBufferUnlocked(skipHistory) {
         let t0 = performance.now();
         const contour = await this.transcribePCMBuffer();
         let tEnd = performance.now();
@@ -190,7 +208,11 @@ class FFBackend {
         });
     }
 
-    async transcribeAndQueryPCMSignal(PCMSignal) {
+    transcribeAndQueryPCMSignal(PCMSignal) {
+        return this._withPCMBufferLock(() => this._transcribeAndQueryPCMSignalUnlocked(PCMSignal));
+    }
+
+    async _transcribeAndQueryPCMSignalUnlocked(PCMSignal) {
         await this.flushPCMBuffer();
 
         try {
@@ -231,9 +253,11 @@ class FFBackend {
         };
     }
 
-    async analyzeRingBuffer(pcm) {
-        await this.feedEntirePCMSignal(pcm);
-        await this.submitFilledBuffer(true);
+    analyzeRingBuffer(pcm) {
+        return this._withPCMBufferLock(async () => {
+            await this.feedEntirePCMSignal(pcm);
+            await this._submitFilledBufferUnlocked(true);
+        });
     }
 
     async settingsFromTuneID(tuneID) {

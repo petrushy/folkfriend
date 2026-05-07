@@ -45,9 +45,13 @@ class LiveAnalysisService {
         this._cancelSleep = null;
         this._timerInterval = null;
         this._sampleRate = 48000;
+        // Promise that resolves when an in-flight stop() completes. start() awaits
+        // this so a quick stop→start cycle cannot create overlapping AudioContexts.
+        this._stopPromise = null;
     }
 
     async start(windowSeconds, stepSeconds) {
+        if (this._stopPromise) await this._stopPromise;
         if (this.isRunning) return;
 
         const options = {
@@ -102,13 +106,20 @@ class LiveAnalysisService {
     }
 
     async stop() {
-        if (!this.isRunning) return;
+        if (!this.isRunning) return this._stopPromise || Promise.resolve();
         this.isRunning = false;
         this.isPaused = false;
         this._stopTimer();
         if (this._cancelSleep) { this._cancelSleep(); this._cancelSleep = null; }
-        await micService.stopContinuous();
-        eventBus.$emit('liveAnalysisStopped');
+        this._stopPromise = (async () => {
+            try {
+                await micService.stopContinuous();
+            } finally {
+                eventBus.$emit('liveAnalysisStopped');
+                this._stopPromise = null;
+            }
+        })();
+        return this._stopPromise;
     }
 
     _startTimer() {
@@ -136,7 +147,23 @@ class LiveAnalysisService {
             const pcm = micService.getContinuousAudio();
 
             if (pcm.length > 0) {
-                const response = await ffBackend.transcribeAndQueryPCMSignal(pcm);
+                // Guard against a hung worker — generous ceiling well beyond
+                // any healthy backend latency (~3s), so a real backend never
+                // hits this and a stuck cycle still recovers on the next step.
+                const analysisCeilingMs = Math.max(15_000, options.windowSeconds * 4 * 1000);
+                let response;
+                try {
+                    response = await Promise.race([
+                        ffBackend.transcribeAndQueryPCMSignal(pcm),
+                        new Promise((_, reject) => setTimeout(
+                            () => reject(new Error('analysis timeout')),
+                            analysisCeilingMs,
+                        )),
+                    ]);
+                } catch (e) {
+                    console.warn('Live analysis cycle skipped:', e && e.message);
+                    response = { error: e && e.message, results: [] };
+                }
 
                 if (this.isRunning && !this.isPaused && !response.error && response.results && response.results.length > 0) {
                     const normalized = normaliseQueryResults(response.results, options);

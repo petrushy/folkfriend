@@ -43,6 +43,15 @@
             </svg>
         </div>
 
+        <v-row
+            v-if="searchState === 'recording' || searchState === 'listening'"
+            justify="center"
+            class="px-4"
+            style="margin-top: 8px; min-height: 18px;"
+        >
+            <VolumeMeter :active="searchState === 'recording' || searchState === 'listening'" />
+        </v-row>
+
         <v-row justify="center" class="monitor-row px-4" style="gap: 4px;">
             <v-btn
                 small
@@ -126,6 +135,7 @@
 
 <script>
 import RecorderButton from '@/components/RecorderButton';
+import VolumeMeter from '@/components/VolumeMeter';
 import ffBackend from '@/services/backend';
 import audioService from '@/services/audio';
 import store from '@/services/store';
@@ -137,6 +147,7 @@ export default {
     name: 'SearchView',
     components: {
         RecorderButton,
+        VolumeMeter,
     },
     data: function () {
         return {
