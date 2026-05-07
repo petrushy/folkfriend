@@ -335,8 +335,7 @@ class Store {
         }
         this.currentUser = user;
         eventBus.$emit('authStateChanged', user);
-        const localFavs = await this.getFavourites();
-        this._unsubscribeSync = syncSubscribe(user.uid, localFavs, async (type, items) => {
+        this._unsubscribeSync = syncSubscribe(user.uid, () => this.getFavourites(), async (type, items) => {
             if (type === 'favourites') {
                 await this._dbSet('favouriteItems', items);
                 this._invalidateFavouriteCache();

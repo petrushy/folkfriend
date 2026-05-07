@@ -4,7 +4,23 @@
             Session Analysis
         </h1>
 
-        <v-card class="pa-5 my-3">
+        <v-btn-toggle
+            v-model="liveMode"
+            mandatory
+            dense
+            rounded
+            class="mb-4"
+        >
+            <v-btn :value="false" small>
+                File recording
+            </v-btn>
+            <v-btn :value="true" small>
+                <v-icon left small>{{ icons.microphone }}</v-icon>
+                Live microphone
+            </v-btn>
+        </v-btn-toggle>
+
+        <v-card v-if="!liveMode" class="pa-5 my-3">
             <h2 class="text-h6 mb-3">
                 Import
             </h2>
@@ -103,6 +119,16 @@
             </v-alert>
         </v-card>
 
+        <v-card v-else class="pa-5 my-3">
+            <h2 class="text-h6 mb-3">
+                Live Microphone
+            </h2>
+            <p class="mb-0">
+                Analyses a rolling window of audio from your microphone every {{ analysisSettings.stepSeconds }}s.
+                Detected tune starts appear in the table below as they are found.
+            </p>
+        </v-card>
+
         <v-card class="pa-5 my-3">
             <div class="d-flex flex-wrap align-center" style="gap: 12px;">
                 <v-btn
@@ -110,20 +136,38 @@
                     :disabled="!canAnalyze"
                     @click="runAnalysis"
                 >
-                    Analyze Recording
+                    {{ liveMode ? 'Start Live Analysis' : 'Analyze Recording' }}
                 </v-btn>
                 <v-btn
-                    v-if="isAnalyzing"
+                    v-if="liveMode && liveMicActive"
+                    text
+                    color="secondary"
+                    @click="togglePauseLive"
+                >
+                    {{ liveIsPaused ? 'Resume' : 'Pause' }}
+                </v-btn>
+                <v-btn
+                    v-if="isAnalyzing || (liveMode && liveMicActive)"
                     text
                     color="secondary"
                     @click="cancelAnalysis"
                 >
-                    Cancel
+                    Stop
                 </v-btn>
                 <div class="text--secondary">
                     Tune index: {{ indexStatusText }}
                 </div>
             </div>
+
+            <v-alert
+                v-if="liveMicError"
+                type="error"
+                dense
+                text
+                class="mt-3 mb-0"
+            >
+                {{ liveMicError }}
+            </v-alert>
 
             <v-divider class="my-4" />
 
@@ -166,12 +210,12 @@
             <div v-if="analysisStage !== 'idle'" class="mt-4">
                 <div class="mb-2">
                     <strong>{{ stageLabel }}</strong>
-                    <span v-if="progress.total > 0">
+                    <span v-if="!liveMode && progress.total > 0">
                         · {{ progress.current }}/{{ progress.total }}
                     </span>
                 </div>
                 <v-progress-linear
-                    :indeterminate="analysisStage === 'decoding'"
+                    :indeterminate="analysisStage === 'decoding' || (liveMode && analysisStage === 'analyzing' && !liveIsPaused)"
                     :value="progressPercent"
                     rounded
                 />
@@ -219,7 +263,7 @@
                 <template #default>
                     <thead>
                         <tr>
-                            <th class="text-left">
+                            <th v-if="!liveMode" class="text-left">
                                 Start
                             </th>
                             <th class="text-left">
@@ -235,7 +279,7 @@
                     </thead>
                     <tbody>
                         <tr v-for="detection in detections" :key="detection.id">
-                            <td class="start-cell">
+                            <td v-if="!liveMode" class="start-cell">
                                 <v-text-field
                                     v-model="detection.editableTime"
                                     dense
@@ -252,7 +296,7 @@
                                     dense
                                     hide-details
                                     solo
-                                    @change="syncSelectedTune(detection)"
+                                    @change="onTuneChange(detection)"
                                 />
                             </td>
                             <td>
@@ -302,22 +346,18 @@
 </template>
 
 <script>
-import audioService from '@/services/audio.js';
-import ffBackend from '@/services/backend.js';
 import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
-import { mdiOpenInNew } from '@mdi/js';
+import { mdiOpenInNew, mdiMicrophone } from '@mdi/js';
+import liveAnalysisService from '@/services/liveAnalysis.js';
+import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import {
     buildTuneListText,
     buildUpdatedXsc,
-    clusterDetections,
     formatSecondsAsClock,
     formatSecondsAsDuration,
-    getAnalysisOptions,
-    normaliseQueryResults,
     parseClockTime,
     parseXscMetadata,
-    rmsOfSignal,
 } from '@/js/sessionAnalysis.js';
 
 const SESSION_ANALYSIS_STATE_VERSION = 3;
@@ -338,11 +378,10 @@ export default {
             analysisStage: 'idle',
             analysisError: '',
             exportError: '',
-            cancelRequested: false,
             customAnalysisSettings: false,
             analysisSettings: {
                 windowSeconds: 10,
-                stepSeconds: 10,
+                stepSeconds: 5,
             },
             detections: [],
             analysisSummary: {
@@ -355,13 +394,28 @@ export default {
                 total: 0,
                 currentTimeSeconds: 0,
             },
+            liveMode: false,
+            liveMicActive: false,
+            liveIsPaused: false,
+            liveMicError: '',
+            liveElapsedSeconds: 0,
             icons: {
                 openInNew: mdiOpenInNew,
+                microphone: mdiMicrophone,
             },
         };
     },
+    watch: {
+        liveMode(newVal) {
+            if (!newVal && liveAnalysisService.isRunning) {
+                liveAnalysisService.stop();
+            }
+            this.resetResults();
+        },
+    },
     computed: {
         canAnalyze() {
+            if (this.liveMode) return !this.isAnalyzing && this.indexLoaded;
             return !!this.audioFile && !this.isAnalyzing && this.indexLoaded;
         },
         isAnalyzing() {
@@ -371,16 +425,25 @@ export default {
             return this.indexLoaded ? 'ready' : 'loading…';
         },
         stageLabel() {
+            if (this.liveMode) {
+                if (this.analysisStage === 'analyzing') return this.liveIsPaused ? 'Paused' : 'Listening…';
+                if (this.analysisStage === 'done') return 'Analysis stopped';
+                return '';
+            }
             if (this.analysisStage === 'decoding') return 'Decoding audio';
             if (this.analysisStage === 'analyzing') return 'Scanning windows';
             if (this.analysisStage === 'done') return 'Analysis complete';
             return '';
         },
         progressPercent() {
+            if (this.liveMode) return 0;
             if (!this.progress.total) return 0;
             return (this.progress.current / this.progress.total) * 100;
         },
         progressLabel() {
+            if (this.liveMode && this.analysisStage === 'analyzing') {
+                return `Elapsed: ${formatSecondsAsClock(this.liveElapsedSeconds)}`;
+            }
             if (this.analysisStage === 'analyzing') {
                 return `Around ${formatSecondsAsClock(this.progress.currentTimeSeconds)} of the recording`;
             }
@@ -392,17 +455,97 @@ export default {
     },
     created() {
         this._pcm = null;
-        this._onIndexLoaded = () => {
-            this.indexLoaded = true;
+
+        // Index
+        this._onIndexLoaded = () => { this.indexLoaded = true; };
+
+        // Live analysis events
+        this._onLiveUpdate = (detections) => {
+            this.detections = detections.map(d => this._buildDetectionRow(d));
+            this.analysisSummary.acceptedWindows = liveAnalysisService._windowMatches.length;
         };
+        this._onLiveTimerTick = (secs) => { this.liveElapsedSeconds = secs; };
+        this._onLiveStopped = () => {
+            this.liveMicActive = false;
+            this.liveIsPaused = false;
+            this.analysisStage = this.detections.length ? 'done' : 'idle';
+        };
+        this._onLivePaused = () => { this.liveIsPaused = true; };
+        this._onLiveResumed = () => { this.liveIsPaused = false; };
+
+        // File analysis events
+        this._onFileStage = (stage) => {
+            this.analysisStage = stage;
+            if (stage === 'done' || stage === 'idle') this.persistState();
+        };
+        this._onFileOptions = ({ windowSeconds, stepSeconds, durationSeconds }) => {
+            this.analysisSettings.windowSeconds = windowSeconds;
+            this.analysisSettings.stepSeconds = stepSeconds;
+            this.analysisSummary.durationSeconds = durationSeconds;
+        };
+        this._onFileProgress = ({ current, total, currentTimeSeconds, acceptedWindows }) => {
+            this.progress = { current, total, currentTimeSeconds };
+            this.analysisSummary.acceptedWindows = acceptedWindows;
+        };
+        this._onFileUpdate = (detections, acceptedWindows) => {
+            this.detections = detections.map(d => this._buildDetectionRow(d));
+            this.analysisSummary.acceptedWindows = acceptedWindows;
+        };
+        this._onFileError = (message) => { this.analysisError = message; };
+
         eventBus.$on('indexLoaded', this._onIndexLoaded);
-        this.restoreSavedState();
+        eventBus.$on('liveAnalysisUpdate', this._onLiveUpdate);
+        eventBus.$on('liveAnalysisTimerTick', this._onLiveTimerTick);
+        eventBus.$on('liveAnalysisStopped', this._onLiveStopped);
+        eventBus.$on('liveAnalysisPaused', this._onLivePaused);
+        eventBus.$on('liveAnalysisResumed', this._onLiveResumed);
+        eventBus.$on('fileAnalysisStage', this._onFileStage);
+        eventBus.$on('fileAnalysisOptions', this._onFileOptions);
+        eventBus.$on('fileAnalysisProgress', this._onFileProgress);
+        eventBus.$on('fileAnalysisUpdate', this._onFileUpdate);
+        eventBus.$on('fileAnalysisError', this._onFileError);
+
+        if (liveAnalysisService.isRunning) {
+            // Setting liveMode queues the watcher which calls resetResults() asynchronously.
+            // Use $nextTick to restore the actual live state after that watcher has run.
+            this.liveMode = true;
+            this.$nextTick(() => {
+                if (!liveAnalysisService.isRunning) return;
+                this.liveMicActive = true;
+                this.liveIsPaused = liveAnalysisService.isPaused;
+                this.analysisStage = 'analyzing';
+                this.liveElapsedSeconds = liveAnalysisService.elapsedSeconds;
+                this.detections = liveAnalysisService.detections.map(d => this._buildDetectionRow(d));
+                this.analysisSummary.acceptedWindows = liveAnalysisService._windowMatches.length;
+            });
+        } else if (this.$route && this.$route.query.live === '1') {
+            this.liveMode = true;
+        } else {
+            this.restoreSavedState();
+        }
+
         eventBus.$emit('parentViewActivated');
     },
     beforeDestroy() {
         this._pcm = null;
-        this.persistState();
+        // File analysis is cancelled on navigation (unlike live, which continues in background)
+        if (fileSessionAnalysisService.isRunning) {
+            fileSessionAnalysisService.cancel();
+        }
         eventBus.$off('indexLoaded', this._onIndexLoaded);
+        eventBus.$off('liveAnalysisUpdate', this._onLiveUpdate);
+        eventBus.$off('liveAnalysisTimerTick', this._onLiveTimerTick);
+        eventBus.$off('liveAnalysisStopped', this._onLiveStopped);
+        eventBus.$off('liveAnalysisPaused', this._onLivePaused);
+        eventBus.$off('liveAnalysisResumed', this._onLiveResumed);
+        eventBus.$off('fileAnalysisStage', this._onFileStage);
+        eventBus.$off('fileAnalysisOptions', this._onFileOptions);
+        eventBus.$off('fileAnalysisProgress', this._onFileProgress);
+        eventBus.$off('fileAnalysisUpdate', this._onFileUpdate);
+        eventBus.$off('fileAnalysisError', this._onFileError);
+        if (!this.liveMode) {
+            this.persistState();
+        }
     },
     methods: {
         restoreSavedState() {
@@ -425,7 +568,7 @@ export default {
             this.customAnalysisSettings = !!saved.customAnalysisSettings;
             this.analysisSettings = saved.analysisSettings || {
                 windowSeconds: 10,
-                stepSeconds: 10,
+                stepSeconds: 5,
             };
             this.detections = saved.detections || [];
             this.analysisSummary = saved.analysisSummary || {
@@ -503,6 +646,7 @@ export default {
             );
         },
         setAudioFile(file) {
+            if (fileSessionAnalysisService.isRunning) fileSessionAnalysisService.cancel();
             this.audioFile = file;
             this.resetResults();
             this.updateFileWarning();
@@ -528,159 +672,78 @@ export default {
             this.analysisError = '';
             this.exportError = '';
             this.detections = [];
-            this.progress = {
-                current: 0,
-                total: 0,
-                currentTimeSeconds: 0,
-            };
-            this.analysisSummary = {
-                acceptedWindows: 0,
-                durationSeconds: 0,
-                options: null,
-            };
-            this.persistState();
-        },
-        resolveAnalysisOptions(durationSeconds) {
-            const defaults = getAnalysisOptions(durationSeconds);
-            if (!this.customAnalysisSettings) {
-                this.analysisSettings.windowSeconds = defaults.windowSeconds;
-                this.analysisSettings.stepSeconds = defaults.stepSeconds;
-                return defaults;
-            }
-
-            const windowSeconds = Number(this.analysisSettings.windowSeconds);
-            const stepSeconds = Number(this.analysisSettings.stepSeconds);
-
-            if (!Number.isFinite(windowSeconds) || windowSeconds < 3) {
-                throw new Error('Window size must be at least 3 seconds.');
-            }
-            if (!Number.isFinite(stepSeconds) || stepSeconds < 1) {
-                throw new Error('Step size must be at least 1 second.');
-            }
-
-            return {
-                ...defaults,
-                windowSeconds,
-                stepSeconds,
-                mergeGapSeconds: windowSeconds,
-            };
+            this.progress = { current: 0, total: 0, currentTimeSeconds: 0 };
+            this.analysisSummary = { acceptedWindows: 0, durationSeconds: 0, options: null };
         },
         cancelAnalysis() {
-            this.cancelRequested = true;
+            if (this.liveMode) {
+                liveAnalysisService.stop();
+            } else {
+                fileSessionAnalysisService.cancel();
+            }
+        },
+        togglePauseLive() {
+            if (this.liveIsPaused) {
+                liveAnalysisService.resume();
+            } else {
+                liveAnalysisService.pause();
+            }
         },
         async runAnalysis() {
+            if (this.liveMode) {
+                await this.startLiveAnalysis();
+                return;
+            }
             if (!this.audioFile) return;
-
-            this.cancelRequested = false;
             this.analysisError = '';
             this.exportError = '';
             this.detections = [];
-            this.analysisStage = 'decoding';
-            this.progress = {
-                current: 0,
-                total: 0,
-                currentTimeSeconds: 0,
+            this.analysisSummary.acceptedWindows = 0;
+            this.progress = { current: 0, total: 0, currentTimeSeconds: 0 };
+            await fileSessionAnalysisService.start(this.audioFile, {
+                customAnalysisSettings: this.customAnalysisSettings,
+                windowSeconds: this.analysisSettings.windowSeconds,
+                stepSeconds: this.analysisSettings.stepSeconds,
+            });
+        },
+        _buildDetectionRow(detection) {
+            const tuneOptions = this.buildTuneOptions(detection);
+            const selectedTuneKey = this.tuneOptionValue({
+                tuneId: detection.tuneId,
+                settingId: detection.settingId,
+                sourceUrl: detection.sourceUrl,
+                title: detection.title,
+            });
+            const selected = tuneOptions.find(o => o.value === selectedTuneKey) || tuneOptions[0] || null;
+            return {
+                ...detection,
+                editableTime: formatSecondsAsClock(detection.startSeconds),
+                selectedTuneKey,
+                tuneOptions,
+                selectedTuneId: selected ? selected.tuneId : detection.tuneId,
+                selectedSettingId: selected ? selected.settingId : (detection.settingId ? String(detection.settingId) : ''),
+                selectedSourceUrl: selected ? (selected.sourceUrl || '') : (detection.sourceUrl || ''),
+                selectedTitle: selected ? selected.title : (detection.title || ''),
             };
+        },
+        async startLiveAnalysis() {
+            this.liveMicError = '';
+            this.detections = [];
+            this.analysisSummary.acceptedWindows = 0;
+            this.analysisStage = 'analyzing';
+            this.analysisError = '';
+            this.liveElapsedSeconds = 0;
+            this.liveIsPaused = false;
 
-            // Release any PCM buffer from a previous run before allocating a new one.
-            // Yielding after the null lets the GC collect it before the large decode.
-            this._pcm = null;
-            await new Promise(resolve => setTimeout(resolve, 0));
-
-            this.persistState();
+            const windowSeconds = Number(this.analysisSettings.windowSeconds) || 10;
+            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 10;
 
             try {
-                this._pcm = await audioService.fileToTimeDomainData(this.audioFile);
-                const pcm = this._pcm;
-                const sampleRate = audioService.sampleRate;
-                const durationSeconds = pcm.length / sampleRate;
-                const options = this.resolveAnalysisOptions(durationSeconds);
-                const maxStart = Math.max(0, durationSeconds - options.windowSeconds);
-                const starts = [];
-
-                for (let start = 0; start <= maxStart; start += options.stepSeconds) {
-                    starts.push(start);
-                }
-                if (!starts.length || starts[starts.length - 1] < maxStart) {
-                    starts.push(maxStart);
-                }
-
-                this.analysisStage = 'analyzing';
-                this.progress.total = starts.length;
-                this.analysisSummary.durationSeconds = durationSeconds;
-                this.analysisSummary.options = options;
-                this.persistState();
-
-                const windowMatches = [];
-
-                for (let i = 0; i < starts.length; i++) {
-                    if (this.cancelRequested) {
-                        this.analysisStage = 'idle';
-                        this.analysisError = 'Analysis cancelled.';
-                        this.persistState();
-                        return;
-                    }
-
-                    const startSeconds = starts[i];
-                    this.progress.current = i + 1;
-                    this.progress.currentTimeSeconds = startSeconds;
-
-                    const startSample = Math.floor(startSeconds * sampleRate);
-                    const endSample = Math.min(pcm.length, startSample + Math.floor(options.windowSeconds * sampleRate));
-                    const segment = pcm.subarray(startSample, endSample);
-
-                    if (rmsOfSignal(segment) < options.minRms) {
-                        continue;
-                    }
-
-                    const response = await ffBackend.transcribeAndQueryPCMSignal(segment);
-                    if (response.error || !response.contour || response.contour.length < options.minContourLength) {
-                        continue;
-                    }
-
-                    const normalized = normaliseQueryResults(response.results, options);
-                    if (!normalized) {
-                        continue;
-                    }
-
-                    windowMatches.push({
-                        startSeconds,
-                        tuneId: normalized.tuneId,
-                        settingId: normalized.settingId,
-                        sourceUrl: normalized.sourceUrl,
-                        displayName: normalized.displayName,
-                        score: normalized.score,
-                        alternatives: normalized.alternatives,
-                    });
-
-                    if ((i + 1) % 5 === 0) {
-                        await new Promise(resolve => setTimeout(resolve, 0));
-                    }
-                }
-
-                const clustered = clusterDetections(windowMatches, options);
-                this.analysisSummary.acceptedWindows = windowMatches.length;
-                this.detections = clustered.map(detection => ({
-                    ...detection,
-                    editableTime: formatSecondsAsClock(detection.startSeconds),
-                    selectedTuneKey: this.tuneOptionValue({
-                        tuneId: detection.tuneId,
-                        settingId: detection.settingId,
-                        sourceUrl: detection.sourceUrl,
-                        title: detection.title,
-                    }),
-                    tuneOptions: this.buildTuneOptions(detection),
-                }));
-                this.detections.forEach(detection => this.syncSelectedTune(detection));
-                this.analysisStage = 'done';
-                this.persistState();
+                await liveAnalysisService.start(windowSeconds, stepSeconds);
+                this.liveMicActive = true;
             } catch (e) {
-                console.error(e);
+                this.liveMicError = 'Could not access microphone. Please check permissions.';
                 this.analysisStage = 'idle';
-                this.analysisError = e && e.message ? e.message : 'Could not analyze the recording.';
-                this.persistState();
-            } finally {
-                this._pcm = null;
             }
         },
         removeDetection(id) {
@@ -742,7 +805,10 @@ export default {
             detection.selectedSettingId = selected.settingId;
             detection.selectedSourceUrl = selected.sourceUrl || '';
             detection.selectedTitle = selected.title;
-            this.persistState();
+        },
+        onTuneChange(detection) {
+            this.syncSelectedTune(detection);
+            if (!this.liveMode) this.persistState();
         },
         normalisedDetectionsForExport() {
             this.exportError = '';

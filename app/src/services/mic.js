@@ -106,7 +106,7 @@ class MicService {
         this.finishOpening();
     }
 
-    async startContinuous() {
+    async startContinuous(durationSecs) {
         if (store.isListening()) return;
         store.setSearchState(store.searchStates.LISTENING);
 
@@ -129,7 +129,7 @@ class MicService {
 
         const sampleRate = this.audioCtx.sampleRate;
         this._ringBufferMaxChunks = Math.ceil(
-            (store.userSettings.recordingTimeLimitSecs || 10) * sampleRate / this.bufferSize
+            (durationSecs || store.userSettings.recordingTimeLimitSecs || 10) * sampleRate / this.bufferSize
         );
 
         this.micProcessor.onaudioprocess = (audioProcessingEvent) => {

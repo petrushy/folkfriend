@@ -43,7 +43,7 @@
             </svg>
         </div>
 
-        <v-row justify="center" class="monitor-row px-4">
+        <v-row justify="center" class="monitor-row px-4" style="gap: 4px;">
             <v-btn
                 small
                 text
@@ -52,7 +52,17 @@
                 @click="toggleMonitor"
             >
                 <v-icon left small>{{ searchState === 'listening' || searchState === 'working' ? icons.microphoneOff : icons.microphone }}</v-icon>
-                {{ searchState === 'listening' || searchState === 'working' ? 'Stop monitoring' : 'Continuously monitor' }}
+                {{ searchState === 'listening' || searchState === 'working' ? 'Stop monitoring' : 'Monitor' }}
+            </v-btn>
+            <v-btn
+                small
+                text
+                color="grey darken-1"
+                :disabled="searchState === 'recording' || searchState === 'listening' || searchState === 'working'"
+                :to="{ name: 'session-analysis', query: { live: '1' } }"
+            >
+                <v-icon left small>{{ icons.timer }}</v-icon>
+                Continuous
             </v-btn>
         </v-row>
         <input
@@ -120,7 +130,7 @@ import ffBackend from '@/services/backend';
 import audioService from '@/services/audio';
 import store from '@/services/store';
 import eventBus from '@/eventBus';
-import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform } from '@mdi/js';
+import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiTimerOutline } from '@mdi/js';
 import micService from '@/services/mic';
 
 export default {
@@ -145,6 +155,7 @@ export default {
                 microphone: mdiMicrophone,
                 microphoneOff: mdiMicrophoneOff,
                 waveform: mdiWaveform,
+                timer: mdiTimerOutline,
             },
         };
     },
