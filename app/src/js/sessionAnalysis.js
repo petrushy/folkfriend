@@ -168,7 +168,9 @@ export function buildTuneListText(detections) {
                 displayName: detection.title,
                 sourceUrl: detection.sourceUrl || '',
             });
-            return `${formatSecondsAsClock(detection.startSeconds)}  ${detection.title}  (${detection.bestScore.toFixed(2)})  ${url}`;
+            const safe = Math.max(0, Math.round(detection.durationSeconds));
+            const duration = `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, '0')}`;
+            return `${detection.title} (${detection.bestScore.toFixed(2)}) ${duration}, ${url}`;
         })
         .join('\n');
 }

@@ -105,6 +105,24 @@ class LiveAnalysisService {
         eventBus.$emit('liveAnalysisResumed');
     }
 
+    // Drops the underlying window matches that produced a given detection cluster,
+    // then re-clusters and emits. Without this, the next analysis cycle would
+    // re-cluster the same matches and the row would pop back.
+    removeDetection(id) {
+        const target = this.detections.find(d => d.id === id);
+        if (!target) return;
+        const epsilon = 1e-6;
+        this._windowMatches = this._windowMatches.filter(match => !(
+            match.tuneId === target.tuneId &&
+            match.startSeconds >= target.startSeconds - epsilon &&
+            match.startSeconds <= target.endSeconds + epsilon
+        ));
+        this.detections = collapseConsecutiveSameTune(
+            clusterDetections(this._windowMatches, this.options)
+        );
+        eventBus.$emit('liveAnalysisUpdate', this.detections);
+    }
+
     async stop() {
         if (!this.isRunning) return this._stopPromise || Promise.resolve();
         this.isRunning = false;

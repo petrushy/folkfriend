@@ -754,8 +754,18 @@ export default {
             }
         },
         removeDetection(id) {
+            // Route through the service so the underlying window matches are
+            // dropped — otherwise the next re-cluster (live every stepSeconds,
+            // file during a still-running analysis) brings the row back.
+            if (this.liveMode) {
+                liveAnalysisService.removeDetection(id);
+            } else {
+                fileSessionAnalysisService.removeDetection(id);
+            }
+            // Mirror locally in case the service is idle (file analysis 'done')
+            // and so the persisted state reflects the removal immediately.
             this.detections = this.detections.filter(detection => detection.id !== id);
-            this.persistState();
+            if (!this.liveMode) this.persistState();
         },
         tuneOptionValue(option) {
             return `${option.settingId || 'none'}::${option.tuneId || 'unknown'}::${option.title}`;
@@ -831,6 +841,9 @@ export default {
                     tuneId: detection.selectedTuneId || detection.tuneId,
                     settingId: detection.selectedSettingId || detection.settingId,
                     sourceUrl: detection.selectedSourceUrl || detection.sourceUrl || '',
+                    // Preserve cluster duration from original endSeconds - startSeconds;
+                    // the user's editable time only changes startSeconds, not the span.
+                    durationSeconds: detection.endSeconds - detection.startSeconds,
                     startSeconds,
                 };
             });

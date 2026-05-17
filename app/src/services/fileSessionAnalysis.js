@@ -16,6 +16,8 @@ class FileSessionAnalysisService {
         this.durationSeconds = 0;
         this._cancelled = false;
         this._pcm = null;
+        this._windowMatches = [];
+        this._options = null;
     }
 
     async start(file, { customAnalysisSettings, windowSeconds, stepSeconds }) {
@@ -23,6 +25,8 @@ class FileSessionAnalysisService {
         this.isRunning = true;
         this._cancelled = false;
         this.detections = [];
+        this._windowMatches = [];
+        this._options = null;
         this.progress = { current: 0, total: 0, currentTimeSeconds: 0 };
         this.durationSeconds = 0;
 
@@ -59,6 +63,8 @@ class FileSessionAnalysisService {
                 };
             }
 
+            this._options = options;
+
             // Emit resolved options so component can update its settings display
             eventBus.$emit('fileAnalysisOptions', {
                 windowSeconds: options.windowSeconds,
@@ -84,8 +90,6 @@ class FileSessionAnalysisService {
                 acceptedWindows: 0,
             });
 
-            const windowMatches = [];
-
             for (let i = 0; i < starts.length; i++) {
                 if (this._cancelled) {
                     eventBus.$emit('fileAnalysisStage', 'idle');
@@ -97,7 +101,7 @@ class FileSessionAnalysisService {
                 this.progress = { current: i + 1, total: starts.length, currentTimeSeconds: startSeconds };
                 eventBus.$emit('fileAnalysisProgress', {
                     ...this.progress,
-                    acceptedWindows: windowMatches.length,
+                    acceptedWindows: this._windowMatches.length,
                 });
 
                 const startSample = Math.floor(startSeconds * sampleRate);
@@ -115,7 +119,7 @@ class FileSessionAnalysisService {
                 const normalized = normaliseQueryResults(response.results, options);
                 if (!normalized) continue;
 
-                windowMatches.push({
+                this._windowMatches.push({
                     startSeconds,
                     tuneId: normalized.tuneId,
                     settingId: normalized.settingId,
@@ -125,8 +129,8 @@ class FileSessionAnalysisService {
                     alternatives: normalized.alternatives,
                 });
 
-                this.detections = clusterDetections(windowMatches, options);
-                eventBus.$emit('fileAnalysisUpdate', this.detections, windowMatches.length);
+                this.detections = clusterDetections(this._windowMatches, options);
+                eventBus.$emit('fileAnalysisUpdate', this.detections, this._windowMatches.length);
 
                 // Yield every 5 windows to keep the event loop responsive
                 if ((i + 1) % 5 === 0) {
@@ -134,8 +138,8 @@ class FileSessionAnalysisService {
                 }
             }
 
-            this.detections = clusterDetections(windowMatches, options);
-            eventBus.$emit('fileAnalysisUpdate', this.detections, windowMatches.length);
+            this.detections = clusterDetections(this._windowMatches, options);
+            eventBus.$emit('fileAnalysisUpdate', this.detections, this._windowMatches.length);
             eventBus.$emit('fileAnalysisStage', 'done');
         } catch (e) {
             console.error(e);
@@ -150,6 +154,23 @@ class FileSessionAnalysisService {
     cancel() {
         this._cancelled = true;
         this._pcm = null;
+    }
+
+    // Drops the window matches that produced a given detection cluster, then
+    // re-clusters and emits. Needed during a still-running analysis (and harmless
+    // when done) so a removed row isn't recreated by the next re-cluster.
+    removeDetection(id) {
+        if (!this._options) return;
+        const target = this.detections.find(d => d.id === id);
+        if (!target) return;
+        const epsilon = 1e-6;
+        this._windowMatches = this._windowMatches.filter(match => !(
+            match.tuneId === target.tuneId &&
+            match.startSeconds >= target.startSeconds - epsilon &&
+            match.startSeconds <= target.endSeconds + epsilon
+        ));
+        this.detections = clusterDetections(this._windowMatches, this._options);
+        eventBus.$emit('fileAnalysisUpdate', this.detections, this._windowMatches.length);
     }
 }
 
