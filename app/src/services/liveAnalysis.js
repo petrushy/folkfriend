@@ -1,6 +1,7 @@
 import micService from './mic.js';
 import ffBackend from './backend.js';
 import { normaliseQueryResults, clusterDetections } from '@/js/sessionAnalysis.js';
+import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import eventBus from '@/eventBus.js';
 
 // Merge consecutive rows with the same tuneId into one row.
@@ -32,6 +33,10 @@ const DEFAULT_OPTIONS = {
     minClusterHits: 2,
     minContourLength: 12,
     maxAlternatives: 3,
+    // Bias toward the most recently confirmed tune: if it appears in the raw
+    // results within this score gap of the current top, promote it to first.
+    // Suppresses brief one-window outliers without blocking real transitions.
+    previousTuneBiasDelta: 0.15,
 };
 
 class LiveAnalysisService {
@@ -184,7 +189,15 @@ class LiveAnalysisService {
                 }
 
                 if (this.isRunning && !this.isPaused && !response.error && response.results && response.results.length > 0) {
-                    const normalized = normaliseQueryResults(response.results, options);
+                    const previousTuneId = this.detections.length > 0
+                        ? this.detections[this.detections.length - 1].tuneId
+                        : null;
+                    const biasedResults = biasResultsTowardPrevious(
+                        response.results,
+                        previousTuneId,
+                        options.previousTuneBiasDelta,
+                    );
+                    const normalized = normaliseQueryResults(biasedResults, options);
                     if (normalized) {
                         this._windowMatches.push({
                             startSeconds: this.elapsedSeconds,
