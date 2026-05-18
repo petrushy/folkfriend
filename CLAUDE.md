@@ -115,7 +115,7 @@ Not part of the service worker — managed directly by `app/src/services/store.j
 
 ### Firebase / Firestore
 
-User data (favourites + history) is synced to Firestore under `users/{uid}/data/favourites` and `users/{uid}/data/history`. Firestore SDK handles its own offline queue — writes made while offline are automatically replayed when connectivity returns. Security rules are in `firestore.rules`.
+Only **favourites** are synced to Firestore (under `users/{uid}/data/favourites`). **History is local-only** — it lives in IndexedDB on the device and is never pushed to Firestore. Firestore SDK handles its own offline queue for favourites — writes made while offline are automatically replayed when connectivity returns. Security rules are in `firestore.rules`.
 
 ## Firebase setup (Petrus's fork)
 
@@ -161,13 +161,13 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 
 **How it works:**
 
-- On sign-in: `sync.subscribe()` sets up an `onSnapshot` listener on `users/{uid}/data/favourites` only — **history is NOT synced in real-time**
+- On sign-in: `sync.subscribe()` sets up an `onSnapshot` listener on `users/{uid}/data/favourites` only — **history is intentionally not synced**, it stays per-device in IndexedDB
 - First snapshot: if Firestore has no data (first device ever), seeds from local IndexedDB; otherwise replaces local with Firestore data
 - Subsequent snapshots: fire in real-time when any device writes favourites, update IndexedDB and emit `syncComplete` on `eventBus`
-- On every favourites write (`addFavourite`, `removeFavourite`): pushes the full updated array to Firestore immediately
-- History is written to Firestore on each `addToHistory` call but there is no `onSnapshot` listener — history changes from another device are not pulled in automatically
-- On sign-out: the `onSnapshot` listener is unsubscribed
-- Firestore is the source of truth — deletions propagate correctly; no additive-merge that would re-add removed items
+- On every favourites write (`addFavourite`, `removeFavourite`): pushes the full updated array to Firestore immediately, with a `clientUpdatedAt` millis timestamp mirrored to localStorage so a stale echoed snapshot can't overwrite newer local data
+- `addToHistory` writes only to IndexedDB. There is no Firestore mirror and no `onSnapshot` listener for history.
+- On sign-out: the favourites `onSnapshot` listener is unsubscribed
+- Firestore is the source of truth for favourites — deletions propagate correctly; no additive-merge that would re-add removed items
 - Firestore SDK queues writes made offline and replays them when connectivity returns
 
 **Reactivity pattern:** `store.currentUser` is a plain object (not Vue reactive). Components listen to `eventBus.$on('authStateChanged', ...)` to update their local `data.currentUser`. Similarly, `eventBus.$on('syncComplete', ...)` triggers list reloads in `Favourites.vue`.
