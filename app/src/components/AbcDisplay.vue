@@ -25,6 +25,15 @@
                 <v-icon small v-if="paused">{{ icons.play }}</v-icon>
                 <v-icon small v-else>{{ icons.pause }}</v-icon>
             </v-btn>
+            <v-btn
+                small
+                class="mx-1 px-2 abcControls"
+                :color="looping ? 'primary' : ''"
+                :title="looping ? 'Loop on' : 'Loop off'"
+                @click="looping = !looping"
+            >
+                <v-icon small>{{ icons.repeat }}</v-icon>
+            </v-btn>
             <v-btn small class="mx-1 px-2 abcControls" @click="stopPlaying">
                 <v-icon small>{{ icons.stop }}</v-icon>
             </v-btn>
@@ -50,7 +59,7 @@
 </template>
 
 <script>
-import { mdiArrowExpand, mdiArrowCollapse, mdiPause, mdiPlay, mdiStop, mdiMetronome } from '@mdi/js';
+import { mdiArrowExpand, mdiArrowCollapse, mdiPause, mdiPlay, mdiStop, mdiMetronome, mdiRepeat } from '@mdi/js';
 import store from '@/services/store.js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
@@ -88,6 +97,7 @@ export default {
             paused: true,
             fullscreen: false,
             tempoPercent: 100,
+            looping: false,
             highlightedNoteEls: [],
 
             icons: {
@@ -97,6 +107,7 @@ export default {
                 pause: mdiPause,
                 play: mdiPlay,
                 stop: mdiStop,
+                repeat: mdiRepeat,
             },
         };
     },
@@ -251,9 +262,13 @@ export default {
             this._clearHighlightedNotes();
         },
         _handlePlaybackEnded() {
-            this.paused = true;
             this.midiBuffer = null;
             this._stopPlaybackTimer();
+            if (this.looping) {
+                this.startPlaying();
+                return;
+            }
+            this.paused = true;
             this.$forceUpdate();
         },
         playButton: function() {
@@ -261,10 +276,14 @@ export default {
                 this.startPlaying();
             } else if(this.paused) {
                 this.paused = false;
+                // Restore onEnded that pause cleared so natural-end loop restart works.
+                this.midiBuffer.onEnded = () => this._handlePlaybackEnded();
                 this._resumePlaybackTimer();
                 this.midiBuffer.resume();
             } else {
                 this.paused = true;
+                // ABCJS pause() fires onEnded — clear it so loop mode doesn't restart.
+                this.midiBuffer.onEnded = null;
                 this.midiBuffer.pause();
                 this._pausePlaybackTimer();
             }
@@ -359,7 +378,11 @@ export default {
             this.paused = true;
             this._stopPlaybackTimer();
             if (this.midiBuffer) {
+                // ABCJS stop() fires onEnded — clear it so loop mode doesn't restart,
+                // and null midiBuffer manually since the handler would normally do it.
+                this.midiBuffer.onEnded = null;
                 this.midiBuffer.stop();
+                this.midiBuffer = null;
             }
         },
         goFullScreen: function () {
