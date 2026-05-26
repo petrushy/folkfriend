@@ -4,7 +4,7 @@
 
 | Version | Date | Dataset (SHA prefix) | Detected | Avg score |
 | --- | --- | --- | --- | --- |
-| `upstream_d1faa84` TomWyllie/folkfriend @ d1faa84 | 2024-12-05 | `d2fc5d00018e` | 20/22 | 0.716 |
+| `upstream_d1faa84` TomWyllie/folkfriend @ d1faa84 | 2024-12-05 | `c90feb1f30b6` | 20/22 | 0.716 |
 | `1b23f68` thumbnails in search results | 2026-04-16 | `6b7ef853a313` | 3/15 | 0.525 |
 | `4f3f06c` Add benchmark infrastructure: runner... | 2026-04-19 | `6b7ef853a313` | 15/15 | 0.683 |
 | `da54d1c` Add benchmark results: 3/15 → 15/15 d... | 2026-04-19 | `6b7ef853a313` | 30/30 | 0.702 |
