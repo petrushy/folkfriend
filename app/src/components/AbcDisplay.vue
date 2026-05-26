@@ -64,6 +64,11 @@ import store from '@/services/store.js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 
+// How far ahead of the audio (in ms) the score highlight is shown. A small
+// lead makes the highlight feel like it anticipates the note rather than
+// reacting to it, which is easier to follow when reading along.
+const HIGHLIGHT_LEAD_MS = 100;
+
 export default {
     name: 'AbcDisplay',
     props: {
@@ -189,16 +194,38 @@ export default {
         },
         _createPlaybackTimer(millisecondsPerMeasure) {
             const qpm = this._msPerMeasureToQpm(millisecondsPerMeasure);
-            return new ABCJS.TimingCallbacks(this.abcVisual, {
-                qpm,
-                eventCallback: (event) => {
-                    if (event === null) {
-                        this._clearHighlightedNotes();
-                        return;
-                    }
-                    this._highlightTimingEvent(event);
-                },
-            });
+            // eventCallback intentionally omitted: ABCJS's setProgress() path
+            // fires it with the NEXT upcoming event rather than the current
+            // one, which causes the highlight to lead the audio by ~one note.
+            // We drive the highlight ourselves from _syncPlaybackTimerToAudio.
+            return new ABCJS.TimingCallbacks(this.abcVisual, { qpm });
+        },
+        _findActiveNoteEvent(currentTimeMs) {
+            const timings = this.playbackTimer && this.playbackTimer.noteTimings;
+            if (!timings || timings.length === 0) return null;
+            let active = null;
+            for (let i = 0; i < timings.length; i++) {
+                if (timings[i].milliseconds > currentTimeMs) break;
+                if (timings[i].type === 'event') active = timings[i];
+            }
+            return active;
+        },
+        _audioElapsedSeconds() {
+            if (
+                !this.audioContext ||
+                !this.midiBuffer ||
+                typeof this.midiBuffer.startTimeSec !== 'number'
+            ) {
+                return null;
+            }
+            // outputLatency: seconds between scheduling a sample and it
+            // reaching the speakers. Subtracting it makes the highlight
+            // track what is HEARD rather than what is SCHEDULED. baseLatency
+            // is the fallback for browsers where outputLatency reports 0.
+            const latency = this.audioContext.outputLatency
+                || this.audioContext.baseLatency
+                || 0;
+            return Math.max(0, this.audioContext.currentTime - this.midiBuffer.startTimeSec - latency);
         },
         _syncPlaybackTimerToAudio() {
             if (!this.playbackTimer || !this.midiBuffer || this.paused || !this.audioContext) {
@@ -206,9 +233,13 @@ export default {
                 return;
             }
 
-            if (typeof this.midiBuffer.startTimeSec === 'number') {
-                const elapsedSeconds = Math.max(0, this.audioContext.currentTime - this.midiBuffer.startTimeSec);
-                this.playbackTimer.setProgress(elapsedSeconds, 'seconds');
+            const elapsedSec = this._audioElapsedSeconds();
+            if (elapsedSec !== null) {
+                const activeEvent = this._findActiveNoteEvent(elapsedSec * 1000 + HIGHLIGHT_LEAD_MS);
+                if (activeEvent !== this._activeHighlightEvent) {
+                    this._activeHighlightEvent = activeEvent;
+                    this._highlightTimingEvent(activeEvent);
+                }
             }
 
             this.playbackSyncFrame = window.requestAnimationFrame(() => this._syncPlaybackTimerToAudio());
@@ -236,18 +267,16 @@ export default {
             } else {
                 this.playbackTimer.setProgress(0, 'seconds');
             }
+            this._activeHighlightEvent = null;
             this._startPlaybackSyncLoop();
         },
         _pausePlaybackTimer() {
             this._stopPlaybackSyncLoop();
-            if (
-                this.playbackTimer &&
-                this.midiBuffer &&
-                this.audioContext &&
-                typeof this.midiBuffer.startTimeSec === 'number'
-            ) {
-                const elapsedSeconds = Math.max(0, this.audioContext.currentTime - this.midiBuffer.startTimeSec);
-                this.playbackTimer.setProgress(elapsedSeconds, 'seconds');
+            if (this.playbackTimer) {
+                const elapsedSec = this._audioElapsedSeconds();
+                if (elapsedSec !== null) {
+                    this.playbackTimer.setProgress(elapsedSec, 'seconds');
+                }
             }
         },
         _resumePlaybackTimer() {
@@ -259,6 +288,7 @@ export default {
                 this.playbackTimer.stop();
                 this.playbackTimer = null;
             }
+            this._activeHighlightEvent = null;
             this._clearHighlightedNotes();
         },
         _handlePlaybackEnded() {
