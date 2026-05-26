@@ -299,18 +299,31 @@ import utils from '@/js/utils';
 import { settingSourceUrl } from '@/js/source.mjs';
 import router from '@/router/index.js';
 
+const FILTER_STATE_KEY = 'favouritesFilterState';
+
+function loadPersistedFilterState() {
+    try {
+        const raw = sessionStorage.getItem(FILTER_STATE_KEY);
+        if (!raw) return null;
+        return JSON.parse(raw);
+    } catch (e) {
+        return null;
+    }
+}
+
 export default {
     name: 'FavouritesView',
     components: { FavouriteRow },
     data() {
+        const persisted = loadPersistedFilterState() || {};
         return {
             favouriteItems: [],
             selectedIDs: new Set(),
-            activeTags: [],
-            nameFilter: '',
-            groupBy: null,
-            collapsedTagGroups: new Set(),
-            collapsedDateGroups: new Set(),
+            activeTags: Array.isArray(persisted.activeTags) ? persisted.activeTags : [],
+            nameFilter: typeof persisted.nameFilter === 'string' ? persisted.nameFilter : '',
+            groupBy: persisted.groupBy === 'tag' || persisted.groupBy === 'date' ? persisted.groupBy : null,
+            collapsedTagGroups: new Set(Array.isArray(persisted.collapsedTagGroups) ? persisted.collapsedTagGroups : []),
+            collapsedDateGroups: new Set(Array.isArray(persisted.collapsedDateGroups) ? persisted.collapsedDateGroups : []),
             manageTagsDialog: false,
             renameTagDialog: false,
             renameTagOld: '',
@@ -321,7 +334,7 @@ export default {
             bulkTagInput: null,
             snackbar: false,
             snackbarText: '',
-            sortBy: 'date',
+            sortBy: typeof persisted.sortBy === 'string' ? persisted.sortBy : 'date',
             sortOptions: [
                 { text: 'Date', value: 'date' },
                 { text: 'Name', value: 'name' },
@@ -434,6 +447,14 @@ export default {
             return groups;
         },
     },
+    watch: {
+        activeTags: { handler() { this._persistFilterState(); }, deep: true },
+        nameFilter() { this._persistFilterState(); },
+        groupBy() { this._persistFilterState(); },
+        sortBy() { this._persistFilterState(); },
+        collapsedTagGroups() { this._persistFilterState(); },
+        collapsedDateGroups() { this._persistFilterState(); },
+    },
     created() {
         eventBus.$emit('parentViewActivated');
         this.loadFavourites();
@@ -443,6 +464,20 @@ export default {
         eventBus.$off('syncComplete', this.loadFavourites);
     },
     methods: {
+        _persistFilterState() {
+            try {
+                sessionStorage.setItem(FILTER_STATE_KEY, JSON.stringify({
+                    activeTags: this.activeTags,
+                    nameFilter: this.nameFilter,
+                    groupBy: this.groupBy,
+                    sortBy: this.sortBy,
+                    collapsedTagGroups: [...this.collapsedTagGroups],
+                    collapsedDateGroups: [...this.collapsedDateGroups],
+                }));
+            } catch (e) {
+                // sessionStorage may be unavailable (private mode, quota); ignore.
+            }
+        },
         _toRow(item) {
             return {
                 name: utils.parseDisplayableName(item.result.displayName),
