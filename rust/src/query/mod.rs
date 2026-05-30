@@ -25,6 +25,10 @@ use std::fmt;
 pub struct QueryEngine {
     pub tune_index: Option<TuneIndex>,
     setting_ids_by_tune_id: HashMap<TuneID, Vec<SettingID>>,
+    /// Run-length-deduplicated copy of every stored contour, precomputed once at
+    /// index load. The heuristic matches against these, so we avoid re-running
+    /// `dedup_runs` over all ~60k contours on every query (see heuristic.rs).
+    deduped_contours: HashMap<SettingID, String>,
     num_repass: usize,
     num_output: usize,
 }
@@ -46,11 +50,25 @@ pub struct NameQueryRecord {
 pub type TranscriptionQueryResults = Vec<TranscriptionQueryRecord>;
 pub type NameQueryResults = Vec<NameQueryRecord>;
 
+/// Look up a tune's alias name by index, returning `None` if either the tune
+/// or the index is absent (rather than panicking on a malformed record).
+fn alias_name<'a>(
+    tune_index: &'a TuneIndex,
+    tune_id: &TuneID,
+    alias_index: usize,
+) -> Option<&'a String> {
+    tune_index
+        .aliases
+        .get(tune_id)
+        .and_then(|aliases| aliases.get(alias_index))
+}
+
 impl QueryEngine {
     pub fn new() -> QueryEngine {
         QueryEngine {
             tune_index: None,
             setting_ids_by_tune_id: HashMap::new(),
+            deduped_contours: HashMap::new(),
             num_repass: ff_config::QUERY_REPASS_SIZE,
             num_output: 100,
         }
@@ -66,11 +84,25 @@ impl QueryEngine {
                 .push(setting_id.clone());
         }
 
+        // Sort numerically. Setting IDs can exceed i32::MAX (folkwiki IDs are
+        // already close to it), so parse as u64; fall back to 0 for any
+        // non-numeric ID rather than panicking the whole module at load.
         for (_, setting_ids) in setting_ids_by_tune_id.iter_mut() {
-            setting_ids.sort_by_key(|k| k.parse::<i32>().unwrap());
+            setting_ids.sort_by_key(|k| k.parse::<u64>().unwrap_or(0));
         }
 
+        // Precompute run-length-deduplicated contours once, so the heuristic
+        // doesn't re-dedup all ~60k contours on every query.
+        let deduped_contours: HashMap<SettingID, String> = tune_index
+            .settings
+            .iter()
+            .map(|(setting_id, setting)| {
+                (setting_id.clone(), heuristic::dedup_runs(&setting.contour))
+            })
+            .collect();
+
         self.setting_ids_by_tune_id = setting_ids_by_tune_id;
+        self.deduped_contours = deduped_contours;
         self.tune_index = Some(tune_index);
     }
 
@@ -79,22 +111,19 @@ impl QueryEngine {
         contour: &decode::types::ContourString,
     ) -> Result<TranscriptionQueryResults, QueryError> {
         match &self.tune_index {
-            None => Err(QueryError),
+            None => Err(QueryError("query engine has not loaded index".into())),
             Some(tune_index) => {
-                //
                 // === Heuristic search ===
-                // First pass: fast, but inaccurate. Good for eliminating many poor candidates.
-                //
-                // let nowh = Instant::now();
-                let mut first_search =
-                    heuristic::run_transcription_query(&contour, &tune_index);
-                first_search.truncate(self.num_repass);
-                    // eprintln!("Heuristic search took {:.2?}", nowh.elapsed());
-                //
+                // First pass: fast, but inaccurate. Eliminates most candidates
+                // and returns the top `num_repass` shortlist already truncated.
+                let first_search = heuristic::run_transcription_query(
+                    &contour,
+                    &self.deduped_contours,
+                    self.num_repass,
+                );
+
                 // === Full search ===
-                // Second pass: slow, but accurate. Good for refining a shortlist of candidates.
-                //
-                // let nowf = Instant::now();
+                // Second pass: slow, but accurate. Re-scores the shortlist.
                 let mut second_search: Vec<(SettingID, f32)> = Vec::new();
                 for (setting_id, _) in &first_search {
                     let score = nw::needleman_wunsch(
@@ -103,24 +132,34 @@ impl QueryEngine {
                     );
                     second_search.push((setting_id.clone(), score));
                 }
-                let mut sorted_rankings: Vec<_> = second_search.into_iter().collect();
-                sorted_rankings.sort_by(|x, y| y.1.partial_cmp(&x.1).unwrap());
+                // total_cmp avoids a panic should a score ever be NaN.
+                second_search.sort_by(|x, y| y.1.total_cmp(&x.1));
                 let mut results: TranscriptionQueryResults = Vec::new();
 
                 let mut tune_ids_in_results: HashSet<TuneID> = HashSet::default();
 
-                for (setting_id, score) in sorted_rankings.iter() {
+                for (setting_id, score) in second_search.iter() {
                     let setting = &tune_index.settings[setting_id];
                     if tune_ids_in_results.contains(&setting.tune_id) {
                         continue;
                     }
+
+                    // Skip rather than panic if a tune somehow has no alias.
+                    let display_name = match tune_index
+                        .aliases
+                        .get(&setting.tune_id)
+                        .and_then(|aliases| aliases.first())
+                    {
+                        Some(name) => name.clone(),
+                        None => continue,
+                    };
 
                     tune_ids_in_results.insert(setting.tune_id.clone());
                     results.push(TranscriptionQueryRecord {
                         setting_id: setting_id.clone(),
                         setting: setting.clone(),
                         score: *score,
-                        display_name: tune_index.aliases.get(&setting.tune_id).unwrap()[0].clone(),
+                        display_name,
                     });
 
                     if results.len() >= self.num_output {
@@ -128,7 +167,6 @@ impl QueryEngine {
                     }
                 }
 
-                // eprintln!("Full search took {:.2?}", nowf.elapsed());
                 Ok(results)
             }
         }
@@ -136,45 +174,43 @@ impl QueryEngine {
 
     pub fn run_name_query(self: &Self, query: &String) -> Result<NameQueryResults, QueryError> {
         match &self.tune_index {
-            None => Err(QueryError),
+            None => Err(QueryError("query engine has not loaded index".into())),
             Some(tune_index) => {
                 let mut scored_names: Vec<heuristic::ScoredName> =
                     heuristic::run_name_query(query, &tune_index);
 
-                // scored_names.sort_unstable_by(|a, b| b.ngram_score.partial_cmp(&a.ngram_score).unwrap());
-
-                scored_names.sort_unstable_by(|a, b| match b.ngram_score.partial_cmp(&a.ngram_score).unwrap() {
-                    std::cmp::Ordering::Less => std::cmp::Ordering::Less,
-                    std::cmp::Ordering::Greater => std::cmp::Ordering::Greater,
-                    std::cmp::Ordering::Equal => {
-                        let a_alias_len =
-                            &tune_index.aliases.get(&a.tune_id).unwrap()[a.alias_index].len();
-                        let b_alias_len =
-                            &tune_index.aliases.get(&b.tune_id).unwrap()[b.alias_index].len();
-                        return a_alias_len.cmp(&b_alias_len);
+                // Sort by score (descending); break ties by shorter alias first.
+                // total_cmp avoids a panic should a score ever be NaN.
+                scored_names.sort_unstable_by(|a, b| {
+                    match b.ngram_score.total_cmp(&a.ngram_score) {
+                        std::cmp::Ordering::Equal => {
+                            let a_alias_len = alias_name(tune_index, &a.tune_id, a.alias_index)
+                                .map_or(0, |s| s.len());
+                            let b_alias_len = alias_name(tune_index, &b.tune_id, b.alias_index)
+                                .map_or(0, |s| s.len());
+                            a_alias_len.cmp(&b_alias_len)
+                        }
+                        ordering => ordering,
                     }
                 });
 
                 let mut tune_ids_in_results: HashSet<TuneID> = HashSet::default();
 
+                // filter_map drops any entry whose lookups fail rather than
+                // panicking the whole module on a single inconsistent record.
                 let top_scores: NameQueryResults = scored_names
                     .iter()
                     .filter(|t| tune_ids_in_results.insert(t.tune_id.clone()))
-                    .take(20)
-                    .map(|t| {
-                        NameQueryRecord {
-                            // TODO safer checks in index builder that there can
-                            //  never be an alias without a corresponding setting
-                            setting: tune_index
-                                .settings
-                                .get(&self.setting_ids_from_tune_id(t.tune_id.clone()).unwrap()[0])
-                                .unwrap()
-                                .clone(),
-                            display_name: tune_index.aliases.get(&t.tune_id).unwrap()
-                                [t.alias_index]
-                                .clone(),
-                        }
+                    .filter_map(|t| {
+                        let setting_id = self.setting_ids_by_tune_id.get(&t.tune_id)?.first()?;
+                        let setting = tune_index.settings.get(setting_id)?;
+                        let display_name = alias_name(tune_index, &t.tune_id, t.alias_index)?;
+                        Some(NameQueryRecord {
+                            setting: setting.clone(),
+                            display_name: display_name.clone(),
+                        })
                     })
+                    .take(20)
                     .collect();
 
                 return Ok(top_scores);
@@ -183,52 +219,47 @@ impl QueryEngine {
     }
 
     pub fn setting_ids_from_tune_id(&self, tune_id: TuneID) -> Result<&Vec<SettingID>, QueryError> {
-        Ok(self
-            .setting_ids_by_tune_id
+        self.setting_ids_by_tune_id
             .get(&tune_id)
-            .ok_or(format!("missing tune ID {}", tune_id))
-            .unwrap())
+            .ok_or_else(|| QueryError(format!("missing tune ID {}", tune_id)))
     }
 
     pub fn settings_from_tune_id(
         &self,
         tune_id: TuneID,
     ) -> Result<Vec<(SettingID, Setting)>, QueryError> {
-        let tune_index = self.tune_index.as_ref();
+        let tune_index = self
+            .tune_index
+            .as_ref()
+            .ok_or_else(|| QueryError("query engine has not loaded index".into()))?;
         Ok(self
             .setting_ids_from_tune_id(tune_id)?
             .iter()
-            .map(|setting_id| {
-                (
-                    setting_id.clone(),
-                    tune_index
-                        .unwrap()
-                        .settings
-                        .get(setting_id)
-                        .unwrap()
-                        .clone(),
-                )
+            // Skip any setting ID with no corresponding setting rather than panic.
+            .filter_map(|setting_id| {
+                tune_index
+                    .settings
+                    .get(setting_id)
+                    .map(|setting| (setting_id.clone(), setting.clone()))
             })
             .collect())
     }
 
     pub fn aliases_from_tune_id(&self, tune_id: TuneID) -> Result<Vec<String>, QueryError> {
-        Ok(self
-            .tune_index
+        self.tune_index
             .as_ref()
-            .unwrap()
+            .ok_or_else(|| QueryError("query engine has not loaded index".into()))?
             .aliases
             .get(&tune_id)
-            .ok_or(format!("missing tune ID {}", tune_id))
-            .unwrap()
-            .to_vec())
+            .ok_or_else(|| QueryError(format!("missing tune ID {}", tune_id)))
+            .map(|aliases| aliases.to_vec())
     }
 }
 
-pub struct QueryError;
+pub struct QueryError(pub String);
 
 impl fmt::Debug for QueryError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "query engine has not loaded index")
+        write!(f, "{}", self.0)
     }
 }

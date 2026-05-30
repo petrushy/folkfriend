@@ -16,7 +16,7 @@
 use crate::ff_config;
 use crate::index::schema::*;
 use crate::index::TuneIndex;
-use aho_corasick::{AhoCorasick, Match};
+use aho_corasick::AhoCorasick;
 use std::collections::HashMap;
 
 pub struct ScoredName {
@@ -40,9 +40,14 @@ pub fn dedup_runs(s: &str) -> String {
     result
 }
 
+/// `deduped_contours` is a precomputed run-length-deduplicated copy of every
+/// stored contour (built once at index load in `QueryEngine::use_tune_index`),
+/// keyed by setting ID. Deduplicating here on every query would re-allocate all
+/// ~60k contour strings per search.
 pub fn run_transcription_query(
     query: &String,
-    tune_index: &TuneIndex,
+    deduped_contours: &HashMap<SettingID, String>,
+    repass: usize,
 ) -> Vec<(SettingID, usize)> {
     // Collapse runs so folkwiki stored contours (4 chars/note due to L:1/16)
     // and audio query contours (1 char/note) use the same representation.
@@ -57,22 +62,32 @@ pub fn run_transcription_query(
         .filter(|g| seen.insert(g.clone()))
         .collect();
 
-    let mut ranked_settings: HashMap<SettingID, usize> = HashMap::new();
+    let mut sorted_rankings: Vec<(SettingID, usize)> = Vec::new();
     let ac = AhoCorasick::new_auto_configured(&ngrams);
 
-    for (setting_id, setting) in &tune_index.settings {
+    for (setting_id, contour) in deduped_contours {
         // Count how many DISTINCT query patterns appear in this candidate.
         // Using raw overlapping match counts rewarded long/repetitive contours
         // disproportionately, causing exact self-matches to rank below #90.
         let mut matched: std::collections::HashSet<usize> =
             std::collections::HashSet::new();
-        for m in ac.find_overlapping_iter(&dedup_runs(&setting.contour)) {
+        for m in ac.find_overlapping_iter(contour) {
             matched.insert(m.pattern());
         }
-        ranked_settings.insert(setting_id.to_string(), matched.len());
+        // Most of the index matches nothing — skip those rather than ranking
+        // and sorting ~60k zero-score entries.
+        if !matched.is_empty() {
+            sorted_rankings.push((setting_id.clone(), matched.len()));
+        }
     }
 
-    let mut sorted_rankings: Vec<_> = ranked_settings.into_iter().collect();
+    // Only the top `repass` candidates are re-scored by Needleman-Wunsch, so
+    // partition first (O(n)) and fully sort just that prefix rather than
+    // sorting every matched candidate (O(n log n)).
+    if sorted_rankings.len() > repass {
+        sorted_rankings.select_nth_unstable_by(repass, |x, y| y.1.cmp(&x.1));
+        sorted_rankings.truncate(repass);
+    }
     sorted_rankings.sort_by(|x, y| y.1.cmp(&x.1));
     sorted_rankings
 }
@@ -86,10 +101,7 @@ pub fn run_name_query(query: &String, tune_index: &TuneIndex) -> Vec<ScoredName>
     let ac = AhoCorasick::new_auto_configured(&ngrams);
     for (tune_id, aliases) in &tune_index.aliases {
         for (alias_id, alias) in aliases.iter().enumerate() {
-            let score = ac
-                .find_overlapping_iter(&alias)
-                .collect::<Vec<Match>>()
-                .len();
+            let score = ac.find_overlapping_iter(&alias).count();
             let score = score as f32 / f32::max((alias.len() as f32).sqrt(), query_len);
             scored_names.push(ScoredName {
                 tune_id: tune_id.clone(),
