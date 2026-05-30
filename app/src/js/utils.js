@@ -30,9 +30,7 @@ export default class utils {
             dateString = msAge > MS_6_MONTHS ? dateString + ' ' + date.getFullYear() : dateString;
         } else {
             let hour = date.getHours();
-            let afternoon = Boolean(Math.floor(hour / 12));
-            dateString = (hour % 12).toString() + ':' + ('0' + date.getMinutes()).slice(-2) + ' ';
-            dateString += afternoon ? 'PM' : 'AM';
+            dateString = ('0' + hour).slice(-2) + ':' + ('0' + date.getMinutes()).slice(-2);
         }
         return dateString;
     }

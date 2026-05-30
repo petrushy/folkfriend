@@ -4,9 +4,11 @@ import Search from '@/views/Search.vue';
 // import Donate from '@/views/Donate.vue';
 import Notes from '@/views/Notes.vue';
 import Results from '@/views/Results.vue';
+import SessionAnalysis from '@/views/SessionAnalysis.vue';
 import Tune from '@/views/Tune.vue';
 import Settings from '@/views/Settings.vue';
 import History from '@/views/History.vue';
+import Favourites from '@/views/Favourites.vue';
 import Help from '@/views/Help.vue';
 
 Vue.use(VueRouter);
@@ -24,14 +26,26 @@ const routes = [{
     name: 'results',
     component: Results
 }, {
+    path: '/session-analysis',
+    name: 'session-analysis',
+    component: SessionAnalysis
+}, {
     path: '/tune',
     name: 'tune',
     component: Tune,
-    props: true
+    props: route => ({
+        tuneID: route.query.tuneID || route.params.tuneID || '',
+        displayName: route.query.displayName || route.params.displayName || '',
+        settingID: route.query.settingID || route.params.settingID || '',
+    })
 }, {
     path: '/history',
     name: 'history',
     component: History
+}, {
+    path: '/favourites',
+    name: 'favourites',
+    component: Favourites
 }, {
     path: '/settings',
     name: 'settings',

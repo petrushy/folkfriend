@@ -1,0 +1,251 @@
+{
+  "commit": "upstream_d1faa84",
+  "commit_message": "TomWyllie/folkfriend @ d1faa84",
+  "date": "2024-12-05",
+  "dataset_sha256": "c90feb1f30b63716f7eac4f402518975aa65203e838f4717a45a1ba27cd67c66",
+  "dataset_bytes": 34003984,
+  "results": [
+    {
+      "wav": "cooleys_reel.wav",
+      "label": "Cooley's Reel",
+      "expected_tune_ids": [
+        "1"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.6319444,
+      "detected": true
+    },
+    {
+      "wav": "wise_maid.wav",
+      "label": "The Wise Maid",
+      "expected_tune_ids": [
+        "118"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.5777778,
+      "detected": true
+    },
+    {
+      "wav": "salamanca.wav",
+      "label": "The Salamanca",
+      "expected_tune_ids": [
+        "99"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.69135803,
+      "detected": true
+    },
+    {
+      "wav": "salamanca2.wav",
+      "label": "The Salamanca (recording 2)",
+      "expected_tune_ids": [
+        "99"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.65625,
+      "detected": true
+    },
+    {
+      "wav": "hut_on_staffin_island.wav",
+      "label": "The Hut on Staffin Island",
+      "expected_tune_ids": [
+        "2067"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.8492063,
+      "detected": true
+    },
+    {
+      "wav": "ithe_glen_cottage.wav",
+      "label": "I the Glen Cottage",
+      "expected_tune_ids": [
+        "5278"
+      ],
+      "max_rank": 5,
+      "rank": 2,
+      "score": 0.61627907,
+      "detected": true
+    },
+    {
+      "wav": "soup_dragon.wav",
+      "label": "Soup Dragon",
+      "expected_tune_ids": [
+        "10785"
+      ],
+      "max_rank": 10,
+      "rank": 1,
+      "score": 0.68604654,
+      "detected": true
+    },
+    {
+      "wav": "blarney_pilgrim.wav",
+      "label": "The Blarney Pilgrim",
+      "expected_tune_ids": [
+        "5"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.8,
+      "detected": true
+    },
+    {
+      "wav": "mist_covered_mountain.wav",
+      "label": "The Mist Covered Mountain",
+      "expected_tune_ids": [
+        "256"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.9142857,
+      "detected": true
+    },
+    {
+      "wav": "windbroke.wav",
+      "label": "The Windbroke",
+      "expected_tune_ids": [
+        "910"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.79746836,
+      "detected": true
+    },
+    {
+      "wav": "banks_of_lough_gowna.wav",
+      "label": "The Banks of Lough Gowna",
+      "expected_tune_ids": [
+        "775"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.7580645,
+      "detected": true
+    },
+    {
+      "wav": "calums_road.wav",
+      "label": "Calum's Road",
+      "expected_tune_ids": [
+        "3016"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "cup_of_team.wav",
+      "label": "The Cup of Tea",
+      "expected_tune_ids": [
+        "20"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.75,
+      "detected": true
+    },
+    {
+      "wav": "john_brosnan.wav",
+      "label": "John Brosnan's",
+      "expected_tune_ids": [
+        "3835"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.6041667,
+      "detected": true
+    },
+    {
+      "wav": "john_ryans.wav",
+      "label": "John Ryan's",
+      "expected_tune_ids": [
+        "441"
+      ],
+      "max_rank": 5,
+      "rank": null,
+      "score": null,
+      "detected": false
+    },
+    {
+      "wav": "killavi_jig.wav",
+      "label": "The Killavil Jig",
+      "expected_tune_ids": [
+        "667"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.74242425,
+      "detected": true
+    },
+    {
+      "wav": "maggie_in_the_woods.wav",
+      "label": "Maggie in the Woods",
+      "expected_tune_ids": [
+        "291"
+      ],
+      "max_rank": 5,
+      "rank": 4,
+      "score": 0.44915253,
+      "detected": true
+    },
+    {
+      "wav": "sally_garden.wav",
+      "label": "Down by the Sally Gardens",
+      "expected_tune_ids": [
+        "118"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.7987805,
+      "detected": true
+    },
+    {
+      "wav": "the_banshee.wav",
+      "label": "The Banshee",
+      "expected_tune_ids": [
+        "8"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.6825397,
+      "detected": true
+    },
+    {
+      "wav": "the_galway_belle.wav",
+      "label": "The Galway Belle",
+      "expected_tune_ids": [
+        "679"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.8877551,
+      "detected": true
+    },
+    {
+      "wav": "the_glenside.wav",
+      "label": "The Glenside",
+      "expected_tune_ids": [
+        "534"
+      ],
+      "max_rank": 5,
+      "rank": 2,
+      "score": 0.61864406,
+      "detected": true
+    },
+    {
+      "wav": "the_linting_banshee.wav",
+      "label": "The Lilting Banshee",
+      "expected_tune_ids": [
+        "60"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.8142857,
+      "detected": true
+    }
+  ]
+}

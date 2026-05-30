@@ -9,6 +9,13 @@ class FolkFriendWASMWrapper {
     constructor() {
         this.folkfriendWASM = null;
         this.abcStringBySetting = {};
+        this.sourceUrlBySetting = {};
+
+        // Reusable per-frame PCM buffer in WASM linear memory. Allocated once
+        // (lazily on first feed) and reused forever — previous code allocated
+        // a fresh buffer per frame which the Rust side forgot, leaking ~2 MB
+        // of WASM heap per analysis cycle.
+        this._pcmWindowPtr = null;
 
         this.loadedWASM = new Promise(resolve => {
             this.setLoadedWASM = resolve;
@@ -41,40 +48,52 @@ class FolkFriendWASMWrapper {
         let url = '/res/nud-meta.json';
         // eslint-disable-next-line no-undef
         if (process.env.NODE_ENV === 'production') {
-            url = 'https://folkfriend-app-data.web.app/nud-meta.json';
+            url = 'https://folkfriend-data.web.app/nud-meta.json';
         }
-        let indexData = await fetch(url)
-            .then((response) => response.json())
-            .catch((err) => console.log(err));
-        return indexData;
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`Failed to fetch tune index metadata: ${response.status}`);
+        return response.json();
     }
 
-    async fetchTuneIndexData() {
+    async fetchTuneIndexData(bypassCacheVersion = null) {
         console.time('index-fetch');
 
         let url = '/res/folkfriend-non-user-data.json';
 
         // eslint-disable-next-line no-undef
         if (process.env.NODE_ENV === 'production') {
-            url = 'https://folkfriend-app-data.web.app/folkfriend-non-user-data.json';
+            url = 'https://folkfriend-data.web.app/folkfriend-non-user-data.json';
+        }
+
+        // Append ?v=N when forcing an update so the service worker's
+        // StaleWhileRevalidate cache (which matches the bare URL) is bypassed
+        // and we always get the freshly deployed version from the network.
+        if (bypassCacheVersion !== null) {
+            url += `?v=${bypassCacheVersion}`;
         }
 
         // Fetch
-        let indexData = await fetch(url)
-            .then((response) => response.json())
-            .catch((err) => console.log(err));
+        const fetchResponse = await fetch(url);
+        if (!fetchResponse.ok) throw new Error(`Failed to fetch tune index: ${fetchResponse.status}`);
+        let indexData = await fetchResponse.json();
 
-        // Lightly postprocess. ABC strings don't go to WASM because
-        //  of slow memory loading in WebAssembly.        
+        // Lightly postprocess. ABC strings and source URLs don't go to WASM
+        //  because of slow memory loading in WebAssembly.
         let abcStringBySetting = {};
+        let sourceUrlBySetting = {};
         for (let settingID in indexData.settings) {
             abcStringBySetting[settingID] = indexData.settings[settingID].abc;
             indexData.settings[settingID].abc = '';
+            if (indexData.settings[settingID].source_url) {
+                sourceUrlBySetting[settingID] = indexData.settings[settingID].source_url;
+                delete indexData.settings[settingID].source_url;
+            }
         }
 
         const downloadedTuneIndex = {
             indexData: indexData,
-            abcStrings: abcStringBySetting
+            abcStrings: abcStringBySetting,
+            sourceUrls: sourceUrlBySetting,
         };
 
         console.timeEnd('index-fetch');
@@ -100,20 +119,38 @@ class FolkFriendWASMWrapper {
         if (typeof localTuneIndex === 'undefined') {
             console.debug('No tune index was cached, requesting download');
 
-            const downloadedTuneIndex = await this.fetchTuneIndexData();
+            try {
+                const downloadedTuneIndex = await this.fetchTuneIndexData();
 
-            // Load (so the user can start using the application)
-            await this.loadTuneIndex(downloadedTuneIndex);
-            console.timeEnd('tune-index-load');
+                // Load (so the user can start using the application)
+                await this.loadTuneIndex(downloadedTuneIndex);
+                console.timeEnd('tune-index-load');
 
-            // Store the version of this newly downloaded tune index
-            const tuneIndexMetadata = await this.fetchTuneIndexMetadata();
-            await set('tuneIndex', downloadedTuneIndex);
-            await set('tuneIndexMetadata', tuneIndexMetadata);
+                // Store the version of this newly downloaded tune index. If
+                // metadata fetch fails we can still proceed with the loaded
+                // index and persist a safe fallback metadata record.
+                let tuneIndexMetadata;
+                try {
+                    tuneIndexMetadata = await this.fetchTuneIndexMetadata();
+                } catch (e) {
+                    console.warn('Could not fetch tune index metadata on first install, using fallback metadata', e);
+                    tuneIndexMetadata = {
+                        v: 0,
+                        date: null,
+                    };
+                }
+                await set('tuneIndex', downloadedTuneIndex);
+                await set('tuneIndexMetadata', tuneIndexMetadata);
 
-            analyticsData['days_since_update'] = 0;
-            analyticsData['tune_index_metadata_version'] = tuneIndexMetadata['v'];
-            analyticsData['newly_installed'] = true;
+                analyticsData['days_since_update'] = 0;
+                analyticsData['tune_index_metadata_version'] = tuneIndexMetadata['v'];
+                analyticsData['tune_index_metadata_date'] = tuneIndexMetadata['date'] || null;
+                analyticsData['newly_installed'] = true;
+            } catch (e) {
+                console.error('Failed to download or load tune index on first install', e);
+                cb({ error: 'Could not load tune index. Please check your connection and refresh.' });
+                return;
+            }
         } else {
             console.debug('Found cached tune index');
 
@@ -122,11 +159,10 @@ class FolkFriendWASMWrapper {
             console.timeEnd('tune-index-load');
 
             // THEN check the latest version and if we want to upgrade
-            const tuneIndexMetadataRemote = await this.fetchTuneIndexMetadata();
             let tuneIndexMetadataLocal = await get('tuneIndexMetadata');
 
             if (typeof tuneIndexMetadataLocal === 'undefined') {
-                // This is a near-impossible state, only reached by people 
+                // This is a near-impossible state, only reached by people
                 //  selectively deleting from IndexedDB. As browsers do delete
                 //   from IndexedDB when under storage pressure it's best to
                 //   cover this case and be safe.
@@ -135,28 +171,42 @@ class FolkFriendWASMWrapper {
                 };
             }
 
-            const remoteVersion = tuneIndexMetadataRemote['v'];
             const localVersion = tuneIndexMetadataLocal['v'];
-            const daysSinceUpdate = remoteVersion - localVersion;
-            console.debug(`Tune index was ${daysSinceUpdate} days out of date`);
+            analyticsData['tune_index_metadata_version'] = localVersion;
+            analyticsData['tune_index_metadata_date'] = tuneIndexMetadataLocal['date'] || null;
 
-            // Folkfriend's TuneIndex (at time of writing) updates once a week,
-            //  scheduled to update just after the latest data dump on Github
-            //  from thesession.org. Having all users automatically update the 
-            //  whole index every week is a little overkill though and uses a
-            //  lot of bandwidth (which may not be free). Only auto-update if
-            //  it's been a while since the last update. A while = 4 weeks.
-            if (daysSinceUpdate >= 28) {
-                console.debug('Upgrading tune index');
-                const downloadedTuneIndex = await this.fetchTuneIndexData();
-                await set('tuneIndex', downloadedTuneIndex);
-                await set('tuneIndexMetadata', tuneIndexMetadataRemote);
+            try {
+                const tuneIndexMetadataRemote = await this.fetchTuneIndexMetadata();
+                const remoteVersion = tuneIndexMetadataRemote['v'];
+                const daysSinceUpdate = remoteVersion - localVersion;
+                console.debug(`Tune index was ${daysSinceUpdate} days out of date`);
+
+                // Update whenever the remote version is strictly newer than the
+                //  cached version. The dataset is large (~38 MB) but only
+                //  re-fetched when v actually increases, so bandwidth is bounded
+                //  by how often the data pipeline runs.
+                if (remoteVersion > localVersion) {
+                    console.debug('Upgrading tune index');
+                    try {
+                        const downloadedTuneIndex = await this.fetchTuneIndexData(remoteVersion);
+                        await this.loadTuneIndex(downloadedTuneIndex);
+                        await set('tuneIndex', downloadedTuneIndex);
+                        await set('tuneIndexMetadata', tuneIndexMetadataRemote);
+                        analyticsData['days_since_update'] = 0;
+                        analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
+                        analyticsData['tune_index_metadata_date'] = tuneIndexMetadataRemote['date'] || null;
+                        analyticsData['newly_updated'] = true;
+                    } catch (e) {
+                        // Non-fatal: the cached index is already loaded and usable.
+                        console.warn('Failed to update tune index, continuing with cached version', e);
+                        analyticsData['days_since_update'] = daysSinceUpdate;
+                    }
+                } else {
+                    analyticsData['days_since_update'] = daysSinceUpdate;
+                }
+            } catch (e) {
+                console.warn('Could not refresh tune index metadata, using cached index', e);
                 analyticsData['days_since_update'] = 0;
-                analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
-                analyticsData['newly_updated'] = true;
-            } else {
-                analyticsData['days_since_update'] = daysSinceUpdate;
-                analyticsData['tune_index_metadata_version'] = tuneIndexMetadataLocal['v'];
             }
         }
 
@@ -171,10 +221,16 @@ class FolkFriendWASMWrapper {
     async loadTuneIndex(tuneIndex) {
         console.time('tune-index-to-wasm');
         await this.loadedWASM;
-        await this.folkfriendWASM.load_index_from_json_obj(tuneIndex.indexData);
-        this.abcStringBySetting = tuneIndex.abcStrings;
-        this.setLoadedIndex();
-        console.timeEnd('tune-index-to-wasm');
+        try {
+            await this.folkfriendWASM.load_index_from_json_obj(tuneIndex.indexData);
+            this.abcStringBySetting = tuneIndex.abcStrings;
+            this.sourceUrlBySetting = tuneIndex.sourceUrls || {};
+        } finally {
+            // Always resolve so any concurrent waiters (e.g. onIndexLoad) don't
+            // hang forever. Errors propagate to the caller (setupTuneIndex).
+            this.setLoadedIndex();
+            console.timeEnd('tune-index-to-wasm');
+        }
     }
 
     async setSampleRate(sampleRate) {
@@ -191,29 +247,46 @@ class FolkFriendWASMWrapper {
     }
 
     async feedEntirePCMSignal(PCMSignal) {
-        const frames = Math.floor(PCMSignal.length / ffConfig.SPEC_WINDOW_SIZE);
+        const windowSize = ffConfig.SPEC_WINDOW_SIZE;
+        const frames = Math.floor(PCMSignal.length / windowSize);
         if (frames === 0) {
             throw 'PCM signal too short';
         }
+        await this.loadedWASM;
+        await this.loadedSampleRate;
+
+        // Allocate the reusable WASM-side PCM buffer once (idempotent across
+        // calls). The Rust-side allocator forgets the buffer so it persists
+        // for the lifetime of the worker.
+        if (this._pcmWindowPtr === null) {
+            this._pcmWindowPtr = this.folkfriendWASM.alloc_single_pcm_window();
+        }
+        const ptr = this._pcmWindowPtr;
+        const wasm = this.folkfriendWASM;
+
+        // The view is re-fetched inside the loop because WASM linear memory
+        // may grow underneath us; resizing detaches existing views. Cheap to
+        // re-create — it's just a typed-array header over the same memory.
         for (let i = 0; i < frames; i++) {
-            const PCMWindow = PCMSignal.slice(
-                ffConfig.SPEC_WINDOW_SIZE * i,
-                ffConfig.SPEC_WINDOW_SIZE * (i + 1)
-            );
-            await this.feedSinglePCMWindow(PCMWindow);
+            const start = windowSize * i;
+            const view = wasm.get_allocated_pcm_window(ptr);
+            view.set(PCMSignal.subarray(start, start + windowSize));
+            wasm.feed_single_pcm_window(ptr);
         }
     }
 
     async feedSinglePCMWindow(PCMWindow) {
+        // Kept for the live-recording mic processor which feeds frames as they
+        // arrive. Uses the same reusable WASM buffer.
         await this.loadedWASM;
         await this.loadedSampleRate;
-        const ptr = await this.folkfriendWASM.alloc_single_pcm_window();
-        const arr = await this.folkfriendWASM.get_allocated_pcm_window(ptr);
-
-        arr.set(PCMWindow);
-
-        await this.folkfriendWASM.feed_single_pcm_window(ptr);
-        // console.debug("feedSinglePCMWindow: complete");
+        if (this._pcmWindowPtr === null) {
+            this._pcmWindowPtr = this.folkfriendWASM.alloc_single_pcm_window();
+        }
+        const ptr = this._pcmWindowPtr;
+        const view = this.folkfriendWASM.get_allocated_pcm_window(ptr);
+        view.set(PCMWindow);
+        this.folkfriendWASM.feed_single_pcm_window(ptr);
     }
 
     async flushPCMBuffer() {
@@ -237,14 +310,30 @@ class FolkFriendWASMWrapper {
         await this.loadedWASM;
         await this.loadedIndex;
         const response = await this.folkfriendWASM.run_transcription_query(query);
-        cb(JSON.parse(response));
+        const results = JSON.parse(response);
+        for (const result of results) {
+            if (result.setting && result.setting_id !== undefined) {
+                const settingID = String(result.setting_id);
+                result.setting.abc = this.abcStringBySetting[settingID] || '';
+                result.setting.source_url = this.sourceUrlBySetting[settingID] || '';
+            }
+        }
+        cb(results);
     }
 
     async runNameQuery(query, cb) {
         await this.loadedWASM;
         await this.loadedIndex;
         const response = await this.folkfriendWASM.run_name_query(query);
-        cb(JSON.parse(response));
+        const results = JSON.parse(response);
+        for (const result of results) {
+            if (result.setting && result.setting_id !== undefined) {
+                const settingID = String(result.setting_id);
+                result.setting.abc = this.abcStringBySetting[settingID] || '';
+                result.setting.source_url = this.sourceUrlBySetting[settingID] || '';
+            }
+        }
+        cb(results);
     }
 
     async contourToAbc(contour, cb) {
@@ -267,6 +356,7 @@ class FolkFriendWASMWrapper {
         let settingsIncludingAbc = settings.map(([settingID, setting]) => {
             setting['setting_id'] = settingID;
             setting['abc'] = this.abcStringBySetting[settingID];
+            setting['source_url'] = this.sourceUrlBySetting[settingID] || '';
             return setting;
         });
 

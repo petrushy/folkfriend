@@ -4,3 +4,11 @@ export class HistoryItem {
         this.timestamp = Date.now();
     }
 }
+
+export class FavouriteItem {
+    constructor(result) {
+        this.result = result; // { settingID, setting, displayName }
+        this.timestamp = Date.now();
+        this.tags = []; // string[] — user-defined tags, e.g. ['to practice', 'for tuesday sessions']
+    }
+}

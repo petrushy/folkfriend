@@ -111,12 +111,15 @@ export default {
         },
     },
     created: function() {
-        let rb = this;
-        eventBus.$on('setSearchState', () => {
-            rb.buttonReady = store.isReady();
-            rb.buttonWorking = store.isWorking();
-            rb.buttonRecording = store.isRecording();
-        });
+        this._onSetSearchState = () => {
+            this.buttonReady = store.isReady();
+            this.buttonWorking = store.isWorking();
+            this.buttonRecording = store.isRecording();
+        };
+        eventBus.$on('setSearchState', this._onSetSearchState);
+    },
+    beforeDestroy() {
+        eventBus.$off('setSearchState', this._onSetSearchState);
     },
     methods: {
         clicked: async function () {
@@ -168,7 +171,7 @@ export default {
                 if (!store.userSettings.advancedMode && store.isRecording() && this.recordingTimer === store.state.lastTimer) {
                     this.clicked();
                 }
-            }, ffConfig.RECORDING_TIME_LIMIT_MS);
+            }, store.userSettings.recordingTimeLimitSecs * 1000);
 
             // Extra to make sure that only one timer is ever active, in case
             //  user spams many recordings in a short space of time.

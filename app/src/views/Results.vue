@@ -9,7 +9,7 @@
         <v-list class="resultsTable">
             <ResultRow
                 v-for="result in lastResults"
-                :key="`${result.setting.tune_id}`"
+                :key="`${result.setting_id}`"
                 :setting="result.setting"
                 :display-name="result.display_name"
                 :setting-i-d="result.setting_id"
@@ -50,7 +50,7 @@ export default {
     max-width: min(90vh, 90vw);
 }
 
-.resultsTable > a:nth-child(odd) {
+.resultsTable > div:nth-child(odd) {
     background: #efefef;
 }
 

@@ -5,7 +5,7 @@
     >
         <v-row class="pt-1 pb-0">
             <v-col class="py-0">
-                <h2>{{ name }}</h2>
+                <span class="tune-title">{{ name }}</span>
             </v-col>
         </v-row>
         <v-row class="pb-2 pt-0">
@@ -54,6 +54,12 @@ export default {
 </script>
 
 <style scoped>
+.tune-title {
+  font-size: 0.95rem;
+  font-weight: 600;
+  display: block;
+}
+
 .descriptor {
   font-style: italic;
 }

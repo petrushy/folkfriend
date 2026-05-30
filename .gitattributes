@@ -1,9 +1,7 @@
 # Set the default behavior for all files.
 * text eol=lf
-
 # Ignore all differences in line endings
 * -crlf
-
 # Don't break newlines inside binary files
 *.png binary
 *.gz binary

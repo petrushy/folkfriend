@@ -12,7 +12,7 @@
                     <v-list-item @click="0">
                         <v-list-item-action>
                             <v-icon medium>
-                                {{ icons.microphone }}
+                                {{ icons.magnify }}
                             </v-icon>
                         </v-list-item-action>
                         <v-list-item-content>
@@ -53,6 +53,21 @@
                     </v-list-item>
                 </router-link>
 
+                <router-link to="/session-analysis">
+                    <v-list-item @click="0">
+                        <v-list-item-action>
+                            <v-icon medium>
+                                {{ icons.waveform }}
+                            </v-icon>
+                        </v-list-item-action>
+                        <v-list-item-content>
+                            <v-list-item-title class="navBarEntry">
+                                Session Analysis
+                            </v-list-item-title>
+                        </v-list-item-content>
+                    </v-list-item>
+                </router-link>
+
                 <router-link to="/history">
                     <v-list-item @click="0">
                         <v-list-item-action>
@@ -63,6 +78,21 @@
                         <v-list-item-content>
                             <v-list-item-title class="navBarEntry">
                                 History
+                            </v-list-item-title>
+                        </v-list-item-content>
+                    </v-list-item>
+                </router-link>
+
+                <router-link to="/favourites">
+                    <v-list-item @click="0">
+                        <v-list-item-action>
+                            <v-icon medium>
+                                {{ icons.star }}
+                            </v-icon>
+                        </v-list-item-action>
+                        <v-list-item-content>
+                            <v-list-item-title class="navBarEntry">
+                                Favourites
                             </v-list-item-title>
                         </v-list-item-content>
                     </v-list-item>
@@ -98,7 +128,7 @@
                     </v-list-item>
                 </router-link>
 
-                <a href="https://donorbox.org/help-support-development-of-folkfriend" target="_blank">
+                <a href="https://donorbox.org/help-support-development-of-folkfriend" target="_blank" rel="noopener noreferrer">
                     <v-list-item @click="0">
                         <v-list-item-action>
                             <v-icon medium>
@@ -153,22 +183,37 @@
             />
             <v-icon
                 color="primary"
-                @click="clickSettings"
+                @click="clickSearch($event)"
             >
-                {{ icons.cog }}
+                {{ icons.magnify }}
             </v-icon>
         </v-app-bar>
 
         <v-main>
             <router-view />
         </v-main>
+
+        <!-- Persistent banner when a new app version is available -->
+        <v-snackbar v-model="updateBanner" :timeout="-1" bottom>
+            A new version is available.
+            <template #action="{ attrs }">
+                <v-btn text small v-bind="attrs" @click="reloadApp">Reload</v-btn>
+            </template>
+        </v-snackbar>
+
+        <!-- Transient banner for Firestore sync errors -->
+        <v-snackbar v-model="syncErrorSnackbar" :timeout="5000" bottom>
+            {{ syncErrorText }}
+        </v-snackbar>
     </v-app>
 </template>
 
 
 <script>
-import { initializeApp } from 'firebase/app';
 import { getAnalytics } from 'firebase/analytics';
+import { onAuthStateChanged } from 'firebase/auth';
+import firebaseApp, { firebaseAuth } from '@/services/firebase.js';
+
 
 import ffBackend from '@/services/backend.js';
 import store from '@/services/store.js';
@@ -183,9 +228,12 @@ import {
     mdiHelpCircleOutline,
     mdiHistory,
     mdiHeart,
+    mdiMagnify,
     mdiMenu,
     mdiMicrophone,
     mdiMusicNote,
+    mdiStar,
+    mdiWaveform,
     // mdiShareVariant,
 } from '@mdi/js';
 import utils from '@/js/utils.js';
@@ -201,6 +249,9 @@ export default {
             cancel: 'cancel',
         },
         hamburgerState: 'hamburger',
+        updateBanner: false,
+        syncErrorSnackbar: false,
+        syncErrorText: '',
         icons: {
             chevronLeft: mdiChevronLeft,
             cog: mdiCog,
@@ -210,9 +261,12 @@ export default {
             heart: mdiHeart,
             help: mdiHelpCircleOutline,
             history: mdiHistory,
+            magnify: mdiMagnify,
             menu: mdiMenu,
             microphone: mdiMicrophone,
             musicNote: mdiMusicNote,
+            star: mdiStar,
+            waveform: mdiWaveform,
             // shareVariant: mdiShareVariant,
         },
         isPWA: utils.checkStandalone(),
@@ -230,7 +284,7 @@ export default {
         //  hamburger. As a fallback, the navigation hamburger becomes a cross
         //  which refreshes the page in case recording / working hangs completely.
         eventBus.$on('setSearchState', () => {
-            if (store.isReady()) {
+            if (store.isReady() || store.isListening()) {
                 if (this.hamburgerState === this.hamburgerStates.cancel) {
                     this.hamburgerState = this.hamburgerStates.hamburger;
                 }
@@ -265,8 +319,20 @@ export default {
         eventBus.$on('indexLoaded', () => {
             store.state.indexLoaded = true;
         });
+
+        eventBus.$on('swUpdated', () => {
+            this.updateBanner = true;
+        });
+
+        eventBus.$on('syncError', (msg) => {
+            this.syncErrorText = msg;
+            this.syncErrorSnackbar = true;
+        });
     },
     methods: {
+        reloadApp() {
+            window.location.reload();
+        },
         hamburgerBack() {
             router.back();
         },
@@ -274,6 +340,13 @@ export default {
             let result = window.confirm('Cancel this search?');
             if (result) {
                 window.location.reload(false);
+            }
+        },
+        clickSearch(e) {
+            if (e && e.currentTarget) e.currentTarget.blur();
+            if (this.$route.name !== 'search') {
+                router.push({ name: 'search' });
+                eventBus.$emit('parentViewActivated');
             }
         },
         clickSettings() {
@@ -291,23 +364,18 @@ export default {
 };
 
 async function initAnalytics() {
-    // Your web app's Firebase configuration
-    const firebaseConfig = {
-        // This **IS** okay to be public !!!
-        apiKey: 'AIzaSyBy36nafCGgjwzQ1FvxUhHd6RyBZ_YnPis',
-        authDomain: 'folk-friend.firebaseapp.com',
-        databaseURL: 'https://folk-friend.firebaseio.com',
-        projectId: 'folk-friend',
-        storageBucket: 'folk-friend.appspot.com',
-        messagingSenderId: '632280350288',
-        appId: '1:632280350288:web:c4869728d2b5241b1edb55'
-    };
-
-    // Initialize Firebase analytics
-    const app = initializeApp(firebaseConfig);
-    const analytics = getAnalytics(app);
+    const analytics = getAnalytics(firebaseApp);
     store.loadAnalytics(analytics);
     store.logAnalyticsEvent('running_standalone', {'value': utils.checkStandalone()}).then();
+
+    store.loadAuth(firebaseAuth);
+    onAuthStateChanged(firebaseAuth, user => {
+        if (user) {
+            store.onSignedIn(user);
+        } else {
+            store.onSignedOut();
+        }
+    });
 }
 
 async function initSetup() {
@@ -315,8 +383,11 @@ async function initSetup() {
         store.state.backendVersion = version;
         console.info('Loaded folkfriend backend version', version);
     });
-    await ffBackend.setupTuneIndex();
+    // Auth must be initialised immediately — do not wait for tune index setup,
+    // which can take seconds. A user tapping "Sign in" before auth is ready
+    // would hit store.signIn() with this.auth === null and crash.
     await initAnalytics();
+    await ffBackend.setupTuneIndex();
 }
 </script>
 
@@ -335,7 +406,7 @@ html, body {
 
 .viewContainerWrapper {
     display: block;
-    max-width: min(90vh, 90vw);
+    max-width: 90vw;
     padding-left: 0;
     padding-right: 0;
     margin-left: auto;

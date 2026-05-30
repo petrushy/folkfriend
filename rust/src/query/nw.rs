@@ -1,3 +1,23 @@
+/// Semi-global Needleman-Wunsch sequence alignment.
+///
+/// This is the second-pass scorer.  It runs on the ~2000 candidates shortlisted
+/// by the heuristic and produces an accurate similarity score for each.
+///
+/// **Semi-global, not global.**  The shorter string (always `a` after the swap
+/// below) is aligned against the *best matching substring* of the longer string
+/// `b`.  Free gaps at the start and end of `b` mean the audio query does not
+/// need to cover the whole stored contour — it finds the best-matching segment.
+/// This is essential because the user hums a fragment; the stored contour covers
+/// an entire tune (possibly with repeats).
+///
+/// **Scoring:** match +2, mismatch -2, gap -1.
+///
+/// **Normalisation:** `0.5 × raw_score / len(a)`.  Maximum 1.0 (perfect match
+/// of every character in the shorter string).
+///
+/// **Raw contours only** — `dedup_runs` must NOT be applied before calling this
+/// function.  Deduplication inflates scores by shortening both strings, causing
+/// too many unrelated tunes to exceed the "Very Close" display threshold.
 use std::cmp;
 
 const MATCH_SCORE: i32 = 2;
@@ -13,7 +33,8 @@ pub fn needleman_wunsch(a: &String, b: &String) -> f32 {
         return 0.0;
     }
 
-    // Swap a and b such that b always longer than a
+    // Swap so that b is always the longer string; a is aligned against a
+    // substring of b.
     let (a, b) = if a.len() > b.len() { (&b, &a) } else { (&a, &b) };
 
     let mut last_row: Vec<i32> = vec![0; a.len() + 1];

@@ -22,6 +22,20 @@ class FFBackend {
         this.folkfriendWorker.onIndexLoad(Comlink.proxy(() => {
             eventBus.$emit('indexLoaded');
         }));
+
+        // Serialises compound PCM-buffer pipelines (flush → feed → transcribe → query)
+        // so two callers cannot interleave and corrupt each other's WASM buffer.
+        // Only wraps operations that touch the shared PCM buffer; index lookups
+        // (name search, settings-by-tune-id, etc.) run unguarded.
+        this._pcmBufferLock = Promise.resolve();
+    }
+
+    _withPCMBufferLock(fn) {
+        const prev = this._pcmBufferLock;
+        let release;
+        const next = new Promise(resolve => { release = resolve; });
+        this._pcmBufferLock = next;
+        return prev.then(fn).finally(release);
     }
 
     async version() {
@@ -38,7 +52,15 @@ class FFBackend {
                 resolve(analyticsData);
             }));
         });
+        if (analyticsData.error) {
+            console.error('Tune index setup failed:', analyticsData.error);
+            eventBus.$emit('tuneIndexError', analyticsData.error);
+            return;
+        }
         store.logAnalyticsEvent('tune_index_init', analyticsData).then();
+        store.state.tuneIndexVersion = analyticsData['tune_index_metadata_version'];
+        store.state.tuneIndexDate = analyticsData['tune_index_metadata_date'] || null;
+        eventBus.$emit('tuneIndexReady');
     }
 
     async setSampleRate(sampleRate) {
@@ -86,7 +108,11 @@ class FFBackend {
         });
     }
 
-    async submitFilledBuffer() {
+    submitFilledBuffer(skipHistory = false) {
+        return this._withPCMBufferLock(() => this._submitFilledBufferUnlocked(skipHistory));
+    }
+
+    async _submitFilledBufferUnlocked(skipHistory) {
         let t0 = performance.now();
         const contour = await this.transcribePCMBuffer();
         let tEnd = performance.now();
@@ -150,9 +176,11 @@ class FFBackend {
         }
 
         store.state.lastContour = contour;
-        store.addToHistory(new HistoryItem({
-            contour: contour
-        }));
+        if (!skipHistory) {
+            store.addToHistory(new HistoryItem({
+                contour: contour
+            }));
+        }
 
         if (!doQuery) {
             router.push({
@@ -180,19 +208,69 @@ class FFBackend {
         });
     }
 
+    transcribeAndQueryPCMSignal(PCMSignal) {
+        return this._withPCMBufferLock(() => this._transcribeAndQueryPCMSignalUnlocked(PCMSignal));
+    }
+
+    async _transcribeAndQueryPCMSignalUnlocked(PCMSignal) {
+        await this.flushPCMBuffer();
+
+        try {
+            await this.feedEntirePCMSignal(PCMSignal);
+        } catch (e) {
+            await this.flushPCMBuffer();
+            return {
+                error: e && e.message ? e.message : String(e),
+                contour: '',
+                results: [],
+            };
+        }
+
+        const contour = await this.transcribePCMBuffer();
+
+        try {
+            const maybeError = JSON.parse(contour);
+            if (maybeError && maybeError.error) {
+                await this.flushPCMBuffer();
+                return {
+                    error: maybeError.error,
+                    contour: '',
+                    results: [],
+                };
+            }
+        } catch (e) {
+            if (!(e instanceof SyntaxError)) {
+                await this.flushPCMBuffer();
+                throw e;
+            }
+        }
+
+        const results = await this.runTranscriptionQuery(contour);
+        return {
+            error: null,
+            contour,
+            results,
+        };
+    }
+
+    analyzeRingBuffer(pcm) {
+        return this._withPCMBufferLock(async () => {
+            await this.feedEntirePCMSignal(pcm);
+            await this._submitFilledBufferUnlocked(true);
+        });
+    }
+
     async settingsFromTuneID(tuneID) {
-        return new Promise(resolve => {
-            this.folkfriendWorker.settingsFromTuneID(tuneID, Comlink.proxy(response => {
-                resolve(response);
-            }));
+        return new Promise((resolve, reject) => {
+            this.folkfriendWorker.settingsFromTuneID(tuneID, Comlink.proxy(resolve))
+                .catch(reject);
         });
     }
 
     async aliasesFromTuneID(tuneID) {
-        return new Promise(resolve => {
-            this.folkfriendWorker.aliasesFromTuneID(tuneID, Comlink.proxy(response => {
-                resolve(response);
-            }));
+        return new Promise((resolve, reject) => {
+            this.folkfriendWorker.aliasesFromTuneID(tuneID, Comlink.proxy(resolve))
+                .catch(reject);
         });
     }
 }
