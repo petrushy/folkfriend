@@ -120,8 +120,34 @@ chunks (basic-pitch overlaps by 30 frames, trims 15 each side via
   pitches [67,69,71,72,74] EXACTLY. DSP path unchanged (19 integration tests
   green). NOTE: a single sustained note returns Err (quantiser needs >3 notes,
   same as DSP) — fine for real tunes.
-- **E. Transcriber trait + wiring** — `DspTranscriber`/`MlTranscriber`, route in
-  `lib.rs`/`bin.rs`, setting in worker/store; A/B on `run_benchmark.py`.
+- **E. Transcriber trait + wiring** — IN PROGRESS. CLI A/B done; app wiring + the
+  Transcriber trait deferred pending ML tuning (see A/B result below).
+  - `bin.rs`: `FF_TRANSCRIBER=ml` env switch selects the ML front-end (built once,
+    shared across rayon workers — `BasicPitch` is Sync). Run the benchmark with
+    that env set to A/B.
+
+## A/B benchmark result (2026-05-31) — ML not yet a clean-audio win
+
+`python3 scripts/run_benchmark.py` (DSP) vs `FF_TRANSCRIBER=ml … run_benchmark.py`:
+
+- **DSP 30/30 detected. ML 25/30** (lost: wise_maid, gazaremsan, äppelbo,
+  calums_road rank 7, sally_garden).
+- **Expected**: the benchmark is all clean *solo* recordings — exactly where the
+  hand-tuned DSP path is strong and where ML's polyphony/percussion advantage is
+  invisible. The banjo/session case (the actual goal) is NOT in this benchmark.
+- **Diagnosis** (wise_maid): ML contour `AEEFChhz...` vs DSP `vAEHEFECAxAz...` —
+  ML **jumps octaves** (loud harmonics briefly win a frame). `notes_to_melody`
+  uses loudest-active-note; needs **melody continuity** (prefer the note nearest
+  the running pitch / penalize octave jumps) + better octave handling. Concrete
+  tuning lever, not a structural flaw. Pipeline is functional end-to-end.
+
+### Decision point / next options
+1. **Tune ML melody selection** (continuity/octave smoothing, thresholds) to
+   recover clean-audio parity, re-A/B.
+2. **Wire ML as opt-in** in the app (keep DSP default) so the real banjo/session
+   case can finally be tested — the only way to validate the actual goal.
+3. **Capture a banjo/session test WAV** + add to `rust/bench/tunes.json` so "more
+   robust" becomes measurable. (Still the highest-leverage missing piece.)
 
 ## Reproduce the spike
 

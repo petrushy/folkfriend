@@ -97,6 +97,16 @@ fn process_audio_files(ff: FolkFriend, input: String, with_transcription_query: 
     let skipped_files: Vec<String> = Vec::new();
     let skipped_files = Arc::new(Mutex::new(skipped_files));
 
+    // A/B switch: FF_TRANSCRIBER=ml uses the basic-pitch ML front-end instead of
+    // the DSP path. Built once and shared across the rayon workers.
+    let use_ml = std::env::var("FF_TRANSCRIBER").map(|v| v == "ml").unwrap_or(false);
+    let basic_pitch = if use_ml {
+        eprintln!("Using ML transcriber (basic-pitch)");
+        Some(folkfriend::decode::ml::BasicPitch::new().expect("Failed to load ML model"))
+    } else {
+        None
+    };
+
     audio_file_paths.par_iter().for_each(|audio_file_path| {
         if let Some(bar) = &progress {
             bar.inc(1);
@@ -119,40 +129,47 @@ fn process_audio_files(ff: FolkFriend, input: String, with_transcription_query: 
         let base_debug_path = wav_path.as_path().display().to_string().replace(".wav", "");
 
         let (signal, sample_rate) = pcm_signal_from_wav(&wav_path);
-        // The FolkFriend struct is not set up for happy concurrency.
-        //  To avoid the unecessary complication of mutex etc, we just
-        //  bypass the higher level wrapper.
-        let mut fe = folkfriend::feature::FeatureExtractor::new(sample_rate).expect("Invalid sample rate");
-        let feature_decoder = folkfriend::decode::FeatureDecoder::new(sample_rate).expect("Invalid sample rate");
-
-        fe.feed_signal(signal);
-
-        if debug {
-            let out_path = format!("{}.a-features.png", base_debug_path);
-            save_features_as_img(&fe.features, &out_path);
-        }
 
         // If there's an error, such as the decoder failing to find any notes,
         //  we can't just gloss over it and pretend we never saw this audio
         //  file. Continue with an empty string as the contour. The results
         //  be terrible but that's fair if we couldn't find any notes.
-        let lattice_path = feature_decoder
-            .decode_lattice_path(&mut fe.features)
-            .unwrap_or(folkfriend::decode::types::LatticePath::new());
-        let contour_string = feature_decoder.decode_contour(&lattice_path, &fe.features).unwrap_or("".to_string());
+        let contour_string = if let Some(bp) = &basic_pitch {
+            bp.transcribe_contour(&signal, sample_rate).unwrap_or_default()
+        } else {
+            // DSP path. The FolkFriend struct is not set up for happy
+            //  concurrency, so we bypass the higher level wrapper here.
+            let mut fe = folkfriend::feature::FeatureExtractor::new(sample_rate)
+                .expect("Invalid sample rate");
+            let feature_decoder = folkfriend::decode::FeatureDecoder::new(sample_rate)
+                .expect("Invalid sample rate");
+            fe.feed_signal(signal);
 
-        if debug {
-            if lattice_path.len() > 0 {
-                let out_path = format!("{}.b-lattice-path.png", base_debug_path);
-                save_lattice_path_as_img(&lattice_path, &out_path);
+            if debug {
+                let out_path = format!("{}.a-features.png", base_debug_path);
+                save_features_as_img(&fe.features, &out_path);
             }
 
-            let contour = folkfriend::decode::types::contour_string_to_contour(&contour_string);
-            if contour.len() > 0 {
-                let out_path = format!("{}.c-decoded-contour.png", base_debug_path);
-                save_contour_as_img(&contour, &out_path);
+            let lattice_path = feature_decoder
+                .decode_lattice_path(&mut fe.features)
+                .unwrap_or(folkfriend::decode::types::LatticePath::new());
+            let contour_string = feature_decoder
+                .decode_contour(&lattice_path, &fe.features)
+                .unwrap_or("".to_string());
+
+            if debug {
+                if lattice_path.len() > 0 {
+                    let out_path = format!("{}.b-lattice-path.png", base_debug_path);
+                    save_lattice_path_as_img(&lattice_path, &out_path);
+                }
+                let contour = folkfriend::decode::types::contour_string_to_contour(&contour_string);
+                if contour.len() > 0 {
+                    let out_path = format!("{}.c-decoded-contour.png", base_debug_path);
+                    save_contour_as_img(&contour, &out_path);
+                }
             }
-        }
+            contour_string
+        };
 
         if !with_transcription_query {
             println!("=== Transcription for file {:?} ===", audio_file_path);
