@@ -107,6 +107,32 @@ failing clip (`rust/wavs/Brännvinslåt_terrible_quality.wav`, 48k/10s).
   WASM is stale; `1.4.0-ml` = current. Immediate check without redeploy: UPLOAD
   the failing wav in the app (ML on) — if not found, the app's WASM is stale.
 
+## ROOT CAUSE: non-deterministic query shortlist (2026-05-31 late) ✅ FIXED
+
+"ML never lists Brännvinslåt in the app, legacy always does" — version confirmed
+`1.4.0-ml` (current WASM), fresh PWA reinstall. So NOT stale WASM, NOT the model.
+
+Reproduced the app's exact WASM path in Node (`rust/test_wasm_path.js`, built with
+`wasm-pack build --target nodejs --out-dir pkg-node`): the WASM contour is
+**byte-identical to native** (`ddhmmhAAyxyACvhDDHHHAtFFCxxxxxttttxxx`). So the ML
+transcription is fine. But running the SAME contour through the query repeatedly:
+Brännvinslåt was #1 in **4 of 5 runs, absent in the 5th**.
+
+**Cause:** `query/heuristic.rs` keeps the top `QUERY_REPASS_SIZE`=2000 candidates by
+distinct-ngram count for the NW re-scoring pass, but it **iterated a HashMap
+(random seed) and split the tie group at the 2000 cutoff** — so for a weak/poor
+contour, where the correct tune ties many others at a low count right at the
+boundary, whether it survived to NW was random. Affects DSP too; just most visible
+on weak ML contours. (NW would score it 0.27 → top, but only if it reached NW.)
+
+**Fix:** never split a tie group at the cutoff — include every candidate whose
+count ties the boundary (deterministic membership, no HashMap-order dependence,
+no setting-id bias), capped at `QUERY_REPASS_MAX`=6000 for pathological low-count
+ties. Now Brännvinslåt is #1 on every run (CLI ×6 and the Node WASM path).
+Version bumped to **`1.4.1-ml`** so the fixed build is identifiable on the About
+page. Benchmark: DSP 34/34, **ML 32/34** (terrible-quality clip now reliably
+found; only gazaremsan/äppelbo remain). 20 integration tests green.
+
 ## Phase 2 reference — basic-pitch note-creation (to port to Rust)
 
 Constants (`basic_pitch/constants.py`): `AUDIO_SAMPLE_RATE=22050`, `FFT_HOP=256`,

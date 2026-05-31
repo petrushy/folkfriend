@@ -81,14 +81,27 @@ pub fn run_transcription_query(
         }
     }
 
-    // Only the top `repass` candidates are re-scored by Needleman-Wunsch, so
-    // partition first (O(n)) and fully sort just that prefix rather than
-    // sorting every matched candidate (O(n log n)).
-    if sorted_rankings.len() > repass {
-        sorted_rankings.select_nth_unstable_by(repass, |x, y| y.1.cmp(&x.1));
-        sorted_rankings.truncate(repass);
-    }
+    // Sort by distinct-ngram count (descending). Only the top candidates go to
+    // the slower Needleman-Wunsch re-scoring pass.
     sorted_rankings.sort_by(|x, y| y.1.cmp(&x.1));
+
+    // Keep the top `repass` candidates — but NEVER split a tie group at the
+    // cutoff. Truncating mid-tie made shortlist membership depend on HashMap
+    // iteration order, so a borderline-correct tune (typical of weak/poor-audio
+    // contours, where many tunes tie at a low count near the boundary) was
+    // randomly included or dropped from one run to the next — the same audio
+    // could find the tune or not. Including the whole boundary tie group makes
+    // membership deterministic; a hard cap bounds the NW pass when a very low
+    // count ties thousands of tunes (a contour too weak to resolve anyway).
+    if sorted_rankings.len() > repass {
+        let cutoff = sorted_rankings[repass - 1].1;
+        let max_end = sorted_rankings.len().min(ff_config::QUERY_REPASS_MAX);
+        let mut end = repass;
+        while end < max_end && sorted_rankings[end].1 >= cutoff {
+            end += 1;
+        }
+        sorted_rankings.truncate(end);
+    }
     sorted_rankings
 }
 
