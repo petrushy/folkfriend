@@ -17,6 +17,7 @@ const USER_SETTING_DEFAULTS = {
     showAbcText: false,
     microphoneChoice: null,
     recordingTimeLimitSecs: 10,
+    useMlTranscriber: false, // opt-in experimental basic-pitch ML transcription
 };
 
 class Store {

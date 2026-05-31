@@ -60,6 +60,9 @@ class FFBackend {
         store.logAnalyticsEvent('tune_index_init', analyticsData).then();
         store.state.tuneIndexVersion = analyticsData['tune_index_metadata_version'];
         store.state.tuneIndexDate = analyticsData['tune_index_metadata_date'] || null;
+        // Apply the persisted ML-transcriber preference now that the worker is up.
+        this.setUseMlTranscriber(store.userSettings.useMlTranscriber || false).catch(e =>
+            console.warn('Could not set ML transcriber preference', e));
         eventBus.$emit('tuneIndexReady');
     }
 
@@ -74,6 +77,13 @@ class FFBackend {
         }
 
         await this.folkfriendWorker.setSampleRate(sampleRate);
+    }
+
+    async setUseMlTranscriber(useMl) {
+        // Push the opt-in ML-transcriber setting to the worker/WASM. Must be set
+        // before PCM is fed (the feed path branches on it), so we call this on
+        // startup and whenever the Settings toggle changes — not per-recording.
+        await this.folkfriendWorker.setUseMlTranscriber(!!useMl);
     }
 
     async feedEntirePCMSignal(PCMSignal) {

@@ -246,6 +246,14 @@ class FolkFriendWASMWrapper {
         this.setLoadedSampleRate();
     }
 
+    async setUseMlTranscriber(useMl) {
+        // Opt-in basic-pitch ML transcriber (default off = DSP path). The WASM
+        // side lazily builds the model on first enable and falls back to DSP if
+        // it can't. Safe to call repeatedly.
+        await this.loadedWASM;
+        this.folkfriendWASM.set_use_ml(!!useMl);
+    }
+
     async feedEntirePCMSignal(PCMSignal) {
         const windowSize = ffConfig.SPEC_WINDOW_SIZE;
         const frames = Math.floor(PCMSignal.length / windowSize);
@@ -306,11 +314,9 @@ class FolkFriendWASMWrapper {
         }
     }
 
-    async runTranscriptionQuery(query, cb) {
-        await this.loadedWASM;
-        await this.loadedIndex;
-        const response = await this.folkfriendWASM.run_transcription_query(query);
-        const results = JSON.parse(response);
+    // ABC strings and source URLs are kept worker-side (not passed to WASM, see
+    // fetchTuneIndexData) so they must be re-attached to each query result here.
+    _reattachSidebandData(results) {
         for (const result of results) {
             if (result.setting && result.setting_id !== undefined) {
                 const settingID = String(result.setting_id);
@@ -318,22 +324,21 @@ class FolkFriendWASMWrapper {
                 result.setting.source_url = this.sourceUrlBySetting[settingID] || '';
             }
         }
-        cb(results);
+        return results;
+    }
+
+    async runTranscriptionQuery(query, cb) {
+        await this.loadedWASM;
+        await this.loadedIndex;
+        const response = await this.folkfriendWASM.run_transcription_query(query);
+        cb(this._reattachSidebandData(JSON.parse(response)));
     }
 
     async runNameQuery(query, cb) {
         await this.loadedWASM;
         await this.loadedIndex;
         const response = await this.folkfriendWASM.run_name_query(query);
-        const results = JSON.parse(response);
-        for (const result of results) {
-            if (result.setting && result.setting_id !== undefined) {
-                const settingID = String(result.setting_id);
-                result.setting.abc = this.abcStringBySetting[settingID] || '';
-                result.setting.source_url = this.sourceUrlBySetting[settingID] || '';
-            }
-        }
-        cb(results);
+        cb(this._reattachSidebandData(JSON.parse(response)));
     }
 
     async contourToAbc(contour, cb) {

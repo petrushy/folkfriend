@@ -120,11 +120,25 @@ chunks (basic-pitch overlaps by 30 frames, trims 15 each side via
   pitches [67,69,71,72,74] EXACTLY. DSP path unchanged (19 integration tests
   green). NOTE: a single sustained note returns Err (quantiser needs >3 notes,
   same as DSP) — fine for real tunes.
-- **E. Transcriber trait + wiring** — IN PROGRESS. CLI A/B done; app wiring + the
-  Transcriber trait deferred pending ML tuning (see A/B result below).
-  - `bin.rs`: `FF_TRANSCRIBER=ml` env switch selects the ML front-end (built once,
-    shared across rayon workers — `BasicPitch` is Sync). Run the benchmark with
-    that env set to A/B.
+- **E. Transcriber trait + wiring** — ✅ DONE (opt-in setting). CLI A/B +
+  app wiring complete.
+  - `bin.rs`: `FF_TRANSCRIBER=ml` env switch (built once, shared across rayon
+    workers — `BasicPitch` is Sync).
+  - `lib.rs`: `FolkFriend` gains an ML mode — `set_use_ml(bool)` (lazy model
+    build, DSP fallback), raw-PCM accumulation, and `transcribe_pcm_buffer`
+    routes to the ML pipeline when enabled. Exposed on WASM as `set_use_ml`.
+    (No separate `Transcriber` trait — the in-struct branch was simpler and the
+    DSP path is fully preserved.)
+  - App: `worker.setUseMlTranscriber` → `backend.setUseMlTranscriber` (pushed on
+    startup in `setupTuneIndex` + on toggle), `store` default
+    `useMlTranscriber:false`, Settings.vue toggle ("Experimental: ML
+    transcription"). Mode is set before any PCM feed (event-driven, not
+    per-recording) because the feed path branches on it.
+  - WASM rebuilt with tract reachable: **11.3 MB raw / 2.4 MB gzip** (model
+    embedded via `include_bytes!`, so Workbox precaches it with the wasm → works
+    offline). App production build passes.
+  - **How to try it:** Settings → enable "Experimental: ML transcription", then
+    record. DSP remains the default.
 
 ## A/B benchmark result (2026-05-31) — ML not yet a clean-audio win
 
