@@ -109,8 +109,17 @@ chunks (basic-pitch overlaps by 30 frames, trims 15 each side via
   selection (2D) discards it anyway. NOTE: python needs `setuptools<81` in the
   conda env (resampy uses pkg_resources, removed in setuptools 81). Decisive
   validation of the port is the 2E benchmark, not the synthetic tone.
-- **D. melody select + contour** — dominant line → reuse tempo quantiser →
-  `ContourString`.
+- **D. melody select + contour** — ✅ DONE. `note_events::notes_to_melody`:
+  per-frame loudest active note → monophonic line, onset-preserving segmentation
+  (repeated picked notes stay split), octave-folded into MIDI 48–95. Refactored
+  `contour.rs` to expose `contour_from_notes_fps(notes, frames_per_sec)` +
+  `Note::new` (pub(crate)) so the ML path (≈86 fps) reuses the SAME tuned tempo
+  quantiser as the DSP path (≈46 fps). `BasicPitch::transcribe_contour(pcm,
+  src_rate)` ties it together → octave-correct → `ContourString`.
+  Test `ascending_melody_contour`: synth G4-A4-B4-C5-D5 → contour `tvxyA` =
+  pitches [67,69,71,72,74] EXACTLY. DSP path unchanged (19 integration tests
+  green). NOTE: a single sustained note returns Err (quantiser needs >3 notes,
+  same as DSP) — fine for real tunes.
 - **E. Transcriber trait + wiring** — `DspTranscriber`/`MlTranscriber`, route in
   `lib.rs`/`bin.rs`, setting in worker/store; A/B on `run_benchmark.py`.
 

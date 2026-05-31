@@ -3,6 +3,8 @@
 //! Loads the embedded ICASSP-2022 model and runs one ~2 s audio window to
 //! produce note / onset / contour posteriorgrams. Compiles to native (CLI +
 //! tests) and wasm32 (browser worker). See `docs/v2-detection/PROGRESS.md`.
+use crate::decode::types::{contour_to_contour_string, ContourString};
+use crate::decode::{contour, note_events, octave, DecoderError};
 use tract_onnx::prelude::*;
 
 /// The official basic-pitch model (~225 KB), embedded so native + wasm share a
@@ -136,6 +138,34 @@ impl BasicPitch {
 
         Ok(Posteriorgrams { note, onset, contour, n_frames: n_out })
     }
+
+    /// Full ML transcription: raw PCM → contour string, matching the DSP path's
+    /// output type. model → note events → monophonic melody → tempo-quantised
+    /// contour → octave correction → string.
+    pub fn transcribe_contour(
+        &self,
+        pcm: &[f32],
+        src_rate: u32,
+    ) -> Result<ContourString, DecoderError> {
+        let p = self.transcribe(pcm, src_rate).map_err(|_| DecoderError)?;
+        let events = note_events::output_to_notes(
+            &p.note,
+            &p.onset,
+            p.n_frames,
+            N_NOTE_BINS,
+            &note_events::NoteCreationParams::default(),
+        );
+        let melody = note_events::notes_to_melody(&events, p.n_frames);
+        let mut notes: contour::Notes = melody
+            .into_iter()
+            .map(|(pitch, dur, power)| contour::Note::new(pitch, dur, power))
+            .collect();
+
+        let frames_per_sec = SAMPLE_RATE as f32 / FFT_HOP as f32; // ≈86.13
+        let mut c = contour::contour_from_notes_fps(&mut notes, frames_per_sec)?;
+        octave::correct_contour_octave(&mut c);
+        Ok(contour_to_contour_string(&c))
+    }
 }
 
 /// Append all but the first/last `n_olap` frames of a window's output.
@@ -193,5 +223,39 @@ mod tests {
         let best_midi = best as u32 + MIDI_OFFSET;
         eprintln!("A4 tone: strongest note bin {best} = MIDI {best_midi}");
         assert_eq!(best_midi, 69, "expected A4 (MIDI 69), got MIDI {best_midi}");
+    }
+
+    #[test]
+    fn ascending_melody_contour() {
+        // Full 2D chain: synthesize 5 ascending notes (G4..D5) and confirm the
+        // transcribed contour ascends and has multiple distinct pitches.
+        use crate::decode::types::contour_string_to_contour;
+        let src_rate = 48_000u32;
+        let midis = [67u32, 69, 71, 72, 74]; // G4 A4 B4 C5 D5
+        let note_secs = 0.5f32;
+        let mut pcm = Vec::new();
+        for &m in &midis {
+            let f0 = 440.0 * 2f32.powf((m as f32 - 69.0) / 12.0);
+            let n = (src_rate as f32 * note_secs) as usize;
+            for i in 0..n {
+                let w = 2.0 * std::f32::consts::PI * i as f32 / src_rate as f32;
+                pcm.push(0.6 * (w * f0).sin() + 0.3 * (w * 2.0 * f0).sin() + 0.15 * (w * 3.0 * f0).sin());
+            }
+        }
+        let bp = BasicPitch::new().unwrap();
+        let contour = bp.transcribe_contour(&pcm, src_rate).expect("should transcribe");
+        eprintln!("ascending melody contour: {contour}");
+        assert!(!contour.is_empty(), "contour should be non-empty");
+        let pitches = contour_string_to_contour(&contour);
+        // Distinct consecutive pitches.
+        let mut distinct: Vec<u32> = Vec::new();
+        for p in pitches {
+            if distinct.last() != Some(&p) {
+                distinct.push(p);
+            }
+        }
+        eprintln!("distinct pitches: {distinct:?}");
+        assert!(distinct.len() >= 4, "expected >=4 distinct pitches, got {distinct:?}");
+        assert!(distinct.first().unwrap() < distinct.last().unwrap(), "melody should ascend");
     }
 }

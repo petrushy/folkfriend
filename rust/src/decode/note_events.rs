@@ -6,6 +6,7 @@
 //! Matrices are flat row-major `[frame * n_bins + bin]`.
 
 use crate::decode::ml::MIDI_OFFSET;
+use crate::ff_config;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NoteEvent {
@@ -237,6 +238,68 @@ pub fn output_to_notes(
     }
 
     notes
+}
+
+/// Fold a MIDI pitch into FolkFriend's representable range [MIDI_LOW, MIDI_HIGH]
+/// by whole octaves (the contour alphabet only covers those 48 semitones).
+fn fold_into_range(mut pitch: u32) -> u32 {
+    while pitch < ff_config::MIDI_LOW {
+        pitch += 12;
+    }
+    while pitch > ff_config::MIDI_HIGH {
+        pitch -= 12;
+    }
+    pitch
+}
+
+/// Collapse polyphonic note events into a monophonic melody line: at each frame
+/// the loudest active note wins; runs of equal pitch become one melody note, but
+/// a note-event onset always starts a new melody note (so repeated picked notes
+/// stay separated — the key win over the DSP path for banjo etc.).
+///
+/// Returns `(pitch_midi, duration_frames, power)` tuples, pitches octave-folded
+/// into FolkFriend's range.
+pub fn notes_to_melody(events: &[NoteEvent], n_frames: usize) -> Vec<(u32, usize, f32)> {
+    if n_frames == 0 {
+        return Vec::new();
+    }
+    let mut frame_pitch: Vec<Option<u32>> = vec![None; n_frames];
+    let mut frame_amp: Vec<f32> = vec![0.0; n_frames];
+    for ev in events {
+        for t in ev.start_frame..ev.end_frame.min(n_frames) {
+            if ev.amplitude > frame_amp[t] {
+                frame_amp[t] = ev.amplitude;
+                frame_pitch[t] = Some(ev.pitch_midi);
+            }
+        }
+    }
+    // Onset boundaries: a frame where some event begins and wins the frame.
+    let mut onset_at = vec![false; n_frames];
+    for ev in events {
+        let t = ev.start_frame;
+        if t < n_frames && frame_pitch[t] == Some(ev.pitch_midi) {
+            onset_at[t] = true;
+        }
+    }
+
+    let mut melody = Vec::new();
+    let mut i = 0;
+    while i < n_frames {
+        let Some(pitch) = frame_pitch[i] else {
+            i += 1;
+            continue;
+        };
+        let start = i;
+        let mut amp_sum = frame_amp[i];
+        i += 1;
+        while i < n_frames && frame_pitch[i] == Some(pitch) && !onset_at[i] {
+            amp_sum += frame_amp[i];
+            i += 1;
+        }
+        let duration = i - start;
+        melody.push((fold_into_range(pitch), duration, amp_sum / duration as f32));
+    }
+    melody
 }
 
 #[cfg(test)]
