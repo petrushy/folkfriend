@@ -89,6 +89,24 @@ deployed WASM can no longer go stale. **Action for next field test: just
 `npm run build && firebase deploy` (WASM rebuild is now automatic), force-update
 the PWA, and re-test — the field ML should now match the CLI (all 3 clips top-5).**
 
+## "ML not on the list in the app" — it's STALE WASM again (2026-05-31 eve)
+
+User: legacy finds Brännvinslåt #1 through a speaker; ML never lists it. Saved the
+failing clip (`rust/wavs/Brännvinslåt_terrible_quality.wav`, 48k/10s).
+- **CLI DSP #1 (0.39); CLI ML #1 (0.27)** on that exact clip — current ML handles
+  it fine despite the poor quality.
+- New regression test `ml_app_path_matches_direct_path` proves the app's ML path
+  (FolkFriend feed + transcribe_pcm_buffer, incl. windowed feed) is byte-identical
+  to the CLI's direct `BasicPitch::transcribe_contour`.
+- ⇒ If the app doesn't list it but the CLI finds it #1 on the same audio, the app
+  is running an OLD WASM (gitignored; PWA service worker caches it hard). Prebuild
+  hook ensures fresh WASM at build time, but the installed PWA can still serve a
+  cached old copy until the SW updates.
+- **Diagnostic added:** bumped `VERSION` to **`1.4.0-ml`** (ff_config + Cargo.toml).
+  The Help/About page shows the backend version — if it reads `1.3.0`, the loaded
+  WASM is stale; `1.4.0-ml` = current. Immediate check without redeploy: UPLOAD
+  the failing wav in the app (ML on) — if not found, the app's WASM is stale.
+
 ## Phase 2 reference — basic-pitch note-creation (to port to Rust)
 
 Constants (`basic_pitch/constants.py`): `AUDIO_SAMPLE_RATE=22050`, `FFT_HOP=256`,

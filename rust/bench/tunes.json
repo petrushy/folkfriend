@@ -301,5 +301,14 @@
     ],
     "max_rank": 5,
     "source": "folkwiki"
+  },
+  {
+    "wav": "Brännvinslåt_terrible_quality.wav",
+    "label": "Brännvinslåt (terrible quality re-recording)",
+    "expected_tune_ids": [
+      "1525005401"
+    ],
+    "max_rank": 10,
+    "source": "folkwiki"
   }
 ]
