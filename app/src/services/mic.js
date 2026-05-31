@@ -33,6 +33,14 @@ class MicService {
         this._recordingMaxChunks = Math.ceil((120 * 48000) / this.bufferSize);
     }
 
+    // Clamped digital mic gain (sensitivity). Applied via a GainNode before the
+    // script processor, so it amplifies both the audio fed to detection and the
+    // PCM retained for clip export.
+    _micGain() {
+        const g = store.userSettings.micGain;
+        return Math.min(10, Math.max(0.5, typeof g === 'number' && g > 0 ? g : 1));
+    }
+
     _accumulateRms(samples) {
         let sum = 0;
         for (let i = 0; i < samples.length; i++) {
@@ -125,9 +133,12 @@ class MicService {
             ffBackend.feedSinglePCMWindow(channelData);
         };
 
-        // Connect things up
+        // Connect things up, via a gain node for adjustable sensitivity.
         this.micSource = this.audioCtx.createMediaStreamSource(this.micStream);
-        this.micSource.connect(this.micProcessor);
+        this.gainNode = this.audioCtx.createGain();
+        this.gainNode.gain.value = this._micGain();
+        this.micSource.connect(this.gainNode);
+        this.gainNode.connect(this.micProcessor);
         this.micProcessor.connect(this.audioCtx.destination);
 
         try {
@@ -190,10 +201,13 @@ class MicService {
             };
 
             this.micSource = this.audioCtx.createMediaStreamSource(this.micStream);
-            this.micSource.connect(this.micProcessor);
+            this.gainNode = this.audioCtx.createGain();
+            this.gainNode.gain.value = this._micGain();
+            this.micSource.connect(this.gainNode);
+            this.gainNode.connect(this.micProcessor);
             this.micProcessor.connect(this.audioCtx.destination);
 
-            console.debug(`Continuous mode: sample rate ${sampleRate}, max chunks ${this._ringBufferMaxChunks}`);
+            console.debug(`Continuous mode: sample rate ${sampleRate}, max chunks ${this._ringBufferMaxChunks}, gain ${this._micGain()}`);
             await ffBackend.setSampleRate(sampleRate);
         })();
 
@@ -231,6 +245,11 @@ class MicService {
         if (this.micProcessor) {
             this.micProcessor.disconnect();
             this.micProcessor = null;
+        }
+
+        if (this.gainNode) {
+            this.gainNode.disconnect();
+            this.gainNode = null;
         }
         if (this.micStream) {
             this.micStream.getTracks().forEach(t => t.stop());
@@ -274,6 +293,11 @@ class MicService {
         if (this.micProcessor) {
             this.micProcessor.disconnect();
             this.micProcessor = null;
+        }
+
+        if (this.gainNode) {
+            this.gainNode.disconnect();
+            this.gainNode = null;
         }
 
         if (this.micStream) {
