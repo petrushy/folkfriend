@@ -92,7 +92,12 @@ chunks (basic-pitch overlaps by 30 frames, trims 15 each side via
   NOTE: current folkfriend.wasm is only 0.7 MB because tract is dead-code-
   eliminated (not yet called from an exported fn) — real size impact comes in 2E.
   Output order pinned as [0]=onset, [1]=note, [2]=contour (verify in 2C).
-- **B. audio prep** — resample arbitrary-rate PCM → 22050 mono, window to 43844.
+- **B. audio prep** — ✅ DONE. `resample_linear` (linear interp; fundamentals ≪
+  11 kHz Nyquist so fine for now) + `BasicPitch::transcribe(pcm, src_rate)` which
+  front-pads, runs overlapping 43844-windows (hop 36164, 30-frame overlap),
+  trims 15 frames/side and stitches → `Posteriorgrams{note,onset,contour,
+  n_frames}`. Test `detects_a4_tone`: a synthesized 440 Hz tone @ 48 kHz peaks at
+  the A4 note bin (MIDI 69) — validates resample+window+model+bin-mapping E2E.
 - **C. note-creation port** — `output_to_notes_polyphonic` (+ infer_onsets), with
   a test cross-checked against python basic_pitch on a saved posteriorgram.
 - **D. melody select + contour** — dominant line → reuse tempo quantiser →
