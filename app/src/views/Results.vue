@@ -20,6 +20,9 @@
                 Save clip
             </v-btn>
         </div>
+        <div class="debugLine">
+            {{ mlEnabled ? 'ML' : 'DSP' }} · contour (len {{ contour.length }}): {{ contour || '(empty)' }}
+        </div>
         <v-list class="resultsTable">
             <ResultRow
                 v-for="result in lastResults"
@@ -59,6 +62,8 @@ export default {
         return {
             lastResults: store.state.lastResults,
             hasRecording: !!store.state.lastRecordedPcm,
+            contour: store.state.lastContour || '',
+            mlEnabled: !!store.userSettings.useMlTranscriber,
             mdiContentSave,
             snackbar: false,
             snackbarText: '',
@@ -121,6 +126,14 @@ export default {
 
 .resultsTable > div:nth-child(odd) {
     background: #efefef;
+}
+
+.debugLine {
+    font-family: monospace;
+    font-size: 11px;
+    color: #888;
+    word-break: break-all;
+    margin-bottom: 8px;
 }
 
 </style>
