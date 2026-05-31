@@ -155,6 +155,28 @@ chunks (basic-pitch overlaps by 30 frames, trims 15 each side via
   the running pitch / penalize octave jumps) + better octave handling. Concrete
   tuning lever, not a structural flaw. Pipeline is functional end-to-end.
 
+### Octave fixes (2026-05-31) — ML 27 → 28/30 ✅
+- **Fold-bounds bug:** `fold_into_range` now folds at `<=48`/`>=95` (open
+  interval, → [49,94]) to match the dataset's `rel_pitch` exactly — the ML path
+  no longer emits boundary chars ('a'/'V') that no stored contour contains.
+  (Correctness; no benchmark change — boundary pitches are rare.)
+- **Octave-stable melody selection:** seed the running pitch from the
+  amplitude-weighted mean of the *loudest note per frame* (not all candidates,
+  which low-octave artifacts dragged down) + slow the EMA to 0.92/0.08 so brief
+  low excursions are penalised instead of pulling the reference down. Recovered
+  calums_road → **28/30** (remaining misses: gazaremsan, äppelbo — weak for DSP
+  too). Sustained low runs persist only in melody *gaps* (low note is the sole
+  candidate); doesn't affect ranking. WASM rebuilt + copied to app.
+
+### Diagnosis: is the dataset filtering a factor? (answered 2026-05-31)
+The stored contours are processed (chord/grace strip, 1 char/quaver via
+`to_midi_contour`, octave-fold) and calibrated for the DSP path. But a length
+diagnostic (Cooley's: DSP-audio 70, ML-audio 62, stored 256) shows it's NOT a
+gross density mismatch — NW is semi-global, aligning the short audio fragment to
+the best window of the full stored tune. The residual ML gap is transcription-
+side (octave excursions), not dataset-side. Only real dataset-alignment issue
+was the fold-bounds bug above (now fixed).
+
 ### Tuning (option 1, 2026-05-31) — melody continuity ✅
 `notes_to_melody` now seeds a running pitch (amplitude-weighted mean) and selects
 per frame by `amplitude - JUMP_PENALTY·octaves_from_running` with an EMA update,

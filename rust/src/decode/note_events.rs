@@ -240,13 +240,16 @@ pub fn output_to_notes(
     notes
 }
 
-/// Fold a MIDI pitch into FolkFriend's representable range [MIDI_LOW, MIDI_HIGH]
-/// by whole octaves (the contour alphabet only covers those 48 semitones).
+/// Fold a MIDI pitch into FolkFriend's representable range by whole octaves.
+/// Matches the dataset's `rel_pitch` bounds EXACTLY — folds at `<= MIDI_LOW` and
+/// `>= MIDI_HIGH` (i.e. into the open interval (48, 95) → [49, 94]) — so the ML
+/// path never emits boundary chars ('a'/'V') that no stored contour contains.
+/// See folkfriend-app-data build/src/midi.py `Note.rel_pitch`.
 fn fold_into_range(mut pitch: u32) -> u32 {
-    while pitch < ff_config::MIDI_LOW {
+    while pitch <= ff_config::MIDI_LOW {
         pitch += 12;
     }
-    while pitch > ff_config::MIDI_HIGH {
+    while pitch >= ff_config::MIDI_HIGH {
         pitch -= 12;
     }
     pitch
@@ -271,11 +274,14 @@ pub fn notes_to_melody(events: &[NoteEvent], n_frames: usize) -> Vec<(u32, usize
         }
     }
 
-    // Seed the running melody pitch with the amplitude-weighted mean pitch, so
-    // greedy selection starts near the melodic centre rather than on a harmonic.
+    // Seed the running melody pitch from the amplitude-weighted mean of the
+    // LOUDEST note per frame — this approximates the melody line and is far less
+    // polluted by simultaneous low-octave artifacts than averaging every
+    // candidate (which would drag the centre down toward the very harmonics we
+    // want to reject).
     let (mut wsum, mut asum) = (0.0f64, 0.0f64);
     for cands in &frame_cands {
-        for &(p, a) in cands {
+        if let Some(&(p, a)) = cands.iter().max_by(|x, y| x.1.total_cmp(&y.1)) {
             wsum += p as f64 * a as f64;
             asum += a as f64;
         }
@@ -302,7 +308,10 @@ pub fn notes_to_melody(events: &[NoteEvent], n_frames: usize) -> Vec<(u32, usize
         if let Some((p, a)) = best {
             frame_pitch[t] = Some(p);
             frame_amp[t] = a;
-            running = 0.85 * running + 0.15 * p as f32; // EMA toward the chosen pitch
+            // Slow EMA: the reference stays near the melodic centre so a brief
+            // (even multi-frame) low excursion is consistently penalised rather
+            // than dragging the reference down with it.
+            running = 0.92 * running + 0.08 * p as f32;
         }
     }
     // Onset boundaries: a frame where some event begins and wins the frame.
