@@ -25,6 +25,47 @@ fn pcm_from_wav(path: &str) -> (Vec<f32>, u32) {
     (signal_f, header.sampling_rate)
 }
 
+// Does the APP's ML path (FolkFriend feed + transcribe_pcm_buffer) produce the
+// SAME contour as the DIRECT path the CLI uses (BasicPitch::transcribe_contour)?
+// If these differ, "ML works" CLI tests don't reflect what the app runs.
+#[test]
+fn ml_app_path_matches_direct_path() {
+    let (pcm, sr) = pcm_from_wav("wavs/Brännvinslåt Efter Gås-anders.wav");
+
+    // Direct path == CLI / bin.rs.
+    let bp = folkfriend::decode::ml::BasicPitch::new().unwrap();
+    let direct = bp.transcribe_contour(&pcm, sr).unwrap();
+
+    // FolkFriend whole-signal feed.
+    let mut ff = FolkFriend::new();
+    ff.set_sample_rate(sr).unwrap();
+    ff.set_use_ml(true);
+    ff.feed_entire_pcm_signal(pcm.clone());
+    let via_entire = ff.transcribe_pcm_buffer().unwrap();
+
+    // FolkFriend windowed feed == the actual app path (mic feeds 1024-sample
+    // windows via feed_single_pcm_window).
+    let mut ff2 = FolkFriend::new();
+    ff2.set_sample_rate(sr).unwrap();
+    ff2.set_use_ml(true);
+    let win = folkfriend::ff_config::SPEC_WINDOW_SIZE;
+    for chunk in pcm.chunks(win) {
+        if chunk.len() == win {
+            let mut w = [0f32; folkfriend::ff_config::SPEC_WINDOW_SIZE];
+            w.copy_from_slice(chunk);
+            ff2.feed_single_pcm_window(w);
+        }
+    }
+    let via_windows = ff2.transcribe_pcm_buffer().unwrap();
+
+    eprintln!("direct  (len {}): {}", direct.len(), direct);
+    eprintln!("entire  (len {}): {}", via_entire.len(), via_entire);
+    eprintln!("windows (len {}): {}", via_windows.len(), via_windows);
+
+    assert_eq!(direct, via_entire, "FolkFriend feed_entire ML path differs from direct");
+    assert_eq!(direct, via_windows, "FolkFriend windowed (app) ML path differs from direct");
+}
+
 fn assert_audio_detects_one_of(
     wav_path: &str,
     expected_tune_ids: &[&str],
