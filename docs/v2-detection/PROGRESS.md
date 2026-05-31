@@ -51,6 +51,26 @@ and budget for it. Model loads + optimizes in ~6–7 ms.
    `interpolate.rs` for log-freq bins) OR confirm the model ingests raw audio.
 4. Then build `MlTranscriber` behind the `Transcriber` trait (plan Phase 2).
 
+## Field data + upload-path check (2026-05-31)
+
+Three real Swedish session recordings added to `rust/wavs/` + `rust/bench/tunes.json`
+(now 33 cases): Brännvinslåt efter Gås-Anders (tune 1525005401), Vendelpolskan
+(801497201/606518301), Kärleksvalsen (1019248601).
+
+- **A/B on 33 (full files):** DSP 33/33, **ML 31/33** (misses: gazaremsan, äppelbo
+  — not the new ones). All three field recordings detected by ML in top-5:
+  Brännvinslåt #1 (0.50), Kärleksvalsen #1 (0.57), Vendelpolskan #1–2 (~0.18,
+  fragile — sometimes pipped by noise via shortlist tie-break non-determinism).
+- **Does the ML toggle apply on file upload?** YES — verified. Upload feeds via
+  `worker.feedEntirePCMSignal` → loops `feed_single_pcm_window`, which branches on
+  `use_ml`; and `audio.js urlToTimeDomainData` sets the sample rate to 48 kHz so
+  the ML resampler is fed the right rate. The CLI A/B proves ML is active on these
+  files (results differ from DSP). The "session felt worse than upload" gap is the
+  **live-session windowing** (shorter/noisier chunks), not the transcriber.
+- **Hardening:** `backend.feedEntirePCMSignal` now asserts the transcriber mode
+  from the current setting *before* feeding, so the ML toggle reliably applies to
+  upload + live-session + ring-buffer regardless of when it was last pushed.
+
 ## Phase 2 reference — basic-pitch note-creation (to port to Rust)
 
 Constants (`basic_pitch/constants.py`): `AUDIO_SAMPLE_RATE=22050`, `FFT_HOP=256`,

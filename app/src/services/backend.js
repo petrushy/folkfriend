@@ -87,6 +87,12 @@ class FFBackend {
     }
 
     async feedEntirePCMSignal(PCMSignal) {
+        // Assert the transcriber mode from the current setting BEFORE feeding —
+        // the WASM feed path branches on it. This guarantees the ML toggle
+        // applies to file upload, live session and ring-buffer analysis (all of
+        // which feed a whole signal through here), independent of when the
+        // setting was last pushed.
+        await this.setUseMlTranscriber(store.userSettings.useMlTranscriber || false);
         await this.folkfriendWorker.feedEntirePCMSignal(PCMSignal);
     }
 
