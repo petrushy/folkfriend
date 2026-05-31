@@ -263,14 +263,46 @@ pub fn notes_to_melody(events: &[NoteEvent], n_frames: usize) -> Vec<(u32, usize
     if n_frames == 0 {
         return Vec::new();
     }
-    let mut frame_pitch: Vec<Option<u32>> = vec![None; n_frames];
-    let mut frame_amp: Vec<f32> = vec![0.0; n_frames];
+    // Per-frame candidate notes (pitch, amplitude) from all active events.
+    let mut frame_cands: Vec<Vec<(u32, f32)>> = vec![Vec::new(); n_frames];
     for ev in events {
         for t in ev.start_frame..ev.end_frame.min(n_frames) {
-            if ev.amplitude > frame_amp[t] {
-                frame_amp[t] = ev.amplitude;
-                frame_pitch[t] = Some(ev.pitch_midi);
+            frame_cands[t].push((ev.pitch_midi, ev.amplitude));
+        }
+    }
+
+    // Seed the running melody pitch with the amplitude-weighted mean pitch, so
+    // greedy selection starts near the melodic centre rather than on a harmonic.
+    let (mut wsum, mut asum) = (0.0f64, 0.0f64);
+    for cands in &frame_cands {
+        for &(p, a) in cands {
+            wsum += p as f64 * a as f64;
+            asum += a as f64;
+        }
+    }
+    let mut running = if asum > 0.0 { (wsum / asum) as f32 } else { 0.0 };
+
+    // Select the dominant note per frame by amplitude BUT penalised for jumping
+    // away from the running melody pitch — suppresses brief loud harmonics
+    // (which sit an octave or two up) that would otherwise fragment the line.
+    const JUMP_PENALTY_PER_OCTAVE: f32 = 0.25;
+    let mut frame_pitch: Vec<Option<u32>> = vec![None; n_frames];
+    let mut frame_amp: Vec<f32> = vec![0.0; n_frames];
+    for t in 0..n_frames {
+        let mut best: Option<(u32, f32)> = None;
+        let mut best_score = f32::NEG_INFINITY;
+        for &(p, a) in &frame_cands[t] {
+            let octaves_away = (p as f32 - running).abs() / 12.0;
+            let score = a - JUMP_PENALTY_PER_OCTAVE * octaves_away;
+            if score > best_score {
+                best_score = score;
+                best = Some((p, a));
             }
+        }
+        if let Some((p, a)) = best {
+            frame_pitch[t] = Some(p);
+            frame_amp[t] = a;
+            running = 0.85 * running + 0.15 * p as f32; // EMA toward the chosen pitch
         }
     }
     // Onset boundaries: a frame where some event begins and wins the frame.

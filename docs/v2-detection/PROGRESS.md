@@ -141,6 +141,13 @@ chunks (basic-pitch overlaps by 30 frames, trims 15 each side via
   the running pitch / penalize octave jumps) + better octave handling. Concrete
   tuning lever, not a structural flaw. Pipeline is functional end-to-end.
 
+### Tuning (option 1, 2026-05-31) — melody continuity ✅
+`notes_to_melody` now seeds a running pitch (amplitude-weighted mean) and selects
+per frame by `amplitude - JUMP_PENALTY·octaves_from_running` with an EMA update,
+suppressing brief loud harmonics. Penalty sweep: 0.4 → 26/30, **0.25 → 27/30**
+(kept 0.25). Remaining misses: gazaremsan, äppelbo, calums_road (all weak for DSP
+too). Not chasing the last 3 on clean audio (overfit risk; real goal is banjo).
+
 ### Decision point / next options
 1. **Tune ML melody selection** (continuity/octave smoothing, thresholds) to
    recover clean-audio parity, re-A/B.
