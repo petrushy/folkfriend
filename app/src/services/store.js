@@ -31,6 +31,10 @@ class Store {
             tuneIndexVersion: null,
             tuneIndexDate: null,
             sessionAnalysis: null,
+            // Raw PCM of the most recent manual recording, retained so the
+            // Results view can export it as a WAV test clip. Cleared lazily.
+            lastRecordedPcm: null,
+            lastRecordedSampleRate: null,
         };
 
         this.searchStates = {

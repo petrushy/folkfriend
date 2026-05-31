@@ -269,6 +269,9 @@ export default {
             try {
                 store.setSearchState(store.searchStates.WORKING);
     
+                // Uploaded audio isn't a mic recording — clear any retained mic
+                // PCM so the Results "save clip" button can't export a stale one.
+                store.state.lastRecordedPcm = null;
                 console.time('file-upload');
                 const file = e.target.files[0];
                 const url = URL.createObjectURL(file);

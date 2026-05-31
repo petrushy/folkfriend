@@ -184,6 +184,17 @@ suppressing brief loud harmonics. Penalty sweep: 0.4 → 26/30, **0.25 → 27/30
 (kept 0.25). Remaining misses: gazaremsan, äppelbo, calums_road (all weak for DSP
 too). Not chasing the last 3 on clean audio (overfit risk; real goal is banjo).
 
+### Test-clip capture (2026-05-31) — for building a real benchmark set ✅
+Results view now has a **"Save clip"** button (manual recordings only). It encodes
+the retained mic PCM to a 16-bit WAV (`app/src/js/wav.mjs`) and shares it via the
+Web Share sheet (iOS: Save to Files/iCloud Drive or AirDrop to Mac) with a desktop
+download fallback. Filename defaults to the top match (`<tune>_tune<id>_<ts>.wav`)
+so it maps to a known tune for `rust/bench/tunes.json`. Implementation: `mic.js`
+accumulates manual-recording PCM (ring-bounded ~120 s) → `store.state.lastRecordedPcm`
+on stop; cleared on new recording / file upload. **Workflow:** field-record →
+Save clip → drop into `rust/wavs/` + add a `tunes.json` entry → benchmark ML vs DSP
+on the real failure mode.
+
 ### Decision point / next options
 1. **Tune ML melody selection** (continuity/octave smoothing, thresholds) to
    recover clean-audio parity, re-A/B.
