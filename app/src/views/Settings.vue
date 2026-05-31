@@ -57,20 +57,14 @@
                     @change="onRecordingLimitChanged"
                 />
             </v-row>
-            <v-row align="center" class="pl-2 pr-4 mt-4">
-                <v-slider
-                    v-model.number="userSettings.micGain"
-                    label="Microphone sensitivity"
-                    min="0.5"
-                    max="10"
-                    step="0.5"
-                    thumb-label
-                    style="max-width: 360px"
-                    hint="Boosts quiet recordings (1× = no change). High values may clip/distort."
-                    persistent-hint
-                    @change="onMicGainChanged"
+            <v-row>
+                <v-switch
+                    v-model="userSettings.autoGainControl"
+                    inset
+                    label="Auto gain control (let the device boost quiet recordings; may cause level pumping on sustained notes)"
+                    class="my-0 pl-2"
+                    @change="settingsChanged"
                 />
-                <span class="ml-3">{{ userSettings.micGain }}×</span>
             </v-row>
         </v-card>
         <v-card class="pa-5 my-2">
@@ -392,11 +386,6 @@ export default {
         onRecordingLimitChanged() {
             const v = Math.round(this.userSettings.recordingTimeLimitSecs);
             this.userSettings.recordingTimeLimitSecs = Math.min(60, Math.max(5, v || 10));
-            store.updateUserSettings(this.userSettings);
-        },
-        onMicGainChanged() {
-            const v = Number(this.userSettings.micGain);
-            this.userSettings.micGain = Math.min(10, Math.max(0.5, v || 1));
             store.updateUserSettings(this.userSettings);
         },
         async signIn() {

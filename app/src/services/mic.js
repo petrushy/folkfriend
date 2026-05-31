@@ -1,11 +1,18 @@
 import ffBackend from '@/services/backend.js';
 import store from './store';
 
-const AUDIO_CONSTRAINTS = {
-    audio: {
-        echoCancellation: false,
-    }
-};
+// Build getUserMedia constraints. Echo cancellation stays off (it mangles
+// music). Auto gain control is opt-in via settings — it lets the OS boost quiet
+// input at capture time (better than post-capture digital gain, which can't
+// improve SNR), at the risk of level "pumping" on sustained notes.
+function audioConstraints() {
+    return {
+        audio: {
+            echoCancellation: false,
+            autoGainControl: !!store.userSettings.autoGainControl,
+        }
+    };
+}
 
 class MicService {
     constructor() {
@@ -31,14 +38,6 @@ class MicService {
         // Cap retained audio at ~120 s to bound memory (advancedMode removes the
         // recording time limit). Older chunks are dropped beyond this.
         this._recordingMaxChunks = Math.ceil((120 * 48000) / this.bufferSize);
-    }
-
-    // Clamped digital mic gain (sensitivity). Applied via a GainNode before the
-    // script processor, so it amplifies both the audio fed to detection and the
-    // PCM retained for clip export.
-    _micGain() {
-        const g = store.userSettings.micGain;
-        return Math.min(10, Math.max(0.5, typeof g === 'number' && g > 0 ? g : 1));
     }
 
     _accumulateRms(samples) {
@@ -86,7 +85,7 @@ class MicService {
         }
 
         try {
-            this.micStream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+            this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
             // sampleRate = this.micStream.getTracks()[0].getSettings().sampleRate;
         } catch (e) {
             this.finishOpening();
@@ -133,12 +132,9 @@ class MicService {
             ffBackend.feedSinglePCMWindow(channelData);
         };
 
-        // Connect things up, via a gain node for adjustable sensitivity.
+        // Connect things up
         this.micSource = this.audioCtx.createMediaStreamSource(this.micStream);
-        this.gainNode = this.audioCtx.createGain();
-        this.gainNode.gain.value = this._micGain();
-        this.micSource.connect(this.gainNode);
-        this.gainNode.connect(this.micProcessor);
+        this.micSource.connect(this.micProcessor);
         this.micProcessor.connect(this.audioCtx.destination);
 
         try {
@@ -177,7 +173,7 @@ class MicService {
             }
 
             try {
-                this.micStream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+                this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
             } catch (e) {
                 store.setSearchState(store.searchStates.READY);
                 throw e;
@@ -201,13 +197,10 @@ class MicService {
             };
 
             this.micSource = this.audioCtx.createMediaStreamSource(this.micStream);
-            this.gainNode = this.audioCtx.createGain();
-            this.gainNode.gain.value = this._micGain();
-            this.micSource.connect(this.gainNode);
-            this.gainNode.connect(this.micProcessor);
+            this.micSource.connect(this.micProcessor);
             this.micProcessor.connect(this.audioCtx.destination);
 
-            console.debug(`Continuous mode: sample rate ${sampleRate}, max chunks ${this._ringBufferMaxChunks}, gain ${this._micGain()}`);
+            console.debug(`Continuous mode: sample rate ${sampleRate}, max chunks ${this._ringBufferMaxChunks}`);
             await ffBackend.setSampleRate(sampleRate);
         })();
 
@@ -245,11 +238,6 @@ class MicService {
         if (this.micProcessor) {
             this.micProcessor.disconnect();
             this.micProcessor = null;
-        }
-
-        if (this.gainNode) {
-            this.gainNode.disconnect();
-            this.gainNode = null;
         }
         if (this.micStream) {
             this.micStream.getTracks().forEach(t => t.stop());
@@ -293,11 +281,6 @@ class MicService {
         if (this.micProcessor) {
             this.micProcessor.disconnect();
             this.micProcessor = null;
-        }
-
-        if (this.gainNode) {
-            this.gainNode.disconnect();
-            this.gainNode = null;
         }
 
         if (this.micStream) {

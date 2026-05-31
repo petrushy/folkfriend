@@ -18,7 +18,7 @@ const USER_SETTING_DEFAULTS = {
     microphoneChoice: null,
     recordingTimeLimitSecs: 10,
     useMlTranscriber: false, // opt-in experimental basic-pitch ML transcription
-    micGain: 1.0, // digital microphone gain/sensitivity multiplier (1 = no change)
+    autoGainControl: false, // let the OS auto-boost quiet mic input at capture
 };
 
 class Store {
