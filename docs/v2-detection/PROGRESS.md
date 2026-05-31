@@ -51,6 +51,55 @@ and budget for it. Model loads + optimizes in ~6–7 ms.
    `interpolate.rs` for log-freq bins) OR confirm the model ingests raw audio.
 4. Then build `MlTranscriber` behind the `Transcriber` trait (plan Phase 2).
 
+## Phase 2 reference — basic-pitch note-creation (to port to Rust)
+
+Constants (`basic_pitch/constants.py`): `AUDIO_SAMPLE_RATE=22050`, `FFT_HOP=256`,
+`ANNOTATIONS_FPS=86`, window `AUDIO_N_SAMPLES=43844` (~2 s) → `ANNOT_N_FRAMES=172`.
+Note bins: 88 @ 1/semitone, bin i → MIDI `i + 21` (A0). Contour bins: 264 @
+3/semitone. `MIDI_OFFSET=21`, `MAX_FREQ_IDX=87`.
+
+Decode defaults (`inference.py`): `onset_thresh=0.5`, `frame_thresh=0.3`,
+`min_note_len=11` frames (=round(127.7ms·86/1000)), `infer_onsets=True`,
+`melodia_trick=True`, `energy_tol=11`.
+
+`output_to_notes_polyphonic(frames[T,88], onsets[T,88])` →
+list of `(start_frame, end_frame, pitch_midi, amplitude)`:
+1. `constrain_frequency`: zero bins outside [min,max] freq (we can skip / set to
+   folkfriend's MIDI 48–95 range).
+2. `infer_onsets`: `frame_diff = min over n∈{1,2} of (frames[t]-frames[t-n])`,
+   clamp≥0, rescale to onsets' max, `onsets = max(onsets, frame_diff)`.
+3. onset peaks = local maxima in time (`argrelmax`) ≥ `onset_thresh`.
+4. iterate onsets backwards in time; from each, walk forward while
+   `remaining_energy[i,f] ≥ frame_thresh` (allow `energy_tol` dips); emit note if
+   length > `min_note_len`; zero used energy at f and f±1.
+5. melodia_trick: while `max(remaining_energy) > frame_thresh`, pick argmax,
+   expand fwd+back the same way, emit note.
+
+For FolkFriend we then need MONOPHONIC melody: per frame pick the dominant
+sounding note (highest amplitude active note), build a pitch-per-frame sequence,
+then feed the existing tempo quantiser. Longer audio: window into 43844-sample
+chunks (basic-pitch overlaps by 30 frames, trims 15 each side via
+`unwrap_output`) and concat frames; first cut can use simple non-overlap windows.
+
+## Phase 2 increments (keep build green + benchmarkable at each)
+
+- **A. tract into main crate** — ✅ DONE. Added `tract-onnx` + the wasm
+  `getrandom` `js` feature to `rust/Cargo.toml`; had to `cargo update -p
+  num-traits` (0.2.15→0.2.19) — tract's `half` needs `FromBytes`/`ToBytes`.
+  New `rust/src/decode/ml.rs`: embeds `models/nmp.onnx` via `include_bytes!`,
+  `BasicPitch::new()` + `run_window(&[f32;43844]) -> {note,onset,contour}`.
+  Unit test on silence passes; full suite still 19+1 green; wasm32 cdylib builds.
+  NOTE: current folkfriend.wasm is only 0.7 MB because tract is dead-code-
+  eliminated (not yet called from an exported fn) — real size impact comes in 2E.
+  Output order pinned as [0]=onset, [1]=note, [2]=contour (verify in 2C).
+- **B. audio prep** — resample arbitrary-rate PCM → 22050 mono, window to 43844.
+- **C. note-creation port** — `output_to_notes_polyphonic` (+ infer_onsets), with
+  a test cross-checked against python basic_pitch on a saved posteriorgram.
+- **D. melody select + contour** — dominant line → reuse tempo quantiser →
+  `ContourString`.
+- **E. Transcriber trait + wiring** — `DspTranscriber`/`MlTranscriber`, route in
+  `lib.rs`/`bin.rs`, setting in worker/store; A/B on `run_benchmark.py`.
+
 ## Reproduce the spike
 
 ```sh

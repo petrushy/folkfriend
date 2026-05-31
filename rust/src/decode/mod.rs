@@ -1,5 +1,6 @@
 mod beam_search;
 mod contour;
+pub mod ml;
 mod octave;
 mod pitch_model;
 pub mod types;
