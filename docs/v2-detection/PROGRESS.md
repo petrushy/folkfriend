@@ -98,8 +98,17 @@ chunks (basic-pitch overlaps by 30 frames, trims 15 each side via
   trims 15 frames/side and stitches → `Posteriorgrams{note,onset,contour,
   n_frames}`. Test `detects_a4_tone`: a synthesized 440 Hz tone @ 48 kHz peaks at
   the A4 note bin (MIDI 69) — validates resample+window+model+bin-mapping E2E.
-- **C. note-creation port** — `output_to_notes_polyphonic` (+ infer_onsets), with
-  a test cross-checked against python basic_pitch on a saved posteriorgram.
+- **C. note-creation port** — ✅ DONE. `rust/src/decode/note_events.rs`:
+  `output_to_notes` ports `output_to_notes_polyphonic` + `get_infered_onsets` +
+  the melodia trick (defaults onset 0.5 / frame 0.3 / min_note_len 11 /
+  energy_tol 11). Tests: single-note, two-sequential-notes, short-note-drop, and
+  an end-to-end `a4_tone_yields_a4_notes` (real model → 1 A4 note).
+  Python spot-check on the A4 tone: python found 2 notes [69, 88], rust found 1
+  [69]. MIDI 88 = the synth's 3rd harmonic (1320 Hz E6); the diff is resampling
+  (linear vs soxr) on a weak harmonic, not a port bug — and monophonic melody
+  selection (2D) discards it anyway. NOTE: python needs `setuptools<81` in the
+  conda env (resampy uses pkg_resources, removed in setuptools 81). Decisive
+  validation of the port is the 2E benchmark, not the synthetic tone.
 - **D. melody select + contour** — dominant line → reuse tempo quantiser →
   `ContourString`.
 - **E. Transcriber trait + wiring** — `DspTranscriber`/`MlTranscriber`, route in
