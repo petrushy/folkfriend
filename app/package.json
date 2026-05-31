@@ -4,6 +4,8 @@
     "private": true,
     "scripts": {
         "serve": "vue-cli-service serve",
+        "build:wasm": "bash build-wasm.sh",
+        "prebuild": "bash build-wasm.sh",
         "build": "vue-cli-service build"
     },
     "dependencies": {

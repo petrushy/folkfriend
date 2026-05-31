@@ -71,6 +71,24 @@ Three real Swedish session recordings added to `rust/wavs/` + `rust/bench/tunes.
   from the current setting *before* feeding, so the ML toggle reliably applies to
   upload + live-session + ring-buffer regardless of when it was last pushed.
 
+## ROOT CAUSE of "ML much worse in the field" (2026-05-31) — stale WASM ⚠️→✅
+
+The field app shipped an OLD, weaker ML melody selection while the CLI ran the
+current Rust source. Cause: **`app/src/wasm/` is gitignored**, so pulling source
+commits updates the JS + Rust source but NOT the compiled WASM — and the field
+deploy was built without re-running `wasm-pack`. So the phone ran the first ML
+wiring (loudest-note-per-frame, no continuity/octave fix, ~25/30) while the CLI
+A/B used the octave-stable version (28/30). User confirmed they did not rebuild
+WASM before deploying. Not a live-session issue (session window is 10 s).
+
+**Fix:** `app/package.json` now has a `prebuild` hook (`app/build-wasm.sh`) that
+rebuilds the WASM (deriving the rustup toolchain bin via `rustup which rustc`,
+since Homebrew rustc lacks wasm32) and copies it to `app/src/wasm/` before every
+`npm run build`. Verified: `npm run build` recompiles + copies fresh WASM. The
+deployed WASM can no longer go stale. **Action for next field test: just
+`npm run build && firebase deploy` (WASM rebuild is now automatic), force-update
+the PWA, and re-test — the field ML should now match the CLI (all 3 clips top-5).**
+
 ## Phase 2 reference — basic-pitch note-creation (to port to Rust)
 
 Constants (`basic_pitch/constants.py`): `AUDIO_SAMPLE_RATE=22050`, `FFT_HOP=256`,

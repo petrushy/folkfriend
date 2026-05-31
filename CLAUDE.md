@@ -15,7 +15,7 @@
 
 ### Web App
 
-- WASM output from `rust/pkg/` must be copied to `app/src/wasm/` before building the Vue app.
+- WASM output from `rust/pkg/` must be copied to `app/src/wasm/` before building the Vue app. **Now automated:** `npm run build` runs a `prebuild` hook (`app/build-wasm.sh`) that rebuilds the WASM (forcing the rustup toolchain, since Homebrew rustc lacks wasm32) and copies it in, so the deployed WASM can't go stale relative to the Rust source. `app/src/wasm/` is gitignored, so without this it was easy to ship an old build. `npm run build:wasm` rebuilds WASM only.
 - Local tune index data must be downloaded before the dev server works:
 
   ```sh
