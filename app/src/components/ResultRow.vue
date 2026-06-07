@@ -1,43 +1,53 @@
 <template>
-    <router-link
-        :to="{
-            name: 'tune',
-            params: {
-                settingID: settingID,
-                tuneID: setting.tune_id,
-                displayName: displayName,
-            },
-        }"
-    >
-        <v-container
-            v-ripple
-            @click="addToHistory"
+    <div class="resultRow d-flex align-center">
+        <router-link
+            class="flex-grow-1"
+            :to="{
+                name: 'tune',
+                params: {
+                    settingID: settingID,
+                    tuneID: setting.tune_id,
+                    displayName: displayName,
+                },
+            }"
         >
-            <v-row class="pt-1 pb-0">
-                <v-col class="py-0">
-                    <h2>{{ name }}</h2>
-                </v-col>
-            </v-row>
-            <v-row class="pb-2 pt-0">
-                <v-col class="py-0 descriptor">
-                    {{ descriptor }}
-                </v-col>
-                <v-col
-                    v-show="score !== null"
-                    class="py-0 text-right score"
-                    :style="`color: ${scoreColour};`"
-                >
-                    {{ scoreLabel }}
-                </v-col>
-            </v-row>
-        </v-container>
-    </router-link>
+            <v-container
+                v-ripple
+                @click="addToHistory"
+            >
+                <v-row class="pt-1 pb-0">
+                    <v-col class="py-0">
+                        <h2>{{ name }}</h2>
+                    </v-col>
+                </v-row>
+                <v-row class="pb-2 pt-0">
+                    <v-col class="py-0 descriptor">
+                        {{ descriptor }}
+                    </v-col>
+                    <v-col
+                        v-show="score !== null"
+                        class="py-0 text-right score"
+                        :style="`color: ${scoreColour};`"
+                    >
+                        {{ scoreLabel }}
+                    </v-col>
+                </v-row>
+            </v-container>
+        </router-link>
+
+        <v-btn v-if="settingID" icon class="mr-2" @click.stop="toggleFavourite">
+            <v-icon :color="isFav ? 'amber darken-1' : 'grey lighten-1'">
+                {{ isFav ? icons.star : icons.starOutline }}
+            </v-icon>
+        </v-btn>
+    </div>
 </template>
 
 <script>
 import utils from '@/js/utils.js';
 import store from '@/services/store.js';
 import {HistoryItem} from '@/js/schema';
+import {mdiStar, mdiStarOutline} from '@mdi/js';
 
 export default {
     name: 'ResultRow',
@@ -61,7 +71,15 @@ export default {
             required: false
         }
     },
-
+    data() {
+        return {
+            isFav: false,
+            icons: {
+                star: mdiStar,
+                starOutline: mdiStarOutline,
+            },
+        };
+    },
     computed: {
         descriptor: function () {
             return utils.parseDisplayableDescription(this.setting);
@@ -104,6 +122,11 @@ export default {
             return utils.lerpColor(a, b, x);
         },
     },
+    created() {
+        if (this.settingID) {
+            store.isFavourite(this.settingID).then((fav) => { this.isFav = fav; });
+        }
+    },
     methods: {
         addToHistory() {
             store.addToHistory(new HistoryItem({
@@ -111,6 +134,18 @@ export default {
                 setting: this.setting,
                 displayName: this.displayName,
             }));
+        },
+        toggleFavourite() {
+            const result = {
+                settingID: this.settingID,
+                setting: this.setting,
+                displayName: this.displayName,
+            };
+            if (this.isFav) {
+                store.removeFavourite(this.settingID).then(() => { this.isFav = false; });
+            } else {
+                store.addFavourite(result).then(() => { this.isFav = true; });
+            }
         },
     },
 };
@@ -130,12 +165,12 @@ export default {
   font-style: italic;
 }
 
-.resultsTable a {
+.resultRow a {
   text-decoration: none;
   color: inherit;
 }
 
-.resultsTable a div {
+.resultRow a div {
   background: inherit;
 }
 </style>

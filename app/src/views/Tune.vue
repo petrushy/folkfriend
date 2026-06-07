@@ -36,9 +36,16 @@
                             )}`
                         }}
                     </h3>
-                    <v-icon v-if="settingData.hasChords" class="justify-end tabChordIcon">
-                        $vuetify.icons.tabChord
-                    </v-icon>
+                    <div class="d-flex justify-end align-center settingHeaderActions">
+                        <v-btn icon small @click.stop="toggleFavourite(settingData)">
+                            <v-icon small :color="isFavourite(settingData) ? 'amber darken-1' : 'grey lighten-1'">
+                                {{ isFavourite(settingData) ? icons.star : icons.starOutline }}
+                            </v-icon>
+                        </v-btn>
+                        <v-icon v-if="settingData.hasChords" class="tabChordIcon">
+                            $vuetify.icons.tabChord
+                        </v-icon>
+                    </div>
                 </v-expansion-panel-header>
                 <v-expansion-panel-content>
                     <AbcDisplay :abc="settingData.abc" :mode="settingData.mode" :meter="settingData.meter"
@@ -60,10 +67,13 @@
 import utils from '@/js/utils.js';
 import AbcDisplay from '@/components/AbcDisplay';
 import ffBackend from '@/services/backend.js';
+import store from '@/services/store.js';
 import eventBus from '@/eventBus';
 
 import {
     mdiOpenInNew,
+    mdiStar,
+    mdiStarOutline,
 } from '@mdi/js';
 export default {
     name: 'TuneView',
@@ -94,9 +104,12 @@ export default {
 
             expandedIndex: [],
 
+            favSettingIDs: [],
+
             icons: {
                 openInNew: mdiOpenInNew,
-
+                star: mdiStar,
+                starOutline: mdiStarOutline,
             },
             sourceTheSession: `https://thesession.org/tunes/${this.tuneID}`
         };
@@ -119,6 +132,13 @@ export default {
             settingData.hasChords = (Math.random() > 0.5);
             return settingData;
         })
+
+        // Note which settings are already favourited so we can show filled stars.
+        for (const settingData of this.settings) {
+            if (await store.isFavourite(settingData.setting_id)) {
+                this.favSettingIDs.push(String(settingData.setting_id));
+            }
+        }
 
         let primaryAliasIndex = 0;
 
@@ -177,7 +197,26 @@ export default {
         },
         sourceClicked: function () {
             window.open(this.sourceTheSession);
-        }
+        },
+        isFavourite: function (settingData) {
+            return this.favSettingIDs.includes(String(settingData.setting_id));
+        },
+        toggleFavourite: function (settingData) {
+            const settingID = String(settingData.setting_id);
+            if (this.isFavourite(settingData)) {
+                store.removeFavourite(settingID).then(() => {
+                    this.favSettingIDs = this.favSettingIDs.filter(id => id !== settingID);
+                });
+            } else {
+                store.addFavourite({
+                    settingID,
+                    setting: settingData,
+                    displayName: this.name,
+                }).then(() => {
+                    this.favSettingIDs.push(settingID);
+                });
+            }
+        },
     },
 };
 </script>
