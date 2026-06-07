@@ -21,35 +21,47 @@
             class="py-2"
         >
             <v-btn
-                class="mx-1 px-3 abcControls"
+                class="mx-1 px-2 abcControls"
                 @click="playButton"
             >
-                <v-icon v-if="paused">
+                <v-icon
+                    v-if="paused"
+                    :size="18"
+                >
                     {{ icons.play }}
                 </v-icon>
-                <v-icon v-else>
+                <v-icon
+                    v-else
+                    :size="18"
+                >
                     {{ icons.pause }}
                 </v-icon>
             </v-btn>
             <v-btn
-                class="mx-1 px-3 abcControls"
+                class="mx-1 px-2 abcControls"
                 :color="looping ? 'primary' : ''"
                 :title="looping ? 'Loop on' : 'Loop off'"
                 @click="looping = !looping"
             >
-                <v-icon>{{ icons.repeat }}</v-icon>
+                <v-icon :size="18">
+                    {{ icons.repeat }}
+                </v-icon>
             </v-btn>
             <v-btn
-                class="mx-1 px-3 abcControls"
+                class="mx-1 px-2 abcControls"
                 @click="stopPlaying"
             >
-                <v-icon>{{ icons.stop }}</v-icon>
+                <v-icon :size="18">
+                    {{ icons.stop }}
+                </v-icon>
             </v-btn>
             <v-btn
-                class="mx-1 px-3 abcControls"
+                class="mx-1 px-2 abcControls"
                 @click="goFullScreen"
             >
-                <v-icon>{{ icons.fullscreen }}</v-icon>
+                <v-icon :size="18">
+                    {{ icons.fullscreen }}
+                </v-icon>
             </v-btn>
         </v-row>
         <v-row
@@ -326,7 +338,9 @@ export default {
 }
 
 .abcControls {
+    /* 25% smaller than the default 36px v-btn (icons sized to 18px inline). */
     min-width: 0 !important;
+    height: 27px !important;
 }
 
 .tempoRow {
