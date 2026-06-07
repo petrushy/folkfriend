@@ -111,14 +111,12 @@ export default {
         this.settings = await ffBackend.settingsFromTuneID(this.tuneID);
         let aliases = await ffBackend.aliasesFromTuneID(this.tuneID);
 
-        // Expand this.settings with chords where relevant
-        // TODO move this function about and actually write it properly
-        // This might do:
-        // "[ABCDEFG]b?#?m?(in|aj)?7?(dim)?(\/[ABCDEFG]b?#?m?(in|aj)?7?(dim)?)?"
+        // Flag which settings have chord symbols so the chord icon can be shown
+        // on each collapsed setting (saves the user opening each one to look).
         this.settings = this.settings.map((settingData) => {
-            settingData.hasChords = (Math.random() > 0.5);
+            settingData.hasChords = utils.abcStringHasChords(settingData.abc);
             return settingData;
-        })
+        });
 
         let primaryAliasIndex = 0;
 

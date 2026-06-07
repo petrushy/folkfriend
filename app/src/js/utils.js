@@ -78,6 +78,20 @@ export default class utils {
         return `rgb(${Math.round(rr)}, ${Math.round(rg)}, ${Math.round(rb)})`;
     }
 
+    static abcStringHasChords(abc) {
+        // Chord symbols in ABC are written as double-quoted strings, e.g.
+        // "Am", "Gmaj7", "C#dim", "D/F#". Other things can be double-quoted too
+        // (ornament/text annotations like "tr", "Fine"), so the pattern matches a
+        // complete chord token between the quotes — the surrounding quotes anchor
+        // it, so a quoted string is only counted when it is *entirely* a chord.
+        if (!abc) {
+            return false;
+        }
+        const chord = '[A-G][b#]?m?(in|aj)?7?(dim)?';
+        const chordPattern = new RegExp(`"${chord}(/${chord})?"`);
+        return chordPattern.test(abc);
+    }
+
     static checkUserAgent() {
         //  https://github.com/ng-chicago/AddToHomeScreen
         const uaString = navigator.userAgent.toLowerCase();
