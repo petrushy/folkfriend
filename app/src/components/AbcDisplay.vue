@@ -312,8 +312,10 @@ export default {
                 this.midiBuffer.resume();
             } else {
                 this.paused = true;
-                // ABCJS pause() fires onEnded — clear it so loop mode doesn't restart.
-                this.midiBuffer.onEnded = null;
+                // ABCJS fires the source end-callback when pause() stops audio,
+                // and it calls onEnded() unconditionally — use a no-op (not null,
+                // which would throw) so loop mode doesn't restart on a pause.
+                this.midiBuffer.onEnded = () => {};
                 this.midiBuffer.pause();
                 this._pausePlaybackTimer();
             }
@@ -388,7 +390,9 @@ export default {
                 // beats instead of raw seconds.
                 let positionBeats = 0;
                 if (this.midiBuffer) {
-                    this.midiBuffer.onEnded = null;
+                    // No-op rather than null: pause() triggers the old synth's
+                    // end-callback, which calls onEnded() unconditionally.
+                    this.midiBuffer.onEnded = () => {};
                     const positionSeconds = this.midiBuffer.pause();
                     const oldMsPerMeasure = this.midiBuffer.millisecondsPerMeasure;
                     const oldBeatsPerMeasure = this.midiBuffer.beatsPerMeasure;
@@ -408,9 +412,11 @@ export default {
             this.paused = true;
             this._stopPlaybackTimer();
             if (this.midiBuffer) {
-                // ABCJS stop() fires onEnded — clear it so loop mode doesn't restart,
-                // and null midiBuffer manually since the handler would normally do it.
-                this.midiBuffer.onEnded = null;
+                // ABCJS stop() fires the source end-callback, which calls
+                // onEnded() unconditionally — use a no-op (not null, which would
+                // throw) so loop mode doesn't restart, and null midiBuffer
+                // manually since the handler would normally do it.
+                this.midiBuffer.onEnded = () => {};
                 this.midiBuffer.stop();
                 this.midiBuffer = null;
             }

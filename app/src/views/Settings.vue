@@ -159,8 +159,20 @@
                         <td class="text--secondary pr-4">Available</td>
                         <td>{{ remoteTuneDataLabel }}</td>
                     </tr>
+                    <tr>
+                        <td class="text--secondary pr-4">Offline storage</td>
+                        <td>
+                            <span v-if="storageIsPersistent === null">checking…</span>
+                            <span v-else-if="storageIsPersistent" class="success--text">secured</span>
+                            <span v-else class="warning--text">may be cleared by browser</span>
+                        </td>
+                    </tr>
                 </tbody>
             </v-simple-table>
+            <p v-if="storageIsPersistent === false" class="mt-0 mb-4 caption">
+                The browser may clear tune data under storage pressure.
+                Add FolkFriend to your Home Screen to improve offline reliability.
+            </p>
             <v-btn :loading="refreshingTuneData" @click="refreshTuneData">
                 <v-icon left>{{ icons.refresh }}</v-icon>
                 Refresh tune data
@@ -283,6 +295,7 @@ export default {
         refreshingTuneData: false,
         refreshMessage: null,
         remoteMetadata: null,
+        storageIsPersistent: null,
         localVersion: store.state.tuneIndexVersion,
         localDate: store.state.tuneIndexDate,
         icons: {
@@ -337,6 +350,13 @@ export default {
         };
         eventBus.$on('tuneIndexReady', this._onTuneIndexReady);
         this._fetchRemoteMetadata();
+        if (navigator.storage && navigator.storage.persisted) {
+            navigator.storage.persisted().then(persisted => {
+                this.storageIsPersistent = persisted;
+            });
+        } else {
+            this.storageIsPersistent = false;
+        }
     },
     beforeDestroy() {
         eventBus.$off('authStateChanged', this._onAuthStateChanged);
@@ -364,9 +384,12 @@ export default {
             this.refreshingTuneData = true;
             this.refreshMessage = null;
             try {
-                await del('tuneIndex');
+                // Clear only the version record so setupTuneIndex forces a fresh
+                // download on reload. The tuneIndex data itself is preserved as a
+                // fallback: if the network drops before the reload completes, the
+                // cached index is still usable rather than the app losing all data.
                 await del('tuneIndexMetadata');
-                this.refreshMessage = 'Tune data cleared. Reloading…';
+                this.refreshMessage = 'Checking for updates. Reloading…';
                 setTimeout(() => window.location.reload(), 800);
             } catch (e) {
                 this.refreshMessage = 'Failed to clear tune data. Try clearing site data manually.';

@@ -113,11 +113,30 @@ class FolkFriendWASMWrapper {
         console.time('tune-index-setup');
         console.time('tune-index-load');
 
-        // This will be null if no tune index has been stored.
-        const localTuneIndex = await get('tuneIndex');
+        // Outer catch ensures cb is always called even if IndexedDB itself
+        // throws (e.g. storage quota error, browser bug) — without this the
+        // backend.js promise never resolves and the app hangs silently.
+        let localTuneIndex;
+        try {
+            localTuneIndex = await get('tuneIndex');
+        } catch (e) {
+            console.error('IndexedDB read failed in setupTuneIndex', e);
+            cb({ error: 'Could not load tune index. Please check your connection and refresh.' });
+            return;
+        }
 
-        if (typeof localTuneIndex === 'undefined') {
-            console.debug('No tune index was cached, requesting download');
+        // Guard against true first-install, entries from old IDB formats (stored
+        // before the {indexData, abcStrings} split), and entries that lost their
+        // abcStrings field under storage pressure. Any of these would cause a
+        // WASM panic or silent empty-content bug if loaded as-is.
+        const isCachedIndexValid = localTuneIndex &&
+            localTuneIndex.indexData &&
+            localTuneIndex.abcStrings;
+
+        if (!isCachedIndexValid) {
+            console.debug(localTuneIndex
+                ? 'Cached tune index is stale or in an invalid format, re-downloading'
+                : 'No tune index was cached, requesting download');
 
             try {
                 const downloadedTuneIndex = await this.fetchTuneIndexData();
@@ -154,59 +173,99 @@ class FolkFriendWASMWrapper {
         } else {
             console.debug('Found cached tune index');
 
-            // Load cached copy
-            await this.loadTuneIndex(localTuneIndex);
+            // Load cached copy. Wrap in try/catch: a WASM panic on a corrupt
+            // (but structurally valid) entry must not hang the app. On failure,
+            // wipe the bad entry and try a fresh download; if that also fails
+            // (offline), surface an error rather than leaving the app frozen.
+            let cachedLoadFailed = false;
+            try {
+                await this.loadTuneIndex(localTuneIndex);
+            } catch (e) {
+                console.warn('Cached tune index failed to load (corrupt?), attempting re-download', e);
+                cachedLoadFailed = true;
+                // Do NOT delete the IDB entry here — only overwrite after a fresh
+                // download succeeds. Deleting first would leave the user with no
+                // data if the download fails (e.g. offline), which is strictly worse.
+                try {
+                    const freshIndex = await this.fetchTuneIndexData();
+                    await this.loadTuneIndex(freshIndex);
+                    let meta;
+                    try {
+                        meta = await this.fetchTuneIndexMetadata();
+                    } catch (_) {
+                        meta = { v: 0, date: null };
+                    }
+                    await set('tuneIndex', freshIndex);
+                    await set('tuneIndexMetadata', meta);
+                    analyticsData['days_since_update'] = 0;
+                    analyticsData['tune_index_metadata_version'] = meta['v'];
+                    analyticsData['tune_index_metadata_date'] = meta['date'] || null;
+                    analyticsData['newly_installed'] = true;
+                } catch (e2) {
+                    console.error('Failed to re-download after corrupt cached index', e2);
+                    cb({ error: 'Could not load tune index. Please check your connection and refresh.' });
+                    return;
+                }
+            }
             console.timeEnd('tune-index-load');
 
-            // THEN check the latest version and if we want to upgrade
-            let tuneIndexMetadataLocal = await get('tuneIndexMetadata');
+            if (!cachedLoadFailed) {
+                // THEN check the latest version and if we want to upgrade
+                let tuneIndexMetadataLocal;
+                try {
+                    tuneIndexMetadataLocal = await get('tuneIndexMetadata');
+                } catch (_) {
+                    // IDB error — treat as missing; v=0 will trigger a re-download
+                    tuneIndexMetadataLocal = undefined;
+                }
 
-            if (typeof tuneIndexMetadataLocal === 'undefined') {
-                // This is a near-impossible state, only reached by people
-                //  selectively deleting from IndexedDB. As browsers do delete
-                //   from IndexedDB when under storage pressure it's best to
-                //   cover this case and be safe.
-                tuneIndexMetadataLocal = {
-                    'v': 0
-                };
-            }
+                if (typeof tuneIndexMetadataLocal === 'undefined') {
+                    // This is a near-impossible state, only reached by people
+                    //  selectively deleting from IndexedDB. As browsers do delete
+                    //   from IndexedDB when under storage pressure it's best to
+                    //   cover this case and be safe.
+                    tuneIndexMetadataLocal = {
+                        'v': 0
+                    };
+                }
 
-            const localVersion = tuneIndexMetadataLocal['v'];
-            analyticsData['tune_index_metadata_version'] = localVersion;
-            analyticsData['tune_index_metadata_date'] = tuneIndexMetadataLocal['date'] || null;
+                const localVersion = tuneIndexMetadataLocal['v'];
+                analyticsData['tune_index_metadata_version'] = localVersion;
+                analyticsData['tune_index_metadata_date'] = tuneIndexMetadataLocal['date'] || null;
 
-            try {
-                const tuneIndexMetadataRemote = await this.fetchTuneIndexMetadata();
-                const remoteVersion = tuneIndexMetadataRemote['v'];
-                const daysSinceUpdate = remoteVersion - localVersion;
-                console.debug(`Tune index was ${daysSinceUpdate} days out of date`);
+                try {
+                    const tuneIndexMetadataRemote = await this.fetchTuneIndexMetadata();
+                    const remoteVersion = tuneIndexMetadataRemote['v'];
+                    const daysSinceUpdate = remoteVersion - localVersion;
+                    console.debug(`Tune index was ${daysSinceUpdate} days out of date`);
 
-                // Update whenever the remote version is strictly newer than the
-                //  cached version. The dataset is large (~38 MB) but only
-                //  re-fetched when v actually increases, so bandwidth is bounded
-                //  by how often the data pipeline runs.
-                if (remoteVersion > localVersion) {
-                    console.debug('Upgrading tune index');
-                    try {
-                        const downloadedTuneIndex = await this.fetchTuneIndexData(remoteVersion);
-                        await this.loadTuneIndex(downloadedTuneIndex);
-                        await set('tuneIndex', downloadedTuneIndex);
-                        await set('tuneIndexMetadata', tuneIndexMetadataRemote);
-                        analyticsData['days_since_update'] = 0;
-                        analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
-                        analyticsData['tune_index_metadata_date'] = tuneIndexMetadataRemote['date'] || null;
-                        analyticsData['newly_updated'] = true;
-                    } catch (e) {
-                        // Non-fatal: the cached index is already loaded and usable.
-                        console.warn('Failed to update tune index, continuing with cached version', e);
+                    // Update whenever the remote version is strictly newer than the
+                    //  cached version. The dataset is large (~38 MB) but only
+                    //  re-fetched when v actually increases, so bandwidth is bounded
+                    //  by how often the data pipeline runs.
+                    if (remoteVersion > localVersion) {
+                        console.debug('Upgrading tune index');
+                        try {
+                            const downloadedTuneIndex = await this.fetchTuneIndexData(remoteVersion);
+                            await this.loadTuneIndex(downloadedTuneIndex);
+                            await set('tuneIndex', downloadedTuneIndex);
+                            await set('tuneIndexMetadata', tuneIndexMetadataRemote);
+                            analyticsData['days_since_update'] = 0;
+                            analyticsData['tune_index_metadata_version'] = tuneIndexMetadataRemote['v'];
+                            analyticsData['tune_index_metadata_date'] = tuneIndexMetadataRemote['date'] || null;
+                            analyticsData['newly_updated'] = true;
+                        } catch (e) {
+                            // Non-fatal: the cached index is already loaded and usable.
+                            console.warn('Failed to update tune index, continuing with cached version', e);
+                            analyticsData['days_since_update'] = daysSinceUpdate;
+                        }
+                    } else {
                         analyticsData['days_since_update'] = daysSinceUpdate;
                     }
-                } else {
-                    analyticsData['days_since_update'] = daysSinceUpdate;
+                } catch (e) {
+                    console.warn('Could not refresh tune index metadata, using cached index', e);
+                    analyticsData['days_since_update'] = 0;
                 }
-            } catch (e) {
-                console.warn('Could not refresh tune index metadata, using cached index', e);
-                analyticsData['days_since_update'] = 0;
             }
         }
 
@@ -223,12 +282,14 @@ class FolkFriendWASMWrapper {
         await this.loadedWASM;
         try {
             await this.folkfriendWASM.load_index_from_json_obj(tuneIndex.indexData);
-            this.abcStringBySetting = tuneIndex.abcStrings;
+            this.abcStringBySetting = tuneIndex.abcStrings || {};
             this.sourceUrlBySetting = tuneIndex.sourceUrls || {};
-        } finally {
-            // Always resolve so any concurrent waiters (e.g. onIndexLoad) don't
-            // hang forever. Errors propagate to the caller (setupTuneIndex).
+            // Signal "index loaded" only on success. A failed load must NOT resolve
+            // loadedIndex — queries await it and must not run against an empty WASM
+            // index. setupTuneIndex catches the error and either re-downloads or
+            // surfaces an error to the user.
             this.setLoadedIndex();
+        } finally {
             console.timeEnd('tune-index-to-wasm');
         }
     }
