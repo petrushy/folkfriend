@@ -50,8 +50,9 @@ class Store {
 
         this._favouriteIDs = null;
         this._favouriteTuneIDs = null;
-        this._settingTagsCache = null; // Map<settingID string, string[]>
-        this._tuneTagsCache = null;    // Map<tuneID string, string[]> — union across all settings
+        this._settingTagsCache = null;  // Map<settingID string, string[]>
+        this._tuneTagsCache = null;     // Map<tuneID string, string[]> — union across all settings
+        this._favouriteTempoCache = null; // Map<settingID string, number|null>
         this.analytics = null;
         this.analyticsLoaded = new Promise(resolve => {
             this.setAnalyticsLoaded = resolve;
@@ -194,6 +195,7 @@ class Store {
                      .map(f => String(f.result.setting.tune_id))
             );
             this._settingTagsCache = new Map(items.map(f => [String(f.result.settingID), f.tags || []]));
+            this._favouriteTempoCache = new Map(items.map(f => [String(f.result.settingID), f.tempo ?? null]));
             this._tuneTagsCache = new Map();
             items.forEach(f => {
                 if (f.result.setting && f.result.setting.tune_id) {
@@ -217,6 +219,7 @@ class Store {
         this._favouriteTuneIDs = null;
         this._settingTagsCache = null;
         this._tuneTagsCache = null;
+        this._favouriteTempoCache = null;
     }
 
     async addFavourite(result) {
@@ -269,6 +272,23 @@ class Store {
         if (!tuneID) return [];
         if (this._tuneTagsCache === null) await this._loadFavouriteIDs();
         return this._tuneTagsCache.get(String(tuneID)) || [];
+    }
+
+    async getFavouriteTempo(settingID) {
+        if (!this._isValidSettingID(settingID)) return null;
+        if (this._favouriteTempoCache === null) await this._loadFavouriteIDs();
+        return this._favouriteTempoCache.get(String(settingID)) ?? null;
+    }
+
+    async setFavouriteTempo(settingID, tempoPercent) {
+        settingID = String(settingID);
+        const items = await this.getFavourites();
+        const item = items.find(f => String(f.result.settingID) === settingID);
+        if (!item) return; // not a favourite — nothing to save
+        item.tempo = tempoPercent;
+        if (this._favouriteTempoCache) this._favouriteTempoCache.set(settingID, tempoPercent);
+        await this._dbSet('favouriteItems', items);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
     async clearHistory() {

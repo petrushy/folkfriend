@@ -10,5 +10,6 @@ export class FavouriteItem {
         this.result = result; // { settingID, setting, displayName }
         this.timestamp = Date.now();
         this.tags = []; // string[] — user-defined tags, e.g. ['to practice', 'for tuesday sessions']
+        this.tempo = null; // number|null — persisted tempo slider value (% of default)
     }
 }

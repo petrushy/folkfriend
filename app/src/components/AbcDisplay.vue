@@ -91,6 +91,11 @@ export default {
             required: false,
             default: null
         },
+        settingID: {
+            type: Number,
+            required: false,
+            default: null,
+        },
     },
     data: function () {
         return {
@@ -144,6 +149,11 @@ export default {
         },
     },
     mounted: async function () {
+        if (this.settingID != null) {
+            const saved = await store.getFavouriteTempo(this.settingID);
+            if (saved != null) this.tempoPercent = saved;
+        }
+
         this._onKeyDown = (e) => {
             if (e.key === 'Escape' && this.fullscreen) {
                 this.exitFullScreen();
@@ -367,6 +377,9 @@ export default {
             });
         },
         tempoChanged: function () {
+            if (this.settingID != null) {
+                store.setFavouriteTempo(this.settingID, this.tempoPercent);
+            }
             // If not playing, nothing to do — new tempo will be used on next play.
             if (this.paused || !this.midiBuffer) return;
 
