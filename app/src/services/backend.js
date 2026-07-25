@@ -54,9 +54,11 @@ class FFBackend {
         });
         if (analyticsData.error) {
             console.error('Tune index setup failed:', analyticsData.error);
+            store.state.tuneIndexError = true;
             eventBus.$emit('tuneIndexError', analyticsData.error);
             return;
         }
+        store.state.tuneIndexError = false;
         store.logAnalyticsEvent('tune_index_init', analyticsData).then();
         store.state.tuneIndexVersion = analyticsData['tune_index_metadata_version'];
         store.state.tuneIndexDate = analyticsData['tune_index_metadata_date'] || null;

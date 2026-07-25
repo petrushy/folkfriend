@@ -25,6 +25,10 @@ class Store {
     constructor() {
         this.state = {
             indexLoaded: false,
+            // True once tune-index setup has definitively failed (e.g. offline
+            // with no cached copy). Lets views fall back instead of hanging on
+            // the never-resolving loadedIndex promise.
+            tuneIndexError: false,
             lastResults: [],
             lastContour: '',
             lastTimer: null,

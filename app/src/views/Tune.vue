@@ -23,6 +23,11 @@
             </v-chip>
         </v-container>
 
+        <v-alert v-if="offlineFallback" dense text type="info" class="mx-2 my-2">
+            Showing your saved offline copy. Connect to the internet to see all
+            settings for this tune.
+        </v-alert>
+
         <v-expansion-panels ref="expansionPanels" v-model="expandedIndex" :class="{ abcFullScreen: abcFullScreen }"
             multiple>
             <v-expansion-panel v-for="(settingData, i) in settings" :key="settingData.setting_id" class="expansionPanel"
@@ -134,6 +139,12 @@ import {
     mdiTagPlusOutline,
 } from '@mdi/js';
 import store from '@/services/store.js';
+
+// Last-resort wait for the WASM tune index before falling back to an offline
+// copy. Long enough to cover a slow cold-start index load, short enough that a
+// genuinely unavailable index (offline + evicted cache) doesn't hang the view.
+const TUNE_INDEX_WAIT_MS = 15000;
+
 export default {
     name: 'TuneView',
     components: { AbcDisplay },
@@ -161,6 +172,9 @@ export default {
             displayableAliases: [],
             abcFullScreen: false,
             loadError: null,
+            // True when the tune index was unavailable and we rendered from the
+            // user's saved (favourite) copy instead — shown as a banner.
+            offlineFallback: false,
 
             expandedIndex: [],
             favouritedSettings: {},
@@ -210,8 +224,15 @@ export default {
         }
 
         try {
-            this.settings = await ffBackend.settingsFromTuneID(this.tuneID);
-            let aliases = await ffBackend.aliasesFromTuneID(this.tuneID);
+            const loaded = await this._loadSettingsAndAliases();
+            if (!loaded) {
+                this.loadError = navigator.onLine
+                    ? 'Could not load tune. Please go back and try again.'
+                    : "This tune isn't saved for offline use. Open it once while online, or favourite it, to view it without a connection.";
+                return;
+            }
+            this.settings = loaded.settings;
+            let aliases = loaded.aliases;
 
             // Detect chord symbols in ABC notation — chords are written as
             // double-quoted strings e.g. "Am", "Gmaj7", "C#dim", "G/B".
@@ -283,6 +304,93 @@ export default {
         next();
     },
     methods: {
+        // Load this tune's settings + aliases from the WASM index, or — if the
+        // index is unavailable (offline after the ~32 MB cache was evicted) —
+        // from the self-contained copy stored in the user's favourites.
+        async _loadSettingsAndAliases() {
+            const status = await this._waitForIndex(TUNE_INDEX_WAIT_MS);
+
+            if (status === 'ready') {
+                const [settings, aliases] = await Promise.all([
+                    ffBackend.settingsFromTuneID(this.tuneID),
+                    ffBackend.aliasesFromTuneID(this.tuneID),
+                ]);
+                if (settings && settings.length) {
+                    return { settings, aliases };
+                }
+            }
+
+            const fallback = await this._settingsFromFavourites();
+            if (fallback) {
+                this.offlineFallback = true;
+                return fallback;
+            }
+            return null;
+        },
+        // Resolve once the tune index is usable ('ready'), has definitively
+        // failed ('error'), or a safety timeout elapses ('timeout'). Never
+        // blocks forever — settingsFromTuneID awaits a promise that never
+        // resolves when the index can't load.
+        _waitForIndex(timeoutMs) {
+            if (store.state.indexLoaded) return Promise.resolve('ready');
+            if (store.state.tuneIndexError) return Promise.resolve('error');
+            return new Promise((resolve) => {
+                let settled = false;
+                const finish = (v) => {
+                    if (settled) return;
+                    settled = true;
+                    eventBus.$off('indexLoaded', onLoad);
+                    eventBus.$off('tuneIndexError', onError);
+                    clearTimeout(timer);
+                    resolve(v);
+                };
+                const onLoad = () => finish('ready');
+                const onError = () => finish('error');
+                const timer = setTimeout(() => finish('timeout'), timeoutMs);
+                eventBus.$on('indexLoaded', onLoad);
+                eventBus.$on('tuneIndexError', onError);
+            });
+        },
+        // Reconstruct settings for this tune from favourites (stored with their
+        // own ABC), so favourited tunes remain fully viewable offline.
+        async _settingsFromFavourites() {
+            let favourites;
+            try {
+                favourites = await store.getFavourites();
+            } catch (e) {
+                console.warn('Could not read favourites for offline fallback', e);
+                return null;
+            }
+
+            const tuneID = String(this.tuneID);
+            const seen = new Set();
+            const settings = [];
+            const aliases = [];
+            for (const fav of favourites) {
+                const setting = fav.result && fav.result.setting;
+                if (!setting || String(setting.tune_id) !== tuneID) continue;
+
+                const settingID = String(fav.result.settingID ?? setting.setting_id);
+                if (seen.has(settingID)) continue;
+                seen.add(settingID);
+
+                // Clone so we never mutate the cached favourite object.
+                settings.push({
+                    ...setting,
+                    setting_id: fav.result.settingID ?? setting.setting_id,
+                });
+
+                if (fav.result.displayName && !aliases.includes(fav.result.displayName)) {
+                    aliases.push(fav.result.displayName);
+                }
+            }
+
+            if (settings.length === 0) return null;
+            if (this.displayName && !aliases.includes(this.displayName)) {
+                aliases.unshift(this.displayName);
+            }
+            return { settings, aliases };
+        },
         descriptor: function (setting) {
             return utils.parseDisplayableDescription(setting);
         },

@@ -167,6 +167,22 @@
                             <span v-else class="warning--text">may be cleared by browser</span>
                         </td>
                     </tr>
+                    <tr>
+                        <td class="text--secondary pr-4">Offline copy</td>
+                        <td>
+                            <span v-if="cachedIndexPresent === null">checking…</span>
+                            <span v-else-if="cachedIndexPresent" class="success--text">present</span>
+                            <span v-else class="warning--text">missing</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="text--secondary pr-4">Index status</td>
+                        <td>
+                            <span v-if="indexLoaded" class="success--text">loaded</span>
+                            <span v-else-if="indexError" class="warning--text">failed to load</span>
+                            <span v-else>loading…</span>
+                        </td>
+                    </tr>
                 </tbody>
             </v-simple-table>
             <p v-if="storageIsPersistent === false" class="mt-0 mb-4 caption">
@@ -252,7 +268,7 @@ import store from '@/services/store.js';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
-import { del } from 'idb-keyval';
+import { del, get } from 'idb-keyval';
 import {
     // mdiCellphoneArrowDownVariant,
     mdiAccountCircle,
@@ -296,6 +312,12 @@ export default {
         refreshMessage: null,
         remoteMetadata: null,
         storageIsPersistent: null,
+        // Diagnostics: does an offline copy actually exist in IndexedDB, and is
+        // the index currently loaded into WASM. Distinguishes "cache evicted"
+        // from "cached but failed to load" when scores don't appear offline.
+        cachedIndexPresent: null,
+        indexLoaded: store.state.indexLoaded,
+        indexError: store.state.tuneIndexError,
         localVersion: store.state.tuneIndexVersion,
         localDate: store.state.tuneIndexDate,
         icons: {
@@ -347,9 +369,15 @@ export default {
         this._onTuneIndexReady = () => {
             this.localVersion = store.state.tuneIndexVersion;
             this.localDate = store.state.tuneIndexDate;
+            this.indexError = store.state.tuneIndexError;
         };
         eventBus.$on('tuneIndexReady', this._onTuneIndexReady);
+        this._onIndexLoaded = () => { this.indexLoaded = true; };
+        eventBus.$on('indexLoaded', this._onIndexLoaded);
+        this._onIndexError = () => { this.indexError = true; };
+        eventBus.$on('tuneIndexError', this._onIndexError);
         this._fetchRemoteMetadata();
+        this._checkCachedIndex();
         if (navigator.storage && navigator.storage.persisted) {
             navigator.storage.persisted().then(persisted => {
                 this.storageIsPersistent = persisted;
@@ -361,8 +389,22 @@ export default {
     beforeDestroy() {
         eventBus.$off('authStateChanged', this._onAuthStateChanged);
         eventBus.$off('tuneIndexReady', this._onTuneIndexReady);
+        eventBus.$off('indexLoaded', this._onIndexLoaded);
+        eventBus.$off('tuneIndexError', this._onIndexError);
     },
     methods: {
+        async _checkCachedIndex() {
+            // Read the raw IndexedDB blob to tell whether an offline copy truly
+            // exists (and is structurally valid), independent of whether it has
+            // been loaded into WASM. Same validity check as worker.setupTuneIndex.
+            try {
+                const cached = await get('tuneIndex');
+                this.cachedIndexPresent = !!(cached && cached.indexData && cached.abcStrings);
+            } catch (e) {
+                console.warn('Could not read cached tune index', e);
+                this.cachedIndexPresent = false;
+            }
+        },
         async _fetchRemoteMetadata() {
             try {
                 // eslint-disable-next-line no-undef
