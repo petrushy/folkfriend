@@ -22,9 +22,11 @@ if (process.env.NODE_ENV === 'production') {
         updatefound() {
             console.log('New content is downloading.');
         },
-        updated() {
+        updated(registration) {
             console.log('New content is available; please refresh.');
-            eventBus.$emit('swUpdated');
+            // Pass the registration through: applying the update needs to talk
+            // to registration.waiting, and a plain reload will not do it.
+            eventBus.$emit('swUpdated', registration);
         },
         offline() {
             console.log('No internet connection found. App is running in offline mode.');
