@@ -38,6 +38,34 @@ class MicService {
         // Cap retained audio at ~120 s to bound memory (advancedMode removes the
         // recording time limit). Older chunks are dropped beyond this.
         this._recordingMaxChunks = Math.ceil((120 * 48000) / this.bufferSize);
+
+        // Browsers suspend an AudioContext that isn't producing audible output
+        // (ours never does — the ScriptProcessorNode is wired to destination
+        // only to keep onaudioprocess firing, and never writes to the output
+        // buffer) after a period of inactivity, and unconditionally whenever
+        // the tab is backgrounded. Once suspended, onaudioprocess stops firing
+        // entirely, so a live session silently stops seeing new audio — the
+        // ring buffer keeps re-serving its last few seconds, and the follow
+        // view looks "stuck" on whatever was last detected. Resume eagerly
+        // whenever the tab comes back to the foreground; startContinuous()'s
+        // analysis loop also calls resumeIfSuspended() every cycle so this
+        // self-heals even if the context suspends while still in the
+        // foreground (the power-saving heuristic isn't visibility-gated).
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', () => {
+                if (document.visibilityState === 'visible') this.resumeIfSuspended();
+            });
+        }
+    }
+
+    async resumeIfSuspended() {
+        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+            try {
+                await this.audioCtx.resume();
+            } catch (e) {
+                // Nothing to do — will retry on the next check.
+            }
+        }
     }
 
     _accumulateRms(samples) {
