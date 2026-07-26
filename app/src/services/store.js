@@ -24,10 +24,17 @@ const USER_SETTING_DEFAULTS = {
 class Store {
     constructor() {
         this.state = {
+            // Single source of truth for tune-index availability, mirrored from
+            // the worker's state machine by backend._onIndexStatus:
+            //   'loading' | 'downloading' | 'ready' | 'unavailable'
+            // It always reaches a terminal state, so no view ever has to guess
+            // with a timeout.
+            indexStatus: 'loading',
+            indexStatusDetail: {},
+            // { received, total } while downloading, else null.
+            indexDownloadProgress: null,
+            // Convenience mirrors of indexStatus, kept for existing views.
             indexLoaded: false,
-            // True once tune-index setup has definitively failed (e.g. offline
-            // with no cached copy). Lets views fall back instead of hanging on
-            // the never-resolving loadedIndex promise.
             tuneIndexError: false,
             lastResults: [],
             lastContour: '',

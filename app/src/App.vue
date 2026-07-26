@@ -316,9 +316,8 @@ export default {
             this.hamburgerState = this.hamburgerStates.hamburger;
         });
 
-        eventBus.$on('indexLoaded', () => {
-            store.state.indexLoaded = true;
-        });
+        // NB: store.state.indexLoaded / indexStatus are maintained centrally by
+        // ffBackend._onIndexStatus — do not mirror index state here as well.
 
         eventBus.$on('swUpdated', () => {
             this.updateBanner = true;

@@ -147,52 +147,90 @@
 
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
-                Tune Data
+                Offline Tune Database
             </h1>
+
+            <v-alert v-if="offlineReady === false" dense text type="warning" class="mb-4">
+                No offline copy is saved on this device. Tune search will not
+                work without a connection. Tap <strong>Save offline copy</strong>
+                below while you have Wi-Fi.
+            </v-alert>
+            <v-alert v-else-if="offlineReady === true" dense text type="success" class="mb-4">
+                Ready to use offline{{ offlineSavedLabel }}.
+            </v-alert>
+
             <v-simple-table dense class="mb-4">
                 <tbody>
                     <tr>
-                        <td class="text--secondary pr-4">Cached</td>
+                        <td class="text--secondary pr-4">Offline copy</td>
+                        <td>
+                            <span v-if="offlineStatus === null">checking…</span>
+                            <span v-else-if="offlineReady" class="success--text">
+                                saved ({{ offlineSizeLabel }})
+                            </span>
+                            <span v-else class="warning--text">not saved</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="text--secondary pr-4">Saved version</td>
                         <td>{{ localTuneDataLabel }}</td>
                     </tr>
                     <tr>
-                        <td class="text--secondary pr-4">Available</td>
+                        <td class="text--secondary pr-4">Latest version</td>
                         <td>{{ remoteTuneDataLabel }}</td>
                     </tr>
                     <tr>
-                        <td class="text--secondary pr-4">Offline storage</td>
+                        <td class="text--secondary pr-4">Storage</td>
                         <td>
                             <span v-if="storageIsPersistent === null">checking…</span>
-                            <span v-else-if="storageIsPersistent" class="success--text">secured</span>
+                            <span v-else-if="storageIsPersistent" class="success--text">protected from clearing</span>
                             <span v-else class="warning--text">may be cleared by browser</span>
+                            <span v-if="storageUsageLabel" class="text--secondary">
+                                · {{ storageUsageLabel }}
+                            </span>
                         </td>
                     </tr>
                     <tr>
-                        <td class="text--secondary pr-4">Offline copy</td>
+                        <td class="text--secondary pr-4">In-memory index</td>
                         <td>
-                            <span v-if="cachedIndexPresent === null">checking…</span>
-                            <span v-else-if="cachedIndexPresent" class="success--text">present</span>
-                            <span v-else class="warning--text">missing</span>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="text--secondary pr-4">Index status</td>
-                        <td>
-                            <span v-if="indexLoaded" class="success--text">loaded</span>
-                            <span v-else-if="indexError" class="warning--text">failed to load</span>
+                            <span v-if="indexStatus === 'ready'" class="success--text">loaded</span>
+                            <span v-else-if="indexStatus === 'downloading'">
+                                downloading{{ downloadPercentLabel }}…
+                            </span>
+                            <span v-else-if="indexStatus === 'unavailable'" class="warning--text">unavailable</span>
                             <span v-else>loading…</span>
                         </td>
                     </tr>
+                    <tr v-if="offlineStatusMessage">
+                        <td class="text--secondary pr-4">Note</td>
+                        <td class="warning--text">{{ offlineStatusMessage }}</td>
+                    </tr>
                 </tbody>
             </v-simple-table>
+
             <p v-if="storageIsPersistent === false" class="mt-0 mb-4 caption">
                 The browser may clear tune data under storage pressure.
-                Add FolkFriend to your Home Screen to improve offline reliability.
+                Add FolkFriend to your Home Screen to make offline storage
+                permanent.
             </p>
-            <v-btn :loading="refreshingTuneData" @click="refreshTuneData">
-                <v-icon left>{{ icons.refresh }}</v-icon>
-                Refresh tune data
+
+            <v-btn
+                :loading="refreshingTuneData"
+                :disabled="refreshingTuneData"
+                color="primary"
+                @click="saveOfflineCopy"
+            >
+                <v-icon left>{{ icons.download }}</v-icon>
+                {{ offlineReady ? 'Update offline copy' : 'Save offline copy' }}
             </v-btn>
+            <v-progress-linear
+                v-if="refreshingTuneData || indexStatus === 'downloading'"
+                :indeterminate="downloadPercent === null"
+                :value="downloadPercent || 0"
+                class="mt-3"
+                height="6"
+                rounded
+            />
             <p v-if="refreshMessage" class="mt-3 mb-0">
                 {{ refreshMessage }}
             </p>
@@ -268,7 +306,7 @@ import store from '@/services/store.js';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
-import { del, get } from 'idb-keyval';
+import { fetchTuneIndexMetadata } from '@/services/tuneIndexNetwork.js';
 import {
     // mdiCellphoneArrowDownVariant,
     mdiAccountCircle,
@@ -285,6 +323,13 @@ import {
     mdiRefresh,
     mdiUpload,
 } from '@mdi/js';
+
+function formatBytes(bytes) {
+    if (!bytes) return '0 MB';
+    const mb = bytes / (1024 * 1024);
+    if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+    return `${mb.toFixed(0)} MB`;
+}
 
 export default {
     name: 'SettingsView',
@@ -312,12 +357,14 @@ export default {
         refreshMessage: null,
         remoteMetadata: null,
         storageIsPersistent: null,
-        // Diagnostics: does an offline copy actually exist in IndexedDB, and is
-        // the index currently loaded into WASM. Distinguishes "cache evicted"
-        // from "cached but failed to load" when scores don't appear offline.
-        cachedIndexPresent: null,
-        indexLoaded: store.state.indexLoaded,
-        indexError: store.state.tuneIndexError,
+        // What is actually on disk (read from IndexedDB, not inferred from
+        // in-memory state) plus a storage quota estimate. This is the pre-flight
+        // check: if "Offline copy: saved" is green before you board, tune search
+        // works on the plane.
+        offlineStatus: null,
+        indexStatus: store.state.indexStatus,
+        indexStatusDetail: store.state.indexStatusDetail,
+        downloadProgress: null,
         localVersion: store.state.tuneIndexVersion,
         localDate: store.state.tuneIndexDate,
         icons: {
@@ -344,8 +391,54 @@ export default {
         restoreMessage: null,
     }),
     computed: {
+        offlineReady() {
+            if (this.offlineStatus === null) return null;
+            return !!this.offlineStatus.manifest;
+        },
+        offlineSizeLabel() {
+            const m = this.offlineStatus && this.offlineStatus.manifest;
+            if (!m || !m.bytes) return 'size unknown';
+            return formatBytes(m.bytes);
+        },
+        offlineSavedLabel() {
+            const m = this.offlineStatus && this.offlineStatus.manifest;
+            if (!m || !m.savedAt) return '';
+            return ` — saved ${new Date(m.savedAt).toLocaleString()}`;
+        },
+        storageUsageLabel() {
+            const st = this.offlineStatus && this.offlineStatus.storage;
+            if (!st || !st.quota) return '';
+            // Spell out which number is which. Usage is typically MB and quota
+            // GB, so "45 MB of 38.4 GB used" reads as though the allowance were
+            // the smaller of the two.
+            return `${formatBytes(st.usage)} used · ${formatBytes(st.quota)} available`;
+        },
+        downloadPercent() {
+            // Pushed in from _onIndexStatus — store.state is not reactive.
+            const p = this.downloadProgress;
+            if (!p || !p.total) return null;
+            return Math.min(100, Math.round((p.received / p.total) * 100));
+        },
+        downloadPercentLabel() {
+            return this.downloadPercent === null ? '' : ` ${this.downloadPercent}%`;
+        },
+        offlineStatusMessage() {
+            const d = this.indexStatusDetail || {};
+            if (d.persistError) {
+                return `Could not save the offline copy: ${d.persistError}. Free up space on your device and try again.`;
+            }
+            if (d.legacy) {
+                return 'Saved in an older storage format — tap "Update offline copy" to re-save it in the more robust format.';
+            }
+            if (this.indexStatus === 'unavailable') {
+                return d.offline
+                    ? 'Offline, and no copy is saved on this device.'
+                    : 'Could not reach the tune database.';
+            }
+            return null;
+        },
         localTuneDataLabel() {
-            if (!this.localVersion) return 'loading…';
+            if (!this.localVersion) return this.offlineReady === false ? 'none' : 'loading…';
             const dateStr = this.localDate
                 ? new Date(this.localDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
                 : `v${this.localVersion}`;
@@ -369,17 +462,31 @@ export default {
         this._onTuneIndexReady = () => {
             this.localVersion = store.state.tuneIndexVersion;
             this.localDate = store.state.tuneIndexDate;
-            this.indexError = store.state.tuneIndexError;
         };
         eventBus.$on('tuneIndexReady', this._onTuneIndexReady);
-        this._onIndexLoaded = () => { this.indexLoaded = true; };
-        eventBus.$on('indexLoaded', this._onIndexLoaded);
-        this._onIndexError = () => { this.indexError = true; };
-        eventBus.$on('tuneIndexError', this._onIndexError);
+        this._onIndexStatus = (detail) => {
+            this.indexStatus = detail.status;
+            this.indexStatusDetail = detail;
+            this.downloadProgress = detail.status === 'downloading'
+                ? { received: detail.received || 0, total: detail.total || 0 }
+                : null;
+            this.localVersion = store.state.tuneIndexVersion;
+            this.localDate = store.state.tuneIndexDate;
+            if (detail.status === 'ready' || detail.status === 'unavailable') {
+                this._refreshOfflineStatus();
+            }
+        };
+        eventBus.$on('indexStatusChanged', this._onIndexStatus);
         this._fetchRemoteMetadata();
-        this._checkCachedIndex();
+        this._refreshOfflineStatus();
+        // Ask for durable storage from a user-visible screen: some browsers
+        // only grant it in response to engagement, and this is the page where
+        // the user is explicitly thinking about offline use.
         if (navigator.storage && navigator.storage.persisted) {
-            navigator.storage.persisted().then(persisted => {
+            navigator.storage.persisted().then(async persisted => {
+                if (!persisted && navigator.storage.persist) {
+                    persisted = await navigator.storage.persist().catch(() => false);
+                }
                 this.storageIsPersistent = persisted;
             });
         } else {
@@ -389,52 +496,56 @@ export default {
     beforeDestroy() {
         eventBus.$off('authStateChanged', this._onAuthStateChanged);
         eventBus.$off('tuneIndexReady', this._onTuneIndexReady);
-        eventBus.$off('indexLoaded', this._onIndexLoaded);
-        eventBus.$off('tuneIndexError', this._onIndexError);
+        eventBus.$off('indexStatusChanged', this._onIndexStatus);
     },
     methods: {
-        async _checkCachedIndex() {
-            // Read the raw IndexedDB blob to tell whether an offline copy truly
-            // exists (and is structurally valid), independent of whether it has
-            // been loaded into WASM. Same validity check as worker.setupTuneIndex.
+        async _refreshOfflineStatus() {
             try {
-                const cached = await get('tuneIndex');
-                this.cachedIndexPresent = !!(cached && cached.indexData && cached.abcStrings);
+                this.offlineStatus = await ffBackend.getOfflineStatus();
+                const m = this.offlineStatus.manifest;
+                if (m && m.v && !this.localVersion) {
+                    this.localVersion = m.v;
+                    this.localDate = m.date;
+                }
             } catch (e) {
-                console.warn('Could not read cached tune index', e);
-                this.cachedIndexPresent = false;
+                console.warn('Could not read offline tune index status', e);
+                this.offlineStatus = { manifest: null, storage: null };
             }
         },
         async _fetchRemoteMetadata() {
+            // Bounded: an unbounded probe here would spin "checking…" forever
+            // behind a captive portal.
             try {
-                // eslint-disable-next-line no-undef
-                const url = process.env.NODE_ENV === 'production'
-                    ? 'https://folkfriend-data.web.app/nud-meta.json'
-                    : '/res/nud-meta.json';
-                const res = await fetch(url);
-                if (res.ok) this.remoteMetadata = await res.json();
-                else this.remoteMetadata = { unavailable: true };
+                this.remoteMetadata = await fetchTuneIndexMetadata();
             } catch (e) {
                 this.remoteMetadata = { unavailable: true };
             }
         },
-        async refreshTuneData() {
-            if (!navigator.onLine) {
-                this.refreshMessage = 'Cannot refresh while offline — current tune data is unchanged.';
-                return;
-            }
+        async saveOfflineCopy() {
             this.refreshingTuneData = true;
             this.refreshMessage = null;
             try {
-                // Clear only the version record so setupTuneIndex forces a fresh
-                // download on reload. The tuneIndex data itself is preserved as a
-                // fallback: if the network drops before the reload completes, the
-                // cached index is still usable rather than the app losing all data.
-                await del('tuneIndexMetadata');
-                this.refreshMessage = 'Checking for updates. Reloading…';
-                setTimeout(() => window.location.reload(), 800);
+                const result = await ffBackend.refreshTuneIndex();
+                if (!result.ok) {
+                    this.refreshMessage = result.error === 'You are offline.'
+                        ? 'You are offline — the saved copy is unchanged.'
+                        : `Could not download tune data: ${result.error}`;
+                    return;
+                }
+                if (result.persistError) {
+                    this.refreshMessage =
+                        `Downloaded, but could not save it for offline use (${result.persistError}). ` +
+                        'Free up space on your device and try again.';
+                } else {
+                    this.refreshMessage = `Offline copy saved (v${result.v}).`;
+                }
+                this.localVersion = result.v;
+                this.localDate = result.date;
+                await this._refreshOfflineStatus();
+                await this._fetchRemoteMetadata();
             } catch (e) {
-                this.refreshMessage = 'Failed to clear tune data. Try clearing site data manually.';
+                this.refreshMessage = `Could not download tune data: ${e.message}`;
+            } finally {
                 this.refreshingTuneData = false;
             }
         },
@@ -506,11 +617,13 @@ export default {
                 }
                 this.importStatus = `Found ${bookmarks.length} bookmarks. Waiting for tune index…`;
 
-                // Wait for the WASM index to be ready before processing
-                await new Promise(resolve => {
-                    if (store.state.indexLoaded) return resolve();
-                    eventBus.$once('indexLoaded', resolve);
-                });
+                // Wait for the WASM index to be ready before processing.
+                // Resolves false (rather than hanging) when there is no index.
+                if (!(await ffBackend.indexReady())) {
+                    this.importError = true;
+                    this.importStatus = 'The tune database is not available — connect to the internet and try again.';
+                    return;
+                }
 
                 const withTimeout = (promise, ms) => Promise.race([
                     promise,

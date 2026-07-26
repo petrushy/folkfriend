@@ -140,10 +140,12 @@ import {
 } from '@mdi/js';
 import store from '@/services/store.js';
 
-// Last-resort wait for the WASM tune index before falling back to an offline
-// copy. Long enough to cover a slow cold-start index load, short enough that a
-// genuinely unavailable index (offline + evicted cache) doesn't hang the view.
-const TUNE_INDEX_WAIT_MS = 15000;
+// Absolute last-resort cap on waiting for the tune index. This should never
+// fire: ffBackend.indexReady() resolves as soon as the worker's state machine
+// settles, and the worker's network calls are themselves bounded. It exists
+// only so that a bug in that chain degrades to the offline copy rather than a
+// blank screen.
+const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
     name: 'TuneView',
@@ -299,13 +301,54 @@ export default {
             this.loadError = 'Could not load tune. Please go back and try again.';
         }
     },
+    mounted: function () {
+        // If we rendered from the offline fallback (or failed outright) and the
+        // index later becomes available — connectivity returns and the
+        // background download finishes — upgrade the view in place rather than
+        // leaving the user on a partial copy.
+        this._onIndexStatus = (detail) => {
+            if (detail.status !== 'ready') return;
+            if (!this.offlineFallback && !this.loadError) return;
+            this._reloadFromIndex();
+        };
+        eventBus.$on('indexStatusChanged', this._onIndexStatus);
+    },
+    beforeDestroy: function () {
+        eventBus.$off('indexStatusChanged', this._onIndexStatus);
+    },
     beforeRouteLeave: function (_to, _from, next) {
         eventBus.$emit('stopSynthPlayback');
         next();
     },
     methods: {
+        async _reloadFromIndex() {
+            if (!this.tuneID || this._reloading) return;
+            this._reloading = true;
+            try {
+                const [settings, aliases] = await Promise.all([
+                    ffBackend.settingsFromTuneID(this.tuneID),
+                    ffBackend.aliasesFromTuneID(this.tuneID),
+                ]);
+                if (!settings || !settings.length) return;
+                const chordPattern = /"[ABCDEFG]b?#?m?(in|aj)?7?(dim)?(\/[ABCDEFG]b?#?m?(in|aj)?7?(dim)?)?"/;
+                this.settings = settings.map(s => ({ ...s, hasChords: chordPattern.test(s.abc) }));
+                if (aliases && aliases.length) {
+                    const displayable = aliases.map(a => utils.parseDisplayableName(a));
+                    let primary = this.displayName ? aliases.indexOf(this.displayName) : 0;
+                    if (primary === -1) primary = 0;
+                    this.displayableAliases = displayable;
+                    this.name = this.displayableAliases.splice(primary, 1)[0];
+                }
+                this.offlineFallback = false;
+                this.loadError = null;
+            } catch (e) {
+                console.warn('Could not upgrade tune view from index', e);
+            } finally {
+                this._reloading = false;
+            }
+        },
         // Load this tune's settings + aliases from the WASM index, or — if the
-        // index is unavailable (offline after the ~32 MB cache was evicted) —
+        // index is unavailable (offline before an offline copy was saved) —
         // from the self-contained copy stored in the user's favourites.
         async _loadSettingsAndAliases() {
             const status = await this._waitForIndex(TUNE_INDEX_WAIT_MS);
@@ -327,29 +370,19 @@ export default {
             }
             return null;
         },
-        // Resolve once the tune index is usable ('ready'), has definitively
-        // failed ('error'), or a safety timeout elapses ('timeout'). Never
-        // blocks forever — settingsFromTuneID awaits a promise that never
-        // resolves when the index can't load.
+        // Resolve as soon as the index is usable or definitively unavailable.
+        // ffBackend.indexReady() reads the worker's state machine, which always
+        // reaches a terminal state, so the common offline case returns
+        // immediately instead of burning a timeout per tune.
         _waitForIndex(timeoutMs) {
-            if (store.state.indexLoaded) return Promise.resolve('ready');
-            if (store.state.tuneIndexError) return Promise.resolve('error');
-            return new Promise((resolve) => {
-                let settled = false;
-                const finish = (v) => {
-                    if (settled) return;
-                    settled = true;
-                    eventBus.$off('indexLoaded', onLoad);
-                    eventBus.$off('tuneIndexError', onError);
-                    clearTimeout(timer);
-                    resolve(v);
-                };
-                const onLoad = () => finish('ready');
-                const onError = () => finish('error');
-                const timer = setTimeout(() => finish('timeout'), timeoutMs);
-                eventBus.$on('indexLoaded', onLoad);
-                eventBus.$on('tuneIndexError', onError);
+            let timer = null;
+            const timeout = new Promise((resolve) => {
+                timer = setTimeout(() => resolve('timeout'), timeoutMs);
             });
+            return Promise.race([
+                ffBackend.indexReady().then(ok => (ok ? 'ready' : 'error')),
+                timeout,
+            ]).finally(() => clearTimeout(timer));
         },
         // Reconstruct settings for this tune from favourites (stored with their
         // own ABC), so favourited tunes remain fully viewable offline.

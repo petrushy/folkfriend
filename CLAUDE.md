@@ -83,35 +83,137 @@ After installing, the service worker caches all assets (including WASM) so the a
 
 - `rust/wavs/soup_dragon.wav` has a corrupt WAV header in git (LIST chunk size and data chunk size are wrong). The file has a non-standard 78-byte header (LIST/INFO chunk from Lavf60.16.100 between fmt and data). Patched in-place by fixing offsets 0x04, 0x28, 0x4a.
 
-## Caching strategy
+## Offline architecture (rewritten July 2026 — v3.6.0)
 
-The app is an offline-first PWA. Caching is configured in `app/vue.config.js` via Workbox (injected into the service worker at build time). The service worker only runs in **production** builds.
+The app is an offline-first PWA. If it has been opened once with a connection,
+everything must work on a plane. This section is the contract; the code that
+implements it is `app/src/services/tuneIndexStore.js`, `tuneIndexNetwork.js` and
+the index state machine in `worker.js`.
 
-### Precache (automatic, build-time)
+### The three rules
 
-All static assets emitted by webpack — JS bundles, CSS, WASM, fonts, icons — are precached by the service worker on install. This covers the entire app shell and makes it available offline immediately after the first load.
+1. **One durable copy of the tune index, in IndexedDB.** Not two.
+2. **The offline copy always wins the race.** Load from disk, declare the app
+   usable, *then* touch the network. The network never gates readiness.
+3. **Index availability is a state machine that always settles.** No caller ever
+   waits on something that might never resolve.
 
-### Runtime cache: tune index (`StaleWhileRevalidate`)
+### What went wrong before (the plane incident)
 
-- **URL pattern:** `/res/folkfriend-non-user-data.json` (local dev) and `https://folkfriend-app-data.web.app/folkfriend-non-user-data.json` (production)
-- **Cache name:** `folkfriend-tune-data`
-- **Strategy:** StaleWhileRevalidate — served from cache instantly on startup, then a fresh copy is fetched in the background and stored for the next launch. Auto-updates every 28 days in-app (see `worker.js`).
-- **Why:** The tune index is ~32 MB and must not block app startup.
+The user opened the app before boarding and still had no tunes in the air, with
+every favourite taking 15 s to open. Four independent causes:
 
-### Runtime cache: ABCJS soundfonts (`CacheFirst`)
+- **The index was stored twice** — once in IndexedDB and once in the service
+  worker's `folkfriend-tune-data` StaleWhileRevalidate cache. ~84 MB of origin
+  quota for one 42 MB dataset, roughly doubling the chance the browser evicts
+  the copy that actually makes the app work.
+- **No fetch had a timeout.** Offline, `fetch` rejects fast; behind a captive
+  portal (plane/hotel Wi-Fi) it hangs for the platform default. `setupTuneIndex`
+  awaited it, so the app sat in "loading" indefinitely.
+- **`loadedIndex` was a promise that never settled on failure** — by design.
+  Every `settingsFromTuneID` / `runNameQuery` call awaited it and hung forever.
+  `Tune.vue` worked around this with a 15 s race; that timeout *was* the 15 s
+  per favourite. `ResultRow.vue` and `Search.vue` had no workaround at all.
+- **A failed IndexedDB write was invisible.** The index loaded fine that session
+  and there was simply no offline copy next launch.
 
-- **URL pattern:** `https://paulrosen.github.io/midi-js-soundfonts/**`
-- **Cache name:** `abcjs-soundfonts`
-- **Strategy:** CacheFirst — served from cache if present, otherwise fetched and cached. Max 500 entries, 1-year TTL.
-- **Why:** ABCJS fetches individual MP3 files per note on first play (e.g. `FluidR3_GM/acoustic_grand_piano-mp3/A3.mp3`). After the user plays a tune once while online, all fetched notes are cached and playback works offline (e.g. on airplane mode).
+### How the index is stored
 
-### IndexedDB (idb-keyval)
+`app/src/services/tuneIndexStore.js`, IndexedDB via idb-keyval:
 
-Not part of the service worker — managed directly by `app/src/services/store.js`:
+- `ffIndexRaw` — the index as **raw JSON text, exactly as downloaded**. Storing
+  text rather than a parsed object graph matters: structured-cloning 62 k
+  setting objects is the operation most likely to be slow or to fail outright on
+  iOS; cloning one big string is effectively a memcpy. The split into
+  `{indexData, abcStrings, sourceUrls}` is re-derived on read by
+  `splitIndexPayload()`, the same function the download path uses, so the two
+  can never disagree.
+- `ffIndexManifest` — `{schema, v, date, savedAt, bytes}`. This is the **commit
+  marker**: deleted first, written last. There is no state where a manifest
+  points at a half-written payload, so an interrupted or quota-failed write
+  reads as "no offline copy" rather than as corruption. An orphaned payload with
+  no manifest is garbage-collected on the next read.
+- Reads never throw. Every failure resolves to `null`.
+- **Legacy (`tuneIndex` / `tuneIndexMetadata`)** — the pre-3.6 single-object
+  layout is still read, so upgrading users are never forced into a 40 MB
+  re-download they might not be able to do. It is deleted the moment a
+  schema-2 write succeeds (i.e. on the next data version bump, or when the user
+  taps "Update offline copy").
+
+### Network policy
+
+`app/src/services/tuneIndexNetwork.js` — every request is bounded:
+
+- `navigator.onLine === false` is authoritative for *don't even try*. It is
+  never authoritative for the reverse: a captive portal is "online".
+- Metadata (`nud-meta.json`, ~50 bytes): 8 s hard deadline. It doubles as a
+  **reachability probe**, and its failure is deliberately fatal — if 50 bytes
+  won't come off that host, a 42 MB download won't either, and failing at 8 s is
+  what lets the app say "unavailable" quickly instead of grinding on a stalled
+  transfer.
+- Index download: streamed via `response.body.getReader()` with a **20 s stall
+  timeout** (abort if no bytes arrive) plus a 10 min overall cap. Streaming also
+  gives real download progress on the Search and Settings screens.
+
+### Index state machine
+
+`worker.js` owns `'loading' | 'downloading' | 'ready' | 'unavailable'`, pushed to
+`store.state.indexStatus` by `backend._onIndexStatus` and broadcast as
+`eventBus.$emit('indexStatusChanged')`. It always reaches a terminal state.
+
+- `ffBackend.indexReady()` resolves `true`/`false` — never hangs. Use it instead
+  of racing the one-shot `indexLoaded` event against your component's mount.
+- Index-dependent worker calls (`settingsFromTuneID`, `aliasesFromTuneID`,
+  `runNameQuery`, `runTranscriptionQuery`) **fail fast with `[]`** when the index
+  is unavailable, so callers fall back immediately.
+- `subscribeIndexStatus` fires once with the current state on subscribe, so a
+  late subscriber cannot miss a transition.
+- Coming back online auto-retries an index that failed to install (`'online'`
+  listener in `backend.js`).
+- `Tune.vue` falls back to the self-contained copy in the user's favourites and
+  upgrades itself in place if the index later becomes available.
+
+### Service worker (`app/vue.config.js`)
+
+- **Precache:** all webpack-emitted assets — JS, CSS, WASM, fonts, icons,
+  soundfonts. This is the app shell and it must be complete for offline start.
+- **`runtimeCaching: []`** — deliberately empty for the tune index. See rule 1.
+  `public/sw-cleanup.js` is `importScripts`-ed into the generated service worker
+  and deletes the obsolete `folkfriend-tune-data` cache on activate, reclaiming
+  ~42 MB from existing installs.
+- ABCJS soundfonts are served from `public/soundfont/` and precached, so
+  playback works offline without a runtime cache.
+
+### Diagnosing it on a device
+
+Settings → **Offline Tune Database** is the pre-flight check. It reads
+IndexedDB directly rather than inferring from in-memory state, and shows:
+offline copy saved/not saved (+ size and when), saved vs latest version, whether
+storage is protected from eviction (`navigator.storage.persist()`), the live
+index status with download percentage, and any persist error (e.g. quota) —
+which used to be swallowed entirely. **"Save offline copy" forces a fresh
+download and re-save**, and is also how a legacy-format copy is migrated on
+demand.
+
+If a user reports "no tunes offline", that panel says which of the two failure
+modes it was: never saved, or saved-then-evicted.
+
+### Tests
+
+- `npm test` — unit tests for the store and network layers, with in-memory
+  fakes. Covers quota failure, partial writes, corrupt payloads, legacy reads,
+  stall aborts.
+- `npm run test:e2e` — real headless Chrome, driven over CDP. See
+  `app/test/e2e/README.md`, which also documents the traps (CDP network
+  emulation does not reach Web Workers; Chrome's HTTP cache masks the failure;
+  `.app` is HSTS-preloaded).
+
+### IndexedDB (idb-keyval) — full key list
 
 - `'favouriteItems'` — array of `FavouriteItem` objects
 - `'historyItems'` — array of `HistoryItem` objects (capped at 100)
-- `'tuneIndex'` / `'tuneIndexMetadata'` — cached tune index and its version (`v` = days since 2020-01-01)
+- `'ffIndexRaw'` / `'ffIndexManifest'` — tune index and its commit marker
+- `'tuneIndex'` / `'tuneIndexMetadata'` — legacy tune index (read-only, migrated away)
 
 ### Firebase / Firestore
 
@@ -283,12 +385,15 @@ Both pipelines rebuilt; 18 integration tests pass at ≥99% baseline thresholds.
 - **`app/src/views/Results.vue`** — fixed striping CSS selector from `.resultsTable > a:nth-child(odd)` to `.resultsTable > div:nth-child(odd)` (ResultRow root is a `div`).
 - **`app/src/services/worker.js`** — `runTranscriptionQuery` and `runNameQuery` now re-attach ABC strings from `abcStringBySetting` to results that have a `setting_id`.
 
-### Offline guard in Settings (April 2026)
+### Offline guard in Settings (April 2026) — superseded July 2026
 
-**`app/src/views/Settings.vue`** — Two offline edge cases fixed:
-
-- `_fetchRemoteMetadata` sets `{ unavailable: true }` on network failure; `remoteTuneDataLabel` returns `'unavailable (offline)'` instead of `'v? · v?'`.
-- `refreshTuneData` checks `navigator.onLine` and returns an explanatory message rather than clearing IndexedDB when offline.
+Largely replaced by the offline-architecture rewrite above. `refreshTuneData`
+(which deleted `tuneIndexMetadata` and reloaded the page) is gone; the Settings
+panel now calls `ffBackend.refreshTuneIndex()`, which downloads and re-saves in
+place with no reload. `_fetchRemoteMetadata` still degrades to
+`'unavailable (offline)'`, but now via the bounded `fetchTuneIndexMetadata()`
+from `tuneIndexNetwork.js` rather than a bare `fetch` that could spin
+`'checking…'` forever behind a captive portal.
 
 ### Composer/origin display and cache-update fixes (April 2026)
 
@@ -321,9 +426,9 @@ Swedish folk music from folkwiki.se is included in the tune index. See `folkfrie
 
 - **`app/src/views/Favourites.vue`** — Share/export URLs now use `source.mjs` (supports folkwiki tunes correctly).
 
-- **`app/src/services/worker.js`** — Extracts `source_url` from each setting as a sideband (same pattern as `abc`), stored in `sourceUrlBySetting`. Re-attached in `settingsFromTuneID`. Production data URLs updated to `https://folkfriend-data.web.app/...`. Update threshold changed from `daysSinceUpdate >= 28` to `remoteVersion > localVersion`. (Cache-busting `?v=N` and missing `loadTuneIndex()` call fixed in the April 2026 cache-update fix above.)
+- **`app/src/services/worker.js`** — Extracts `source_url` from each setting as a sideband (same pattern as `abc`), stored in `sourceUrlBySetting`. Re-attached in `settingsFromTuneID`. Production data URLs updated to `https://folkfriend-data.web.app/...`. Update threshold changed from `daysSinceUpdate >= 28` to `remoteVersion > localVersion`. (Fetching, caching and the update check were rewritten in July 2026 — see "Offline architecture" above.)
 
-- **`app/vue.config.js`** — Added `StaleWhileRevalidate` runtime cache entries for both local and CDN tune index URLs. (`$`-anchored to exclude `?v=N` URLs — see April 2026 cache-update fix above.)
+- **`app/vue.config.js`** — Added `StaleWhileRevalidate` runtime cache entries for both local and CDN tune index URLs. **Removed in July 2026** — they were a second 42 MB copy of the IndexedDB data; see "Offline architecture" above.
 
 - **`docs/system-architecture.md`** — NEW: end-to-end architecture overview (repos, topology, data flow, service worker, Firebase, Rust/WASM).
 
