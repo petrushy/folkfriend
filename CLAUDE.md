@@ -412,6 +412,30 @@ There are **two transcribers** (audio → contour). The query/index backend is s
    an ML run at the same commit overwrite each other — copy the JSON aside
    between runs when comparing.
 
+   **ML scores are NOT rescaled, deliberately.** They run systematically lower
+   than DSP (median 0.660 vs 0.854 on the correct match), which makes the app's
+   confidence labels read pessimistically under ML. Scaling them up looks like
+   the obvious fix and is a trap: ML's *separation* is narrower, not just its
+   scale (correct − best-wrong: DSP 0.348, ML 0.235), and a uniform rescale
+   multiplies both sides. Measured over the corpus, every factor that improved
+   label agreement also multiplied wrong tunes shown as "Very Close":
+
+   | k | labels matching DSP | wrong tune shown "Very Close" |
+   |---|---|---|
+   | 1.00 (current) | 6/12 | 0 |
+   | 1.29 (equalises medians) | 6/12 | 3 |
+   | 1.40 (best agreement) | 8/12 | 4 |
+
+   DSP's own baseline is 1. Scaling thresholds down instead is mathematically
+   identical to scaling scores up — no free lunch. The residual disagreements
+   are real per-clip differences, not calibration error (ML scores
+   `the_arra_mountains` 0.272 vs DSP 0.875, but `the_kid_on_the_mountain` 0.676
+   vs DSP 0.500), and no constant fixes those.
+
+   `scripts/compare_transcribers.py` regenerates this analysis. Re-run it as the
+   corpus grows — 12 clips is too few to calibrate on, and the question is worth
+   revisiting once there is degraded audio in the set.
+
 5. **The CLI and the app use different ML entry points** — keep them equivalent. CLI/`bin.rs` (`FF_TRANSCRIBER=ml`) calls `BasicPitch::transcribe_contour` **directly**; the app/WASM goes `FolkFriend::feed_* → transcribe_pcm_buffer`. Guarded by test `ml_app_path_matches_direct_path`. ML is normalised internally, so it's far **less robust to degraded/playback audio than DSP** — clean clips can pass while field/speaker re-recordings fail.
 
 ### Debugging playbook (app-vs-CLI ML differences)
