@@ -42,9 +42,6 @@ jobs:
         with:
           workspaces: rust
 
-      - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-
       - name: Install app dependencies
         working-directory: app
         run: npm ci
@@ -97,6 +94,29 @@ jobs:
       # worker install and takes offline support down with it.
       - name: Drop the tune index from the deployed bundle
         run: rm -f app/public/res/folkfriend-non-user-data.json
+
+      # Only the build needs wasm-pack (via the prebuild hook), so install it
+      # here rather than up front — a flake fetching it then blocked the tests
+      # from running at all. Retried because the installer pulls its tarball
+      # from GitHub's release CDN, which resets connections often enough to
+      # matter (curl: (35) Recv failure).
+      #
+      # NB: `curl ... | sh` would mask a failed download — the pipeline's exit
+      # status is sh's, and sh happily succeeds on empty input. Download first,
+      # then run.
+      - name: Install wasm-pack
+        run: |
+          for i in 1 2 3; do
+            if curl -fsSL -o /tmp/wasm-pack-init.sh \
+                 https://rustwasm.github.io/wasm-pack/installer/init.sh \
+               && sh /tmp/wasm-pack-init.sh; then
+              wasm-pack --version && exit 0
+            fi
+            echo "wasm-pack install attempt $i failed; retrying in 10s"
+            sleep 10
+          done
+          echo "wasm-pack install failed after 3 attempts"
+          exit 1
 
       - name: Build
         working-directory: app
