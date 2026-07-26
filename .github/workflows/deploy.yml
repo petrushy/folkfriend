@@ -1,0 +1,169 @@
+name: Test & Deploy
+
+# Pushes to master deploy to the live site. Pull requests get their own
+# temporary preview URL, which is genuinely useful here because the app is
+# tested on a real iPhone — you can try a branch without disturbing the
+# installed PWA.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# A newer commit supersedes an in-flight run for the same ref. Never cancel a
+# live deploy mid-flight, though.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 22+: the e2e scripts drive Chrome over the DevTools Protocol using
+      # the global WebSocket, which only exists from Node 22 (it failed on 20
+      # with "WebSocket is not defined"). Node 20 is also being deprecated on
+      # the runners.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # The Vue build's `prebuild` hook compiles the Rust to WASM, so the
+      # deployed WASM can never be stale relative to the Rust source.
+      - name: Install Rust (with wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Caches ~/.cargo and rust/target. Without this every run recompiles
+      # tract + the ONNX stack, which dominates the build.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      # The Rust integration tests read the real tune index from
+      # app/public/res/ (it is gitignored — far too large to commit), so it has
+      # to be fetched before `cargo test`. It is removed again before the app
+      # build; see "Drop the tune index" below.
+      - name: Download tune index
+        working-directory: app
+        run: bash download_tune_data.sh
+
+      # --release because these run full queries over a 42 MB index; in debug
+      # the NW alignment pass is slow enough to dominate the job.
+      #
+      # The audio_* tests are skipped: their WAV fixtures are corrupt in git.
+      # They were committed on 2026-04-17, when .gitattributes said
+      # `* text eol=lf` with no `*.wav binary` rule (that arrived 2026-05-31),
+      # so git's text filter converted every CRLF to LF inside the audio and
+      # stored the result. The files contain zero 0D0A pairs despite thousands
+      # of lone 0D bytes — every one was eaten. Bytes were removed from
+      # throughout each file, not truncated from the end, so the audio after the
+      # first removal is unrecoverable; repairing the headers would only make
+      # them parse.
+      #
+      # These tests fail identically on a clean checkout of any machine. They
+      # only ever passed where the pristine originals still sat in the working
+      # tree, invisible to `git status` because the text filter made the
+      # comparison match.
+      #
+      # Re-enable by dropping --skip once the fixtures are re-added from the
+      # original recordings (safe now: *.wav binary is in place).
+      - name: Rust tests
+        working-directory: rust
+        run: cargo test --release -- --skip audio_
+
+      - name: JS unit tests
+        working-directory: app
+        run: npm test
+
+      # In production the app fetches the index from folkfriend-data.web.app,
+      # so the copy in public/res/ is dead weight in the deployed bundle — it
+      # was adding ~42 MB to every deploy. nud-meta.json MUST stay: it is in the
+      # service worker's precache manifest, and a 404 there fails the service
+      # worker install and takes offline support down with it.
+      - name: Drop the tune index from the deployed bundle
+        run: rm -f app/public/res/folkfriend-non-user-data.json
+
+      # Only the build needs wasm-pack (via the prebuild hook), so install it
+      # here rather than up front — a flake fetching it then blocked the tests
+      # from running at all. Retried because the installer pulls its tarball
+      # from GitHub's release CDN, which resets connections often enough to
+      # matter (curl: (35) Recv failure).
+      #
+      # NB: `curl ... | sh` would mask a failed download — the pipeline's exit
+      # status is sh's, and sh happily succeeds on empty input. Download first,
+      # then run.
+      - name: Install wasm-pack
+        run: |
+          for i in 1 2 3; do
+            if curl -fsSL -o /tmp/wasm-pack-init.sh \
+                 https://rustwasm.github.io/wasm-pack/installer/init.sh \
+               && sh /tmp/wasm-pack-init.sh; then
+              wasm-pack --version && exit 0
+            fi
+            echo "wasm-pack install attempt $i failed; retrying in 10s"
+            sleep 10
+          done
+          echo "wasm-pack install failed after 3 attempts"
+          exit 1
+
+      - name: Build
+        working-directory: app
+        run: npm run build
+
+      - name: Report bundle size
+        working-directory: app
+        run: du -sh dist && du -sh dist/* | sort -h | tail -5
+
+      # The offline tests need the production build (they exercise the service
+      # worker) served over http, plus a real Chrome.
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        id: setup-chrome
+
+      - name: Serve the production build
+        working-directory: app
+        run: |
+          npx serve dist -s -l 3000 &
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3000/ && exit 0
+            sleep 1
+          done
+          echo "dev server never came up"; exit 1
+
+      - name: Offline / PWA end-to-end tests
+        working-directory: app
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: npm run test:e2e
+
+      # Preview channel for PRs: a temporary URL that expires after 7 days.
+      - name: Deploy preview (pull request)
+        if: github.event_name == 'pull_request'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: folkfriend-petrush-fork
+          entryPoint: ./app
+          expires: 7d
+
+      - name: Deploy live (master)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: folkfriend-petrush-fork
+          entryPoint: ./app
+          channelId: live

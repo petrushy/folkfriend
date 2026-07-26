@@ -12,21 +12,16 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { CHROME, BASE_ARGS } from './chrome.mjs';
 
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const PORT = 9333;
 const APP = 'http://localhost:3000';
 const profile = mkdtempSync(path.join(tmpdir(), 'ff-cdp-'));
 
 const chrome = spawn(CHROME, [
-    '--headless=new',
+    ...BASE_ARGS,
     `--remote-debugging-port=${PORT}`,
     `--user-data-dir=${profile}`,
-    '--no-first-run',
-    '--disable-gpu',
-    // Chrome's HTTP disk cache would otherwise serve the 40 MB index even when
-    // offline, masking the very path under test.
-    '--disk-cache-size=1',
     'about:blank',
 ], { stdio: 'ignore' });
 

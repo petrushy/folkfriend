@@ -17,8 +17,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { CHROME, BASE_ARGS } from './chrome.mjs';
 
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const APP = 'http://localhost:3001';  // dist-test: CDN URL repointed at the local stand-in
 const DATA_PORT = 8444;
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -94,12 +94,9 @@ const send = (method, params = {}, sessionId) => {
 };
 
 const chrome = spawn(CHROME, [
-    '--headless=new',
+    ...BASE_ARGS,
     '--remote-debugging-port=9600',
     `--user-data-dir=${profile}`,
-    '--no-first-run',
-    '--disable-gpu',
-    '--disk-cache-size=1',
     'about:blank',
 ], { stdio: 'ignore' });
 

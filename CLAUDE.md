@@ -81,7 +81,41 @@ After installing, the service worker caches all assets (including WASM) so the a
 
 ### Known issues
 
-- `rust/wavs/soup_dragon.wav` has a corrupt WAV header in git (LIST chunk size and data chunk size are wrong). The file has a non-standard 78-byte header (LIST/INFO chunk from Lavf60.16.100 between fmt and data). Patched in-place by fixing offsets 0x04, 0x28, 0x4a.
+- **The WAV test fixtures in `rust/wavs/` are corrupt in git and the `audio_*`
+  integration tests cannot pass.** They were committed on 2026-04-17, when
+  `.gitattributes` said `* text eol=lf` and had no `*.wav binary` rule — that
+  only arrived on 2026-05-31 (`b4a9e52`), six weeks later. Git's text filter
+  therefore converted every CRLF to LF *inside the audio* before storing it,
+  deleting ~90–180 bytes from each file. The proof: the files contain **zero
+  `0D 0A` pairs** despite thousands of lone `0D` bytes, where untouched binary
+  of that size would have 10–30. 30 of 34 files now declare more data in their
+  header than they contain, so `wav::read` fails with `UnexpectedEof`.
+
+  They are **not repairable**. Bytes were removed from throughout each file, not
+  truncated from the end; in 16-bit stereo PCM a single dropped byte shifts every
+  subsequent sample, so the audio after the first removal is destroyed. Fixing
+  the headers would make them parse, not make them audio. Restoring the suite
+  means re-adding the original recordings — safe now that `*.wav binary` is in
+  place.
+
+  This was invisible for months because while `text` was in effect git compared
+  the *filtered* working copy against the blob, so a pristine local file looked
+  identical to the mangled stored one. The tests passed only on the machine that
+  created them; they fail on any clean checkout. CI skips them via
+  `cargo test --release -- --skip audio_`.
+
+  Audited 2026-07-26: only `.wav` files were affected. `rust/models/nmp.onnx`,
+  the WASM, PNGs, SVGs, icons and archives are intact — they were added in or
+  after the commit that introduced the `binary` rules.
+
+  **Lesson:** when adding a new binary file type to this repo, add its
+  `*.ext binary` rule to `.gitattributes` *in the same commit or earlier*. The
+  blanket `* text eol=lf` at the top will silently eat it otherwise, and
+  `git status` will not tell you.
+
+- `rust/wavs/soup_dragon.wav` additionally has a non-standard 78-byte header
+  (LIST/INFO chunk from Lavf60.16.100 between fmt and data) with wrong chunk
+  sizes at offsets 0x04, 0x28, 0x4a — a separate defect from the CRLF damage.
 
 ## Offline architecture (rewritten July 2026 — v3.6.0)
 
@@ -218,6 +252,50 @@ modes it was: never saved, or saved-then-evicted.
 ### Firebase / Firestore
 
 Only **favourites** are synced to Firestore (under `users/{uid}/data/favourites`). **History is local-only** — it lives in IndexedDB on the device and is never pushed to Firestore. Firestore SDK handles its own offline queue for favourites — writes made while offline are automatically replayed when connectivity returns. Security rules are in `firestore.rules`.
+
+## CI/CD — GitHub Actions (July 2026)
+
+`.github/workflows/deploy.yml`. Push to `master` deploys live; pull requests get
+a Firebase Hosting **preview channel** (temporary URL, expires after 7 days) —
+useful because the app is tested on a real iPhone and a preview lets you try a
+branch without disturbing the installed PWA.
+
+Pipeline: install Rust (+ wasm32) and Node → download tune index → `cargo test
+--release` → `npm test` → **drop the tune index** → `npm run build` → serve
+`dist` → `npm run test:e2e` → deploy.
+
+Three things about it are non-obvious:
+
+- **The Rust tests need the 42 MB index**, which is gitignored. CI runs
+  `download_tune_data.sh` before `cargo test`, and `--release` because the tests
+  run full NW queries over the whole index — debug builds make that the longest
+  step in the job.
+- **The index is then deleted before `npm run build`.** In production the app
+  fetches it from `folkfriend-data.web.app`, so the copy webpack was pasting
+  into `dist/` was never read — it was silently adding ~42 MB to every deploy.
+  Dropping it takes `dist` from 65 MB to 24 MB. `app/firebase.json` also ignores
+  `res/folkfriend-non-user-data.json` so local `firebase deploy` does the same.
+- **`res/nud-meta.json` MUST survive.** It is in the service worker's precache
+  manifest; a 404 there fails the service worker install and takes offline
+  support down with it. Never exclude `res/` wholesale.
+
+Chrome for the e2e tests is resolved by `app/test/e2e/chrome.mjs` (`CHROME_PATH`
+env var, then the usual macOS/Linux locations), which also adds `--no-sandbox`
+and `--disable-dev-shm-usage` when `CI` is set.
+
+**The e2e tests need Node 22+.** They drive Chrome over the DevTools Protocol
+using the global `WebSocket`, which Node only exposes from v22. `chrome.mjs`
+checks this and says so, rather than failing with a bare
+`WebSocket is not defined`.
+
+### Required secret
+
+`FIREBASE_SERVICE_ACCOUNT` — the JSON key for a service account **in the
+`folkfriend-petrush-fork` project** with the Firebase Hosting Admin role.
+Firebase console → Project settings → Service accounts → Generate new private
+key, then paste the whole file into the GitHub repo secret. Check `project_id`
+inside the JSON matches — a key from a different project fails with a
+permissions error that reads like a broken workflow.
 
 ## Firebase setup (Petrus's fork)
 

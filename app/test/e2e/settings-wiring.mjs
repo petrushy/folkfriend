@@ -5,15 +5,15 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { CHROME, BASE_ARGS } from './chrome.mjs';
 
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const APP = 'http://localhost:3000';
 const profile = mkdtempSync(path.join(tmpdir(), 'ff-settings-'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const chrome = spawn(CHROME, [
-    '--headless=new', '--remote-debugging-port=9700', `--user-data-dir=${profile}`,
-    '--no-first-run', '--disable-gpu', 'about:blank',
+    ...BASE_ARGS, '--remote-debugging-port=9700', `--user-data-dir=${profile}`,
+    'about:blank',
 ], { stdio: 'ignore' });
 
 let msgId = 0;
