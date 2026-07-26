@@ -133,7 +133,20 @@ impl QueryEngine {
                     second_search.push((setting_id.clone(), score));
                 }
                 // total_cmp avoids a panic should a score ever be NaN.
-                second_search.sort_by(|x, y| y.1.total_cmp(&x.1));
+                //
+                // The setting_id tiebreak is what makes the result order
+                // deterministic. sort_by is stable, so tied entries keep their
+                // input order — and that input order comes from a shortlist
+                // built by iterating a HashMap, whose hasher Rust seeds
+                // randomly per process. Without a total order, identical audio
+                // reordered its tied results from one run to the next: two
+                // tunes sharing a title and an exact score swapped rank, and a
+                // tune with several equally-scoring settings reported a
+                // different one each time. Same family as the tie-group bug in
+                // heuristic.rs; the name-query path already breaks ties by
+                // alias length for the same reason.
+                second_search
+                    .sort_by(|x, y| y.1.total_cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
                 let mut results: TranscriptionQueryResults = Vec::new();
 
                 let mut tune_ids_in_results: HashSet<TuneID> = HashSet::default();
