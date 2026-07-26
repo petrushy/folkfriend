@@ -154,6 +154,14 @@
                 >
                     Stop
                 </v-btn>
+                <v-btn
+                    v-if="liveMode && liveMicActive"
+                    color="primary"
+                    @click="followMode = true"
+                >
+                    <v-icon left small>{{ icons.clef }}</v-icon>
+                    Follow Score
+                </v-btn>
                 <VolumeMeter
                     v-if="liveMode && liveMicActive && !liveIsPaused"
                     :active="liveMode && liveMicActive && !liveIsPaused"
@@ -347,30 +355,39 @@
                 The recording was analyzed, but no window produced a stable enough match to keep. This can happen with noisy starts, low melody prominence, or thresholds that are still too strict for the material.
             </p>
         </v-card>
+
+        <LiveScoreFollow
+            v-if="followMode"
+            :detections="detections"
+            @close="followMode = false"
+        />
     </v-container>
 </template>
 
 <script>
 import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
-import { mdiOpenInNew, mdiMicrophone } from '@mdi/js';
+import { mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble } from '@mdi/js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
+import LiveScoreFollow from '@/components/LiveScoreFollow.vue';
 import {
     buildTuneListText,
+    buildTuneOptions,
     buildUpdatedXsc,
     formatSecondsAsClock,
     formatSecondsAsDuration,
     parseClockTime,
     parseXscMetadata,
+    tuneOptionValue,
 } from '@/js/sessionAnalysis.js';
 
 const SESSION_ANALYSIS_STATE_VERSION = 3;
 
 export default {
     name: 'SessionAnalysisView',
-    components: { VolumeMeter },
+    components: { VolumeMeter, LiveScoreFollow },
     data() {
         return {
             dragActive: false,
@@ -406,9 +423,11 @@ export default {
             liveIsPaused: false,
             liveMicError: '',
             liveElapsedSeconds: 0,
+            followMode: false,
             icons: {
                 openInNew: mdiOpenInNew,
                 microphone: mdiMicrophone,
+                clef: mdiMusicClefTreble,
             },
         };
     },
@@ -417,6 +436,7 @@ export default {
             if (!newVal && liveAnalysisService.isRunning) {
                 liveAnalysisService.stop();
             }
+            this.followMode = false;
             this.resetResults();
         },
     },
@@ -475,6 +495,7 @@ export default {
         this._onLiveStopped = () => {
             this.liveMicActive = false;
             this.liveIsPaused = false;
+            this.followMode = false;
             this.analysisStage = this.detections.length ? 'done' : 'idle';
         };
         this._onLivePaused = () => { this.liveIsPaused = true; };
@@ -714,8 +735,8 @@ export default {
             });
         },
         _buildDetectionRow(detection) {
-            const tuneOptions = this.buildTuneOptions(detection);
-            const selectedTuneKey = this.tuneOptionValue({
+            const tuneOptions = buildTuneOptions(detection);
+            const selectedTuneKey = tuneOptionValue({
                 tuneId: detection.tuneId,
                 settingId: detection.settingId,
                 sourceUrl: detection.sourceUrl,
@@ -767,9 +788,6 @@ export default {
             this.detections = this.detections.filter(detection => detection.id !== id);
             if (!this.liveMode) this.persistState();
         },
-        tuneOptionValue(option) {
-            return `${option.settingId || 'none'}::${option.tuneId || 'unknown'}::${option.title}`;
-        },
         selectedOptionForDetection(detection) {
             return detection.tuneOptions.find(option => option.value === detection.selectedTuneKey) || detection.tuneOptions[0] || null;
         },
@@ -783,37 +801,6 @@ export default {
                     displayName: (selected && selected.title) || detection.title,
                 },
             };
-        },
-        buildTuneOptions(detection) {
-            const options = [];
-            const seen = new Set();
-            const candidates = [
-                {
-                    tuneId: detection.tuneId,
-                    settingId: detection.settingId,
-                    sourceUrl: detection.sourceUrl || '',
-                    title: detection.title,
-                    score: detection.bestScore,
-                },
-                ...(detection.alternatives || []),
-            ];
-
-            for (const candidate of candidates) {
-                const value = this.tuneOptionValue(candidate);
-                if (seen.has(value)) continue;
-                seen.add(value);
-                options.push({
-                    value,
-                    tuneId: candidate.tuneId,
-                    settingId: candidate.settingId ? String(candidate.settingId) : '',
-                    sourceUrl: candidate.sourceUrl || '',
-                    title: candidate.title,
-                    score: candidate.score,
-                    text: `${candidate.title} (${candidate.score.toFixed(2)})`,
-                });
-            }
-
-            return options;
         },
         syncSelectedTune(detection) {
             const selected = this.selectedOptionForDetection(detection);
