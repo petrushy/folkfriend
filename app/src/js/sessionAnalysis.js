@@ -175,6 +175,44 @@ export function buildTuneListText(detections) {
         .join('\n');
 }
 
+export function tuneOptionValue(option) {
+    return `${option.settingId || 'none'}::${option.tuneId || 'unknown'}::${option.title}`;
+}
+
+// Selectable candidates for one detection: its own best match first, then the
+// merged alternatives, deduplicated by option value.
+export function buildTuneOptions(detection) {
+    const options = [];
+    const seen = new Set();
+    const candidates = [
+        {
+            tuneId: detection.tuneId,
+            settingId: detection.settingId,
+            sourceUrl: detection.sourceUrl || '',
+            title: detection.title,
+            score: detection.bestScore,
+        },
+        ...(detection.alternatives || []),
+    ];
+
+    for (const candidate of candidates) {
+        const value = tuneOptionValue(candidate);
+        if (seen.has(value)) continue;
+        seen.add(value);
+        options.push({
+            value,
+            tuneId: candidate.tuneId,
+            settingId: candidate.settingId ? String(candidate.settingId) : '',
+            sourceUrl: candidate.sourceUrl || '',
+            title: candidate.title,
+            score: candidate.score,
+            text: `${candidate.title} (${candidate.score.toFixed(2)})`,
+        });
+    }
+
+    return options;
+}
+
 function mergeAlternatives(...alternativeLists) {
     const byTuneId = new Map();
     for (const alternatives of alternativeLists) {

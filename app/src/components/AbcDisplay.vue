@@ -20,7 +20,7 @@
             <div ref="abcTarget" />
         </div>
         <!-- Controls bar — sibling of the full-screen div so fixed positioning works correctly -->
-        <div :class="fullscreen ? 'fullScreenControls' : 'inlineControls'">
+        <div v-if="!hideControls" :class="fullscreen ? 'fullScreenControls' : 'inlineControls'">
             <v-btn small class="mx-1 px-2 abcControls" @click="playButton">
                 <v-icon small v-if="paused">{{ icons.play }}</v-icon>
                 <v-icon small v-else>{{ icons.pause }}</v-icon>
@@ -95,6 +95,13 @@ export default {
             type: Number,
             required: false,
             default: null,
+        },
+        // Render notation only. Used by the live-follow overlay, where synth
+        // playback would feed straight back into the listening microphone.
+        hideControls: {
+            type: Boolean,
+            required: false,
+            default: false,
         },
     },
     data: function () {
