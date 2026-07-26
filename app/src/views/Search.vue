@@ -210,6 +210,17 @@ export default {
                 this._startPulse();
             }
         };
+        // The mic can be taken away by another app (or by iOS backgrounding
+        // us). micService retries in the background; say so rather than
+        // leaving a listening session that silently hears nothing.
+        this._onMicLost = () => {
+            this.snackbar = true;
+            this.snackbarText = 'Lost access to the microphone — retrying…';
+        };
+        this._onMicRecovered = () => {
+            this.snackbar = true;
+            this.snackbarText = 'Microphone reconnected';
+        };
 
         if (!this.indexLoaded) {
             eventBus.$on('indexLoaded', this._onIndexLoaded);
@@ -218,6 +229,8 @@ export default {
         eventBus.$on('indexStatusChanged', this._onIndexStatus);
         eventBus.$on('searchError', this._onSearchError);
         eventBus.$on('setSearchState', this._onSetSearchState);
+        eventBus.$on('micLost', this._onMicLost);
+        eventBus.$on('micRecovered', this._onMicRecovered);
 
         if (store.isListening()) {
             this._startPulse();
@@ -230,6 +243,8 @@ export default {
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
         eventBus.$off('searchError', this._onSearchError);
         eventBus.$off('setSearchState', this._onSetSearchState);
+        eventBus.$off('micLost', this._onMicLost);
+        eventBus.$off('micRecovered', this._onMicRecovered);
     },
     methods: {
         _startPulse() {

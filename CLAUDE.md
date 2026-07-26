@@ -475,6 +475,78 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Microphone capture recovery after app switching (July 2026 — v3.8.0)
+
+**Symptom:** switch to another app and come back, and FolkFriend silently stops
+hearing anything. The follow view stays stuck on the last tune it saw, the
+volume meter sits at zero, and only stopping and restarting the session fixes
+it.
+
+**There are two independent causes with that one symptom, and the code only
+handled the first:**
+
+1. **The AudioContext suspends.** Browsers suspend a context that isn't
+   producing audible output (ours never does) after a period of inactivity, and
+   unconditionally when the tab is backgrounded. `resume()` fixes it, and
+   `resumeIfSuspended()` already did.
+2. **The MediaStreamTrack dies.** iOS hands the microphone to whatever the user
+   switched to (a call, Siri, Voice Memos, another recorder). Our track either
+   ends (`readyState === 'ended'`, terminal) or comes back **live but
+   permanently muted**. Resuming the context achieves nothing here:
+   `onaudioprocess` fires again and delivers digital silence forever. The only
+   fix is a fresh `getUserMedia` and a rebuilt graph.
+
+Case 2 is the one that looks most like a bug, because everything *claims* to be
+healthy — context `running`, track `live`, buffers arriving on schedule.
+
+**`micService.ensureMicHealthy()`** (`app/src/services/mic.js`) now covers both.
+It resumes a suspended context, then checks for a fault (`no stream`, `track
+ended`, `track muted`, `audio context closed`), and separately for a **stall** —
+no buffer delivered for 1.5 s. A stall is confirmed rather than assumed: it
+waits up to 750 ms for the next buffer first, because a just-resumed context
+takes a few milliseconds to produce one. Any confirmed fault tears the pipeline
+down and rebuilds it from a fresh `getUserMedia`.
+
+It is called from four places, and is deliberately safe to call from all of them
+at once: a `visibilitychange` → visible handler, a `MediaStreamTrack` `'ended'`
+listener, a 2 s watchdog interval that runs while a capture is open, and the
+live-analysis loop once per cycle (replacing its `resumeIfSuspended()` call).
+Concurrent callers join the single in-flight check via `_healthCheck`, assigned
+before the first `await` — without that, returning to the foreground fires three
+of those paths at once and each races its own `getUserMedia`, leaving orphaned
+microphones open.
+
+Things that are easy to get wrong here, and how they're handled:
+
+- **Never re-acquire while backgrounded.** It would fail, or snatch the mic back
+  from whatever the user switched to. Both the watchdog and the `'ended'`
+  listener check `document.visibilityState` first; the visibility handler covers
+  the return trip.
+- **Failed recovery backs off** (2/4/8/15/30 s) and emits `micLost` only on the
+  first failure of a streak, so a denied mic doesn't spin `getUserMedia` or spam
+  snackbars. The capture stays "wanted", so it recovers on its own once the other
+  app lets go. `micRecovered` fires on success; `Search.vue` shows both.
+- **The ring buffer survives recovery.** It *is* the analysis window — emptying
+  it would throw away the audio the next query runs on.
+- **Stops during recovery.** `_captureGeneration` is bumped by every stop, and an
+  in-flight recovery that has already re-opened checks it and tears its own new
+  pipeline down. Otherwise stopping mid-recovery leaves the microphone on.
+
+The pipeline setup/teardown shared by `startRecording` and `startContinuous` was
+factored into `_openPipeline(mode, durationSecs)` / `_teardownPipeline()` so
+recovery rebuilds exactly what the original open built. The chunk handler binds
+its `mode` at wiring time instead of reading `this._mode`, so a buffer arriving
+mid-setup can't be routed to the wrong sink. `set_sample_rate` is a no-op in
+WASM when the rate is unchanged, so re-opening mid-session doesn't disturb
+audio already fed to the backend.
+
+**Tests:** `app/test/mic.test.mjs` (14 cases, in the `npm test` chain). Fakes the
+`getUserMedia`/Web Audio surface so the dead-track, muted-track, live-but-silent,
+background, foreground-return, failed-recovery and stop-during-recovery paths are
+all covered without a browser. Note that "live but silent" and "track ended" fail
+for different reasons and need separate cases — a mutation that neuters
+`_captureFault` still passes the stall test.
+
 ### Folkwiki audio detection fix (April 2026) — three-layer fix
 
 This was a multi-cause failure: folkwiki tunes were not detectable from real audio at all. Three independent bugs were found and fixed.
