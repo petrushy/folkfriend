@@ -54,34 +54,29 @@ jobs:
         working-directory: app
         run: bash download_tune_data.sh
 
-      # TEMPORARY: all 15 audio integration tests failed on the runner with
-      # UnexpectedEof reading their WAV fixtures, while a clean clone of the same
-      # branch produces byte-identical, valid WAVs locally. Dumping what the
-      # runner actually checked out.
-      - name: Diagnose WAV fixtures
-        run: |
-          echo "--- sizes ---"
-          ls -la rust/wavs/ | head -12
-          echo "--- md5 (local reference: wise_maid 656f13e3a687046f78a4f1464fa93f23, salamanca 8cad9e812fa5c98ade983aa1f45c0b00, cooleys_reel a3b58cd3a87bb1f5dc0b8f0ce6e76530) ---"
-          md5sum rust/wavs/wise_maid.wav rust/wavs/salamanca.wav rust/wavs/cooleys_reel.wav
-          echo "--- file type ---"
-          file rust/wavs/wise_maid.wav
-          echo "--- first bytes ---"
-          head -c 48 rust/wavs/wise_maid.wav | xxd
-          echo "--- git attrs ---"
-          git check-attr -a rust/wavs/wise_maid.wav
-          echo "--- git status (is the checkout considered clean?) ---"
-          git status --short rust/wavs/ | head
-          echo "--- lfs ---"
-          git lfs env 2>&1 | head -3 || echo "no git-lfs"
-          echo "--- disk ---"
-          df -h /home/runner | tail -1
-
       # --release because these run full queries over a 42 MB index; in debug
       # the NW alignment pass is slow enough to dominate the job.
+      #
+      # The audio_* tests are skipped: their WAV fixtures are corrupt in git.
+      # They were committed on 2026-04-17, when .gitattributes said
+      # `* text eol=lf` with no `*.wav binary` rule (that arrived 2026-05-31),
+      # so git's text filter converted every CRLF to LF inside the audio and
+      # stored the result. The files contain zero 0D0A pairs despite thousands
+      # of lone 0D bytes — every one was eaten. Bytes were removed from
+      # throughout each file, not truncated from the end, so the audio after the
+      # first removal is unrecoverable; repairing the headers would only make
+      # them parse.
+      #
+      # These tests fail identically on a clean checkout of any machine. They
+      # only ever passed where the pristine originals still sat in the working
+      # tree, invisible to `git status` because the text filter made the
+      # comparison match.
+      #
+      # Re-enable by dropping --skip once the fixtures are re-added from the
+      # original recordings (safe now: *.wav binary is in place).
       - name: Rust tests
         working-directory: rust
-        run: cargo test --release
+        run: cargo test --release -- --skip audio_
 
       - name: JS unit tests
         working-directory: app

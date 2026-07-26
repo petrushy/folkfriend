@@ -81,7 +81,41 @@ After installing, the service worker caches all assets (including WASM) so the a
 
 ### Known issues
 
-- `rust/wavs/soup_dragon.wav` has a corrupt WAV header in git (LIST chunk size and data chunk size are wrong). The file has a non-standard 78-byte header (LIST/INFO chunk from Lavf60.16.100 between fmt and data). Patched in-place by fixing offsets 0x04, 0x28, 0x4a.
+- **The WAV test fixtures in `rust/wavs/` are corrupt in git and the `audio_*`
+  integration tests cannot pass.** They were committed on 2026-04-17, when
+  `.gitattributes` said `* text eol=lf` and had no `*.wav binary` rule — that
+  only arrived on 2026-05-31 (`b4a9e52`), six weeks later. Git's text filter
+  therefore converted every CRLF to LF *inside the audio* before storing it,
+  deleting ~90–180 bytes from each file. The proof: the files contain **zero
+  `0D 0A` pairs** despite thousands of lone `0D` bytes, where untouched binary
+  of that size would have 10–30. 30 of 34 files now declare more data in their
+  header than they contain, so `wav::read` fails with `UnexpectedEof`.
+
+  They are **not repairable**. Bytes were removed from throughout each file, not
+  truncated from the end; in 16-bit stereo PCM a single dropped byte shifts every
+  subsequent sample, so the audio after the first removal is destroyed. Fixing
+  the headers would make them parse, not make them audio. Restoring the suite
+  means re-adding the original recordings — safe now that `*.wav binary` is in
+  place.
+
+  This was invisible for months because while `text` was in effect git compared
+  the *filtered* working copy against the blob, so a pristine local file looked
+  identical to the mangled stored one. The tests passed only on the machine that
+  created them; they fail on any clean checkout. CI skips them via
+  `cargo test --release -- --skip audio_`.
+
+  Audited 2026-07-26: only `.wav` files were affected. `rust/models/nmp.onnx`,
+  the WASM, PNGs, SVGs, icons and archives are intact — they were added in or
+  after the commit that introduced the `binary` rules.
+
+  **Lesson:** when adding a new binary file type to this repo, add its
+  `*.ext binary` rule to `.gitattributes` *in the same commit or earlier*. The
+  blanket `* text eol=lf` at the top will silently eat it otherwise, and
+  `git status` will not tell you.
+
+- `rust/wavs/soup_dragon.wav` additionally has a non-standard 78-byte header
+  (LIST/INFO chunk from Lavf60.16.100 between fmt and data) with wrong chunk
+  sizes at offsets 0x04, 0x28, 0x4a — a separate defect from the CRLF damage.
 
 ## Offline architecture (rewritten July 2026 — v3.6.0)
 
