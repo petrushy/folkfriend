@@ -4,26 +4,40 @@ Short (~10 s) recordings used by the `audio_*` integration tests in
 `rust/tests/integration_tests.rs` and by the benchmark corpus in
 `rust/bench/tunes.json`.
 
-**This directory is currently empty.** The original fixtures were destroyed and
-have been removed pending re-recording — see below.
-
 ## Adding a recording
 
-1. Drop the `.wav` in here. 16-bit PCM, mono or stereo, ~10 s is plenty (the
-   search is tuned for about that length).
-2. Add an entry to `rust/bench/tunes.json` with the expected tune IDs.
-3. Add a test to `integration_tests.rs` calling `assert_audio_detects_one_of`.
-   Tests whose WAV is missing skip themselves rather than failing, so a test can
-   be committed before its clip exists.
-4. **Verify the round-trip.** Commit, then clone the repo to a temp directory
-   and check the file is byte-identical:
+**Name the file after the tune** — `the_kid_on_the_mountain.wav`. The tooling
+derives everything else from that.
+
+1. Drop the `.wav` in here. 16-bit PCM, mono or stereo, ~8–10 s (the search is
+   tuned for about that length).
+2. Regenerate the baselines:
+
+   ```sh
+   cargo build --release --manifest-path rust/Cargo.toml
+   bash app/download_tune_data.sh                      # if you lack the index
+   python3 scripts/make_audio_baselines.py             # report
+   python3 scripts/make_audio_baselines.py --emit      # + code to paste
+   ```
+
+   It matches the filename against the titles in the *audio results*, so it
+   finds the right tune ID and proves the recording detects it in one step.
+   Read the report before pasting: a mis-named file will match the wrong tune
+   and bake that mistake into a test.
+
+3. Paste the emitted entry into `rust/bench/tunes.json` and the emitted test
+   into `integration_tests.rs`. Tests whose WAV is missing skip themselves, so
+   a test may be committed before its clip exists.
+
+4. **Verify the round-trip.** Commit, then clone to a temp directory and check
+   the file is byte-identical:
 
    ```sh
    git clone --depth 1 <repo> /tmp/check
    md5 /tmp/check/rust/wavs/your.wav rust/wavs/your.wav
    ```
 
-   Step 4 is not paranoia — see below.
+   Not paranoia — see below.
 
 The app's Results page has a **"Save clip"** button that exports the last
 manual recording as a WAV via the iOS share sheet, which is the easiest way to

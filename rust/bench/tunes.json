@@ -1,53 +1,27 @@
 [
   {
-    "wav": "gumboda_schottis.wav",
-    "label": "Schottis från Gumboda",
+    "wav": "farewell_to_ireland.wav",
+    "label": "Farewell To Ireland",
     "expected_tune_ids": [
-      "973588901",
-      "1401836401"
-    ],
-    "max_rank": 10,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "cooleys_reel.wav",
-    "label": "Cooley's Reel",
-    "expected_tune_ids": [
-      "1"
+      "33",
+      "4403",
+      "4571"
     ],
     "max_rank": 5,
     "source": "thesession"
   },
   {
-    "wav": "wise_maid.wav",
-    "label": "The Wise Maid",
+    "wav": "farewell_to_whalley_range.wav",
+    "label": "Farewell To Whalley Range",
     "expected_tune_ids": [
-      "118"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "salamanca.wav",
-    "label": "The Salamanca",
-    "expected_tune_ids": [
-      "99"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "salamanca2.wav",
-    "label": "The Salamanca (recording 2)",
-    "expected_tune_ids": [
-      "99"
+      "2410"
     ],
     "max_rank": 5,
     "source": "thesession"
   },
   {
     "wav": "hut_on_staffin_island.wav",
-    "label": "The Hut on Staffin Island",
+    "label": "Hut On Staffin Island",
     "expected_tune_ids": [
       "2067"
     ],
@@ -55,46 +29,8 @@
     "source": "thesession"
   },
   {
-    "wav": "ithe_glen_cottage.wav",
-    "label": "I the Glen Cottage",
-    "expected_tune_ids": [
-      "5278"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "soup_dragon.wav",
-    "label": "Soup Dragon",
-    "expected_tune_ids": [
-      "10785"
-    ],
-    "max_rank": 10,
-    "source": "thesession"
-  },
-  {
-    "wav": "Skållmånsarn.wav",
-    "label": "Skållmånsarn",
-    "expected_tune_ids": [
-      "598100601"
-    ],
-    "max_rank": 5,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "gazaremsan.wav",
-    "label": "Gazaremsan",
-    "expected_tune_ids": [
-      "1604843401",
-      "1596117401",
-      "1546819101"
-    ],
-    "max_rank": 5,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "nåspolskan.wav",
-    "label": "Nåspolskan",
+    "wav": "nåspolskan.wav",
+    "label": "Nåspolskan",
     "expected_tune_ids": [
       "56869501",
       "767879601"
@@ -103,212 +39,78 @@
     "source": "folkwiki"
   },
   {
-    "wav": "polska_efter_kristian_oskarsson.wav",
-    "label": "Polska efter Kristian Oskarsson",
+    "wav": "the_arra_mountains.wav",
+    "label": "The Arra Mountains",
     "expected_tune_ids": [
-      "1027010001",
-      "892357901"
-    ],
-    "max_rank": 5,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "polska_efter_snickar_erik.wav",
-    "label": "Polska efter Snickar Erik",
-    "expected_tune_ids": [
-      "1013016301"
-    ],
-    "max_rank": 5,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "blarney_pilgrim.wav",
-    "label": "The Blarney Pilgrim",
-    "expected_tune_ids": [
-      "5"
+      "1901"
     ],
     "max_rank": 5,
     "source": "thesession"
   },
   {
-    "wav": "mist_covered_mountain.wav",
-    "label": "The Mist Covered Mountain",
+    "wav": "the_cock_and_the_hen.wav",
+    "label": "The Cock And The Hen",
     "expected_tune_ids": [
-      "256"
+      "23405",
+      "93"
+    ],
+    "max_rank": 5,
+    "source": "thesession"
+  },
+  {
+    "wav": "the_golden_keyboard.wav",
+    "label": "The Golden Keyboard",
+    "expected_tune_ids": [
+      "36"
+    ],
+    "max_rank": 5,
+    "source": "thesession"
+  },
+  {
+    "wav": "the_kerfunten.wav",
+    "label": "The Kerfunten",
+    "expected_tune_ids": [
+      "139"
+    ],
+    "max_rank": 5,
+    "source": "thesession"
+  },
+  {
+    "wav": "the_kid_on_the_mountain.wav",
+    "label": "The Kid On The Mountain",
+    "expected_tune_ids": [
+      "52"
+    ],
+    "max_rank": 5,
+    "source": "thesession"
+  },
+  {
+    "wav": "the_lounge_bar.wav",
+    "label": "The Lounge Bar",
+    "expected_tune_ids": [
+      "8853"
+    ],
+    "max_rank": 5,
+    "source": "thesession"
+  },
+  {
+    "wav": "the_musical_priest.wav",
+    "label": "The Musical Priest",
+    "expected_tune_ids": [
+      "17606",
+      "73",
+      "9214"
     ],
     "max_rank": 5,
     "source": "thesession"
   },
   {
     "wav": "windbroke.wav",
-    "label": "The Windbroke",
+    "label": "Windbroke",
     "expected_tune_ids": [
       "910"
     ],
     "max_rank": 5,
     "source": "thesession"
-  },
-  {
-    "wav": "äppelbo_gånglåt.wav",
-    "label": "Äppelbo Gånglåt",
-    "expected_tune_ids": [
-      "1292412001"
-    ],
-    "max_rank": 15,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "banks_of_lough_gowna.wav",
-    "label": "The Banks of Lough Gowna",
-    "expected_tune_ids": [
-      "775"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "björnes_schottis.wav",
-    "label": "Björnes Schottis",
-    "expected_tune_ids": [
-      "698147501"
-    ],
-    "max_rank": 5,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "calums_road.wav",
-    "label": "Calum's Road",
-    "expected_tune_ids": [
-      "3016"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "cup_of_team.wav",
-    "label": "The Cup of Tea",
-    "expected_tune_ids": [
-      "20"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "john_brosnan.wav",
-    "label": "John Brosnan's",
-    "expected_tune_ids": [
-      "3835"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "john_ryans.wav",
-    "label": "John Ryan's",
-    "expected_tune_ids": [
-      "441"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "killavi_jig.wav",
-    "label": "The Killavil Jig",
-    "expected_tune_ids": [
-      "667"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "maggie_in_the_woods.wav",
-    "label": "Maggie in the Woods",
-    "expected_tune_ids": [
-      "291"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "sally_garden.wav",
-    "label": "Down by the Sally Gardens",
-    "expected_tune_ids": [
-      "118"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "the_banshee.wav",
-    "label": "The Banshee",
-    "expected_tune_ids": [
-      "8"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "the_galway_belle.wav",
-    "label": "The Galway Belle",
-    "expected_tune_ids": [
-      "679"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "the_glenside.wav",
-    "label": "The Glenside",
-    "expected_tune_ids": [
-      "534"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "the_linting_banshee.wav",
-    "label": "The Lilting Banshee",
-    "expected_tune_ids": [
-      "60"
-    ],
-    "max_rank": 5,
-    "source": "thesession"
-  },
-  {
-    "wav": "Brännvinslåt Efter Gås-anders.wav",
-    "label": "Brännvinslåt efter Gås-Anders",
-    "expected_tune_ids": [
-      "1525005401"
-    ],
-    "max_rank": 5,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "Vendelpolskan.wav",
-    "label": "Vendelpolskan",
-    "expected_tune_ids": [
-      "801497201",
-      "606518301"
-    ],
-    "max_rank": 5,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "Kärleksvalsen.wav",
-    "label": "Kärleksvalsen",
-    "expected_tune_ids": [
-      "1019248601"
-    ],
-    "max_rank": 5,
-    "source": "folkwiki"
-  },
-  {
-    "wav": "Brännvinslåt_terrible_quality.wav",
-    "label": "Brännvinslåt (terrible quality re-recording)",
-    "expected_tune_ids": [
-      "1525005401"
-    ],
-    "max_rank": 10,
-    "source": "folkwiki"
   }
 ]
