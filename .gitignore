@@ -7,6 +7,11 @@ scripts/*/decoded.txt
 # PyCharm
 .idea/*
 package-lock.json
+# ...but the app's lockfile IS tracked: CI deploys straight to production, and
+# without it `npm install` re-resolves semver ranges on every run, so a bad
+# release of any transitive dep would ship to users and get cached by the
+# service worker. `npm ci` also needs it.
+!app/package-lock.json
 
 */node_modules/*
 
