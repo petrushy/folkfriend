@@ -21,7 +21,12 @@ impl PitchModel {
             -0.3947, // -3,
             -0.2396, // -2,
             -1.3759, // -1,
-            -f32::INFINITY  // zero is handled separately. By definition it's not a note transition.
+            // NOTE the comma. Without it Rust parses this and the next line as a
+            // single subtraction expression, collapsing two entries into one: the
+            // table loses an element, every ascending interval reads the score
+            // meant for the next semitone up, and +12 falls off the end onto the
+            // generic large-jump penalty.
+            -f32::INFINITY, // zero is handled separately. By definition it's not a note transition.
             -1.3005, // 1,
             -0.0000, // 2,
             -0.3356, // 3,
