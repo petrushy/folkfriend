@@ -19,6 +19,10 @@ RUSTUP_BIN="$(dirname "$(rustup which rustc)")"
 echo "build-wasm: compiling (rustup toolchain bin: $RUSTUP_BIN)…"
 ( cd "$RUST_DIR" && PATH="$RUSTUP_BIN:$PATH" wasm-pack build )
 
+# app/src/wasm/ is gitignored, so it does not exist on a fresh checkout (CI, or
+# a new clone) and the copy below would fail with "No such file or directory".
+mkdir -p "$WASM_DEST"
+
 cp "$RUST_DIR/pkg/folkfriend.d.ts" \
    "$RUST_DIR/pkg/folkfriend.js" \
    "$RUST_DIR/pkg/folkfriend_bg.js" \
