@@ -61,26 +61,12 @@ jobs:
       # --release because these run full queries over a 42 MB index; in debug
       # the NW alignment pass is slow enough to dominate the job.
       #
-      # The audio_* tests are skipped: their WAV fixtures are corrupt in git.
-      # They were committed on 2026-04-17, when .gitattributes said
-      # `* text eol=lf` with no `*.wav binary` rule (that arrived 2026-05-31),
-      # so git's text filter converted every CRLF to LF inside the audio and
-      # stored the result. The files contain zero 0D0A pairs despite thousands
-      # of lone 0D bytes — every one was eaten. Bytes were removed from
-      # throughout each file, not truncated from the end, so the audio after the
-      # first removal is unrecoverable; repairing the headers would only make
-      # them parse.
-      #
-      # These tests fail identically on a clean checkout of any machine. They
-      # only ever passed where the pristine originals still sat in the working
-      # tree, invisible to `git status` because the text filter made the
-      # comparison match.
-      #
-      # Re-enable by dropping --skip once the fixtures are re-added from the
-      # original recordings (safe now: *.wav binary is in place).
+      # The audio_* tests skip themselves while their WAV fixture is absent (see
+      # rust/wavs/README.md), so no --skip filter is needed here: each one comes
+      # back automatically as soon as its clip is restored.
       - name: Rust tests
         working-directory: rust
-        run: cargo test --release -- --skip audio_
+        run: cargo test --release
 
       - name: JS unit tests
         working-directory: app

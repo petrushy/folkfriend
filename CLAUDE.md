@@ -81,41 +81,45 @@ After installing, the service worker caches all assets (including WASM) so the a
 
 ### Known issues
 
-- **The WAV test fixtures in `rust/wavs/` are corrupt in git and the `audio_*`
-  integration tests cannot pass.** They were committed on 2026-04-17, when
-  `.gitattributes` said `* text eol=lf` and had no `*.wav binary` rule — that
-  only arrived on 2026-05-31 (`b4a9e52`), six weeks later. Git's text filter
-  therefore converted every CRLF to LF *inside the audio* before storing it,
-  deleting ~90–180 bytes from each file. The proof: the files contain **zero
-  `0D 0A` pairs** despite thousands of lone `0D` bytes, where untouched binary
-  of that size would have 10–30. 30 of 34 files now declare more data in their
-  header than they contain, so `wav::read` fails with `UnexpectedEof`.
+- **The WAV test fixtures were destroyed and have been removed** (July 2026);
+  `rust/wavs/` now holds only a README. They were committed on 2026-04-17, when
+  `.gitattributes` said `* text eol=lf` with no `*.wav binary` rule — that only
+  arrived on 2026-05-31 (`b4a9e52`). Git's text filter converted every CRLF to
+  LF *inside the audio* before storing it. The proof: zero `0D 0A` pairs across
+  files with thousands of lone `0D` bytes, where chance would give 10–30.
 
-  They are **not repairable**. Bytes were removed from throughout each file, not
-  truncated from the end; in 16-bit stereo PCM a single dropped byte shifts every
-  subsequent sample, so the audio after the first removal is destroyed. Fixing
-  the headers would make them parse, not make them audio. Restoring the suite
-  means re-adding the original recordings — safe now that `*.wav binary` is in
-  place.
+  Measured, not assumed: with headers repaired the clips still parsed and the
+  correct tune still ranked **6th, 16th, 23rd, 39th and 54th of ~62,000
+  settings**, at roughly 40–65% of the recorded score baselines. So they were
+  degraded rather than unusable — but well outside the thresholds the tests
+  assert, and re-baselining against damaged audio would have locked in a corpus
+  nobody could reason about. Retired instead, pending fresh recordings.
 
-  This was invisible for months because while `text` was in effect git compared
-  the *filtered* working copy against the blob, so a pristine local file looked
-  identical to the mangled stored one. The tests passed only on the machine that
-  created them; they fail on any clean checkout. CI skips them via
-  `cargo test --release -- --skip audio_`.
+  `assert_audio_detects_one_of` skips when its WAV is absent, so the 15
+  `audio_*` tests and `ml_app_path_matches_direct_path` report `ok` while
+  printing `SKIP <label>` to stderr, and each returns to real coverage the
+  moment its clip is restored. `scripts/run_benchmark.py` already skips missing
+  files. **Until then there is no real-audio regression coverage**, and the v2.0
+  ML-vs-DSP benchmark figures rest on that damaged corpus — treat them as
+  unverified.
 
-  Audited 2026-07-26: only `.wav` files were affected. `rust/models/nmp.onnx`,
-  the WASM, PNGs, SVGs, icons and archives are intact — they were added in or
-  after the commit that introduced the `binary` rules.
+  See `rust/wavs/README.md` for how to add recordings back, including the
+  clone-and-compare check that would have caught this.
 
-  **Lesson:** when adding a new binary file type to this repo, add its
-  `*.ext binary` rule to `.gitattributes` *in the same commit or earlier*. The
-  blanket `* text eol=lf` at the top will silently eat it otherwise, and
-  `git status` will not tell you.
+  **Lesson:** add a new binary type's `*.ext binary` rule to `.gitattributes`
+  *in the same commit as the first file of that type, or earlier*. The blanket
+  `* text eol=lf` will silently eat it, and `git status` will not tell you —
+  while `text` is in effect git compares the *filtered* working copy against the
+  blob, so a pristine local file looks identical to a mangled stored one.
 
-- `rust/wavs/soup_dragon.wav` additionally has a non-standard 78-byte header
-  (LIST/INFO chunk from Lavf60.16.100 between fmt and data) with wrong chunk
-  sizes at offsets 0x04, 0x28, 0x4a — a separate defect from the CRLF damage.
+  Audited 2026-07-26: only `.wav` was affected. `rust/models/nmp.onnx`, the
+  WASM, PNGs, SVGs, icons and archives are intact.
+
+- `rust/wavs/soup_dragon.wav` (now removed) additionally had a non-standard
+  78-byte header — a LIST/INFO chunk from Lavf60.16.100 between fmt and data —
+  with wrong chunk sizes at offsets 0x04, 0x28, 0x4a. Worth remembering if a
+  re-recorded clip comes out of ffmpeg: that header layout is legal but unusual,
+  and some readers mis-handle it.
 
 ## Offline architecture (rewritten July 2026 — v3.6.0)
 
