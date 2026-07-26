@@ -376,7 +376,19 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 1. **`app/src/wasm/` is gitignored** — it's the *compiled* Rust. Pulling source updates the JS + Rust source but NOT the WASM, so deploys silently shipped stale ML. **Now automated:** `npm run build` runs a `prebuild` hook (`app/build-wasm.sh`) that rebuilds + copies the WASM. Never hand-deploy without it. After deploy, the **PWA service worker caches the WASM hard** — a clean reinstall (delete app + Settings→Safari→clear Website Data + re-add) is the reliable cache-buster.
 2. **Verify the live build on-device:** `ff_config::VERSION` (e.g. `1.4.1-ml`) shows on the **Help/About** page. **Bump it whenever you ship a behaviour change** so you can confirm which build is actually running (this is how we proved "stale WASM" vs "real bug"). Keep `ff_config.rs` VERSION and `Cargo.toml` version in sync.
-3. **Query must be deterministic.** `query/heuristic.rs` shortlists the top `QUERY_REPASS_SIZE` candidates for the NW pass. It iterates a `HashMap` (random seed), so **never truncate mid-tie** — include the whole boundary tie group (capped at `QUERY_REPASS_MAX`). Splitting a tie made shortlist membership depend on HashMap order, so the same audio randomly found/missed a borderline tune (worst on weak ML/poor-audio contours). Any HashMap-order-dependent selection here is a bug.
+3. **Query must be deterministic — twice over.** *Membership* and *order*.
+
+   *Order (fixed July 2026):* `sort_by` is stable, so tied entries keep their
+   input order — which came from iterating a `HashMap`, whose hasher Rust seeds
+   randomly per process. Identical audio therefore reordered its tied results
+   run to run: two tunes sharing a title and an exact score swapped rank, and a
+   tune with several equally-scoring settings reported a different one each
+   time. Scores themselves were never affected. Both sorts (`query/mod.rs` NW
+   pass, `query/heuristic.rs` shortlist) now break ties on `setting_id`, giving
+   a total order. The name-query path had always done this (ties broken by
+   alias length). **Any new sort over query results needs a tiebreak.**
+
+   *Membership:* `query/heuristic.rs` shortlists the top `QUERY_REPASS_SIZE` candidates for the NW pass. It iterates a `HashMap` (random seed), so **never truncate mid-tie** — include the whole boundary tie group (capped at `QUERY_REPASS_MAX`). Splitting a tie made shortlist membership depend on HashMap order, so the same audio randomly found/missed a borderline tune (worst on weak ML/poor-audio contours). Any HashMap-order-dependent selection here is a bug.
 4. **The CLI and the app use different ML entry points** — keep them equivalent. CLI/`bin.rs` (`FF_TRANSCRIBER=ml`) calls `BasicPitch::transcribe_contour` **directly**; the app/WASM goes `FolkFriend::feed_* → transcribe_pcm_buffer`. Guarded by test `ml_app_path_matches_direct_path`. ML is normalised internally, so it's far **less robust to degraded/playback audio than DSP** — clean clips can pass while field/speaker re-recordings fail.
 
 ### Debugging playbook (app-vs-CLI ML differences)

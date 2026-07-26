@@ -83,7 +83,11 @@ pub fn run_transcription_query(
 
     // Sort by distinct-ngram count (descending). Only the top candidates go to
     // the slower Needleman-Wunsch re-scoring pass.
-    sorted_rankings.sort_by(|x, y| y.1.cmp(&x.1));
+    // Tiebreak on setting_id so the shortlist's ORDER is deterministic too, not
+    // just its membership (see the tie-group note below). Otherwise HashMap
+    // iteration order leaks into the NW pass's input order and back out into
+    // the final ranking.
+    sorted_rankings.sort_by(|x, y| y.1.cmp(&x.1).then_with(|| x.0.cmp(&y.0)));
 
     // Keep the top `repass` candidates — but NEVER split a tie group at the
     // cutoff. Truncating mid-tie made shortlist membership depend on HashMap
