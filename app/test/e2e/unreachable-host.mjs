@@ -14,8 +14,8 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { CHROME, BASE_ARGS } from './chrome.mjs';
 
-const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
 const APP = 'http://localhost:3000';
 const profile = mkdtempSync(path.join(tmpdir(), 'ff-unreach-'));
 
@@ -31,16 +31,9 @@ let port = 9400;
 async function withChrome(extraArgs, fn) {
     const p = ++port;
     const chrome = spawn(CHROME, [
-        '--headless=new',
+        ...BASE_ARGS,
         `--remote-debugging-port=${p}`,
         `--user-data-dir=${profile}`,
-        '--no-first-run',
-        '--disable-gpu',
-        // Chrome's HTTP disk cache would otherwise serve the 40 MB index even
-        // with the origin unreachable, masking the very path under test.
-        // Safari/iOS will not hold a response that large, so we must not rely
-        // on it either.
-        '--disk-cache-size=1',
         ...extraArgs,
         'about:blank',
     ], { stdio: 'ignore' });

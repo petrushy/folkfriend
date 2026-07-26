@@ -219,6 +219,45 @@ modes it was: never saved, or saved-then-evicted.
 
 Only **favourites** are synced to Firestore (under `users/{uid}/data/favourites`). **History is local-only** — it lives in IndexedDB on the device and is never pushed to Firestore. Firestore SDK handles its own offline queue for favourites — writes made while offline are automatically replayed when connectivity returns. Security rules are in `firestore.rules`.
 
+## CI/CD — GitHub Actions (July 2026)
+
+`.github/workflows/deploy.yml`. Push to `master` deploys live; pull requests get
+a Firebase Hosting **preview channel** (temporary URL, expires after 7 days) —
+useful because the app is tested on a real iPhone and a preview lets you try a
+branch without disturbing the installed PWA.
+
+Pipeline: install Rust (+ wasm32) and Node → download tune index → `cargo test
+--release` → `npm test` → **drop the tune index** → `npm run build` → serve
+`dist` → `npm run test:e2e` → deploy.
+
+Three things about it are non-obvious:
+
+- **The Rust tests need the 42 MB index**, which is gitignored. CI runs
+  `download_tune_data.sh` before `cargo test`, and `--release` because the tests
+  run full NW queries over the whole index — debug builds make that the longest
+  step in the job.
+- **The index is then deleted before `npm run build`.** In production the app
+  fetches it from `folkfriend-data.web.app`, so the copy webpack was pasting
+  into `dist/` was never read — it was silently adding ~42 MB to every deploy.
+  Dropping it takes `dist` from 65 MB to 24 MB. `app/firebase.json` also ignores
+  `res/folkfriend-non-user-data.json` so local `firebase deploy` does the same.
+- **`res/nud-meta.json` MUST survive.** It is in the service worker's precache
+  manifest; a 404 there fails the service worker install and takes offline
+  support down with it. Never exclude `res/` wholesale.
+
+Chrome for the e2e tests is resolved by `app/test/e2e/chrome.mjs` (`CHROME_PATH`
+env var, then the usual macOS/Linux locations), which also adds `--no-sandbox`
+and `--disable-dev-shm-usage` when `CI` is set.
+
+### Required secret
+
+`FIREBASE_SERVICE_ACCOUNT` — the JSON key for a service account **in the
+`folkfriend-petrush-fork` project** with the Firebase Hosting Admin role.
+Firebase console → Project settings → Service accounts → Generate new private
+key, then paste the whole file into the GitHub repo secret. Check `project_id`
+inside the JSON matches — a key from a different project fails with a
+permissions error that reads like a broken workflow.
+
 ## Firebase setup (Petrus's fork)
 
 This fork uses a separate Firebase project (`folkfriend-petrush-fork`) — not the original `folk-friend` project used by the upstream app.

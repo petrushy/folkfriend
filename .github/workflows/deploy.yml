@@ -1,0 +1,127 @@
+name: Test & Deploy
+
+# Pushes to master deploy to the live site. Pull requests get their own
+# temporary preview URL, which is genuinely useful here because the app is
+# tested on a real iPhone — you can try a branch without disturbing the
+# installed PWA.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# A newer commit supersedes an in-flight run for the same ref. Never cancel a
+# live deploy mid-flight, though.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build-test-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      # The Vue build's `prebuild` hook compiles the Rust to WASM, so the
+      # deployed WASM can never be stale relative to the Rust source.
+      - name: Install Rust (with wasm32 target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Caches ~/.cargo and rust/target. Without this every run recompiles
+      # tract + the ONNX stack, which dominates the build.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install app dependencies
+        working-directory: app
+        run: npm ci
+
+      # The Rust integration tests read the real tune index from
+      # app/public/res/ (it is gitignored — far too large to commit), so it has
+      # to be fetched before `cargo test`. It is removed again before the app
+      # build; see "Drop the tune index" below.
+      - name: Download tune index
+        working-directory: app
+        run: bash download_tune_data.sh
+
+      # --release because these run full queries over a 42 MB index; in debug
+      # the NW alignment pass is slow enough to dominate the job.
+      - name: Rust tests
+        working-directory: rust
+        run: cargo test --release
+
+      - name: JS unit tests
+        working-directory: app
+        run: npm test
+
+      # In production the app fetches the index from folkfriend-data.web.app,
+      # so the copy in public/res/ is dead weight in the deployed bundle — it
+      # was adding ~42 MB to every deploy. nud-meta.json MUST stay: it is in the
+      # service worker's precache manifest, and a 404 there fails the service
+      # worker install and takes offline support down with it.
+      - name: Drop the tune index from the deployed bundle
+        run: rm -f app/public/res/folkfriend-non-user-data.json
+
+      - name: Build
+        working-directory: app
+        run: npm run build
+
+      - name: Report bundle size
+        working-directory: app
+        run: du -sh dist && du -sh dist/* | sort -h | tail -5
+
+      # The offline tests need the production build (they exercise the service
+      # worker) served over http, plus a real Chrome.
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        id: setup-chrome
+
+      - name: Serve the production build
+        working-directory: app
+        run: |
+          npx serve dist -s -l 3000 &
+          for i in $(seq 1 60); do
+            curl -sf -o /dev/null http://localhost:3000/ && exit 0
+            sleep 1
+          done
+          echo "dev server never came up"; exit 1
+
+      - name: Offline / PWA end-to-end tests
+        working-directory: app
+        env:
+          CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+        run: npm run test:e2e
+
+      # Preview channel for PRs: a temporary URL that expires after 7 days.
+      - name: Deploy preview (pull request)
+        if: github.event_name == 'pull_request'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: folkfriend-petrush-fork
+          entryPoint: ./app
+          expires: 7d
+
+      - name: Deploy live (master)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
+        uses: FirebaseExtended/action-hosting-deploy@v0
+        with:
+          repoToken: ${{ secrets.GITHUB_TOKEN }}
+          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          projectId: folkfriend-petrush-fork
+          entryPoint: ./app
+          channelId: live
