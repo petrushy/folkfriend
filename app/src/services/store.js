@@ -17,12 +17,25 @@ const USER_SETTING_DEFAULTS = {
     showAbcText: false,
     microphoneChoice: null,
     recordingTimeLimitSecs: 10,
+    useMlTranscriber: false, // opt-in experimental basic-pitch ML transcription
+    autoGainControl: false, // let the OS auto-boost quiet mic input at capture
 };
 
 class Store {
     constructor() {
         this.state = {
+            // Single source of truth for tune-index availability, mirrored from
+            // the worker's state machine by backend._onIndexStatus:
+            //   'loading' | 'downloading' | 'ready' | 'unavailable'
+            // It always reaches a terminal state, so no view ever has to guess
+            // with a timeout.
+            indexStatus: 'loading',
+            indexStatusDetail: {},
+            // { received, total } while downloading, else null.
+            indexDownloadProgress: null,
+            // Convenience mirrors of indexStatus, kept for existing views.
             indexLoaded: false,
+            tuneIndexError: false,
             lastResults: [],
             lastContour: '',
             lastTimer: null,
@@ -30,6 +43,10 @@ class Store {
             tuneIndexVersion: null,
             tuneIndexDate: null,
             sessionAnalysis: null,
+            // Raw PCM of the most recent manual recording, retained so the
+            // Results view can export it as a WAV test clip. Cleared lazily.
+            lastRecordedPcm: null,
+            lastRecordedSampleRate: null,
         };
 
         this.searchStates = {
@@ -44,8 +61,9 @@ class Store {
 
         this._favouriteIDs = null;
         this._favouriteTuneIDs = null;
-        this._settingTagsCache = null; // Map<settingID string, string[]>
-        this._tuneTagsCache = null;    // Map<tuneID string, string[]> — union across all settings
+        this._settingTagsCache = null;  // Map<settingID string, string[]>
+        this._tuneTagsCache = null;     // Map<tuneID string, string[]> — union across all settings
+        this._favouriteTempoCache = null; // Map<settingID string, number|null>
         this.analytics = null;
         this.analyticsLoaded = new Promise(resolve => {
             this.setAnalyticsLoaded = resolve;
@@ -188,6 +206,7 @@ class Store {
                      .map(f => String(f.result.setting.tune_id))
             );
             this._settingTagsCache = new Map(items.map(f => [String(f.result.settingID), f.tags || []]));
+            this._favouriteTempoCache = new Map(items.map(f => [String(f.result.settingID), f.tempo ?? null]));
             this._tuneTagsCache = new Map();
             items.forEach(f => {
                 if (f.result.setting && f.result.setting.tune_id) {
@@ -211,6 +230,7 @@ class Store {
         this._favouriteTuneIDs = null;
         this._settingTagsCache = null;
         this._tuneTagsCache = null;
+        this._favouriteTempoCache = null;
     }
 
     async addFavourite(result) {
@@ -263,6 +283,23 @@ class Store {
         if (!tuneID) return [];
         if (this._tuneTagsCache === null) await this._loadFavouriteIDs();
         return this._tuneTagsCache.get(String(tuneID)) || [];
+    }
+
+    async getFavouriteTempo(settingID) {
+        if (!this._isValidSettingID(settingID)) return null;
+        if (this._favouriteTempoCache === null) await this._loadFavouriteIDs();
+        return this._favouriteTempoCache.get(String(settingID)) ?? null;
+    }
+
+    async setFavouriteTempo(settingID, tempoPercent) {
+        settingID = String(settingID);
+        const items = await this.getFavourites();
+        const item = items.find(f => String(f.result.settingID) === settingID);
+        if (!item) return; // not a favourite — nothing to save
+        item.tempo = tempoPercent;
+        if (this._favouriteTempoCache) this._favouriteTempoCache.set(settingID, tempoPercent);
+        await this._dbSet('favouriteItems', items);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
     async clearHistory() {

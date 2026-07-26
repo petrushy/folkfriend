@@ -25,6 +25,12 @@ pub struct FolkFriend {
     query_engine: query::QueryEngine,
     feature_extractor: feature::FeatureExtractor,
     feature_decoder: decode::FeatureDecoder,
+    // ML (basic-pitch) transcriber path — opt-in. When `use_ml` is set, raw PCM
+    // is accumulated in `raw_pcm` and transcription routes to the ML pipeline
+    // instead of the DSP feature extractor + lattice decoder.
+    basic_pitch: Option<decode::ml::BasicPitch>,
+    use_ml: bool,
+    raw_pcm: Vec<f32>,
 }
 
 impl FolkFriend {
@@ -34,7 +40,25 @@ impl FolkFriend {
             feature_extractor: feature::FeatureExtractor::new(ff_config::SAMPLE_RATE_DEFAULT)
                 .unwrap(),
             feature_decoder: decode::FeatureDecoder::new(ff_config::SAMPLE_RATE_DEFAULT).unwrap(),
+            basic_pitch: None,
+            use_ml: false,
+            raw_pcm: Vec::new(),
         }
+    }
+
+    /// Select the ML (basic-pitch) transcriber. Lazily builds the model on first
+    /// enable; falls back to the DSP path if the model fails to build.
+    pub fn set_use_ml(&mut self, use_ml: bool) {
+        if use_ml && self.basic_pitch.is_none() {
+            match decode::ml::BasicPitch::new() {
+                Ok(bp) => self.basic_pitch = Some(bp),
+                Err(_) => {
+                    self.use_ml = false;
+                    return;
+                }
+            }
+        }
+        self.use_ml = use_ml;
     }
 
     pub fn version(&self) -> String {
@@ -60,20 +84,36 @@ impl FolkFriend {
     }
 
     pub fn feed_entire_pcm_signal(&mut self, pcm_signal: Vec<f32>) {
-        self.feature_extractor.feed_signal(pcm_signal);
+        if self.use_ml {
+            self.raw_pcm.extend_from_slice(&pcm_signal);
+        } else {
+            self.feature_extractor.feed_signal(pcm_signal);
+        }
     }
 
     pub fn feed_single_pcm_window(&mut self, pcm_window: [f32; ff_config::SPEC_WINDOW_SIZE]) {
-        self.feature_extractor.feed_window(pcm_window);
+        if self.use_ml {
+            self.raw_pcm.extend_from_slice(&pcm_window);
+        } else {
+            self.feature_extractor.feed_window(pcm_window);
+        }
     }
 
     pub fn flush_pcm_buffer(&mut self) {
         self.feature_extractor.flush();
+        self.raw_pcm.clear();
     }
 
     pub fn transcribe_pcm_buffer(
         &mut self,
     ) -> Result<decode::types::ContourString, decode::DecoderError> {
+        if self.use_ml {
+            let sample_rate = self.feature_extractor.sample_rate;
+            let bp = self.basic_pitch.as_ref().ok_or(decode::DecoderError)?;
+            let contour = bp.transcribe_contour(&self.raw_pcm, sample_rate);
+            self.raw_pcm.clear();
+            return contour;
+        }
         let lattice_path = self
             .feature_decoder
             .decode_lattice_path(&mut self.feature_extractor.features)?;
@@ -155,6 +195,10 @@ impl FolkFriendWASM {
             Ok(()) => true,
             Err(_) => false,
         }
+    }
+
+    pub fn set_use_ml(&mut self, use_ml: bool) {
+        self.ff.set_use_ml(use_ml);
     }
 
     pub fn feed_entire_pcm_signal(&mut self) {

@@ -40,26 +40,21 @@ module.exports = {
         theme_color: '#055581',
         background_color: '#055581',
         workboxOptions: {
-            // The tune index is 32MB — too large to precache, but we want it
-            // served from cache immediately after first load. CacheFirst means:
-            // cold start → fetch from network + cache; all subsequent loads →
-            // serve from cache instantly with no network round-trip.
-            runtimeCaching: [{
-                // Match only the bare URL (no query string). Requests with
-                // ?v=N (used for forced updates) bypass this cache entirely.
-                urlPattern: /\/res\/folkfriend-non-user-data\.json$/,
-                handler: 'StaleWhileRevalidate',
-                options: {
-                    cacheName: 'folkfriend-tune-data',
-                },
-            }, {
-                // Same for the production CDN URL.
-                urlPattern: /https:\/\/folkfriend-data\.web\.app\/folkfriend-non-user-data\.json$/,
-                handler: 'StaleWhileRevalidate',
-                options: {
-                    cacheName: 'folkfriend-tune-data',
-                },
-            }],
+            // The ~42 MB tune index is deliberately NOT cached by the service
+            // worker. It used to be (StaleWhileRevalidate, cache
+            // 'folkfriend-tune-data') while ALSO being stored in IndexedDB by
+            // services/tuneIndexStore.js — two copies of the same 42 MB, i.e.
+            // ~84 MB of origin quota for one dataset. That roughly doubled the
+            // chance of the browser evicting site data, which is precisely the
+            // failure the offline copy exists to prevent. IndexedDB (plus
+            // navigator.storage.persist()) is now the single durable store; the
+            // worker never re-fetches the index unless the version changed.
+            //
+            // Delete the stale cache left over from previous builds so upgrading
+            // users get that 42 MB back.
+            runtimeCaching: [],
+            cleanupOutdatedCaches: true,
+            importScripts: ['sw-cleanup.js'],
         },
     },
 };

@@ -1,0 +1,6 @@
+# Throwaway Phase 1 feasibility spike — do not commit artifacts.
+.venv/
+**/target/
+*.onnx
+*.bin
+*.npy

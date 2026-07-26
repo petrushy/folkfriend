@@ -1,6 +1,6 @@
 // Stores important global parameters that are re-used across FolkFriend.
 // MAKE SURE THIS MATCHES CARGO.TOML
-pub const VERSION: &str = "1.3.0";
+pub const VERSION: &str = "1.4.1-ml";
 
 // ====================================
 // === Signal Processing Paramaters ===
@@ -85,3 +85,7 @@ pub const CONTOUR_TO_QUERY_CHAR: [char; MIDI_NUM as usize] = [
 pub const QUERY_NGRAM_SIZE_CONTOUR: usize = 4;  // "quadgram"
 pub const QUERY_NGRAM_SIZE_NAME: usize = 3;     // "trigram"
 pub const QUERY_REPASS_SIZE: usize = 2000;
+// Hard ceiling on the NW shortlist when the cutoff count ties many candidates
+// (so we can include a whole boundary tie group without splitting it — see
+// query/heuristic.rs — without an unbounded NW pass on pathological contours).
+pub const QUERY_REPASS_MAX: usize = 6000;

@@ -1,11 +1,18 @@
 import ffBackend from '@/services/backend.js';
 import store from './store';
 
-const AUDIO_CONSTRAINTS = {
-    audio: {
-        echoCancellation: false,
-    }
-};
+// Build getUserMedia constraints. Echo cancellation stays off (it mangles
+// music). Auto gain control is opt-in via settings — it lets the OS boost quiet
+// input at capture time (better than post-capture digital gain, which can't
+// improve SNR), at the risk of level "pumping" on sustained notes.
+function audioConstraints() {
+    return {
+        audio: {
+            echoCancellation: false,
+            autoGainControl: !!store.userSettings.autoGainControl,
+        }
+    };
+}
 
 class MicService {
     constructor() {
@@ -23,6 +30,14 @@ class MicService {
         // integrated level since the last read.
         this._rmsSquaredSum = 0;
         this._rmsSampleCount = 0;
+
+        // Retained PCM of the current manual recording, for optional WAV export
+        // (building a personal test-clip collection). Ring-bounded for safety.
+        this._recordingPcm = [];
+        this._recordingSampleRate = null;
+        // Cap retained audio at ~120 s to bound memory (advancedMode removes the
+        // recording time limit). Older chunks are dropped beyond this.
+        this._recordingMaxChunks = Math.ceil((120 * 48000) / this.bufferSize);
     }
 
     _accumulateRms(samples) {
@@ -51,6 +66,8 @@ class MicService {
             return;
         }
         store.setSearchState(store.searchStates.RECORDING);
+        this._recordingPcm = [];
+        store.state.lastRecordedPcm = null; // repopulated when this recording stops
 
         // It's possible for a call to stopRecording to come in whilst we are
         //  still running startRecording (if the button is pushed very quickly).
@@ -68,7 +85,7 @@ class MicService {
         }
 
         try {
-            this.micStream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+            this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
             // sampleRate = this.micStream.getTracks()[0].getSettings().sampleRate;
         } catch (e) {
             this.finishOpening();
@@ -108,6 +125,10 @@ class MicService {
         this.micProcessor.onaudioprocess = function(audioProcessingEvent) {
             let channelData = audioProcessingEvent.inputBuffer.getChannelData(0);
             self._accumulateRms(channelData);
+            self._recordingPcm.push(new Float32Array(channelData)); // copy for export
+            if (self._recordingPcm.length > self._recordingMaxChunks) {
+                self._recordingPcm.shift();
+            }
             ffBackend.feedSinglePCMWindow(channelData);
         };
 
@@ -122,6 +143,7 @@ class MicService {
             //  that. Firefox doesn't let you know the sample rate until after
             //  you've connected it up to the audio context.
             let sampleRate = this.audioCtx.sampleRate;
+            this._recordingSampleRate = sampleRate;
             console.debug(`Using microphone sample rate ${sampleRate}`);
             await ffBackend.setSampleRate(sampleRate);
         } catch (e) {
@@ -151,7 +173,7 @@ class MicService {
             }
 
             try {
-                this.micStream = await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+                this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
             } catch (e) {
                 store.setSearchState(store.searchStates.READY);
                 throw e;
@@ -237,6 +259,21 @@ class MicService {
         // Make sure we don't try to close whilst in the process
         //  of opening.
         await this.opening;
+
+        // Finalise the retained recording into the store so Results can export
+        // it as a WAV test clip.
+        if (this._recordingPcm && this._recordingPcm.length) {
+            const total = this._recordingPcm.reduce((n, c) => n + c.length, 0);
+            const out = new Float32Array(total);
+            let offset = 0;
+            for (const chunk of this._recordingPcm) {
+                out.set(chunk, offset);
+                offset += chunk.length;
+            }
+            store.state.lastRecordedPcm = out;
+            store.state.lastRecordedSampleRate = this._recordingSampleRate || 48000;
+        }
+        this._recordingPcm = [];
 
         this._rmsSquaredSum = 0;
         this._rmsSampleCount = 0;

@@ -1,0 +1,23 @@
+# Isolated feasibility spike — NOT part of the main folkfriend crate.
+# Goal: determine whether tract-onnx compiles to wasm32-unknown-unknown and can
+# load/run a basic-pitch-style model. Throwaway once Phase 1 gates are answered.
+[package]
+name = "tract-wasm-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "spike"
+path = "src/main.rs"
+
+[dependencies]
+tract-onnx = "0.21"
+
+# tract pulls getrandom 0.2 transitively; wasm32-unknown-unknown needs its "js"
+# feature enabled explicitly (standard wasm-bindgen workaround).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }

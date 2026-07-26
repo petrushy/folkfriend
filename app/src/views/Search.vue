@@ -112,12 +112,18 @@
         </v-container>
 
         <v-container class="tuneProgress">
-            <v-progress-linear
-                v-if="!indexError"
-                :class="{ Transparent: indexLoaded }"
-                indeterminate
-                rounded
-            />
+            <template v-if="!indexError">
+                <v-progress-linear
+                    :class="{ Transparent: indexLoaded }"
+                    :indeterminate="downloadPercent === null"
+                    :value="downloadPercent || 0"
+                    rounded
+                />
+                <p v-if="indexStatus === 'downloading'" class="indexProgressMsg">
+                    Downloading tune database{{ downloadPercent === null ? '' : ` — ${downloadPercent}%` }}…
+                    <br>This happens once; afterwards FolkFriend works offline.
+                </p>
+            </template>
             <p v-else class="indexErrorMsg">
                 {{ indexError }}
             </p>
@@ -157,6 +163,8 @@ export default {
             textQuery: '',
             offlineButton: true,
             indexLoaded: store.state.indexLoaded,
+            indexStatus: store.state.indexStatus,
+            downloadProgress: null,
             indexError: null,
             searchState: store.searchState,
             analyzeScale: 1.0,
@@ -170,11 +178,28 @@ export default {
             },
         };
     },
+    computed: {
+        downloadPercent() {
+            // store.state is a plain (non-reactive) object, so progress is
+            // pushed in from the indexStatusChanged handler rather than read
+            // from the store here.
+            const p = this.downloadProgress;
+            if (!p || !p.total) return null;
+            return Math.min(100, Math.round((p.received / p.total) * 100));
+        },
+    },
     created: function () {
         eventBus.$emit('parentViewActivated');
 
         this._onIndexLoaded = () => { this.indexLoaded = true; };
         this._onIndexError = (msg) => { this.indexError = msg; };
+        this._onIndexStatus = (detail) => {
+            this.indexStatus = detail.status;
+            this.downloadProgress = detail.status === 'downloading'
+                ? { received: detail.received || 0, total: detail.total || 0 }
+                : null;
+            if (detail.status !== 'unavailable') this.indexError = null;
+        };
         this._onSearchError = (errorMsg) => {
             this.snackbar = true;
             this.snackbarText = errorMsg || 'An error ocurred 😟';
@@ -190,6 +215,7 @@ export default {
             eventBus.$on('indexLoaded', this._onIndexLoaded);
         }
         eventBus.$on('tuneIndexError', this._onIndexError);
+        eventBus.$on('indexStatusChanged', this._onIndexStatus);
         eventBus.$on('searchError', this._onSearchError);
         eventBus.$on('setSearchState', this._onSetSearchState);
 
@@ -201,6 +227,7 @@ export default {
         this._destroyed = true;
         eventBus.$off('indexLoaded', this._onIndexLoaded);
         eventBus.$off('tuneIndexError', this._onIndexError);
+        eventBus.$off('indexStatusChanged', this._onIndexStatus);
         eventBus.$off('searchError', this._onSearchError);
         eventBus.$off('setSearchState', this._onSetSearchState);
     },
@@ -269,6 +296,9 @@ export default {
             try {
                 store.setSearchState(store.searchStates.WORKING);
     
+                // Uploaded audio isn't a mic recording — clear any retained mic
+                // PCM so the Results "save clip" button can't export a stale one.
+                store.state.lastRecordedPcm = null;
                 console.time('file-upload');
                 const file = e.target.files[0];
                 const url = URL.createObjectURL(file);

@@ -316,9 +316,8 @@ export default {
             this.hamburgerState = this.hamburgerStates.hamburger;
         });
 
-        eventBus.$on('indexLoaded', () => {
-            store.state.indexLoaded = true;
-        });
+        // NB: store.state.indexLoaded / indexStatus are maintained centrally by
+        // ffBackend._onIndexStatus — do not mirror index state here as well.
 
         eventBus.$on('swUpdated', () => {
             this.updateBanner = true;
@@ -383,6 +382,18 @@ async function initSetup() {
         store.state.backendVersion = version;
         console.info('Loaded folkfriend backend version', version);
     });
+
+    // Request durable (persistent) storage so the browser does not evict
+    // IndexedDB under storage pressure. Especially important on iOS Safari,
+    // which can clear site data for PWAs that haven't been opened recently.
+    // Fire-and-forget — denial is silent and the app still works; it just
+    // means the tune index could be evicted, requiring a re-download.
+    if (navigator.storage && navigator.storage.persist) {
+        navigator.storage.persist().then(granted => {
+            console.info('Persistent storage:', granted ? 'granted' : 'not granted');
+        });
+    }
+
     // Auth must be initialised immediately — do not wait for tune index setup,
     // which can take seconds. A user tapping "Sign in" before auth is ready
     // would hit store.signIn() with this.auth === null and crash.

@@ -19,9 +19,26 @@ class FFBackend {
         const worker = new Worker(new URL('@/services/worker.js', import.meta.url));
         this.folkfriendWorker = Comlink.wrap(worker);
 
-        this.folkfriendWorker.onIndexLoad(Comlink.proxy(() => {
-            eventBus.$emit('indexLoaded');
+        // Single source of truth for "is the tune index usable". Views read
+        // store.state.indexStatus (and listen for 'indexStatusChanged') rather
+        // than racing a one-shot event against their own mount, which is what
+        // made every Tune view sit through a 15 s timeout when the index was
+        // slow or unavailable.
+        this.folkfriendWorker.subscribeIndexStatus(Comlink.proxy(detail => {
+            this._onIndexStatus(detail);
         }));
+
+        // When connectivity comes back, an index that failed to install is
+        // retried automatically — the user should not have to restart the app.
+        if (typeof window !== 'undefined') {
+            window.addEventListener('online', () => {
+                if (store.state.indexStatus === 'unavailable') {
+                    console.debug('Back online — retrying tune index setup');
+                    this.setupTuneIndex().catch(e =>
+                        console.warn('Tune index retry failed', e));
+                }
+            });
+        }
 
         // Serialises compound PCM-buffer pipelines (flush → feed → transcribe → query)
         // so two callers cannot interleave and corrupt each other's WASM buffer.
@@ -38,6 +55,72 @@ class FFBackend {
         return prev.then(fn).finally(release);
     }
 
+    _onIndexStatus(detail) {
+        const previous = store.state.indexStatus;
+        store.state.indexStatus = detail.status;
+        store.state.indexStatusDetail = detail;
+        store.state.indexLoaded = detail.status === 'ready';
+        store.state.tuneIndexError = detail.status === 'unavailable';
+        store.state.indexDownloadProgress =
+            detail.status === 'downloading'
+                ? { received: detail.received || 0, total: detail.total || 0 }
+                : null;
+
+        if (detail.status === 'ready') {
+            if (detail.v) store.state.tuneIndexVersion = detail.v;
+            if (detail.date) store.state.tuneIndexDate = detail.date;
+        }
+
+        eventBus.$emit('indexStatusChanged', detail);
+        // Legacy edge events, kept so existing views keep working.
+        if (detail.status === 'ready' && previous !== 'ready') {
+            eventBus.$emit('indexLoaded');
+        }
+        if (detail.status === 'unavailable' && previous !== 'unavailable') {
+            eventBus.$emit('tuneIndexError', this.indexUnavailableMessage(detail));
+        }
+    }
+
+    indexUnavailableMessage(detail) {
+        const d = detail || store.state.indexStatusDetail || {};
+        if (d.offline || d.reason === 'offline') {
+            return 'You are offline and no tune database is saved on this device. Your favourites are still available.';
+        }
+        if (d.reason === 'network') {
+            return 'Could not reach the tune database. Your favourites are still available.';
+        }
+        return 'Could not load the tune database. Your favourites are still available.';
+    }
+
+    // Resolves as soon as the index reaches a terminal state — true when it is
+    // usable, false when the caller should fall back to locally saved data.
+    // Never hangs: the worker's state machine always settles.
+    indexReady() {
+        if (store.state.indexStatus === 'ready') return Promise.resolve(true);
+        if (store.state.indexStatus === 'unavailable') return Promise.resolve(false);
+        return new Promise(resolve => {
+            const onChange = detail => {
+                if (detail.status === 'ready' || detail.status === 'unavailable') {
+                    eventBus.$off('indexStatusChanged', onChange);
+                    resolve(detail.status === 'ready');
+                }
+            };
+            eventBus.$on('indexStatusChanged', onChange);
+        });
+    }
+
+    async refreshTuneIndex() {
+        return new Promise(resolve => {
+            this.folkfriendWorker.refreshTuneIndex(Comlink.proxy(resolve));
+        });
+    }
+
+    async getOfflineStatus() {
+        return new Promise(resolve => {
+            this.folkfriendWorker.getOfflineStatus(Comlink.proxy(resolve));
+        });
+    }
+
     async version() {
         return new Promise(resolve => {
             this.folkfriendWorker.version(Comlink.proxy(version => {
@@ -52,14 +135,24 @@ class FFBackend {
                 resolve(analyticsData);
             }));
         });
+        // Status (and therefore the tuneIndexError flag and events) is driven
+        // by subscribeIndexStatus, not by this callback — the callback only
+        // carries analytics. This keeps a single code path for readiness.
+        store.logAnalyticsEvent('tune_index_init', analyticsData).then();
+
+        // Independent of the index: apply the persisted ML-transcriber
+        // preference now that the worker is up.
+        this.setUseMlTranscriber(store.userSettings.useMlTranscriber || false).catch(e =>
+            console.warn('Could not set ML transcriber preference', e));
+
         if (analyticsData.error) {
             console.error('Tune index setup failed:', analyticsData.error);
-            eventBus.$emit('tuneIndexError', analyticsData.error);
             return;
         }
-        store.logAnalyticsEvent('tune_index_init', analyticsData).then();
-        store.state.tuneIndexVersion = analyticsData['tune_index_metadata_version'];
-        store.state.tuneIndexDate = analyticsData['tune_index_metadata_date'] || null;
+        if (analyticsData['tune_index_metadata_version'] !== undefined) {
+            store.state.tuneIndexVersion = analyticsData['tune_index_metadata_version'];
+            store.state.tuneIndexDate = analyticsData['tune_index_metadata_date'] || null;
+        }
         eventBus.$emit('tuneIndexReady');
     }
 
@@ -76,7 +169,20 @@ class FFBackend {
         await this.folkfriendWorker.setSampleRate(sampleRate);
     }
 
+    async setUseMlTranscriber(useMl) {
+        // Push the opt-in ML-transcriber setting to the worker/WASM. Must be set
+        // before PCM is fed (the feed path branches on it), so we call this on
+        // startup and whenever the Settings toggle changes — not per-recording.
+        await this.folkfriendWorker.setUseMlTranscriber(!!useMl);
+    }
+
     async feedEntirePCMSignal(PCMSignal) {
+        // Assert the transcriber mode from the current setting BEFORE feeding —
+        // the WASM feed path branches on it. This guarantees the ML toggle
+        // applies to file upload, live session and ring-buffer analysis (all of
+        // which feed a whole signal through here), independent of when the
+        // setting was last pushed.
+        await this.setUseMlTranscriber(store.userSettings.useMlTranscriber || false);
         await this.folkfriendWorker.feedEntirePCMSignal(PCMSignal);
     }
 
