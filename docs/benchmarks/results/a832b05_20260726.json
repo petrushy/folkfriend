@@ -1,0 +1,147 @@
+{
+  "commit": "a832b05",
+  "commit_message": "Merge pull request #4 from petrushy/fix/retire-corrupt-wav-fixtures",
+  "date": "2026-07-26",
+  "dataset_sha256": "6b7ef853a313011b12e163fec91966ac1e774f05965fcd0101e2bf55c32fd443",
+  "dataset_bytes": 42218174,
+  "results": [
+    {
+      "wav": "farewell_to_ireland.wav",
+      "label": "Farewell To Ireland",
+      "expected_tune_ids": [
+        "33",
+        "4403",
+        "4571"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.95098037,
+      "detected": true
+    },
+    {
+      "wav": "farewell_to_whalley_range.wav",
+      "label": "Farewell To Whalley Range",
+      "expected_tune_ids": [
+        "2410"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.95454544,
+      "detected": true
+    },
+    {
+      "wav": "hut_on_staffin_island.wav",
+      "label": "Hut On Staffin Island",
+      "expected_tune_ids": [
+        "2067"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.75,
+      "detected": true
+    },
+    {
+      "wav": "nåspolskan.wav",
+      "label": "Nåspolskan",
+      "expected_tune_ids": [
+        "56869501",
+        "767879601"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.6097561,
+      "detected": true
+    },
+    {
+      "wav": "the_arra_mountains.wav",
+      "label": "The Arra Mountains",
+      "expected_tune_ids": [
+        "1901"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.875,
+      "detected": true
+    },
+    {
+      "wav": "the_cock_and_the_hen.wav",
+      "label": "The Cock And The Hen",
+      "expected_tune_ids": [
+        "23405",
+        "93"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.9791667,
+      "detected": true
+    },
+    {
+      "wav": "the_golden_keyboard.wav",
+      "label": "The Golden Keyboard",
+      "expected_tune_ids": [
+        "36"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.72321427,
+      "detected": true
+    },
+    {
+      "wav": "the_kerfunten.wav",
+      "label": "The Kerfunten",
+      "expected_tune_ids": [
+        "139"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.44186047,
+      "detected": true
+    },
+    {
+      "wav": "the_kid_on_the_mountain.wav",
+      "label": "The Kid On The Mountain",
+      "expected_tune_ids": [
+        "52"
+      ],
+      "max_rank": 5,
+      "rank": 4,
+      "score": 0.5,
+      "detected": true
+    },
+    {
+      "wav": "the_lounge_bar.wav",
+      "label": "The Lounge Bar",
+      "expected_tune_ids": [
+        "8853"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.89361703,
+      "detected": true
+    },
+    {
+      "wav": "the_musical_priest.wav",
+      "label": "The Musical Priest",
+      "expected_tune_ids": [
+        "17606",
+        "73",
+        "9214"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.87931037,
+      "detected": true
+    },
+    {
+      "wav": "windbroke.wav",
+      "label": "Windbroke",
+      "expected_tune_ids": [
+        "910"
+      ],
+      "max_rank": 5,
+      "rank": 1,
+      "score": 0.8333333,
+      "detected": true
+    }
+  ]
+}

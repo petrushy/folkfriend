@@ -250,6 +250,9 @@ export default {
         },
         hamburgerState: 'hamburger',
         updateBanner: false,
+        // ServiceWorkerRegistration carrying the waiting worker, so Reload can
+        // actually apply the update (see reloadApp).
+        swRegistration: null,
         syncErrorSnackbar: false,
         syncErrorText: '',
         icons: {
@@ -319,7 +322,8 @@ export default {
         // NB: store.state.indexLoaded / indexStatus are maintained centrally by
         // ffBackend._onIndexStatus — do not mirror index state here as well.
 
-        eventBus.$on('swUpdated', () => {
+        eventBus.$on('swUpdated', (registration) => {
+            this.swRegistration = registration || null;
             this.updateBanner = true;
         });
 
@@ -330,7 +334,32 @@ export default {
     },
     methods: {
         reloadApp() {
-            window.location.reload();
+            // A new service worker installs into the "waiting" state and will
+            // not take control while the old one still controls a client.
+            // window.location.reload() does NOT release control — the page
+            // reloads and the OLD worker still serves it — so tapping Reload
+            // appeared to do nothing and the only way to pick up a deploy was
+            // to fully close the app. Tell the waiting worker to activate
+            // (it already listens for SKIP_WAITING), then reload once it has
+            // actually taken over.
+            const waiting = this.swRegistration && this.swRegistration.waiting;
+            if (!waiting) {
+                window.location.reload();
+                return;
+            }
+
+            let reloaded = false;
+            const reloadOnce = () => {
+                if (reloaded) return;
+                reloaded = true;
+                window.location.reload();
+            };
+            navigator.serviceWorker.addEventListener(
+                'controllerchange', reloadOnce, { once: true });
+            // Safety net: if controllerchange never fires (an edge case rather
+            // than the norm), reload anyway rather than leaving a dead button.
+            setTimeout(reloadOnce, 3000);
+            waiting.postMessage({ type: 'SKIP_WAITING' });
         },
         hamburgerBack() {
             router.back();

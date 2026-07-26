@@ -389,7 +389,30 @@ There are **two transcribers** (audio → contour). The query/index backend is s
    alias length). **Any new sort over query results needs a tiebreak.**
 
    *Membership:* `query/heuristic.rs` shortlists the top `QUERY_REPASS_SIZE` candidates for the NW pass. It iterates a `HashMap` (random seed), so **never truncate mid-tie** — include the whole boundary tie group (capped at `QUERY_REPASS_MAX`). Splitting a tie made shortlist membership depend on HashMap order, so the same audio randomly found/missed a borderline tune (worst on weak ML/poor-audio contours). Any HashMap-order-dependent selection here is a bug.
-4. **The CLI and the app use different ML entry points** — keep them equivalent. CLI/`bin.rs` (`FF_TRANSCRIBER=ml`) calls `BasicPitch::transcribe_contour` **directly**; the app/WASM goes `FolkFriend::feed_* → transcribe_pcm_buffer`. Guarded by test `ml_app_path_matches_direct_path`. ML is normalised internally, so it's far **less robust to degraded/playback audio than DSP** — clean clips can pass while field/speaker re-recordings fail.
+4. **ML vs DSP, re-measured on the clean corpus (July 2026).** The earlier
+   finding that ML is "far less robust than DSP" was measured on the corrupted
+   fixtures and does **not** hold on clean audio — they are equal on rank:
+
+   | | top-1 | top-5 | top-10 |
+   |---|---|---|---|
+   | DSP | 11/12 | 12/12 | 12/12 |
+   | ML  | 11/12 | 11/12 | 12/12 |
+
+   Each wins some: ML gets `the_kid_on_the_mountain` to rank 1 where DSP manages
+   only 4, and scores `the_kerfunten` higher; DSP is much stronger on
+   `nåspolskan` (rank 1 vs 9). ML scores are systematically lower in absolute
+   terms, but scores are not comparable across transcribers — only rank is.
+
+   **Still untested:** the original claim was specifically about *degraded /
+   speaker-re-recorded* audio, and the current corpus is all clean recordings.
+   That claim is unverified, not disproven. Worth capturing some deliberately
+   poor clips via the Results page "Save clip" button.
+
+   Note `scripts/run_benchmark.py` names its output by commit, so a DSP run and
+   an ML run at the same commit overwrite each other — copy the JSON aside
+   between runs when comparing.
+
+5. **The CLI and the app use different ML entry points** — keep them equivalent. CLI/`bin.rs` (`FF_TRANSCRIBER=ml`) calls `BasicPitch::transcribe_contour` **directly**; the app/WASM goes `FolkFriend::feed_* → transcribe_pcm_buffer`. Guarded by test `ml_app_path_matches_direct_path`. ML is normalised internally, so it's far **less robust to degraded/playback audio than DSP** — clean clips can pass while field/speaker re-recordings fail.
 
 ### Debugging playbook (app-vs-CLI ML differences)
 
