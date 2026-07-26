@@ -23,9 +23,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Node 22+: the e2e scripts drive Chrome over the DevTools Protocol using
+      # the global WebSocket, which only exists from Node 22 (it failed on 20
+      # with "WebSocket is not defined"). Node 20 is also being deprecated on
+      # the runners.
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: app/package-lock.json
 

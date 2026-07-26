@@ -28,6 +28,16 @@ export function resolveChrome() {
 
 export const CHROME = resolveChrome();
 
+// These scripts talk to Chrome over the DevTools Protocol using the global
+// WebSocket, which Node only exposes from v22. Without this check the failure
+// is a bare "WebSocket is not defined" from deep inside a scenario.
+if (typeof WebSocket === 'undefined') {
+    console.error(
+        `These end-to-end tests need Node 22 or newer (found ${process.version}) — ` +
+        'they use the global WebSocket to drive Chrome over the DevTools Protocol.');
+    process.exit(1);
+}
+
 // Flags shared by every scenario.
 //
 // --disk-cache-size=1 is not an optimisation: Chrome's HTTP disk cache will

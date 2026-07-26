@@ -283,6 +283,11 @@ Chrome for the e2e tests is resolved by `app/test/e2e/chrome.mjs` (`CHROME_PATH`
 env var, then the usual macOS/Linux locations), which also adds `--no-sandbox`
 and `--disable-dev-shm-usage` when `CI` is set.
 
+**The e2e tests need Node 22+.** They drive Chrome over the DevTools Protocol
+using the global `WebSocket`, which Node only exposes from v22. `chrome.mjs`
+checks this and says so, rather than failing with a bare
+`WebSocket is not defined`.
+
 ### Required secret
 
 `FIREBASE_SERVICE_ACCOUNT` — the JSON key for a service account **in the
