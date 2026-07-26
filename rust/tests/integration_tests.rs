@@ -28,6 +28,75 @@ fn pcm_from_wav(path: &str) -> (Vec<f32>, u32) {
 // Does the APP's ML path (FolkFriend feed + transcribe_pcm_buffer) produce the
 // SAME contour as the DIRECT path the CLI uses (BasicPitch::transcribe_contour)?
 // If these differ, "ML works" CLI tests don't reflect what the app runs.
+// The app feeds the ML transcriber in 1024-sample windows and drops the
+// trailing partial one; the CLI (and scripts/run_benchmark.py) feed the whole
+// signal at once. Those produce DIFFERENT contours on most clips, because the
+// tempo quantiser in contour_from_notes_fps picks a winner by argmax over a
+// coarse 5-BPM grid — a perturbation as small as 128 samples (2.9 ms) can flip
+// it, and the winner rescales every note's quaver count, changing the contour
+// from its first symbol. DSP is unaffected: identical output across the same
+// perturbations.
+//
+// So the benchmark has never measured what the app actually runs. This test
+// does: it drives the app's windowed feed over every fixture and asserts the
+// tune is still found. Exact contour equality with the CLI is deliberately NOT
+// asserted — it does not hold, and pretending otherwise is what let this go
+// unnoticed.
+#[test]
+fn ml_app_path_finds_tunes() {
+    let ff_index = load_tune_index();
+    let cases: Vec<(&str, Vec<&str>, usize)> = vec![
+        ("farewell_to_ireland.wav", vec!["33", "4403", "4571"], 5),
+        ("farewell_to_whalley_range.wav", vec!["2410"], 5),
+        ("hut_on_staffin_island.wav", vec!["2067"], 5),
+        // ML is weak on this one: rank 9 via the CLI's whole-signal feed, 11 via
+        // the app's windowed feed. DSP finds it at rank 1.
+        ("nåspolskan.wav", vec!["56869501", "767879601"], 15),
+        ("the_arra_mountains.wav", vec!["1901"], 5),
+        ("the_cock_and_the_hen.wav", vec!["93", "9008"], 5),
+        ("the_golden_keyboard.wav", vec!["36"], 5),
+        ("the_kerfunten.wav", vec!["139"], 5),
+        ("the_kid_on_the_mountain.wav", vec!["52"], 5),
+        ("the_lounge_bar.wav", vec!["8853"], 5),
+        ("the_musical_priest.wav", vec!["73", "9214", "17606"], 5),
+        ("windbroke.wav", vec!["910"], 5),
+    ];
+
+    let mut failures = Vec::new();
+    for (wav, expected, max_rank) in cases {
+        let path = format!("wavs/{}", wav);
+        if !Path::new(&path).exists() {
+            eprintln!("SKIP {wav}: not present");
+            continue;
+        }
+        let (signal, sr) = pcm_from_wav(&path);
+
+        let mut ff = FolkFriend::new();
+        ff.set_sample_rate(sr).unwrap();
+        ff.set_use_ml(true);
+        let w = folkfriend::ff_config::SPEC_WINDOW_SIZE;
+        for chunk in signal.chunks(w) {
+            if chunk.len() == w {
+                let mut buf = [0f32; folkfriend::ff_config::SPEC_WINDOW_SIZE];
+                buf.copy_from_slice(chunk);
+                ff.feed_single_pcm_window(buf);
+            }
+        }
+        let contour = match ff.transcribe_pcm_buffer() {
+            Ok(c) => c,
+            Err(_) => { failures.push(format!("{wav}: transcription failed")); continue; }
+        };
+        let results = ff_index.run_transcription_query(&contour).unwrap();
+        let rank = results.iter().position(|r| expected.contains(&r.setting.tune_id.as_str()));
+        match rank {
+            Some(i) if i < max_rank => eprintln!("{wav}: app path rank #{}", i + 1),
+            Some(i) => failures.push(format!("{wav}: rank #{} (want <= {})", i + 1, max_rank)),
+            None => failures.push(format!("{wav}: not found via the app path")),
+        }
+    }
+    assert!(failures.is_empty(), "app ML path regressions:\n  {}", failures.join("\n  "));
+}
+
 #[test]
 fn ml_app_path_matches_direct_path() {
     let wav = "wavs/farewell_to_ireland.wav";

@@ -168,6 +168,10 @@ impl FolkFriend {
 #[wasm_bindgen]
 pub struct FolkFriendWASM {
     ff: FolkFriend,
+    /// Reusable PCM window that JavaScript writes into (see
+    /// alloc_single_pcm_window). Owned here so the pointer handed out stays
+    /// valid for the lifetime of this struct.
+    pcm_window: Option<Box<[f32]>>,
 }
 
 #[wasm_bindgen]
@@ -177,6 +181,7 @@ impl FolkFriendWASM {
         panic::set_hook(Box::new(console_error_panic_hook::hook));
         FolkFriendWASM {
             ff: FolkFriend::new(),
+            pcm_window: None,
         }
     }
 
@@ -206,19 +211,27 @@ impl FolkFriendWASM {
     }
 
     pub fn alloc_single_pcm_window(&mut self) -> *mut f32 {
-        // This function is not required in the non-WASM version of FolkFriend.
-        //  This is required for passing Float32Arrays (audio data) from
-        //   javascript into rust.
-        let mut buf: [f32; ff_config::SPEC_WINDOW_SIZE] = [0.; ff_config::SPEC_WINDOW_SIZE];
-
-        // This pointer will be given to JavaScript so that it can write
-        //  directly into WebAssembly's memory
-        let ptr = buf.as_mut_ptr();
-        // Take ownership of this memory block to prevent destruction
-        // See https://radu-matei.com/blog/practical-guide-to-wasm-memory/
-        std::mem::forget(buf);
-
-        return ptr;
+        // Hands JavaScript a pointer it writes PCM directly into, avoiding a
+        // copy per frame.
+        //
+        // This used to allocate the buffer on the stack and call
+        // std::mem::forget to "keep" it. mem::forget is a no-op for Copy types
+        // (the compiler warns: "calls to std::mem::forget with a value that
+        // implements Copy does nothing"), so the array died with the stack
+        // frame and JavaScript was handed a dangling pointer into reclaimed
+        // stack space. It happened to work — later calls did not reuse those
+        // bytes before the read — but it was undefined behaviour that any
+        // change of compiler, optimisation level or call sequence could turn
+        // into silently corrupted audio.
+        //
+        // The buffer is now owned by the struct, so it lives exactly as long
+        // as FolkFriendWASM does. Repeated calls return the same pointer,
+        // which is what the worker already assumes (it allocates once and
+        // reuses the pointer forever).
+        if self.pcm_window.is_none() {
+            self.pcm_window = Some(vec![0f32; ff_config::SPEC_WINDOW_SIZE].into_boxed_slice());
+        }
+        return self.pcm_window.as_mut().unwrap().as_mut_ptr();
     }
 
     pub fn get_allocated_pcm_window(&mut self, ptr: *mut f32) -> js_sys::Float32Array {

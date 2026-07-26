@@ -436,7 +436,35 @@ There are **two transcribers** (audio → contour). The query/index backend is s
    corpus grows — 12 clips is too few to calibrate on, and the question is worth
    revisiting once there is degraded audio in the set.
 
-5. **The CLI and the app use different ML entry points** — keep them equivalent. CLI/`bin.rs` (`FF_TRANSCRIBER=ml`) calls `BasicPitch::transcribe_contour` **directly**; the app/WASM goes `FolkFriend::feed_* → transcribe_pcm_buffer`. Guarded by test `ml_app_path_matches_direct_path`. ML is normalised internally, so it's far **less robust to degraded/playback audio than DSP** — clean clips can pass while field/speaker re-recordings fail.
+5. **The ML contour is unstable w.r.t. input length; the app and CLI feed
+   different lengths (July 2026).** `contour_from_notes_fps` picks a tempo by
+   argmax over a coarse 5-BPM grid. Candidates routinely score within a hair of
+   each other, so a perturbation as small as **128 samples (2.9 ms)** flips the
+   winner — and since the winner sets every note's quaver count, the *whole*
+   contour changes, from its first symbol. Measured: `the_lounge_bar` went 43 →
+   49 characters and its match score 0.721 → 0.612. **DSP is immune** (identical
+   output across the same trims), which is why DSP holds up in the field and ML
+   does not.
+
+   The app feeds 1024-sample windows and drops the trailing partial one; the CLI
+   and `scripts/run_benchmark.py` feed the whole signal. So **the benchmark has
+   never measured what the app runs** — 4 of 6 clips produce different contours
+   between the two paths.
+
+   Two fixes were tried and both made matching *worse* on the corpus, so neither
+   was kept:
+   - epsilon tie-break preferring the faster tempo: 2 clips down, 0 up
+   - excluding the final note from tempo scoring (its duration is set by where
+     recording stopped, not by the music): 5 down, 1 up, one by 0.196
+
+   `ml_app_path_finds_tunes` now drives the app's windowed feed over every
+   fixture and asserts the tune is still found — a real guard on the path that
+   ships. It deliberately does NOT assert contour equality with the CLI, because
+   that does not hold; the old `ml_app_path_matches_direct_path` asserted
+   equality on a single clip that happened to agree, which is how this stayed
+   hidden.
+
+6. **The CLI and the app use different ML entry points** — keep them equivalent. CLI/`bin.rs` (`FF_TRANSCRIBER=ml`) calls `BasicPitch::transcribe_contour` **directly**; the app/WASM goes `FolkFriend::feed_* → transcribe_pcm_buffer`. Guarded by test `ml_app_path_matches_direct_path`. ML is normalised internally, so it's far **less robust to degraded/playback audio than DSP** — clean clips can pass while field/speaker re-recordings fail.
 
 ### Debugging playbook (app-vs-CLI ML differences)
 
