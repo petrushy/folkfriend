@@ -167,6 +167,12 @@ class LiveAnalysisService {
 
         while (this.isRunning && !this.isPaused) {
             const cycleStart = Date.now();
+            // The AudioContext can suspend itself mid-session (backgrounded
+            // tab, or a browser power-saving heuristic — see mic.js), which
+            // silently freezes the ring buffer. Check every cycle so the
+            // session recovers on its own rather than needing the user to
+            // notice and restart it.
+            await micService.resumeIfSuspended();
             const pcm = micService.getContinuousAudio();
 
             if (pcm.length > 0) {
