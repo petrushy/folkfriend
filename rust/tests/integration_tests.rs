@@ -30,7 +30,7 @@ fn pcm_from_wav(path: &str) -> (Vec<f32>, u32) {
 // If these differ, "ML works" CLI tests don't reflect what the app runs.
 #[test]
 fn ml_app_path_matches_direct_path() {
-    let wav = "wavs/Brännvinslåt Efter Gås-anders.wav";
+    let wav = "wavs/farewell_to_ireland.wav";
     if !Path::new(wav).exists() {
         eprintln!("SKIP ml_app_path_matches_direct_path: {wav} is not present");
         return;
