@@ -133,7 +133,15 @@ export default {
                 const { target, changed } = resolveFollowTarget(detections, this.target);
                 this.target = target;
                 this.selectedTuneKey = target ? this._optionKeyFor(target) : null;
-                this._syncFavourited();
+                // detections updates continuously while listening (many times a
+                // second) but the displayed settingId only actually moves when
+                // `changed` is true — see resolveFollowTarget(). Re-checking
+                // isFavourite() on every tick raced store.addFavourite()/
+                // removeFavourite(), whose in-memory cache only reflects a
+                // write after its IndexedDB write resolves: a tick landing in
+                // that window read the stale cache and snapped the star back,
+                // making it look like the tap hadn't registered.
+                if (changed) this._syncFavourited();
                 if (changed) this.loadScore();
             },
         },
@@ -217,18 +225,29 @@ export default {
             });
         },
         async toggleFavourite() {
+            // A shaky field tap can register as two quick clicks on the same
+            // gesture; without this guard the second one reads `favourited`
+            // before the first write lands and repeats the same store call.
+            if (this._togglingFavourite) return;
             const target = this.target;
             if (!target || !store._isValidSettingID(target.settingId)) return;
-            if (this.favourited) {
-                await store.removeFavourite(target.settingId);
-                this.favourited = false;
-            } else {
-                await store.addFavourite({
-                    settingID: target.settingId,
-                    setting: this.abcSetting || { tune_id: target.tuneId, setting_id: target.settingId },
-                    displayName: target.title,
-                });
-                this.favourited = true;
+            this._togglingFavourite = true;
+            // Set optimistically so the star responds on this click rather
+            // than after the IndexedDB round-trip.
+            const nowFavourited = !this.favourited;
+            this.favourited = nowFavourited;
+            try {
+                if (nowFavourited) {
+                    await store.addFavourite({
+                        settingID: target.settingId,
+                        setting: this.abcSetting || { tune_id: target.tuneId, setting_id: target.settingId },
+                        displayName: target.title,
+                    });
+                } else {
+                    await store.removeFavourite(target.settingId);
+                }
+            } finally {
+                this._togglingFavourite = false;
             }
         },
         async loadScore() {
@@ -303,13 +322,20 @@ export default {
 }
 
 .starBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     border: none;
     background: none;
-    padding: 0;
-    margin-left: 6px;
+    /* Icon is 24px; padding brings the tappable area to the ~44px minimum
+       recommended touch target. Negative top/bottom margin cancels the
+       padding's effect on the title's line height. */
+    padding: 10px;
+    margin: -10px 0 -10px 2px;
     cursor: pointer;
     vertical-align: middle;
     line-height: 1;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .tuneMeta {
