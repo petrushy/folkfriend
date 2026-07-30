@@ -116,31 +116,66 @@ await test('write then read round-trips the index and its version', async () => 
     assert.equal(result.index.indexData.settings['101'].abc, '');
 });
 
-await test('a failed payload write leaves NO manifest, so the cache reads as absent', async () => {
+// THE important property: an update that fails must never cost the user the
+// copy they already had. They discover the loss next time they are offline,
+// which is precisely when they cannot recover it.
+await test('a failed update PRESERVES the existing offline copy', async () => {
     const { store, idb } = await loadStore();
+    await store.writeIndex(SAMPLE, { v: 100, date: '2026-01-01' });
+
     idb.__state.failOn = 'ffIndexRaw';
-    await assert.rejects(() => store.writeIndex(SAMPLE, { v: 1, date: null }));
-    assert.equal(await store.readIndex(), null,
-        'a half-written cache must never be reported as usable');
-    assert.equal(await store.readManifest(), null);
+    await assert.rejects(() => store.writeIndex('{"settings":{},"aliases":{}}',
+        { v: 101, date: null }));
+
+    const still = await store.readIndex();
+    assert.ok(still, 'the previous copy must survive a failed update');
+    assert.equal(still.manifest.v, 100, 'and keep its version');
+    assert.equal(still.index.abcStrings['101'], 'ABC-ONE');
 });
 
-await test('a failed write does not resurrect a stale manifest', async () => {
+await test('an interrupted update (payload written, manifest not) keeps the data', async () => {
     const { store, idb } = await loadStore();
     await store.writeIndex(SAMPLE, { v: 100, date: null });
-    idb.__state.failOn = 'ffIndexRaw';
+
+    // Payload commits, then the process dies before the manifest is written.
+    idb.__state.failOn = 'ffIndexManifest';
     await assert.rejects(() => store.writeIndex(SAMPLE, { v: 101, date: null }));
-    // The old payload was invalidated along with its manifest — correct, because
-    // we cannot know which version the surviving bytes belong to.
-    assert.equal(await store.readIndex(), null);
+
+    const after = await store.readIndex();
+    assert.ok(after, 'data must remain usable after an interrupted write');
+    assert.equal(after.index.abcStrings['101'], 'ABC-ONE');
 });
 
-await test('a manifest without its payload is treated as corrupt and cleared', async () => {
+await test('a payload with no manifest at all is used, not deleted', async () => {
     const { store, idb } = await loadStore();
     await store.writeIndex(SAMPLE, { v: 7, date: null });
-    idb.__db.delete('ffIndexRaw'); // simulate partial eviction
+    idb.__db.delete('ffIndexManifest');   // e.g. selective eviction
+
+    const result = await store.readIndex();
+    assert.ok(result, 'a parseable payload is usable even with no manifest');
+    assert.equal(result.manifest.versionUnknown, true,
+        'version reported unknown so an update is attempted when online');
+    assert.equal(idb.__db.has('ffIndexRaw'), true, 'payload must NOT be deleted');
+});
+
+await test('a manifest describing a different payload still yields the data', async () => {
+    const { store, idb } = await loadStore();
+    await store.writeIndex(SAMPLE, { v: 7, date: null });
+    idb.__db.set('ffIndexManifest',
+        { schema: 2, v: 6, date: null, savedAt: 1, bytes: 999999 });
+
+    const result = await store.readIndex();
+    assert.ok(result, 'mismatched bookkeeping must not discard good data');
+    assert.equal(result.manifest.versionUnknown, true);
+    assert.equal(result.index.abcStrings['101'], 'ABC-ONE');
+});
+
+await test('a manifest without its payload drops only the dangling record', async () => {
+    const { store, idb } = await loadStore();
+    await store.writeIndex(SAMPLE, { v: 7, date: null });
+    idb.__db.delete('ffIndexRaw');
     assert.equal(await store.readIndex(), null);
-    assert.equal(idb.__db.has('ffIndexManifest'), false, 'corrupt manifest should be cleared');
+    assert.equal(idb.__db.has('ffIndexManifest'), false);
 });
 
 await test('unparseable payload is discarded rather than thrown', async () => {
@@ -186,11 +221,12 @@ await test('a successful schema-2 write reclaims the legacy 42 MB copy', async (
     assert.equal(idb.__db.has('tuneIndexMetadata'), false);
 });
 
-await test('orphaned payload with no manifest is garbage-collected', async () => {
+await test('an orphaned payload is adopted rather than binned', async () => {
     const { store, idb } = await loadStore();
     idb.__db.set('ffIndexRaw', SAMPLE); // write that died before the manifest
-    assert.equal(await store.readIndex(), null);
-    assert.equal(idb.__db.has('ffIndexRaw'), false);
+    const result = await store.readIndex();
+    assert.ok(result, 'orphaned but valid data is still the user\'s offline copy');
+    assert.equal(idb.__db.has('ffIndexRaw'), true);
 });
 
 console.log('\ntuneIndexNetwork');

@@ -48,6 +48,17 @@ class FolkFriendWASMWrapper {
         });
 
         // --- Index state machine -------------------------------------------
+        // Whether an index is actually loaded into WASM and queryable. This is
+        // deliberately SEPARATE from indexStatus, which describes what the
+        // pipeline is doing. They are not the same thing: during a background
+        // update the status is 'downloading' while the previously loaded index
+        // remains perfectly usable. Conflating them made every query return
+        // empty for the whole duration of an update.
+        this.indexUsable = false;
+        // Startup update check. Can be turned off in Settings — the offline copy
+        // is the app's whole reason for working in a pub with no signal, and
+        // some users would rather it were never touched without asking.
+        this.autoUpdateEnabled = true;
         this.indexStatus = INDEX_STATUS.LOADING;
         this.indexDetail = {};
         this._statusSubscribers = [];
@@ -74,7 +85,11 @@ class FolkFriendWASMWrapper {
 
     _setIndexStatus(status, detail = {}) {
         this.indexStatus = status;
-        this.indexDetail = { ...detail, status };
+        // `usable` travels with every status update so the UI can distinguish
+        // "busy" from "broken". A background update is busy; the app is still
+        // fully functional and must not show a loading state or fall back to
+        // favourites while it runs.
+        this.indexDetail = { ...detail, status, usable: this.indexUsable };
         if (status === INDEX_STATUS.READY || status === INDEX_STATUS.UNAVAILABLE) {
             this._resolveIndexSettled(status);
         }
@@ -109,10 +124,14 @@ class FolkFriendWASMWrapper {
     // promptly once the state machine has settled — index-dependent calls use
     // this instead of blocking on a promise that may never resolve.
     async _indexIsUsable() {
-        if (this.indexStatus === INDEX_STATUS.READY) return true;
+        // An index that is loaded stays usable no matter what the pipeline is
+        // doing. In particular a background update ('downloading') must NOT
+        // make queries fail: the old index is still in WASM and still answers
+        // correctly until the new one replaces it.
+        if (this.indexUsable) return true;
         if (this.indexStatus === INDEX_STATUS.UNAVAILABLE) return false;
         await this._indexSettled;
-        return this.indexStatus === INDEX_STATUS.READY;
+        return this.indexUsable;
     }
 
 
@@ -277,6 +296,10 @@ class FolkFriendWASMWrapper {
 
     async _checkForUpdateInBackground(manifest) {
         if (isDefinitelyOffline()) return;
+        if (!this.autoUpdateEnabled) {
+            console.debug('Automatic tune index updates are disabled');
+            return;
+        }
 
         let remote;
         try {
@@ -376,6 +399,8 @@ class FolkFriendWASMWrapper {
             await this.folkfriendWASM.load_index_from_json_obj(tuneIndex.indexData);
             this.abcStringBySetting = tuneIndex.abcStrings || {};
             this.sourceUrlBySetting = tuneIndex.sourceUrls || {};
+            // From here queries work, regardless of what the pipeline does next.
+            this.indexUsable = true;
         } finally {
             console.timeEnd('tune-index-to-wasm');
         }
@@ -392,6 +417,10 @@ class FolkFriendWASMWrapper {
         //  simply ignores the invalid sample rate and stays on the default.
         await this.folkfriendWASM.set_sample_rate(sampleRate);
         this.setLoadedSampleRate();
+    }
+
+    async setAutoUpdate(enabled) {
+        this.autoUpdateEnabled = !!enabled;
     }
 
     async setUseMlTranscriber(useMl) {

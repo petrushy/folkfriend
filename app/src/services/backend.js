@@ -57,10 +57,14 @@ class FFBackend {
 
     _onIndexStatus(detail) {
         const previous = store.state.indexStatus;
+        const previouslyLoaded = store.state.indexLoaded;
         store.state.indexStatus = detail.status;
         store.state.indexStatusDetail = detail;
-        store.state.indexLoaded = detail.status === 'ready';
-        store.state.tuneIndexError = detail.status === 'unavailable';
+        // Usable, not "ready": during a background update the status is
+        // 'downloading' but the loaded index still answers queries, so the UI
+        // must not regress to a loading state or fall back to favourites.
+        store.state.indexLoaded = !!detail.usable || detail.status === 'ready';
+        store.state.tuneIndexError = detail.status === 'unavailable' && !detail.usable;
         store.state.indexDownloadProgress =
             detail.status === 'downloading'
                 ? { received: detail.received || 0, total: detail.total || 0 }
@@ -73,10 +77,10 @@ class FFBackend {
 
         eventBus.$emit('indexStatusChanged', detail);
         // Legacy edge events, kept so existing views keep working.
-        if (detail.status === 'ready' && previous !== 'ready') {
+        if (store.state.indexLoaded && !previouslyLoaded) {
             eventBus.$emit('indexLoaded');
         }
-        if (detail.status === 'unavailable' && previous !== 'unavailable') {
+        if (store.state.tuneIndexError && previous !== 'unavailable') {
             eventBus.$emit('tuneIndexError', this.indexUnavailableMessage(detail));
         }
     }
@@ -129,7 +133,15 @@ class FFBackend {
         });
     }
 
+    async setAutoUpdate(enabled) {
+        await this.folkfriendWorker.setAutoUpdate(!!enabled);
+    }
+
     async setupTuneIndex() {
+        // Push the preference BEFORE setup, so a user who has disabled updates
+        // never gets one on the very launch where it matters.
+        const auto = store.userSettings.autoUpdateTuneData;
+        await this.folkfriendWorker.setAutoUpdate(auto === undefined ? true : !!auto);
         const analyticsData = await new Promise(resolve => {
             this.folkfriendWorker.setupTuneIndex(Comlink.proxy(analyticsData => {
                 resolve(analyticsData);

@@ -155,6 +155,37 @@ every favourite taking 15 s to open. Four independent causes:
 - **A failed IndexedDB write was invisible.** The index loaded fine that session
   and there was simply no offline copy next launch.
 
+### Reliability rules for the offline copy (learned July 2026, the hard way)
+
+The offline copy is the entire reason the app works without a connection. It
+must be treated as sacred:
+
+1. **Never delete anything on a failure path.** An update that fails must leave
+   the previous copy exactly as it was. `writeIndex` originally deleted the
+   manifest *first* and deleted the payload on error, so an interrupted or
+   quota-failed update destroyed a working copy — which the user only
+   discovered the next time they were offline, i.e. when they could not
+   possibly recover it.
+2. **Payload first, manifest second.** IndexedDB `set()` is a single
+   transaction: it commits or aborts, so a payload can never be half-written.
+   The worst case with this ordering is a manifest naming the previous version
+   while the payload is the new one — both complete and valid, costing one
+   redundant update. The old ordering had a window with a payload and no
+   manifest, which `readIndex` treated as "no copy" and then garbage-collected.
+3. **A payload that parses is usable, full stop.** Never discard one because its
+   bookkeeping looks wrong. A missing or mismatched manifest means "version
+   unknown" (report `v: 0` so an update is attempted when online), not "throw
+   the user's only copy away". The only state worth clearing is a payload that
+   genuinely fails to parse.
+4. **Usability is not pipeline status.** `indexUsable` is tracked separately
+   from `indexStatus`. During a background update the status is `downloading`
+   while the loaded index still answers queries perfectly — conflating the two
+   made every query return empty for the duration of an update, which on a poor
+   connection is minutes, on every launch.
+5. Automatic update checking can be turned off entirely (Settings → *Check for
+   new tune data automatically*, `userSettings.autoUpdateTuneData`). With it
+   off, the saved copy is only ever replaced by an explicit tap.
+
 ### How the index is stored
 
 `app/src/services/tuneIndexStore.js`, IndexedDB via idb-keyval:

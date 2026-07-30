@@ -214,6 +214,15 @@
                 permanent.
             </p>
 
+            <v-switch
+                v-model="userSettings.autoUpdateTuneData"
+                label="Check for new tune data automatically"
+                hint="Off means the saved copy is only ever replaced when you tap the button below. It is never modified in the background."
+                persistent-hint
+                class="mt-0 mb-4"
+                @change="settingsChanged"
+            />
+
             <v-btn
                 :loading="refreshingTuneData"
                 :disabled="refreshingTuneData"

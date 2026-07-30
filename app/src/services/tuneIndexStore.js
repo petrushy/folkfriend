@@ -112,29 +112,47 @@ export async function readManifest() {
 export async function readIndex() {
     const manifest = await safeGet(KEY_MANIFEST);
 
-    if (manifest && manifest.schema === SCHEMA_VERSION) {
-        const raw = await safeGet(KEY_RAW);
-        if (typeof raw === 'string' && raw.length > 0) {
-            try {
-                console.time('index-parse-from-cache');
-                const parsed = JSON.parse(raw);
-                console.timeEnd('index-parse-from-cache');
-                return { index: splitIndexPayload(parsed), manifest };
-            } catch (e) {
-                console.warn('Cached tune index failed to parse; discarding', e);
+    const raw = await safeGet(KEY_RAW);
+
+    // A payload that parses is usable, full stop. Never discard one because its
+    // bookkeeping looks odd — an offline user has no way to get it back.
+    if (typeof raw === 'string' && raw.length > 0) {
+        try {
+            console.time('index-parse-from-cache');
+            const parsed = JSON.parse(raw);
+            console.timeEnd('index-parse-from-cache');
+
+            let effective = manifest;
+            if (!manifest || manifest.schema !== SCHEMA_VERSION) {
+                // Payload with no (or an unrecognised) manifest: still perfectly
+                // good data, we just don't know its version. Report v=0 so an
+                // update is attempted when there is a connection, rather than
+                // throwing away the only copy the user has.
+                console.warn('Tune index payload present without a valid manifest; '
+                    + 'using it and treating the version as unknown');
+                effective = { schema: SCHEMA_VERSION, v: 0, date: null,
+                    savedAt: null, bytes: raw.length, versionUnknown: true };
+            } else if (manifest.bytes && manifest.bytes !== raw.length) {
+                // Manifest describes a different payload than the one on disk —
+                // the two writes straddled an interruption. The payload is still
+                // complete; only the version record is untrustworthy.
+                console.warn('Tune index manifest does not match the stored payload; '
+                    + 'using the payload and treating the version as unknown');
+                effective = { ...manifest, v: 0, versionUnknown: true };
             }
-        } else {
-            console.warn('Tune index manifest present but payload missing; discarding');
+            return { index: splitIndexPayload(parsed), manifest: effective };
+        } catch (e) {
+            // Genuinely unparseable — this is the only state worth clearing.
+            console.warn('Cached tune index failed to parse; discarding', e);
+            await clearIndex();
+            return null;
         }
-        // Manifest without a usable payload is the one genuinely corrupt state.
-        await clearIndex();
-        return null;
     }
 
-    // Manifest missing. Garbage-collect any orphaned payload left by a write
-    // that ran out of quota part-way through, so it stops occupying space.
-    if (manifest || (await safeGet(KEY_RAW)) !== undefined) {
-        await clearIndex();
+    if (manifest) {
+        // Manifest with no payload: nothing usable, drop the dangling record.
+        console.warn('Tune index manifest present but payload missing');
+        await safeDel(KEY_MANIFEST);
     }
 
     return await readLegacyIndex();
@@ -172,14 +190,33 @@ async function readLegacyIndex() {
 export async function writeIndex(rawText, metadata) {
     console.time('index-persist');
 
-    // Invalidate first: from here until the manifest is written, any reader
-    // correctly sees "no offline copy" rather than a half-written one.
-    await safeDel(KEY_MANIFEST);
-
+    // ORDERING IS A RELIABILITY PROPERTY. Payload first, manifest second, and
+    // NOTHING is ever deleted on a failure path.
+    //
+    // This previously deleted the manifest first, "so a reader can't see a
+    // half-written copy", and deleted the payload if the write failed. Both
+    // were wrong and both could destroy a perfectly good offline copy:
+    //
+    //   - IndexedDB set() is a single transaction. It commits or it aborts;
+    //     a payload can never be half-written. The pre-delete protected
+    //     against something that cannot happen.
+    //   - Between the delete and the new manifest there was a window with a
+    //     payload and no manifest. Anything interrupting there — iOS
+    //     suspending the worker, the app being backgrounded, the tab closing,
+    //     a quota error — left readIndex seeing "no offline copy", which then
+    //     garbage-collected the payload. A failed update thereby deleted the
+    //     working copy the user already had, and they discovered it the next
+    //     time they were somewhere without a connection.
+    //
+    // With this order the worst case is a manifest that names the previous
+    // version while the payload is the new one. Both are complete and valid;
+    // the only consequence is one redundant update later. A failed write
+    // leaves the previous copy exactly as it was.
     try {
         await set(KEY_RAW, rawText);
     } catch (e) {
-        await safeDel(KEY_RAW);
+        // Do NOT delete anything. The previous payload is still intact and
+        // still described by the existing manifest.
         console.timeEnd('index-persist');
         throw e;
     }
@@ -191,20 +228,19 @@ export async function writeIndex(rawText, metadata) {
         savedAt: Date.now(),
         bytes: rawText.length,
     };
-    await set(KEY_MANIFEST, manifest);
 
-    // Confirm the commit actually landed. IndexedDB resolves its transaction
-    // only on commit, so this is a cheap belt-and-braces check that also
-    // catches storage that silently drops writes.
-    const check = await safeGet(KEY_MANIFEST);
-    if (!check || check.savedAt !== manifest.savedAt) {
-        await safeDel(KEY_RAW);
+    try {
+        await set(KEY_MANIFEST, manifest);
+    } catch (e) {
+        // The payload is on disk and usable; only the version record failed.
+        // Leave it — a stale version means a redundant update, not data loss.
+        console.warn('Tune index payload saved but its manifest did not', e);
         console.timeEnd('index-persist');
-        throw new Error('Offline copy did not commit to IndexedDB');
+        throw e;
     }
 
-    // The legacy copy is another ~42 MB of the same data. Drop it as soon as
-    // schema 2 is safely on disk.
+    // The legacy copy is another ~42 MB of the same data. Drop it only once
+    // the new one is fully committed.
     await safeDel(LEGACY_KEY_INDEX);
     await safeDel(LEGACY_KEY_META);
 

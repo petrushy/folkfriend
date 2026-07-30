@@ -19,6 +19,7 @@ const USER_SETTING_DEFAULTS = {
     recordingTimeLimitSecs: 10,
     useMlTranscriber: false, // opt-in experimental basic-pitch ML transcription
     autoGainControl: false, // let the OS auto-boost quiet mic input at capture
+    autoUpdateTuneData: true, // check for a newer tune index on startup
 };
 
 class Store {
