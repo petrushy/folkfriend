@@ -4,6 +4,16 @@
             <div class="headerText">
                 <h2 class="tuneTitle">
                     {{ target ? target.title : 'Listening…' }}
+                    <button
+                        v-if="target && hasValidSettingID"
+                        class="starBtn"
+                        :title="favourited ? 'Remove from favourites' : 'Add to favourites'"
+                        @click="toggleFavourite"
+                    >
+                        <v-icon :color="favourited ? 'amber darken-1' : 'grey lighten-1'">
+                            {{ favourited ? starIcon : starOutlineIcon }}
+                        </v-icon>
+                    </button>
                 </h2>
                 <div class="tuneMeta">
                     <span v-if="target" class="scoreReadout">
@@ -80,8 +90,10 @@
 </template>
 
 <script>
+import { mdiStar, mdiStarOutline } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
+import store from '@/services/store.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import AbcDisplay from '@/components/AbcDisplay.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
@@ -104,7 +116,15 @@ export default {
             loading: false,
             loadError: '',
             elapsedSeconds: liveAnalysisService.elapsedSeconds,
+            favourited: false,
+            starIcon: mdiStar,
+            starOutlineIcon: mdiStarOutline,
         };
+    },
+    computed: {
+        hasValidSettingID() {
+            return !!this.target && store._isValidSettingID(this.target.settingId);
+        },
     },
     watch: {
         detections: {
@@ -113,6 +133,15 @@ export default {
                 const { target, changed } = resolveFollowTarget(detections, this.target);
                 this.target = target;
                 this.selectedTuneKey = target ? this._optionKeyFor(target) : null;
+                // detections updates continuously while listening (many times a
+                // second) but the displayed settingId only actually moves when
+                // `changed` is true — see resolveFollowTarget(). Re-checking
+                // isFavourite() on every tick raced store.addFavourite()/
+                // removeFavourite(), whose in-memory cache only reflects a
+                // write after its IndexedDB write resolves: a tick landing in
+                // that window read the stale cache and snapped the star back,
+                // making it look like the tap hadn't registered.
+                if (changed) this._syncFavourited();
                 if (changed) this.loadScore();
             },
         },
@@ -121,6 +150,10 @@ export default {
         // Loads are guarded by a token so a slow settingsFromTuneID for an old
         // tune cannot land after a newer one and put the wrong score on screen.
         this._loadToken = 0;
+        // Same idea for the favourited flag, keyed off the currently displayed
+        // setting — a slow isFavourite() for a tune we've since moved on from
+        // must not overwrite the star for the tune now on screen.
+        this._favouriteToken = 0;
     },
     mounted() {
         this._onKeyDown = (e) => {
@@ -176,7 +209,46 @@ export default {
             const option = this.target.tuneOptions.find(o => o.value === value);
             const { target, changed } = applyOverride(this.target, option);
             this.target = target;
+            this._syncFavourited();
             if (changed) this.loadScore();
+        },
+        _syncFavourited() {
+            const token = ++this._favouriteToken;
+            const settingId = this.target ? this.target.settingId : '';
+            if (!store._isValidSettingID(settingId)) {
+                this.favourited = false;
+                return;
+            }
+            store.isFavourite(settingId).then(v => {
+                if (token !== this._favouriteToken) return;
+                this.favourited = v;
+            });
+        },
+        async toggleFavourite() {
+            // A shaky field tap can register as two quick clicks on the same
+            // gesture; without this guard the second one reads `favourited`
+            // before the first write lands and repeats the same store call.
+            if (this._togglingFavourite) return;
+            const target = this.target;
+            if (!target || !store._isValidSettingID(target.settingId)) return;
+            this._togglingFavourite = true;
+            // Set optimistically so the star responds on this click rather
+            // than after the IndexedDB round-trip.
+            const nowFavourited = !this.favourited;
+            this.favourited = nowFavourited;
+            try {
+                if (nowFavourited) {
+                    await store.addFavourite({
+                        settingID: target.settingId,
+                        setting: this.abcSetting || { tune_id: target.tuneId, setting_id: target.settingId },
+                        displayName: target.title,
+                    });
+                } else {
+                    await store.removeFavourite(target.settingId);
+                }
+            } finally {
+                this._togglingFavourite = false;
+            }
         },
         async loadScore() {
             const token = ++this._loadToken;
@@ -247,6 +319,23 @@ export default {
     line-height: 1.3;
     color: #1a1a1a;
     overflow-wrap: anywhere;
+}
+
+.starBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: none;
+    /* Icon is 24px; padding brings the tappable area to the ~44px minimum
+       recommended touch target. Negative top/bottom margin cancels the
+       padding's effect on the title's line height. */
+    padding: 10px;
+    margin: -10px 0 -10px 2px;
+    cursor: pointer;
+    vertical-align: middle;
+    line-height: 1;
+    -webkit-tap-highlight-color: transparent;
 }
 
 .tuneMeta {
