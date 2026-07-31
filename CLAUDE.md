@@ -182,7 +182,15 @@ must be treated as sacred:
    while the loaded index still answers queries perfectly — conflating the two
    made every query return empty for the duration of an update, which on a poor
    connection is minutes, on every launch.
-5. Automatic update checking can be turned off entirely (Settings → *Check for
+5. **Test the invariant, not the implementation.** The bug that stranded a user
+   in a pub passed every existing test, because those tests asserted what
+   `writeIndex` did rather than what must remain true. `npm test` now walks a
+   simulated interruption across *every* storage operation in an update and
+   asserts directly: **if a usable offline copy existed before, one exists
+   after, wherever the update died.** Verified by reinstating the old
+   destructive ordering — 3 tests fail; with the fix, 21 pass. Any future
+   rewrite of the persistence layer is held to the same property.
+6. Automatic update checking can be turned off entirely (Settings → *Check for
    new tune data automatically*, `userSettings.autoUpdateTuneData`). With it
    off, the saved copy is only ever replaced by an explicit tap.
 
