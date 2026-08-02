@@ -103,9 +103,40 @@ jobs:
           echo "wasm-pack install failed after 3 attempts"
           exit 1
 
+      # public/soundfont/ is gitignored, so a fresh clone has no soundfont at
+      # all. Without this step the build emits a dist/ with no soundfont/ dir,
+      # every note 404s, Firebase's SPA rewrite answers with index.html at
+      # status 200, and ABCJS fails decoding a web page as an MP3 — playback is
+      # dead on the deployed site while working perfectly on any machine that
+      # ran the script once by hand. Verified below, because a 200 that is
+      # secretly HTML is exactly the failure a plain fetch cannot see.
+      - name: Download soundfont
+        working-directory: app
+        run: bash download_soundfont.sh
+
       - name: Build
         working-directory: app
         run: npm run build
+
+      # Guards the failure above. Checks the files reached dist/ *and* that each
+      # one is really an MP3 — a truncated or HTML-bodied download would
+      # otherwise sail through and only surface as silent playback in the app.
+      - name: Verify soundfont shipped in the build
+        working-directory: app
+        run: |
+          dir=dist/soundfont/acoustic_grand_piano-mp3
+          count=$(ls "$dir"/*.mp3 2>/dev/null | wc -l)
+          if [ "$count" -ne 88 ]; then
+            echo "expected 88 soundfont notes in $dir, found $count"
+            exit 1
+          fi
+          for f in "$dir"/*.mp3; do
+            if ! file -b "$f" | grep -qi 'audio\|mpeg'; then
+              echo "$f is not an MP3: $(file -b "$f")"
+              exit 1
+            fi
+          done
+          echo "soundfont OK: $count notes"
 
       - name: Report bundle size
         working-directory: app

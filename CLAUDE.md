@@ -259,7 +259,29 @@ must be treated as sacred:
   and deletes the obsolete `folkfriend-tune-data` cache on activate, reclaiming
   ~42 MB from existing installs.
 - ABCJS soundfonts are served from `public/soundfont/` and precached, so
-  playback works offline without a runtime cache.
+  playback works offline without a runtime cache — **but only if the files are
+  actually there at build time.** `public/soundfont/` is gitignored
+  (`app/.gitignore`), so a fresh clone has none, and until August 2026 CI never
+  fetched them: every deployed build shipped a `dist/` with no `soundfont/`
+  directory while every local build worked, because the developer had run
+  `download_soundfont.sh` once by hand.
+
+  The failure mode is nastier than a 404. Firebase's SPA rewrite
+  (`"**": "/index.html"`) answers a missing static file with **index.html at
+  status 200**, so ABCJS receives a web page labelled `text/html`, tries to
+  decode it as audio, and reports `Can't decode sound at
+  /soundfont/…/B4.mp3` — 88 times, once per note. Nothing in the chain looks
+  like a missing file.
+
+  `.github/workflows/deploy.yml` now runs `download_soundfont.sh` before the
+  build and then **verifies dist**: 88 notes present and each one really an
+  MP3 per `file`. Checking existence alone is not enough here, precisely
+  because the broken case is a 200 with a body.
+
+  **Rule:** any asset that is gitignored *and* required by the deployed app
+  needs both a CI fetch step and a post-build assertion. `res/nud-meta.json`
+  and the WASM are the other two; the tune index is the deliberate exception
+  (fetched at runtime from `folkfriend-data.web.app`).
 
 ### Diagnosing it on a device
 
