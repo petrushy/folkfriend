@@ -29,11 +29,19 @@ NOTES=(
 echo "Downloading ${#NOTES[@]} soundfont note files to $DEST/ ..."
 for note in "${NOTES[@]}"; do
   dest_file="$DEST/${note}.mp3"
-  if [ -f "$dest_file" ]; then
+  # Only an existing file that is plausibly a whole note is worth keeping. The
+  # smallest real note is ~14 kB; anything under 1 kB is a truncated transfer or
+  # an error page, and skipping over one would leave playback broken in a way
+  # that reads as an app bug rather than a bad download.
+  if [ -f "$dest_file" ] && [ "$(wc -c < "$dest_file")" -ge 1024 ]; then
     echo "  skip $note (already exists)"
   else
     echo "  $note"
-    curl -sf "$BASE/${note}.mp3" -o "$dest_file"
+    # Download to a temporary name and move into place only on success, so an
+    # interrupted run can never leave a half-written file that the check above
+    # would then accept.
+    curl -sf "$BASE/${note}.mp3" -o "$dest_file.part"
+    mv "$dest_file.part" "$dest_file"
   fi
 done
 echo "Done."
