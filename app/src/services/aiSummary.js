@@ -48,9 +48,12 @@ const MAX_TOKENS = 1500;
 // restating it. The comments are the entire point of fetching the page, so the
 // budget has to be large enough to reach them.
 //
-// 30k tokens is roughly $0.03 of input on Haiku 4.5 and $0.09 on Sonnet 5, once,
-// per tune, and the result is cached forever. Worth it.
-const WEB_FETCH_MAX_CONTENT_TOKENS = 30000;
+// It was then raised to 30000, which did not help either: the failure turned out
+// not to be truncation at all (see `grounding`). Now that the discussion is
+// fetched by the app and passed in the prompt, this budget only applies to the
+// fallback path, so it is back to a modest figure — a fallback note is a
+// consolation prize and does not warrant 30k tokens of notation.
+const WEB_FETCH_MAX_CONTENT_TOKENS = 10000;
 
 // A server-tool turn can come back `pause_turn` when the tool loop hits its
 // iteration cap. Resume, but never indefinitely.
@@ -61,6 +64,9 @@ export const TIMEOUTS = {
     // is not usable, whatever navigator.onLine claims. Failure here is
     // non-fatal — the summary still generates without it.
     SESSION_JSON_MS: 8000,
+    // The tune page is a few hundred kilobytes of HTML. Same reasoning as above,
+    // and the same consequence for failure: no comments, note written anyway.
+    SESSION_PAGE_MS: 8000,
     // The model may fetch and read a web page before writing, so this is much
     // longer than a plain API call would need. Still finite.
     CLAUDE_MS: 60000,
@@ -212,9 +218,146 @@ export async function fetchSessionTuneFacts(tuneID) {
                 ? data.aliases.filter(a => typeof a === 'string').slice(0, 12)
                 : [],
             type: typeof data.type === 'string' ? data.type : '',
+            // The page states the composer in its first line, and "who wrote it"
+            // is exactly what a background note is for — so unlike the other
+            // metadata this one belongs in the note.
+            composer: typeof data.composer === 'string' ? data.composer : '',
         };
     } catch (e) {
         console.warn('thesession facts unavailable', e && e.message);
+        return null;
+    }
+}
+
+// ---- the discussion thread ------------------------------------------------
+//
+// This is the material the whole feature exists to summarise, and the reason it
+// is fetched here rather than by the model: asking the model to fetch the page
+// failed three different ways in the field — our allowlist blocked a redirect,
+// the content budget truncated before the comments, and finally a fetch that
+// reported success returned nothing usable (Sonnet 5's web_fetch variant filters
+// page content through code before it reaches the model, which on a page that is
+// mostly ABC notation can discard the discussion entirely).
+//
+// Fetching it ourselves removes all three failure modes at once, and costs less:
+// a few thousand tokens of comments instead of tens of thousands of notation.
+
+export function sessionTunePageUrl(tuneID) {
+    return `https://thesession.org/tunes/${encodeURIComponent(String(tuneID))}`;
+}
+
+// Comment threads on popular tunes are long (36 on Maggie's Pancakes) and this
+// is the only unbounded input in the feature, so it is capped. Oldest-first is
+// the page's default order, and the origin discussion is usually near the top of
+// the thread, so truncating the tail is the right end to lose.
+const MAX_COMMENTS_CHARS = 24000;
+
+function tidy(text) {
+    return String(text || '').replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+}
+
+function capComments(parts) {
+    const out = [];
+    let total = 0;
+    for (const part of parts) {
+        const piece = tidy(part);
+        if (!piece) continue;
+        if (total + piece.length > MAX_COMMENTS_CHARS) break;
+        out.push(piece);
+        total += piece.length;
+    }
+    return out;
+}
+
+// Exported so the HTML shape can be tested with a fake document — DOMParser does
+// not exist in Node.
+export function extractCommentsFromDocument(doc) {
+    if (!doc || typeof doc.querySelectorAll !== 'function') return [];
+
+    // Comment permalinks on the page are #comment19828-style, so the comments
+    // themselves carry matching ids.
+    const nodes = Array.from(doc.querySelectorAll('[id^="comment"]'));
+    const byId = nodes
+        .map(node => (node.textContent || '').trim())
+        .filter(text => text.length > 20);
+    if (byId.length) return byId;
+
+    // No matching ids — fall back to taking everything below the comments
+    // heading. Cruder, but a thread is better than nothing.
+    const body = doc.body;
+    const whole = body ? (body.textContent || '') : '';
+    const heading = whole.search(/^[^\n]*\bcomments?\b[^\n]*$/im);
+    return heading === -1 ? [] : [whole.slice(heading)];
+}
+
+function parseHtml(html) {
+    if (typeof DOMParser === 'undefined') return null;
+    try {
+        return new DOMParser().parseFromString(html, 'text/html');
+    } catch (e) {
+        return null;
+    }
+}
+
+// Pull the comments out of the JSON payload if they are there. The field name is
+// not documented for this endpoint, so several plausible spellings are probed
+// rather than assuming one.
+function commentsFromJson(data) {
+    if (!data || typeof data !== 'object') return [];
+    const list = [data.comments, data.discussion, data.discussions]
+        .find(candidate => Array.isArray(candidate) && candidate.length);
+    if (!list) return [];
+
+    return list.map(entry => {
+        if (typeof entry === 'string') return entry;
+        if (!entry || typeof entry !== 'object') return '';
+        const who = entry.member && entry.member.name ? entry.member.name : (entry.author || '');
+        const when = entry.date || entry.created || '';
+        const what = entry.content || entry.comment || entry.body || entry.text || '';
+        if (!what) return '';
+        const attribution = [who, when].filter(Boolean).join(', ');
+        return attribution ? `${what}\n— ${attribution}` : String(what);
+    }).filter(Boolean);
+}
+
+// The discussion thread for a tune, or null. Never throws: a tune whose comments
+// cannot be reached still gets a note, written from the model's own knowledge and
+// labelled as such in the UI.
+export async function fetchSessionComments(tuneID) {
+    if (!isThesessionTuneID(tuneID)) return null;
+    if (isDefinitelyOffline()) return null;
+
+    // 1. The JSON endpoint first: this origin+format is known CORS-permissive
+    //    (Settings.vue's bookmarks import has used it in production for months),
+    //    so if the comments are in there this is both cheaper and more robust
+    //    than parsing HTML.
+    try {
+        const response = await fetchWithDeadline(sessionTuneJsonUrl(tuneID), TIMEOUTS.SESSION_JSON_MS);
+        if (response.ok) {
+            const parts = capComments(commentsFromJson(await response.json()));
+            if (parts.length) {
+                return { text: parts.join('\n\n'), count: parts.length, source: 'json' };
+            }
+        }
+    } catch (e) {
+        console.warn('thesession comments (json) unavailable', e && e.message);
+    }
+
+    // 2. The HTML page. Whether this origin sends CORS headers on HTML as it does
+    //    on ?format=json is UNVERIFIED — it could not be tested from a sandbox
+    //    where thesession.org is blocked by egress policy. If it is blocked the
+    //    fetch simply fails here and the caller falls back, which is why this is
+    //    attempted rather than assumed.
+    try {
+        const response = await fetchWithDeadline(sessionTunePageUrl(tuneID), TIMEOUTS.SESSION_PAGE_MS);
+        if (!response.ok) return null;
+        const doc = parseHtml(await response.text());
+        if (!doc) return null;
+        const parts = capComments(extractCommentsFromDocument(doc));
+        if (!parts.length) return null;
+        return { text: parts.join('\n\n'), count: parts.length, source: 'html' };
+    } catch (e) {
+        console.warn('thesession comments (html) unavailable', e && e.message);
         return null;
     }
 }
@@ -225,20 +368,44 @@ export async function fetchSessionTuneFacts(tuneID) {
 // displays directly above the note.
 function factsBlock(facts) {
     if (!facts) return '';
+
     const parts = [];
     if (facts.name) parts.push(`titled "${facts.name}"`);
     if (facts.aliases.length) parts.push(`also listed as ${facts.aliases.join('; ')}`);
     if (facts.type) parts.push(`catalogued as a ${facts.type}`);
-    if (!parts.length) return '';
-    return '\n\nTo identify the right tune (the app already shows all of this to the ' +
-        `reader, so none of it belongs in your note): the tune is ${parts.join(', ')}.`;
+
+    const lines = [];
+    if (parts.length) {
+        lines.push('\n\nTo identify the right tune (the app already shows all of this to the ' +
+            `reader, so none of it belongs in your note): the tune is ${parts.join(', ')}.`);
+    }
+    // The composer is the exception to the do-not-restate rule: "who wrote it" is
+    // one of the things the note is *for*, so it is handed over as material.
+    if (facts.composer) {
+        lines.push(`\nThe source database credits the composer as ${facts.composer} — ` +
+            'this one you should use.');
+    }
+    return lines.join('');
 }
 
-export function buildPrompt({ displayName = '', url = '', facts = null, canFetch = true }) {
+export function buildPrompt({ displayName = '', url = '', facts = null, canFetch = true, comments = null }) {
     const title = (facts && facts.name) || displayName || 'this tune';
 
-    const fetchClause = canFetch
+    // When we have fetched the discussion ourselves it goes in the prompt and the
+    // model is told not to go looking — no tool, no fetching, no filtering step
+    // between the text and the model. This is the path that works.
+    const sourceClause = comments
         ? [
+            `Below is the discussion thread from that tune's page on thesession.org (${url}), in the players' own words, oldest first. It is the source for this note: build the note from it.`,
+            'Take what it says over what you think you remember, including where the two disagree — the people posting are often the composer, the collector, or someone who learned the tune directly from them. Where several posts disagree, say what is disputed and by whom.',
+            'Ignore the ABC notation, chord lists and setting-numbering that appear in some posts; you want the prose.',
+            '',
+            '--- discussion thread begins ---',
+            comments,
+            '--- discussion thread ends ---',
+        ].join('\n')
+        : canFetch
+            ? [
             `Fetch ${url} and build the note from what it says rather than from recollection.`,
             // The discussion is the entire reason for fetching. Without pointing
             // at it explicitly the model summarises the page header — which is
@@ -249,8 +416,8 @@ export function buildPrompt({ displayName = '', url = '', facts = null, canFetch
             // write anything, because the instruction above told it the page was
             // the authority and the honesty rule below told it not to guess.
             'If the fetch fails, returns nothing, or is blocked, do not mention that and do not decline — silently fall back to what you already know about the tune and write the note anyway.',
-        ].join('\n')
-        : `You have no way to fetch the source page (${url}), so write from what you already know about this tune. Do not mention lacking access.`;
+            ].join('\n')
+            : `You have no way to fetch the source page (${url}), so write from what you already know about this tune. Do not mention lacking access.`;
 
     return [
         `You are writing a short background note about the traditional tune "${title}", to sit beside its sheet music in a folk-music app.`,
@@ -274,7 +441,7 @@ export function buildPrompt({ displayName = '', url = '', facts = null, canFetch
         '- how many settings or versions exist',
         '- a description of how the melody goes, or advice on playing it',
         '',
-        fetchClause,
+        sourceClause,
         'Where the documented record is thin or contested, say so plainly in a clause and write a shorter note — but always write the note. Never decline, and never fill a gap with plausible invention.',
         // The output is rendered verbatim into a panel with no reply channel, so
         // asking a question or suggesting a retry is a dead end for the reader.
@@ -391,12 +558,13 @@ function addUsage(total, usage) {
 // models moves. It exists so the running total in Settings is a real number
 // rather than a shrug.
 // What one note costs at list prices, for the Settings hint. Derived from the
-// fetch budget rather than hard-coded, so raising WEB_FETCH_MAX_CONTENT_TOKENS
-// cannot leave a stale number on screen. Deliberately assumes the page fetch
-// fills its budget — the honest upper end rather than a flattering average.
+// comment cap rather than hard-coded, so changing MAX_COMMENTS_CHARS cannot leave
+// a stale number on screen. Models the normal path — comments fetched by the app
+// — and assumes the thread fills its cap, so it is an upper bound rather than a
+// flattering average. The web_fetch fallback is bounded lower still.
 export function estimateCostPerNoteUsd(model) {
     const spec = modelSpec(model);
-    const inputTokens = WEB_FETCH_MAX_CONTENT_TOKENS + 1000; // page + prompt
+    const inputTokens = MAX_COMMENTS_CHARS / 4 + 1000; // thread + prompt
     const outputTokens = 400; // ~10 lines
     return (inputTokens / 1e6) * spec.inputPerMTok + (outputTokens / 1e6) * spec.outputPerMTok;
 }
@@ -499,6 +667,7 @@ export async function generateTuneSummary({
     displayName = '',
     sourceUrl = '',
     facts = null,
+    comments = null,
     model = DEFAULT_MODEL,
     apiKey = '',
 }) {
@@ -510,7 +679,13 @@ export async function generateTuneSummary({
     }
 
     const url = sourceUrl || tuneSourceUrl({ tuneID, displayName });
-    const tool = webFetchToolFor(model, url);
+    const commentText = comments && comments.text ? comments.text : '';
+
+    // With the discussion already in hand there is nothing to fetch, so the tool
+    // is not offered at all. Leaving it attached would invite the model to go and
+    // re-fetch the page, reintroducing the filtering step that lost the comments
+    // in the first place.
+    const tool = commentText ? null : webFetchToolFor(model, url);
 
     const makeBody = (canFetch) => {
         const body = {
@@ -518,14 +693,20 @@ export async function generateTuneSummary({
             max_tokens: MAX_TOKENS,
             messages: [{
                 role: 'user',
-                content: buildPrompt({ displayName, url, facts, canFetch: canFetch && Boolean(tool) }),
+                content: buildPrompt({
+                    displayName,
+                    url,
+                    facts,
+                    comments: commentText || null,
+                    canFetch: canFetch && Boolean(tool),
+                }),
             }],
         };
         if (canFetch && tool) body.tools = [tool];
         return body;
     };
 
-    let attempt = await runAttempt(makeBody, apiKey, true);
+    let attempt = await runAttempt(makeBody, apiKey, Boolean(tool));
     const usage = { ...attempt.usage };
 
     // A page fetch that fails at *runtime* is not covered by the ladder above —
@@ -535,7 +716,7 @@ export async function generateTuneSummary({
     // answer is written under a false premise and in practice is often a report
     // of the network problem rather than a note, so it is worth one more call
     // with the fetch instruction removed altogether.
-    if (attempt.pageRead === 'error' && !attempt.degraded) {
+    if (tool && attempt.pageRead === 'error' && !attempt.degraded) {
         console.warn('web_fetch could not reach the page; regenerating without it');
         try {
             const retry = await runAttempt(makeBody, apiKey, false);
@@ -548,12 +729,23 @@ export async function generateTuneSummary({
         }
     }
 
-    // Cheap way for a user to check the page read from DevTools without running
-    // the probe script: if chars is small or looksLikeComments is false, the note
-    // is thin because the fetch never reached the discussion.
-    if (attempt.pageStats) {
-        console.debug('tune background: fetched page', attempt.pageStats);
-    }
+    // What the note was actually built from. This replaces `pageRead === 'ok'` as
+    // the thing the UI trusts, because that turned out to be worthless: on the
+    // failure that prompted this rewrite, pageRead was 'ok' — the tool ran and
+    // reported success — while the model had nothing, so the dialog silently
+    // assured the reader the source page had been read when it had not.
+    const grounding = commentText
+        ? 'comments'
+        : (attempt.pageRead === 'ok' && pageStatsLookUsable(attempt.pageStats) ? 'page' : 'knowledge');
+
+    // Cheap way to check the grounding from DevTools without running the probe.
+    console.debug('tune background:', {
+        grounding,
+        commentCount: (comments && comments.count) || 0,
+        commentSource: (comments && comments.source) || null,
+        commentChars: commentText.length,
+        pageStats: attempt.pageStats || null,
+    });
 
     return {
         text: attempt.text,
@@ -561,10 +753,21 @@ export async function generateTuneSummary({
         generatedAt: Date.now(),
         sourceUrl: url,
         usage,
+        grounding,
+        commentCount: (comments && comments.count) || 0,
+        commentSource: (comments && comments.source) || null,
         pageRead: attempt.pageRead,
         pageStats: attempt.pageStats || null,
         degraded: Boolean(attempt.degraded),
     };
+}
+
+// A successful web_fetch is not evidence the model got anything usable — see the
+// `grounding` comment above. Only treat the page as read when substantial text
+// came back and it looks like it reached the discussion.
+function pageStatsLookUsable(stats) {
+    if (!stats) return false;
+    return stats.chars >= 2000 && stats.looksLikeComments;
 }
 
 // One generation attempt: send, resume any paused server-tool turn, and pull the

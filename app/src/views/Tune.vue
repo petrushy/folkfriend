@@ -128,10 +128,7 @@
                     <template v-else-if="summary">
                         <p class="summaryText">{{ summary.text }}</p>
                         <p class="caption text--secondary mb-0">
-                            <span v-if="summaryPageMissed">
-                                Written without access to the source page, so from the
-                                model's own knowledge only.
-                            </span>
+                            <span v-if="groundingNote">{{ groundingNote }}</span>
                             Generated {{ formatSummaryDate(summary.generatedAt) }}<span
                                 v-if="summary.model">&nbsp;by {{ summary.model }}</span>. Written by
                             an AI and may be wrong — verify anything you rely on against the
@@ -185,6 +182,7 @@ import store from '@/services/store.js';
 import {
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
     describeAiSummaryError,
+    fetchSessionComments,
     fetchSessionTuneFacts,
     generateTuneSummary,
 } from '@/services/aiSummary.js';
@@ -241,9 +239,11 @@ export default {
             summary: null,
             summaryLoading: false,
             summaryError: '',
-            // Transient, not persisted: true when the note we just generated was
-            // written without the model getting to read the source page.
-            summaryPageMissed: false,
+            // Transient, not persisted: what the note we just generated was built
+            // from — 'comments' | 'page' | 'knowledge'. Shown to the reader, and
+            // the first thing to look at when a note comes back thin.
+            summaryGrounding: null,
+            summaryCommentCount: 0,
 
             icons: {
                 info: mdiInformationOutline,
@@ -257,6 +257,22 @@ export default {
     computed: {
         aiSummariesEnabled() {
             return Boolean(this.userSettings.aiSummariesEnabled);
+        },
+        // Names what the note was built from, so a user reporting a thin note
+        // carries its own diagnosis. Only shown right after generating — a note
+        // read back from the cache does not persist this.
+        groundingNote() {
+            if (this.summaryGrounding === 'comments') {
+                const n = this.summaryCommentCount;
+                return `Written from the ${n ? `${n} ` : ''}discussion ${n === 1 ? 'post' : 'posts'} on the source page.`;
+            }
+            if (this.summaryGrounding === 'page') {
+                return 'Written from the source page.';
+            }
+            if (this.summaryGrounding === 'knowledge') {
+                return 'The source page\'s discussion could not be read, so this is from the model\'s own knowledge only.';
+            }
+            return '';
         },
         sourceName() {
             return sourceNameForTuneID(this.tuneID);
@@ -560,7 +576,8 @@ export default {
         async openSummaryDialog() {
             this.summaryDialog = true;
             this.summaryError = '';
-            this.summaryPageMissed = false;
+            this.summaryGrounding = null;
+            this.summaryCommentCount = 0;
             if (this.summary) return;
             // Read the cache and stop. Opening the dialog must never spend
             // money — a miss shows the Generate button and waits for a tap.
@@ -580,18 +597,25 @@ export default {
 
             this.summaryLoading = true;
             this.summaryError = '';
-            this.summaryPageMissed = false;
+            this.summaryGrounding = null;
+            this.summaryCommentCount = 0;
 
             try {
-                // Non-fatal: resolves to null if thesession is unreachable or
-                // this is a folkwiki tune, and the note is written anyway.
-                const facts = await fetchSessionTuneFacts(this.tuneID);
+                // Both non-fatal: each resolves to null if thesession is
+                // unreachable or this is a folkwiki tune, and the note is written
+                // anyway — from the model's own knowledge, labelled as such.
+                // The comments are the material the note is actually built from.
+                const [facts, comments] = await Promise.all([
+                    fetchSessionTuneFacts(this.tuneID),
+                    fetchSessionComments(this.tuneID),
+                ]);
 
                 const record = await generateTuneSummary({
                     tuneID: this.tuneID,
                     displayName: this.name || this.displayName,
                     sourceUrl: this.sourceUrl,
                     facts,
+                    comments,
                     model: this.userSettings.aiSummaryModel || DEFAULT_AI_MODEL,
                     apiKey,
                 });
@@ -599,7 +623,8 @@ export default {
                 store.recordAiUsage(record.usage, record.model);
                 await store.setAiSummary(this.tuneID, record);
                 this.summary = await store.getAiSummary(this.tuneID);
-                this.summaryPageMissed = record.pageRead !== 'ok';
+                this.summaryGrounding = record.grounding;
+                this.summaryCommentCount = record.commentCount || 0;
             } catch (e) {
                 console.error('Tune background note failed', e);
                 this.summaryError = describeAiSummaryError(e);

@@ -84,6 +84,10 @@ function jsonResponse(body, { ok = true, status = 200 } = {}) {
     return { ok, status, json: async () => body };
 }
 
+function htmlResponse(html, { ok = true, status = 200 } = {}) {
+    return { ok, status, text: async () => html };
+}
+
 // Records every call so tests can assert on request shape, not just the result.
 function recordingFetch(responders) {
     const calls = [];
@@ -112,6 +116,14 @@ const ARGS = {
     model: 'claude-haiku-4-5',
     apiKey: 'sk-ant-test',
 };
+
+// The real thread that exposed the problem, trimmed. Every fact the note should
+// contain is in here, and none of it is anywhere else.
+const MAGGIES_COMMENTS = [
+    'The original name for this tune was "Maggie\'s Pancakes". It\'s a Scottish tune composed by fiddler Stuart Morison of the Tannahill Weavers. The Maggie in the title is Maggie Moore who makes nice pancakes. I\'m sure out of all the places in the world, it is most often played in Cambridge, UK.\n— Dr. Dow',
+    'For the record, the tune was written on the same day as Live Aid!\n— smorison',
+    'D: Tannahill Weavers, "Dancing Feet"\n— Dr. Dow',
+].join('\n\n');
 
 await mkdir(tmpDir, { recursive: true });
 
@@ -223,14 +235,16 @@ await test('the prompt asks for history and forbids restating on-screen metadata
     }
 });
 
-await test('the page-fetch budget is big enough to reach the comments', async () => {
+await test('the comment cap is big enough to hold a real thread', async () => {
     const ai = await loadAiSummary();
-    const tool = ai.webFetchToolFor('claude-haiku-4-5', 'https://thesession.org/tunes/1');
-    // A thesession page carries a full ABC block per setting above the
-    // discussion, and notation is token-dense. At the original 6k the budget was
-    // spent before the comments started.
-    assert.ok(tool.max_content_tokens >= 20000,
-        `budget ${tool.max_content_tokens} is too small to reach a discussion thread`);
+    // Maggie's Pancakes has 36 comments; the origin discussion is a few hundred
+    // characters and sits near the top. This is the input that actually matters
+    // now — the web_fetch budget only governs the fallback path, and raising it
+    // was tried and did not fix anything.
+    const comments = Array.from({ length: 36 }, (_, i) => `Comment ${i}: ${'z'.repeat(300)}`);
+    stubEnv({ fetchImpl: async () => jsonResponse({ comments }) });
+    const result = await ai.fetchSessionComments('1316');
+    assert.ok(result.count >= 36, `a 36-comment thread must fit, got ${result.count}`);
 });
 
 console.log('\naiSummary — response handling');
@@ -625,6 +639,201 @@ await test('facts are optional — every failure degrades to null', async () => 
     assert.equal(await ai.fetchSessionTuneFacts('14109'), null);
 });
 
+console.log('\naiSummary — the discussion thread');
+
+// DOMParser does not exist in Node. Rather than pull in a DOM library, the HTML
+// path is tested two ways: extractCommentsFromDocument directly against a fake
+// document (below), and fetchSessionComments with a stubbed global DOMParser.
+function fakeDocument({ comments = [], body = '' }) {
+    return {
+        querySelectorAll: (selector) => {
+            if (selector !== '[id^="comment"]') return [];
+            return comments.map(text => ({ textContent: text }));
+        },
+        body: { textContent: body },
+    };
+}
+
+function stubDomParser(docFor) {
+    globalThis.DOMParser = class {
+        parseFromString(html) { return docFor(html); }
+    };
+}
+
+await test('comments are read from the JSON endpoint when it carries them', async () => {
+    const ai = await loadAiSummary();
+    const { impl, calls } = recordingFetch(jsonResponse({
+        name: "Maggie's Pancakes",
+        comments: [
+            { content: 'Composed by Stuart Morison of the Tannahill Weavers.', member: { name: 'Dr. Dow' }, date: '2002' },
+            { content: 'Written on the same day as Live Aid!', member: { name: 'smorison' } },
+        ],
+    }));
+    stubEnv({ fetchImpl: impl });
+
+    const result = await ai.fetchSessionComments('1316');
+    assert.equal(result.source, 'json');
+    assert.equal(result.count, 2);
+    assert.ok(result.text.includes('Stuart Morison'));
+    assert.ok(result.text.includes('Dr. Dow'), 'attribution matters — who said it is evidence');
+    // No HTML request when the JSON already answered: that path is the fallback.
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes('format=json'));
+});
+
+await test('the HTML page is parsed when the JSON has no comments', async () => {
+    const ai = await loadAiSummary();
+    stubDomParser(() => fakeDocument({
+        comments: [
+            'The original name for this tune was Maggie\'s Pancakes. Composed by Stuart Morison.',
+            'For the record, the tune was written on the same day as Live Aid!',
+            'short',
+        ],
+    }));
+    const { impl, calls } = recordingFetch([
+        jsonResponse({ name: "Maggie's Pancakes" }),
+        htmlResponse('<html><body>…</body></html>'),
+    ]);
+    stubEnv({ fetchImpl: impl });
+
+    const result = await ai.fetchSessionComments('1316');
+    assert.equal(result.source, 'html');
+    assert.equal(result.count, 2, 'trivially short nodes are not comments');
+    assert.ok(result.text.includes('Live Aid'));
+    assert.equal(calls.length, 2);
+    assert.ok(!calls[1].url.includes('format=json'), 'the second call is the HTML page');
+});
+
+await test('HTML with no comment ids falls back to the heading slice', async () => {
+    const ai = await loadAiSummary();
+    const body = 'X:1 K:Bm notation notation\nThirty-six comments\nOrigins: a Scottish tune by Stuart Morison.';
+    stubDomParser(() => fakeDocument({ comments: [], body }));
+    const { impl } = recordingFetch([
+        jsonResponse({}),
+        htmlResponse('<html><body>…</body></html>'),
+    ]);
+    stubEnv({ fetchImpl: impl });
+
+    const result = await ai.fetchSessionComments('1316');
+    assert.ok(result.text.includes('Stuart Morison'));
+    // The notation above the heading is dropped — it is what crowded the comments
+    // out of the budget when the model was doing the fetching.
+    assert.ok(!result.text.includes('X:1'));
+});
+
+await test('extractCommentsFromDocument is directly testable', async () => {
+    const ai = await loadAiSummary();
+    assert.deepEqual(
+        ai.extractCommentsFromDocument(fakeDocument({ comments: ['a comment long enough to count as one'] })),
+        ['a comment long enough to count as one'],
+    );
+    assert.deepEqual(ai.extractCommentsFromDocument(null), []);
+    assert.deepEqual(ai.extractCommentsFromDocument({}), []);
+});
+
+await test('an unreachable page degrades to null rather than throwing', async () => {
+    const ai = await loadAiSummary();
+    stubDomParser(() => fakeDocument({ comments: [] }));
+
+    // CORS rejection presents to fetch() as a TypeError, which is the outcome
+    // this whole path is a bet against — it must not break generation.
+    stubEnv({ fetchImpl: async () => { throw new TypeError('Failed to fetch'); } });
+    assert.equal(await ai.fetchSessionComments('1316'), null);
+
+    stubEnv({ fetchImpl: async (url) => (String(url).includes('format=json')
+        ? jsonResponse({})
+        : htmlResponse('', { ok: false, status: 403 })) });
+    assert.equal(await ai.fetchSessionComments('1316'), null);
+
+    // Folkwiki tunes have no thesession page at all.
+    let called = 0;
+    stubEnv({ fetchImpl: async () => { called++; return jsonResponse({}); } });
+    assert.equal(await ai.fetchSessionComments('1402836401'), null);
+    assert.equal(called, 0);
+});
+
+await test('a very long thread is capped', async () => {
+    const ai = await loadAiSummary();
+    const comments = Array.from({ length: 200 }, (_, i) => `Comment number ${i}: ${'y'.repeat(500)}`);
+    stubEnv({ fetchImpl: async () => jsonResponse({ comments }) });
+
+    const result = await ai.fetchSessionComments('1316');
+    assert.ok(result.text.length <= 24000, `expected a cap, got ${result.text.length} chars`);
+    assert.ok(result.count < 200, 'the tail is dropped, not the head');
+    // Oldest-first is the page order and the origin discussion is near the top,
+    // so the first comment must survive.
+    assert.ok(result.text.startsWith('Comment number 0'));
+});
+
+console.log('\naiSummary — grounding');
+
+await test('supplied comments go in the prompt and no tool is offered', async () => {
+    const ai = await loadAiSummary();
+    const { impl, calls } = recordingFetch(jsonResponse({
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'A Scottish reel by Stuart Morison, written on Live Aid day 1985.' }],
+        usage: { input_tokens: 3000, output_tokens: 200 },
+    }));
+    stubEnv({ fetchImpl: impl });
+
+    const result = await ai.generateTuneSummary({
+        ...ARGS,
+        comments: { text: MAGGIES_COMMENTS, count: 3, source: 'html' },
+    });
+
+    // The tool must be gone: offering it invites a re-fetch, and the model's own
+    // fetch is what lost the discussion in the first place.
+    assert.equal(calls[0].body.tools, undefined);
+    const prompt = calls[0].body.messages[0].content;
+    assert.ok(prompt.includes('Stuart Morison'), 'the thread must reach the model');
+    assert.ok(prompt.includes('Live Aid'));
+    assert.ok(/discussion thread begins/.test(prompt), 'the thread must be delimited');
+    assert.ok(/over what you think you remember/i.test(prompt));
+    assert.ok(!/^Fetch /m.test(prompt), 'nothing left to fetch');
+
+    assert.equal(result.grounding, 'comments');
+    assert.equal(result.commentCount, 3);
+});
+
+await test('a successful web_fetch with no usable text is NOT reported as grounded', async () => {
+    const ai = await loadAiSummary();
+    // The exact failure that prompted this rewrite: pageRead came back 'ok', so
+    // the dialog showed no caveat, while the model plainly had nothing — it wrote
+    // that no documentary record existed for a tune whose composer is named in
+    // the page's first line.
+    const { impl } = recordingFetch(jsonResponse({
+        stop_reason: 'end_turn',
+        content: [
+            { type: 'web_fetch_tool_result', content: { type: 'web_fetch_result', content: { type: 'document', source: { data: 'x'.repeat(300) } } } },
+            { type: 'text', text: 'I have no reliable documentary record for a tune titled "Maggie\'s Pancakes".' },
+        ],
+        usage: { input_tokens: 10, output_tokens: 10 },
+    }));
+    stubEnv({ fetchImpl: impl });
+
+    const result = await ai.generateTuneSummary(ARGS);
+    assert.equal(result.pageRead, 'ok', 'the API did report success');
+    assert.equal(result.grounding, 'knowledge',
+        'but a token amount of page text must not be presented to the reader as sourced');
+});
+
+await test('a genuinely full page read is reported as grounded', async () => {
+    const ai = await loadAiSummary();
+    const page = `${'Origins: composed by Stuart Morison. '.repeat(80)}\n# Comments\nPosted by Dr. Dow`;
+    const { impl } = recordingFetch(jsonResponse({
+        stop_reason: 'end_turn',
+        content: [
+            { type: 'web_fetch_tool_result', content: { type: 'web_fetch_result', content: { type: 'document', source: { data: page } } } },
+            { type: 'text', text: 'A Scottish reel by Stuart Morison.' },
+        ],
+        usage: { input_tokens: 10, output_tokens: 10 },
+    }));
+    stubEnv({ fetchImpl: impl });
+
+    const result = await ai.generateTuneSummary(ARGS);
+    assert.equal(result.grounding, 'page');
+});
+
 console.log('\naiSummary — cost estimate');
 
 await test('cost is priced per model and counts cached input tokens', async () => {
@@ -641,13 +850,15 @@ await test('cost is priced per model and counts cached input tokens', async () =
     assert.equal(ai.estimateCostUsd(undefined, 'claude-haiku-4-5'), 0);
 });
 
-await test('the per-note estimate tracks the fetch budget', async () => {
+await test('the per-note estimate tracks the comment cap', async () => {
     const ai = await loadAiSummary();
-    // Derived, not hard-coded, so raising the page budget cannot leave a stale
-    // (and now misleadingly cheap) number in the Settings hint.
+    // Derived, not hard-coded, so changing the cap cannot leave a stale (and
+    // misleadingly cheap) number in the Settings hint. Bounded by the comment cap
+    // rather than a whole page of notation, which is why it is cents not tens of
+    // cents.
     const haiku = ai.estimateCostPerNoteUsd('claude-haiku-4-5');
     const sonnet = ai.estimateCostPerNoteUsd('claude-sonnet-5');
-    assert.ok(haiku > 0.02 && haiku < 0.06, `haiku estimate ${haiku} looks wrong`);
+    assert.ok(haiku > 0.001 && haiku < 0.02, `haiku estimate ${haiku} looks wrong`);
     assert.ok(sonnet > haiku * 2.5, 'sonnet must be priced well above haiku');
     assert.ok(ai.estimateCostPerNoteUsd('unknown-model') > 0);
 });

@@ -663,10 +663,53 @@ no history. Three causes, two of them self-inflicted:
    explicitly that the notation is near the top, the discussion is lower down,
    and the discussion is the point.
 
-`estimateCostPerNoteUsd()` derives the Settings figure from
-`WEB_FETCH_MAX_CONTENT_TOKENS`, so raising that budget cannot leave a stale
-(flatteringly cheap) number on screen. At 30k the honest upper bound is ~$0.03
-per note on Haiku 4.5 and ~$0.09 on Sonnet 5, once per tune, cached forever.
+#### And then the model stopped being asked to fetch at all (August 2026)
+
+Raising the budget did not fix it either, because truncation was never the cause.
+The decisive observation came from a note on tune 1316 (*Maggie's Pancakes*)
+generated with **Sonnet 5**: it claimed no documentary record existed, while the
+page names the composer in its *first line* and carries 36 comments including the
+composer's own post dating the tune to Live Aid day. Two things follow:
+
+- Truncation keeps the **top** of a page, so any page content at all would have
+  carried the composer. Not a `max_content_tokens` problem.
+- The dialog showed **no caveat**, meaning `pageRead === 'ok'` — the tool ran and
+  reported success — while the model plainly had nothing. Sonnet 5 uses the
+  `_20260209` web_fetch variant, whose dynamic filtering runs code over the page
+  before it reaches the model; on a page that is mostly ABC notation and link
+  lists that can discard the discussion entirely.
+
+So **`pageRead === 'ok'` is worthless as a quality signal** — worse, it silently
+told the reader the source had been read when it had not, which is what hid this
+for two rounds. It is replaced by `grounding`
+(`'comments' | 'page' | 'knowledge'`), and the page path only counts as grounded
+when `pageFetchStats()` reports substantial text that reaches the comments.
+
+**The app now fetches the discussion itself and puts it in the prompt**
+(`fetchSessionComments`): `?format=json` first (that origin+format is
+CORS-proven), falling back to the HTML page parsed with `DOMParser`, selecting
+`[id^="comment"]` and then a comments-heading slice. When comments are in hand the
+`web_fetch` tool is **not offered at all** — leaving it attached invites a
+re-fetch and reintroduces the filtering step that lost them.
+
+This is cheaper as well as better: a few thousand tokens of prose instead of tens
+of thousands of notation, so `WEB_FETCH_MAX_CONTENT_TOKENS` went back down to
+10000 (it now only governs the fallback) and the default model stays Haiku 4.5 —
+with the material supplied, a cheap model summarising real text beats an
+expensive one guessing.
+
+> ⚠️ **Whether thesession.org sends CORS headers on HTML is unverified.**
+> `?format=json` demonstrably does; the HTML page is a bet. It could not be tested
+> from a Claude Code session (the host is blocked by egress policy), which is why
+> the JSON attempt comes first and the whole thing degrades to `'knowledge'`
+> rather than failing. If `grounding` reads `'page'` or `'knowledge'` on every
+> tune in the field, that bet lost and the next step is a read-only proxy — which
+> this repo has no infrastructure for.
+
+`estimateCostPerNoteUsd()` derives the Settings figure from `MAX_COMMENTS_CHARS`,
+so changing the cap cannot leave a stale (flatteringly cheap) number on screen:
+~$0.009 per note on Haiku 4.5 and ~$0.027 on Sonnet 5, once per tune, cached
+forever.
 
 **`pageFetchStats()` is how to tell whether any of this worked**, since "the
 fetch succeeded" and "the model saw the comments" are different claims. It digs

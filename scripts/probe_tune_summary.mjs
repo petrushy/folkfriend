@@ -59,13 +59,30 @@ try {
     const facts = await ai.fetchSessionTuneFacts(tuneID);
     console.log('thesession facts:', facts ? JSON.stringify(facts) : 'unavailable (non-fatal)');
 
+    // The app fetches the discussion itself and passes it in the prompt; that is
+    // the path that produces a note with history in it. Node has no DOMParser, so
+    // the HTML half cannot run here — a null result in this script says nothing
+    // about whether the browser path works.
+    const comments = await ai.fetchSessionComments(tuneID);
+    if (comments) {
+        console.log(`comments:        ${comments.count} via ${comments.source}, ${comments.text.length} chars`);
+    } else {
+        console.log('comments:        none from Node (no DOMParser here — the browser path is untested by this script)');
+    }
+
     const started = Date.now();
-    const result = await ai.generateTuneSummary({ tuneID, model, apiKey });
+    const result = await ai.generateTuneSummary({ tuneID, model, apiKey, facts, comments });
     const seconds = ((Date.now() - started) / 1000).toFixed(1);
 
+    // The headline number: what the note was actually built from. 'knowledge'
+    // means the model was guessing, whatever else the run reports.
+    console.log(`grounding:       ${result.grounding}` +
+        (result.grounding === 'knowledge' ? '   <-- the model was working from memory' : ''));
     console.log(`page read:       ${result.pageRead}` +
-        (result.pageRead === 'ok' ? '' : '   <-- written without the source page'));
-    console.log(`web_fetch tool:  ${result.degraded ? 'UNAVAILABLE for this model (dropped)' : 'used'}`);
+        (result.pageRead === 'ok' && result.grounding !== 'page'
+            ? '   (reported ok, but the text was not usable)'
+            : ''));
+    console.log(`web_fetch tool:  ${result.degraded ? 'UNAVAILABLE for this model (dropped)' : 'used or not needed'}`);
 
     // The question this probe exists to answer: the discussion thread sits below
     // a full ABC block per setting, so a fetch can succeed and still be truncated
