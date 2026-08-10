@@ -590,13 +590,59 @@ import. There is a test asserting the exported JSON does not contain it.
    often and `web_fetch` firing is the point. Hence `max_tokens: 1500` — that cap
    covers thinking *and* visible text together.
 
+#### What the first on-device test actually broke (August 2026)
+
+The unit tests fake `fetch`, so they could not have caught any of this. The first
+real generation returned a *refusal* rather than a note, and it took three
+separate bugs to produce it. All three are now pinned by tests, each verified by
+reinstating the bug:
+
+1. **The tool-call preamble was being treated as part of the note.** The model
+   narrates before calling a server tool ("I'll fetch that page to research the
+   tune's history"), and `extractText` joined *every* `text` block, so that
+   narration was prepended to the summary. It now takes only prose **after the
+   last `web_fetch_tool_result`**, falling back to all text when no tool ran.
+   This affected successful notes too, not just failures.
+2. **A fetch that failed at runtime made the model decline entirely.** The
+   ladder below only covers the API *rejecting* the tool with a 400; a tool that
+   is accepted and then cannot reach the page returns HTTP 200 with an error
+   object. The prompt still said "fetch this page first and prefer what it says",
+   so the model reported the network problem and refused to write — reinforced by
+   the honesty rule ("don't fill gaps with invention"), which it read as "no
+   record exists". Fixed at both levels: the prompt now says a failed fetch means
+   silently fall back to knowledge and **never decline**, and
+   `generateTuneSummary` **regenerates once with the tool and the fetch
+   instruction removed** when `pageRead === 'error'`. If that retry also fails,
+   the first attempt is kept rather than turning a caveated note into an error.
+3. **It asked the reader to paste the page in.** The model had no idea it was
+   writing into a one-shot panel. The prompt now states that the reply is
+   rendered verbatim with no reply channel, so it must never ask a question,
+   suggest retrying, or describe its own tools and difficulties.
+
+A fourth, latent version of (2): rung 3 of the ladder dropped the tool but
+**reused the prompt built for rung 1**, leaving "fetch this page first" in a
+request with no fetch tool — precisely the state that causes the refusal. The
+ladder now takes a `makeBody(canFetch)` function and rebuilds the prompt.
+
+Also hardened: `allowed_domains` now carries **both** host spellings
+(`thesession.org` and `www.thesession.org`), since a redirect between them would
+be blocked by our own allowlist and would look like an unexplained fetch failure.
+
+**The lesson:** a prompt that names an authority the model may not be able to
+reach needs an explicit instruction for what to do when it cannot — and the
+fallback path must rebuild the prompt, not just strip the tool. If Anthropic's
+fetcher simply cannot reach thesession.org (bot protection, rate limits), notes
+degrade to knowledge-based and the dialog says so; the browser-side
+`?format=json` facts are then the only grounding.
+
 #### Response-handling traps (all silent when got wrong)
 
 - **Never `content[0].text`.** With a server tool in play, `content[0]` is a
-  `web_fetch_tool_result` or a thinking block. Filter by `type === 'text'`.
+  `web_fetch_tool_result` or a thinking block — and the *first* text block is
+  usually the pre-tool preamble, not the answer. See (1) above.
 - **`web_fetch` errors do not raise** — they arrive as HTTP 200 with an error
-  object inside the result block. Treated as "no page text"; the note still
-  returns, with `pageRead: 'error'` so the dialog can caveat it.
+  object inside the result block. `pageRead` is the only way to detect it, and it
+  now drives a regeneration rather than just a UI caveat. See (2) above.
 - **Check `stop_reason` before reading `content`.** On a refusal `content` is
   empty, so indexing it throws a `TypeError` instead of reporting what happened.
 - **`pause_turn` must be resumed** (re-send with the assistant turn appended, no

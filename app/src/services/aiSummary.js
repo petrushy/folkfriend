@@ -122,8 +122,16 @@ function hostOf(url) {
     }
 }
 
-// The web_fetch tool definition for a given model, locked to the single host we
-// are actually asking about. Returns null when the URL has no parseable host,
+// Both spellings of a host, because a site that redirects thesession.org ->
+// www.thesession.org (or the reverse) would otherwise have the redirect blocked
+// by our own allowlist, surfacing as an unexplained fetch failure.
+function hostVariants(host) {
+    const bare = host.replace(/^www\./, '');
+    return bare === host ? [host, `www.${host}`] : [host, bare];
+}
+
+// The web_fetch tool definition for a given model, locked to the host we are
+// actually asking about. Returns null when the URL has no parseable host,
 // in which case the summary is generated without page access rather than
 // handing the model an unrestricted fetch tool.
 export function webFetchToolFor(model, url) {
@@ -134,7 +142,7 @@ export function webFetchToolFor(model, url) {
         name: 'web_fetch',
         max_uses: 1,
         max_content_tokens: WEB_FETCH_MAX_CONTENT_TOKENS,
-        allowed_domains: [host],
+        allowed_domains: hostVariants(host),
     };
 }
 
@@ -219,8 +227,15 @@ export function buildPrompt({ displayName = '', url = '', facts = null, canFetch
     const title = (facts && facts.name) || displayName || 'this tune';
 
     const fetchClause = canFetch
-        ? `Fetch ${url} first and prefer what it says — including the discussion comments, which is usually where the history is — over recollection.`
-        : `The source page is ${url}, which you cannot fetch here, so work from what you know.`;
+        ? [
+            `Fetch ${url} first and prefer what it says — including the discussion comments, which is usually where the history is — over recollection.`,
+            // Without this, a fetch that fails at runtime reliably produces a
+            // meta-response: the model reports the network error and declines to
+            // write anything, because the instruction above told it the page was
+            // the authority and the honesty rule below told it not to guess.
+            'If the fetch fails, returns nothing, or is blocked, do not mention that and do not decline — silently fall back to what you already know about the tune and write the note anyway.',
+        ].join('\n')
+        : `You have no way to fetch the source page (${url}), so write from what you already know about this tune. Do not mention lacking access.`;
 
     return [
         `You are writing a short program note about the traditional tune "${title}".`,
@@ -228,20 +243,41 @@ export function buildPrompt({ displayName = '', url = '', facts = null, canFetch
         'Summarize the tune\'s origin (geography, earliest documented date, composer if known), any key historical detail or story, and one notable aspect (musician, collection, or distinctive feature, specific musical instruments used). Keep to ~10 lines of prose suitable as a program note.',
         '',
         fetchClause,
-        'Where the documented record is thin or contested, say so plainly in a clause rather than filling the gap with plausible invention — a shorter honest note is worth more than a confident wrong one.',
+        'Where the documented record is thin or contested, say so plainly in a clause and write a shorter note — but always write the note. Never decline, and never fill a gap with plausible invention.',
+        // The output is rendered verbatim into a panel with no reply channel, so
+        // asking a question or suggesting a retry is a dead end for the reader.
+        'Your reply is displayed verbatim in a small information panel. Nobody can answer you, so never ask for information, never suggest trying again, and never describe your own process, tools or difficulties.',
         'Plain prose only: no headings, no bullet points, no markdown, no preamble such as "Here is". Start with the note itself.',
         factsBlock(facts),
     ].join('\n');
 }
 
-function extractText(content) {
-    if (!Array.isArray(content)) return '';
+function textBlocksIn(content) {
     return content
         .filter(block => block && block.type === 'text' && typeof block.text === 'string')
         .map(block => block.text.trim())
-        .filter(Boolean)
-        .join('\n\n')
-        .trim();
+        .filter(Boolean);
+}
+
+function extractText(content) {
+    if (!Array.isArray(content)) return '';
+
+    // With a server tool in play the model typically narrates before calling it
+    // ("I'll fetch that page to research the tune's history") and writes the real
+    // answer after the result comes back. Joining every text block prepends that
+    // narration to the note, so only prose after the last tool result counts.
+    let afterLastResult = 0;
+    content.forEach((block, i) => {
+        if (block && block.type === 'web_fetch_tool_result') afterLastResult = i + 1;
+    });
+
+    const tail = textBlocksIn(content.slice(afterLastResult));
+    // If the turn ended with the tool result and no prose followed, there is no
+    // note — fall back to whatever text there was rather than returning empty,
+    // and let the caller decide (a failed page read triggers a retry).
+    const blocks = tail.length ? tail : textBlocksIn(content);
+
+    return blocks.join('\n\n').trim();
 }
 
 // Did the model actually get to read the page? web_fetch failures do not raise
@@ -346,20 +382,30 @@ function looksLikeWebFetchRejection(error) {
 // This is why the module does not need to hard-code which variant a given model
 // serves: it finds out once, per call, cheaply, and a 400 never reaches the user
 // as "HTTP 400".
-async function requestWithLadder(body, apiKey) {
-    const hasTool = Array.isArray(body.tools) && body.tools.length > 0;
+//
+// `makeBody(canFetch)` rather than a fixed body, because rung 3 must rebuild the
+// prompt as well as drop the tool: a prompt that still says "fetch this page
+// first" while no fetch tool is attached is exactly what makes the model report a
+// network problem and decline instead of writing a note.
+async function requestWithLadder(makeBody, apiKey) {
+    const withTool = makeBody(true);
+    const hasTool = Array.isArray(withTool.tools) && withTool.tools.length > 0;
 
     try {
-        return { response: await postMessages(body, apiKey), body };
+        return { response: await postMessages(withTool, apiKey), body: withTool };
     } catch (e) {
         if (!hasTool || !looksLikeWebFetchRejection(e)) throw e;
 
         try {
-            return { response: await postMessages(body, apiKey, WEB_FETCH_BETA), body, beta: WEB_FETCH_BETA };
+            return {
+                response: await postMessages(withTool, apiKey, WEB_FETCH_BETA),
+                body: withTool,
+                beta: WEB_FETCH_BETA,
+            };
         } catch (e2) {
             if (!looksLikeWebFetchRejection(e2)) throw e2;
             console.warn('web_fetch unavailable for this model; generating without page access');
-            const { tools: _dropped, ...withoutTool } = body;
+            const withoutTool = makeBody(false);
             return { response: await postMessages(withoutTool, apiKey), body: withoutTool, degraded: true };
         }
     }
@@ -384,17 +430,65 @@ export async function generateTuneSummary({
     const url = sourceUrl || tuneSourceUrl({ tuneID, displayName });
     const tool = webFetchToolFor(model, url);
 
-    const body = {
-        model,
-        max_tokens: MAX_TOKENS,
-        messages: [{
-            role: 'user',
-            content: buildPrompt({ displayName, url, facts, canFetch: Boolean(tool) }),
-        }],
+    const makeBody = (canFetch) => {
+        const body = {
+            model,
+            max_tokens: MAX_TOKENS,
+            messages: [{
+                role: 'user',
+                content: buildPrompt({ displayName, url, facts, canFetch: canFetch && Boolean(tool) }),
+            }],
+        };
+        if (canFetch && tool) body.tools = [tool];
+        return body;
     };
-    if (tool) body.tools = [tool];
 
-    const first = await requestWithLadder(body, apiKey);
+    let attempt = await runAttempt(makeBody, apiKey, true);
+    const usage = { ...attempt.usage };
+
+    // A page fetch that fails at *runtime* is not covered by the ladder above —
+    // that only handles the API rejecting the tool outright. Here the tool was
+    // accepted and then could not reach the page, which leaves the model having
+    // been told the page is the authority while holding nothing from it. Its
+    // answer is written under a false premise and in practice is often a report
+    // of the network problem rather than a note, so it is worth one more call
+    // with the fetch instruction removed altogether.
+    if (attempt.pageRead === 'error' && !attempt.degraded) {
+        console.warn('web_fetch could not reach the page; regenerating without it');
+        try {
+            const retry = await runAttempt(makeBody, apiKey, false);
+            addUsage(usage, retry.usage);
+            attempt = { ...retry, degraded: true };
+        } catch (e) {
+            // Keep whatever the first attempt produced rather than turning a
+            // usable-if-caveated note into an error.
+            console.warn('fallback generation failed; keeping the first attempt', e && e.message);
+        }
+    }
+
+    return {
+        text: attempt.text,
+        model,
+        generatedAt: Date.now(),
+        sourceUrl: url,
+        usage,
+        pageRead: attempt.pageRead,
+        degraded: Boolean(attempt.degraded),
+    };
+}
+
+// One generation attempt: send, resume any paused server-tool turn, and pull the
+// prose out. `canFetch` false means no tool and a prompt that does not mention
+// fetching.
+async function runAttempt(makeBody, apiKey, canFetch) {
+    let first;
+    if (canFetch) {
+        first = await requestWithLadder(makeBody, apiKey);
+    } else {
+        const body = makeBody(false);
+        first = { response: await postMessages(body, apiKey), body };
+    }
+
     let response = first.response;
     let requestBody = first.body;
     const usage = addUsage(emptyUsage(), response.usage);
@@ -432,9 +526,6 @@ export async function generateTuneSummary({
 
     return {
         text,
-        model,
-        generatedAt: Date.now(),
-        sourceUrl: url,
         usage,
         pageRead,
         degraded: Boolean(first.degraded),

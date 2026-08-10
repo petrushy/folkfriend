@@ -131,8 +131,19 @@ await test('web_fetch variant is gated on the model (the wrong one 400s)', async
 
 await test('the fetch tool is locked to the host being asked about', async () => {
     const ai = await loadAiSummary();
-    const tool = ai.webFetchToolFor('claude-haiku-4-5', 'http://www.folkwiki.se/Musik/Foo');
-    assert.deepEqual(tool.allowed_domains, ['www.folkwiki.se']);
+    // Both spellings, or a www redirect is blocked by our own allowlist and
+    // looks like an unexplained fetch failure.
+    assert.deepEqual(
+        ai.webFetchToolFor('claude-haiku-4-5', 'http://www.folkwiki.se/Musik/Foo').allowed_domains,
+        ['www.folkwiki.se', 'folkwiki.se'],
+    );
+    assert.deepEqual(
+        ai.webFetchToolFor('claude-haiku-4-5', 'https://thesession.org/tunes/1').allowed_domains,
+        ['thesession.org', 'www.thesession.org'],
+    );
+    // Still an allowlist, though — not an open fetch tool.
+    const tool = ai.webFetchToolFor('claude-haiku-4-5', 'https://thesession.org/tunes/1');
+    assert.ok(!tool.allowed_domains.some(d => d.includes('example')));
     assert.equal(tool.max_uses, 1);
     assert.ok(tool.max_content_tokens > 0, 'page read must be capped');
     // No parseable host means no tool at all, rather than an unrestricted one.
@@ -170,6 +181,25 @@ await test('the prompt carries the source URL and the known facts', async () => 
     assert.ok(!/^Fetch /m.test(offlinePrompt));
 });
 
+await test('the prompt forbids declining, asking, and narrating process', async () => {
+    const ai = await loadAiSummary();
+    // Observed in the field: with a failed fetch the model reported the network
+    // error, declined to write a note, and asked the reader to paste the page in
+    // — into a panel that has no reply channel. All three instructions below are
+    // what prevent that, so each is pinned.
+    for (const canFetch of [true, false]) {
+        const prompt = ai.buildPrompt({ displayName: 'Donald Blue', url: 'https://thesession.org/tunes/1', canFetch });
+        assert.ok(/never decline/i.test(prompt), `canFetch=${canFetch}: must forbid declining`);
+        assert.ok(/never ask for information/i.test(prompt), `canFetch=${canFetch}: must forbid asking`);
+        assert.ok(/never suggest trying again/i.test(prompt), `canFetch=${canFetch}: must forbid retry advice`);
+        assert.ok(/displayed verbatim/i.test(prompt), `canFetch=${canFetch}: must say the output is rendered as-is`);
+    }
+    // With a tool attached the prompt must also pre-empt the failure case, or the
+    // model treats "fetch failed" as "no record exists" and writes nothing.
+    const fetchPrompt = ai.buildPrompt({ displayName: 'x', url: 'https://x/1', canFetch: true });
+    assert.ok(/if the fetch fails/i.test(fetchPrompt));
+});
+
 console.log('\naiSummary — response handling');
 
 await test('prose is extracted by block type, not by position', async () => {
@@ -195,21 +225,89 @@ await test('prose is extracted by block type, not by position', async () => {
     assert.equal(result.usage.output_tokens, 5);
 });
 
-await test('a web_fetch error still yields a note (it arrives as HTTP 200)', async () => {
+await test('the tool-call preamble is not treated as the note', async () => {
     const ai = await loadAiSummary();
+    // The model narrates before calling a server tool. Joining every text block
+    // prepends that narration to the note — this is what put "I'll fetch that
+    // page to research the tune's history" at the top of a real summary.
     const { impl } = recordingFetch(jsonResponse({
         stop_reason: 'end_turn',
         content: [
-            { type: 'web_fetch_tool_result', content: { type: 'web_fetch_tool_result_error', error_code: 'unavailable' } },
-            { type: 'text', text: 'Written from memory alone.' },
+            { type: 'text', text: "I'll fetch that page to research the tune's history and origins." },
+            { type: 'web_fetch_tool_result', content: { type: 'web_fetch_result' } },
+            { type: 'text', text: 'Donald Blue is a Scottish strathspey.' },
         ],
         usage: { input_tokens: 1, output_tokens: 1 },
     }));
     stubEnv({ fetchImpl: impl });
 
     const result = await ai.generateTuneSummary(ARGS);
-    assert.equal(result.text, 'Written from memory alone.');
-    // Surfaced so the UI can caveat it rather than passing it off as sourced.
+    assert.equal(result.text, 'Donald Blue is a Scottish strathspey.');
+    assert.ok(!/I'll fetch/.test(result.text), 'the preamble must not reach the reader');
+});
+
+await test('a runtime fetch failure is regenerated without the tool', async () => {
+    const ai = await loadAiSummary();
+    // Observed in the field. The tool was accepted, the fetch then failed, and
+    // the model spent the turn explaining that it could not access the page and
+    // declining to write — because the prompt still told it the page was the
+    // authority. That answer is unusable, so it is worth one more call.
+    const { impl, calls } = recordingFetch([
+        jsonResponse({
+            stop_reason: 'end_turn',
+            content: [
+                { type: 'text', text: "I'll fetch that page to research the tune's history." },
+                { type: 'web_fetch_tool_result', content: { type: 'web_fetch_tool_result_error', error_code: 'unavailable' } },
+                { type: 'text', text: 'I am unable to access The Session database at the moment. Rather than fill gaps with plausible invention, I would recommend trying the URL again.' },
+            ],
+            usage: { input_tokens: 500, output_tokens: 200 },
+        }),
+        jsonResponse({
+            stop_reason: 'end_turn',
+            content: [{ type: 'text', text: 'Donald Blue is a Scottish strathspey of uncertain authorship.' }],
+            usage: { input_tokens: 300, output_tokens: 150 },
+        }),
+    ]);
+    stubEnv({ fetchImpl: impl });
+
+    const result = await ai.generateTuneSummary(ARGS);
+
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].body.tools, undefined, 'the retry must not offer a tool it cannot use');
+    const retryPrompt = calls[1].body.messages[0].content;
+    assert.ok(!/^Fetch /m.test(retryPrompt), 'the retry must not still order a fetch');
+    assert.ok(/no way to fetch/i.test(retryPrompt));
+
+    assert.equal(result.text, 'Donald Blue is a Scottish strathspey of uncertain authorship.');
+    assert.equal(result.degraded, true, 'the UI must be able to caveat this');
+    assert.notEqual(result.pageRead, 'ok');
+    // Both calls are billed, so both must be counted.
+    assert.equal(result.usage.input_tokens, 800);
+    assert.equal(result.usage.output_tokens, 350);
+});
+
+await test('if the fallback also fails, the first attempt is kept', async () => {
+    const ai = await loadAiSummary();
+    const { impl, calls } = recordingFetch((n) => {
+        if (n === 1) {
+            return jsonResponse({
+                stop_reason: 'end_turn',
+                content: [
+                    { type: 'web_fetch_tool_result', content: { type: 'web_fetch_tool_result_error', error_code: 'unavailable' } },
+                    { type: 'text', text: 'A thin but usable note.' },
+                ],
+                usage: { input_tokens: 10, output_tokens: 5 },
+            });
+        }
+        return jsonResponse({ error: { message: 'overloaded' } }, { ok: false, status: 529 });
+    });
+    stubEnv({ fetchImpl: impl });
+
+    // Turning a caveated note into an error would be a worse outcome than
+    // showing it, so the retry failing must not fail the whole call.
+    const result = await ai.generateTuneSummary(ARGS);
+    assert.equal(calls.length, 2);
+    assert.equal(result.text, 'A thin but usable note.');
     assert.equal(result.pageRead, 'error');
 });
 
@@ -394,6 +492,11 @@ await test('a model that cannot fetch at all still produces a note', async () =>
     const result = await ai.generateTuneSummary(ARGS);
     assert.equal(calls.length, 3);
     assert.equal(calls[2].body.tools, undefined, 'the third attempt drops the tool');
+    // Dropping the tool without rebuilding the prompt would leave "Fetch this
+    // page first" in a request with no fetch tool — the exact setup that makes
+    // the model report a problem instead of writing a note.
+    assert.ok(!/^Fetch /m.test(calls[2].body.messages[0].content),
+        'rung 3 must rebuild the prompt, not just strip the tool');
     assert.equal(result.degraded, true);
     assert.equal(result.pageRead, 'none');
     assert.equal(result.text, 'From knowledge only.');
