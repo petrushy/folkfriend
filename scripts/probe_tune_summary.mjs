@@ -66,6 +66,16 @@ try {
     console.log(`page read:       ${result.pageRead}` +
         (result.pageRead === 'ok' ? '' : '   <-- written without the source page'));
     console.log(`web_fetch tool:  ${result.degraded ? 'UNAVAILABLE for this model (dropped)' : 'used'}`);
+
+    // The question this probe exists to answer: the discussion thread sits below
+    // a full ABC block per setting, so a fetch can succeed and still be truncated
+    // before the comments — which produces a note restating the header metadata.
+    if (result.pageStats) {
+        console.log(`page text:       ${result.pageStats.chars.toLocaleString()} chars`);
+        console.log(`comments found:  ${result.pageStats.looksLikeComments ? 'yes' : 'NO — raise WEB_FETCH_MAX_CONTENT_TOKENS'}`);
+    } else if (result.pageRead === 'ok') {
+        console.log('page text:       (not exposed in the tool result on this API version)');
+    }
     console.log(`usage:           ${JSON.stringify(result.usage)}`);
     console.log(`est. cost:       $${ai.estimateCostUsd(result.usage, result.model).toFixed(4)}`);
     console.log(`elapsed:         ${seconds}s`);

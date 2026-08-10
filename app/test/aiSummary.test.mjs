@@ -163,17 +163,18 @@ await test('the browser-access header is sent (without it the preflight fails)',
     assert.equal(calls[0].headers['anthropic-beta'], undefined, 'no beta header on the first attempt');
 });
 
-await test('the prompt carries the source URL and the known facts', async () => {
+await test('the prompt carries the source URL and identifying facts', async () => {
     const ai = await loadAiSummary();
-    const facts = {
-        name: 'The Kesh', aliases: ['Kincora'], type: 'jig',
-        meter: '6/8', mode: 'Gmajor', settingCount: 12,
-    };
+    const facts = { name: 'The Kesh', aliases: ['Kincora'], type: 'jig' };
     const prompt = ai.buildPrompt({ displayName: 'The Kesh', url: 'https://thesession.org/tunes/14109', facts });
 
     assert.ok(prompt.includes('https://thesession.org/tunes/14109'));
-    assert.ok(prompt.includes('Kincora'), 'aliases must reach the model');
-    assert.ok(prompt.includes('6/8'));
+    assert.ok(prompt.includes('Kincora'), 'aliases identify the tune');
+    // ...but they are handed over as identification only. The first version of
+    // this block told the model to "prefer these over the page", which is why
+    // early notes read as a restatement of the metadata already on screen.
+    assert.ok(/already shows all of this/i.test(prompt));
+    assert.ok(!/prefer these/i.test(prompt));
     assert.ok(/no markdown/i.test(prompt), 'plain-prose instruction must survive edits');
 
     // When there is no fetch tool the prompt must not order a fetch it cannot do.
@@ -198,6 +199,38 @@ await test('the prompt forbids declining, asking, and narrating process', async 
     // model treats "fetch failed" as "no record exists" and writes nothing.
     const fetchPrompt = ai.buildPrompt({ displayName: 'x', url: 'https://x/1', canFetch: true });
     assert.ok(/if the fetch fails/i.test(fetchPrompt));
+});
+
+await test('the prompt asks for history and forbids restating on-screen metadata', async () => {
+    const ai = await loadAiSummary();
+    const prompt = ai.buildPrompt({
+        displayName: 'The Kesh',
+        url: 'https://thesession.org/tunes/14109',
+        facts: { name: 'The Kesh', aliases: ['Kincora'], type: 'jig' },
+        canFetch: true,
+    });
+
+    // Notes were shallow because the model summarised the page header — aliases,
+    // key, tune type — all of which the Tune view already renders inches away.
+    for (const banned of [/other names or aliases/i, /key, mode or meter/i, /how many settings/i]) {
+        assert.ok(banned.test(prompt), `must forbid restating: ${banned}`);
+    }
+    // And it must be pointed at the discussion, which is the only part of the
+    // page carrying history at all.
+    assert.ok(/discussion/i.test(prompt), 'must point at the discussion thread');
+    for (const wanted of [/geograph/i, /earliest known printing/i, /collections/i, /who collected it/i]) {
+        assert.ok(wanted.test(prompt), `must ask for: ${wanted}`);
+    }
+});
+
+await test('the page-fetch budget is big enough to reach the comments', async () => {
+    const ai = await loadAiSummary();
+    const tool = ai.webFetchToolFor('claude-haiku-4-5', 'https://thesession.org/tunes/1');
+    // A thesession page carries a full ABC block per setting above the
+    // discussion, and notation is token-dense. At the original 6k the budget was
+    // spent before the comments started.
+    assert.ok(tool.max_content_tokens >= 20000,
+        `budget ${tool.max_content_tokens} is too small to reach a discussion thread`);
 });
 
 console.log('\naiSummary — response handling');
@@ -530,10 +563,42 @@ await test('facts are read from the JSON endpoint', async () => {
     assert.ok(calls[0].url.includes('format=json'));
     assert.equal(facts.name, 'The Kesh');
     assert.deepEqual(facts.aliases, ['Kincora', 'The Kesh Jig']);
-    assert.equal(facts.settingCount, 2);
-    // meter/mode live on the settings, not the tune, in thesession's JSON.
-    assert.equal(facts.meter, '6/8');
-    assert.equal(facts.mode, 'Gmajor');
+    assert.equal(facts.type, 'jig');
+    // Meter, key/mode and the setting count are deliberately NOT collected: the
+    // app displays them next to the note, and feeding them to the model is what
+    // produced notes that just restated them.
+    assert.equal(facts.meter, undefined);
+    assert.equal(facts.mode, undefined);
+    assert.equal(facts.settingCount, undefined);
+});
+
+await test('page stats expose whether the fetch reached the discussion', async () => {
+    const ai = await loadAiSummary();
+    const long = 'x'.repeat(400);
+
+    // Truncated before the comments — the failure mode behind shallow notes.
+    const notation = ai.pageFetchStats([{
+        type: 'web_fetch_tool_result',
+        content: {
+            type: 'web_fetch_result',
+            content: { type: 'document', source: { type: 'text', data: `X:1\nK:Gmaj\n${long}` } },
+        },
+    }]);
+    assert.ok(notation.chars > 400);
+    assert.equal(notation.looksLikeComments, false);
+
+    // Reached them.
+    const withComments = ai.pageFetchStats([{
+        type: 'web_fetch_tool_result',
+        content: {
+            type: 'web_fetch_result',
+            content: { type: 'document', source: { type: 'text', data: `${long}\n# Comments\nPosted by someone` } },
+        },
+    }]);
+    assert.equal(withComments.looksLikeComments, true);
+
+    assert.equal(ai.pageFetchStats([{ type: 'text', text: 'no tool ran' }]), null);
+    assert.equal(ai.pageFetchStats(null), null);
 });
 
 await test('facts are optional — every failure degrades to null', async () => {
@@ -574,6 +639,17 @@ await test('cost is priced per model and counts cached input tokens', async () =
     assert.equal(ai.estimateCostUsd({ cache_read_input_tokens: 1e6 }, 'claude-haiku-4-5'), 1);
     assert.equal(ai.estimateCostUsd({}, 'claude-haiku-4-5'), 0);
     assert.equal(ai.estimateCostUsd(undefined, 'claude-haiku-4-5'), 0);
+});
+
+await test('the per-note estimate tracks the fetch budget', async () => {
+    const ai = await loadAiSummary();
+    // Derived, not hard-coded, so raising the page budget cannot leave a stale
+    // (and now misleadingly cheap) number in the Settings hint.
+    const haiku = ai.estimateCostPerNoteUsd('claude-haiku-4-5');
+    const sonnet = ai.estimateCostPerNoteUsd('claude-sonnet-5');
+    assert.ok(haiku > 0.02 && haiku < 0.06, `haiku estimate ${haiku} looks wrong`);
+    assert.ok(sonnet > haiku * 2.5, 'sonnet must be priced well above haiku');
+    assert.ok(ai.estimateCostPerNoteUsd('unknown-model') > 0);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

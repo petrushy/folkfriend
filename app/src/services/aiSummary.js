@@ -38,10 +38,19 @@ const WEB_FETCH_BETA = 'web-fetch-2025-09-10';
 // way (max_tokens caps thinking and visible text together).
 const MAX_TOKENS = 1500;
 
-// Caps how much of the tune page the model may pull into context. A thesession
-// discussion thread can be long; 6k tokens is plenty for a program note and
-// bounds the input cost of a summary.
-const WEB_FETCH_MAX_CONTENT_TOKENS = 6000;
+// Caps how much of the tune page the model may pull into context, and therefore
+// the input cost of a summary.
+//
+// This started at 6000 and that was too low to be useful. A thesession tune page
+// puts a full ABC block per setting *above* the discussion thread, and notation
+// is token-dense — on a tune with a dozen settings the cap was spent before the
+// comments began, so the model saw only the header metadata and wrote a note
+// restating it. The comments are the entire point of fetching the page, so the
+// budget has to be large enough to reach them.
+//
+// 30k tokens is roughly $0.03 of input on Haiku 4.5 and $0.09 on Sonnet 5, once,
+// per tune, and the result is cached forever. Worth it.
+const WEB_FETCH_MAX_CONTENT_TOKENS = 30000;
 
 // A server-tool turn can come back `pause_turn` when the tool loop hits its
 // iteration cap. Resume, but never indefinitely.
@@ -193,16 +202,16 @@ export async function fetchSessionTuneFacts(tuneID) {
         const data = await response.json();
         if (!data || typeof data !== 'object') return null;
 
-        const setting = firstSetting(data);
+        // Deliberately only what identifies the tune. Meter, key/mode and the
+        // number of settings used to be collected here and fed to the model,
+        // which is precisely why early notes read as a restatement of the
+        // metadata already on screen a few pixels away.
         return {
             name: typeof data.name === 'string' ? data.name : '',
             aliases: Array.isArray(data.aliases)
                 ? data.aliases.filter(a => typeof a === 'string').slice(0, 12)
                 : [],
             type: typeof data.type === 'string' ? data.type : '',
-            meter: data.meter || setting.meter || '',
-            mode: data.mode || setting.mode || setting.key || '',
-            settingCount: Array.isArray(data.settings) ? data.settings.length : 0,
         };
     } catch (e) {
         console.warn('thesession facts unavailable', e && e.message);
@@ -210,17 +219,19 @@ export async function fetchSessionTuneFacts(tuneID) {
     }
 }
 
+// Identification only. The old version of this block listed the metadata and
+// told the model to "prefer these over the page", which read as an instruction
+// to write about names, type, meter and key — all of which the Tune view already
+// displays directly above the note.
 function factsBlock(facts) {
     if (!facts) return '';
-    const lines = [];
-    if (facts.name) lines.push(`Title: ${facts.name}`);
-    if (facts.aliases.length) lines.push(`Also known as: ${facts.aliases.join('; ')}`);
-    if (facts.type) lines.push(`Tune type: ${facts.type}`);
-    if (facts.meter) lines.push(`Meter: ${facts.meter}`);
-    if (facts.mode) lines.push(`Key/mode: ${facts.mode}`);
-    if (facts.settingCount) lines.push(`Settings on record: ${facts.settingCount}`);
-    if (!lines.length) return '';
-    return `\n\nKnown facts from the source database (authoritative — prefer these over the page for names, type, meter and key):\n${lines.join('\n')}`;
+    const parts = [];
+    if (facts.name) parts.push(`titled "${facts.name}"`);
+    if (facts.aliases.length) parts.push(`also listed as ${facts.aliases.join('; ')}`);
+    if (facts.type) parts.push(`catalogued as a ${facts.type}`);
+    if (!parts.length) return '';
+    return '\n\nTo identify the right tune (the app already shows all of this to the ' +
+        `reader, so none of it belongs in your note): the tune is ${parts.join(', ')}.`;
 }
 
 export function buildPrompt({ displayName = '', url = '', facts = null, canFetch = true }) {
@@ -228,7 +239,11 @@ export function buildPrompt({ displayName = '', url = '', facts = null, canFetch
 
     const fetchClause = canFetch
         ? [
-            `Fetch ${url} first and prefer what it says — including the discussion comments, which is usually where the history is — over recollection.`,
+            `Fetch ${url} and build the note from what it says rather than from recollection.`,
+            // The discussion is the entire reason for fetching. Without pointing
+            // at it explicitly the model summarises the page header — which is
+            // metadata the app already displays — and stops.
+            'That page has ABC notation for each setting near the top and, lower down, a discussion thread. The discussion is what you are there for: it is where players record where a tune came from, who collected or composed it, which book or recording it first appeared in, and which claims are disputed. Read it and use it. The notation itself tells you nothing you need — skip it.',
             // Without this, a fetch that fails at runtime reliably produces a
             // meta-response: the model reports the network error and declines to
             // write anything, because the instruction above told it the page was
@@ -238,16 +253,33 @@ export function buildPrompt({ displayName = '', url = '', facts = null, canFetch
         : `You have no way to fetch the source page (${url}), so write from what you already know about this tune. Do not mention lacking access.`;
 
     return [
-        `You are writing a short program note about the traditional tune "${title}".`,
+        `You are writing a short background note about the traditional tune "${title}", to sit beside its sheet music in a folk-music app.`,
         '',
-        'Summarize the tune\'s origin (geography, earliest documented date, composer if known), any key historical detail or story, and one notable aspect (musician, collection, or distinctive feature, specific musical instruments used). Keep to ~10 lines of prose suitable as a program note.',
+        'Cover, in roughly this order of priority:',
+        '- where the tune comes from geographically, and where it is played',
+        '- dates: earliest known printing, manuscript, or recording',
+        '- named sources: collections, tune books, manuscripts, particular recordings',
+        '- named people: who composed it, who collected it, whose playing carried it',
+        '- any story, dispute or correction the discussion records',
+        '',
+        'Prefer specifics over characterisation. A name, a year, a place or the title of a collection is worth more than a sentence describing how the melody feels. If the record contradicts itself, say what is disputed and by whom.',
+        '',
+        // Every item here is rendered on the Tune view within a few pixels of
+        // this note, so restating it is pure waste — and it is what the model
+        // does by default, because it is the easiest material on the page.
+        'Do not write about any of the following. The app already displays all of it immediately beside your note, so repeating it wastes the only ten lines you have:',
+        '- the tune\'s other names or aliases',
+        '- its key, mode or meter',
+        '- what type of tune it is (jig, reel, polska and so on)',
+        '- how many settings or versions exist',
+        '- a description of how the melody goes, or advice on playing it',
         '',
         fetchClause,
         'Where the documented record is thin or contested, say so plainly in a clause and write a shorter note — but always write the note. Never decline, and never fill a gap with plausible invention.',
         // The output is rendered verbatim into a panel with no reply channel, so
         // asking a question or suggesting a retry is a dead end for the reader.
         'Your reply is displayed verbatim in a small information panel. Nobody can answer you, so never ask for information, never suggest trying again, and never describe your own process, tools or difficulties.',
-        'Plain prose only: no headings, no bullet points, no markdown, no preamble such as "Here is". Start with the note itself.',
+        'About ten lines of prose. Plain prose only: no headings, no bullet points, no markdown, no preamble such as "Here is". Start with the note itself.',
         factsBlock(facts),
     ].join('\n');
 }
@@ -296,6 +328,45 @@ export function pageFetchOutcome(content) {
     return sawBlock ? 'error' : 'none';
 }
 
+// Pull the fetched page text back out of the tool result. The exact nesting of
+// the document inside a web_fetch_result is not something this module should
+// depend on, so rather than hard-code a path this walks the result and collects
+// any substantial strings it finds.
+function collectLongStrings(node, out = [], depth = 0) {
+    if (depth > 8 || out.length > 8) return out;
+    if (typeof node === 'string') {
+        if (node.length > 200) out.push(node);
+    } else if (Array.isArray(node)) {
+        node.forEach(item => collectLongStrings(item, out, depth + 1));
+    } else if (node && typeof node === 'object') {
+        Object.values(node).forEach(value => collectLongStrings(value, out, depth + 1));
+    }
+    return out;
+}
+
+// How much page text actually came back, and does it look like it reached the
+// discussion? The comments are the whole reason for fetching, and they sit below
+// a full ABC block per setting — so a fetch that "succeeded" can still have been
+// truncated before anything useful. Not persisted; surfaced for diagnosis via
+// scripts/probe_tune_summary.mjs and the console.
+export function pageFetchStats(content) {
+    if (!Array.isArray(content)) return null;
+
+    const result = content.find(block => block && block.type === 'web_fetch_tool_result');
+    if (!result) return null;
+
+    const text = collectLongStrings(result.content).join('\n');
+    if (!text) return null;
+
+    return {
+        chars: text.length,
+        // thesession renders each comment with a "# Comment" heading or a
+        // "Posted by" / "Re:" line, so any of these appearing is decent evidence
+        // the fetch got past the notation.
+        looksLikeComments: /\bcomments?\b/i.test(text) || /posted by/i.test(text) || /^re:/im.test(text),
+    };
+}
+
 const USAGE_FIELDS = [
     'input_tokens',
     'output_tokens',
@@ -319,6 +390,17 @@ function addUsage(total, usage) {
 // do not know the caller's contracted rates, and the intro pricing on some
 // models moves. It exists so the running total in Settings is a real number
 // rather than a shrug.
+// What one note costs at list prices, for the Settings hint. Derived from the
+// fetch budget rather than hard-coded, so raising WEB_FETCH_MAX_CONTENT_TOKENS
+// cannot leave a stale number on screen. Deliberately assumes the page fetch
+// fills its budget — the honest upper end rather than a flattering average.
+export function estimateCostPerNoteUsd(model) {
+    const spec = modelSpec(model);
+    const inputTokens = WEB_FETCH_MAX_CONTENT_TOKENS + 1000; // page + prompt
+    const outputTokens = 400; // ~10 lines
+    return (inputTokens / 1e6) * spec.inputPerMTok + (outputTokens / 1e6) * spec.outputPerMTok;
+}
+
 export function estimateCostUsd(usage, model) {
     const spec = modelSpec(model);
     const input = (Number(usage && usage.input_tokens) || 0) +
@@ -466,6 +548,13 @@ export async function generateTuneSummary({
         }
     }
 
+    // Cheap way for a user to check the page read from DevTools without running
+    // the probe script: if chars is small or looksLikeComments is false, the note
+    // is thin because the fetch never reached the discussion.
+    if (attempt.pageStats) {
+        console.debug('tune background: fetched page', attempt.pageStats);
+    }
+
     return {
         text: attempt.text,
         model,
@@ -473,6 +562,7 @@ export async function generateTuneSummary({
         sourceUrl: url,
         usage,
         pageRead: attempt.pageRead,
+        pageStats: attempt.pageStats || null,
         degraded: Boolean(attempt.degraded),
     };
 }
@@ -493,6 +583,7 @@ async function runAttempt(makeBody, apiKey, canFetch) {
     let requestBody = first.body;
     const usage = addUsage(emptyUsage(), response.usage);
     let pageRead = pageFetchOutcome(response.content);
+    let pageStats = pageFetchStats(response.content);
 
     // A paused server-tool turn is resumed by re-sending with the assistant
     // turn appended — no extra user message, the API resumes on its own.
@@ -506,6 +597,7 @@ async function runAttempt(makeBody, apiKey, canFetch) {
         response = await postMessages(requestBody, apiKey, first.beta || null);
         addUsage(usage, response.usage);
         if (pageRead !== 'ok') pageRead = pageFetchOutcome(response.content);
+        if (!pageStats) pageStats = pageFetchStats(response.content);
     }
 
     // Check stop_reason before touching content: on a refusal content can be
@@ -528,6 +620,7 @@ async function runAttempt(makeBody, apiKey, canFetch) {
         text,
         usage,
         pageRead,
+        pageStats,
         degraded: Boolean(first.degraded),
     };
 }

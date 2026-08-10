@@ -630,10 +630,56 @@ be blocked by our own allowlist and would look like an unexplained fetch failure
 
 **The lesson:** a prompt that names an authority the model may not be able to
 reach needs an explicit instruction for what to do when it cannot — and the
-fallback path must rebuild the prompt, not just strip the tool. If Anthropic's
-fetcher simply cannot reach thesession.org (bot protection, rate limits), notes
-degrade to knowledge-based and the dialog says so; the browser-side
-`?format=json` facts are then the only grounding.
+fallback path must rebuild the prompt, not just strip the tool.
+
+**The actual cause of that first failure was our own allowlist.** With the `www.`
+variant added the fetch started working, so a redirect between `thesession.org`
+and `www.thesession.org` was being blocked by `allowed_domains`. It surfaced as a
+"network issue" the model reported in prose, which is about as indirect as a bug
+report gets.
+
+#### Then the notes were shallow (August 2026)
+
+Once the page was reachable, notes came back restating the tune's aliases, key
+and type — all of which the Tune view renders inches above the note — with almost
+no history. Three causes, two of them self-inflicted:
+
+1. **We were feeding it the metadata and telling it to prefer it.** `factsBlock`
+   listed title/aliases/type/meter/key/setting-count under the heading "Known
+   facts from the source database (authoritative — **prefer these over the
+   page**…)". That is an instruction to write about metadata. Meter, mode and
+   setting count are no longer collected at all, and what remains is labelled
+   identification-only with an explicit "none of it belongs in your note".
+2. **The prompt never said what to leave out.** It now names the five things the
+   UI already shows (aliases, key/mode/meter, tune type, setting count, melodic
+   description) and forbids them, and asks in priority order for geography,
+   dates, named sources, named people, and disputes — "prefer specifics over
+   characterisation".
+3. **`max_content_tokens: 6000` was probably truncating before the comments.** A
+   thesession page carries a full ABC block *per setting* above the discussion,
+   and notation is token-dense, so on a tune with many settings the budget was
+   spent before the comments began — leaving the header metadata as the only
+   thing the model actually saw. Raised to **30000**, and the prompt now says
+   explicitly that the notation is near the top, the discussion is lower down,
+   and the discussion is the point.
+
+`estimateCostPerNoteUsd()` derives the Settings figure from
+`WEB_FETCH_MAX_CONTENT_TOKENS`, so raising that budget cannot leave a stale
+(flatteringly cheap) number on screen. At 30k the honest upper bound is ~$0.03
+per note on Haiku 4.5 and ~$0.09 on Sonnet 5, once per tune, cached forever.
+
+**`pageFetchStats()` is how to tell whether any of this worked**, since "the
+fetch succeeded" and "the model saw the comments" are different claims. It digs
+the fetched text back out of the `web_fetch_tool_result` and reports its length
+plus whether comment markers appear; it is logged to the console on every
+generation and printed by `scripts/probe_tune_summary.mjs`. If `looksLikeComments`
+is false, the budget is still too small — that is the number to raise.
+
+> ⚠️ **`thesession.org` is blocked by the sandbox egress policy**, so none of the
+> above could be verified from a Claude Code session — not by `curl`, not by
+> `WebFetch`. The unit tests fake the network. Whether the discussion actually
+> reaches the model can only be established on a real device or with a real key
+> via the probe script, which is exactly what `pageFetchStats` exists to answer.
 
 #### Response-handling traps (all silent when got wrong)
 

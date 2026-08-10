@@ -423,7 +423,11 @@ import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
 import { fetchTuneIndexMetadata } from '@/services/tuneIndexNetwork.js';
-import { MODELS as AI_MODELS, DEFAULT_MODEL as DEFAULT_AI_MODEL } from '@/services/aiSummary.js';
+import {
+    MODELS as AI_MODELS,
+    DEFAULT_MODEL as DEFAULT_AI_MODEL,
+    estimateCostPerNoteUsd,
+} from '@/services/aiSummary.js';
 import {
     // mdiCellphoneArrowDownVariant,
     mdiAccountCircle,
@@ -529,9 +533,9 @@ export default {
         aiModelHint() {
             const model = this.userSettings.aiSummaryModel || DEFAULT_AI_MODEL;
             const spec = AI_MODELS[model] || AI_MODELS[DEFAULT_AI_MODEL];
-            return `About $${spec.inputPerMTok.toFixed(2)} per million input tokens and ` +
-                `$${spec.outputPerMTok.toFixed(2)} per million output — roughly ` +
-                `${this.formatUsd(spec.inputPerMTok * 0.007 + spec.outputPerMTok * 0.0004)} per note.`;
+            return `$${spec.inputPerMTok.toFixed(2)} per million input tokens, ` +
+                `$${spec.outputPerMTok.toFixed(2)} per million output — up to about ` +
+                `${this.formatUsd(estimateCostPerNoteUsd(model))} per note, once per tune.`;
         },
         offlineReady() {
             if (this.offlineStatus === null) return null;
