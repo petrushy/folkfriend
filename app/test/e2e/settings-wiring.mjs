@@ -101,14 +101,18 @@ try {
         if (!vm) return { error: 'SettingsView not mounted' };
         const names = ['signIn','signOut','settingsChanged','onMlTranscriberChanged',
                        'onRecordingLimitChanged','saveOfflineCopy','downloadUserData',
-                       'restoreUserData','importFromTheSession'];
+                       'restoreUserData','importFromTheSession','onApiKeyChanged',
+                       'confirmClearAiSummaries','clearAiSummaries','resetAiUsage',
+                       'formatUsd'];
         const missing = names.filter(n => typeof vm[n] !== 'function');
-        return { missing, hasStore: !!vm.$data };
+        return { missing, total: names.length, hasStore: !!vm.$data };
     })()`);
     check('SettingsView is mounted', !wiring.error, wiring.error || '');
     check('every handler named in the template exists',
         wiring.missing && wiring.missing.length === 0,
-        wiring.missing && wiring.missing.length ? `missing: ${wiring.missing.join(', ')}` : 'all 9 present');
+        wiring.missing && wiring.missing.length
+            ? `missing: ${wiring.missing.join(', ')}`
+            : `all ${wiring.total} present`);
 
     // Clicking "Sign in with Google" must actually run the handler. The bug was
     // a template referencing a method that no longer existed, so the click was

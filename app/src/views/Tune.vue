@@ -4,23 +4,21 @@
             {{ name }}
         </h1>
 
-        <v-container v-if="displayableAliases.length" class="mt-0 mb-2 py-0">
-            <span class="akaSpan pl-2 pr-1">Also known as</span>
-            <v-chip v-for="alias in displayableAliases" :key="alias" class="ma-1 px-2" small>
-                {{ alias }}
-            </v-chip>
+        <v-container class="mt-0 mb-2 py-0">
+            <template v-if="displayableAliases.length">
+                <span class="akaSpan pl-2 pr-1">Also known as</span>
+                <v-chip v-for="alias in displayableAliases" :key="alias" class="ma-1 px-2" small>
+                    {{ alias }}
+                </v-chip>
+            </template>
             <v-chip small class="sourceChip ma-1 px-2" @click="sourceClicked">
                 {{ sourceName }}&nbsp;<v-icon small>
                     {{ icons.openInNew }}
                 </v-icon>
             </v-chip>
-        </v-container>
-        <v-container v-else class="mt-0 mb-2 py-0">
-            <v-chip small class="sourceChip ma-1 px-2 py-2" @click="sourceClicked">
-                {{ sourceName }}&nbsp;<v-icon small>
-                    {{ icons.openInNew }}
-                </v-icon>
-            </v-chip>
+            <v-btn v-if="aiSummariesEnabled" icon small class="ma-1" aria-label="Tune background" @click="openSummaryDialog">
+                <v-icon color="grey darken-1">{{ icons.info }}</v-icon>
+            </v-btn>
         </v-container>
 
         <v-alert v-if="offlineFallback" dense text type="info" class="mx-2 my-2">
@@ -113,6 +111,50 @@
                 </v-expansion-panel-content>
             </v-expansion-panel>
         </v-expansion-panels>
+
+        <v-dialog v-model="summaryDialog" max-width="560" scrollable>
+            <v-card>
+                <v-card-title class="summaryTitle">Background</v-card-title>
+                <v-card-text>
+                    <!-- The error sits above the note rather than replacing it: a
+                         failed regenerate must not hide the note you already have. -->
+                    <p v-if="summaryError" class="error--text" :class="summary ? 'mb-4' : 'mb-0'">
+                        {{ summaryError }}
+                    </p>
+                    <div v-if="summaryLoading" class="d-flex align-center py-2">
+                        <v-progress-circular indeterminate size="22" width="2" class="mr-3" />
+                        <span>Writing a background note…</span>
+                    </div>
+                    <template v-else-if="summary">
+                        <p class="summaryText">{{ summary.text }}</p>
+                        <p class="caption text--secondary mb-0">
+                            <span v-if="summaryPageMissed">
+                                Written without access to the source page, so from the
+                                model's own knowledge only.
+                            </span>
+                            Generated {{ formatSummaryDate(summary.generatedAt) }}<span
+                                v-if="summary.model">&nbsp;by {{ summary.model }}</span>. Written by
+                            an AI and may be wrong — verify anything you rely on against the
+                            source.
+                        </p>
+                    </template>
+                    <p v-else-if="!summaryError" class="mb-0">
+                        No background note saved for this tune yet. Generating one makes a
+                        single call to the Claude API with your own key, and the result is
+                        saved so the same tune is never paid for twice.
+                    </p>
+                </v-card-text>
+                <v-card-actions>
+                    <v-spacer />
+                    <v-btn text :disabled="summaryLoading" @click="summaryDialog = false">
+                        Close
+                    </v-btn>
+                    <v-btn text color="primary" :loading="summaryLoading" @click="generateSummary">
+                        {{ summary ? 'Regenerate' : 'Generate' }}
+                    </v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
     </v-container>
     <v-container v-else-if="loadError" class="px-10">
         <p>{{ loadError }}</p>
@@ -133,12 +175,19 @@ import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus';
 
 import {
+    mdiInformationOutline,
     mdiOpenInNew,
     mdiStar,
     mdiStarOutline,
     mdiTagPlusOutline,
 } from '@mdi/js';
 import store from '@/services/store.js';
+import {
+    DEFAULT_MODEL as DEFAULT_AI_MODEL,
+    describeAiSummaryError,
+    fetchSessionTuneFacts,
+    generateTuneSummary,
+} from '@/services/aiSummary.js';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
 // fire: ffBackend.indexReady() resolves as soon as the worker's state machine
@@ -185,7 +234,19 @@ export default {
             addTagMenus: {},
             tagInputValues: {},
 
+            // AI background note. `summary` is the cached record for this tune
+            // ({ text, model, generatedAt, sourceUrl }) or null.
+            userSettings: store.userSettings,
+            summaryDialog: false,
+            summary: null,
+            summaryLoading: false,
+            summaryError: '',
+            // Transient, not persisted: true when the note we just generated was
+            // written without the model getting to read the source page.
+            summaryPageMissed: false,
+
             icons: {
+                info: mdiInformationOutline,
                 openInNew: mdiOpenInNew,
                 star: mdiStar,
                 starOutline: mdiStarOutline,
@@ -194,6 +255,9 @@ export default {
         };
     },
     computed: {
+        aiSummariesEnabled() {
+            return Boolean(this.userSettings.aiSummariesEnabled);
+        },
         sourceName() {
             return sourceNameForTuneID(this.tuneID);
         },
@@ -488,7 +552,61 @@ export default {
         },
         $openUrl: function (url) {
             window.open(url);
-        }
+        },
+        formatSummaryDate: function (timestamp) {
+            if (!timestamp) return 'previously';
+            return `on ${new Date(timestamp).toLocaleDateString()}`;
+        },
+        async openSummaryDialog() {
+            this.summaryDialog = true;
+            this.summaryError = '';
+            this.summaryPageMissed = false;
+            if (this.summary) return;
+            // Read the cache and stop. Opening the dialog must never spend
+            // money — a miss shows the Generate button and waits for a tap.
+            // It also means an already-summarised tune reads fine on a plane.
+            this.summary = await store.getAiSummary(this.tuneID);
+        },
+        async generateSummary() {
+            // Single in-flight guard: the button is also :loading, but a
+            // double-tap that slipped through would be a second paid call.
+            if (this.summaryLoading) return;
+
+            const apiKey = store.getApiKey();
+            if (!apiKey) {
+                this.summaryError = describeAiSummaryError({ kind: 'no-key' });
+                return;
+            }
+
+            this.summaryLoading = true;
+            this.summaryError = '';
+            this.summaryPageMissed = false;
+
+            try {
+                // Non-fatal: resolves to null if thesession is unreachable or
+                // this is a folkwiki tune, and the note is written anyway.
+                const facts = await fetchSessionTuneFacts(this.tuneID);
+
+                const record = await generateTuneSummary({
+                    tuneID: this.tuneID,
+                    displayName: this.name || this.displayName,
+                    sourceUrl: this.sourceUrl,
+                    facts,
+                    model: this.userSettings.aiSummaryModel || DEFAULT_AI_MODEL,
+                    apiKey,
+                });
+
+                store.recordAiUsage(record.usage, record.model);
+                await store.setAiSummary(this.tuneID, record);
+                this.summary = await store.getAiSummary(this.tuneID);
+                this.summaryPageMissed = record.pageRead !== 'ok';
+            } catch (e) {
+                console.error('Tune background note failed', e);
+                this.summaryError = describeAiSummaryError(e);
+            } finally {
+                this.summaryLoading = false;
+            }
+        },
     },
 };
 </script>
@@ -561,5 +679,17 @@ h1 {
 .settingMetaLabel {
     font-weight: 600;
     margin-right: 4px;
+}
+
+.summaryTitle {
+    font-size: 1.1rem;
+    font-weight: 500;
+}
+
+.summaryText {
+    /* The model is asked for plain prose, but it may still use paragraph
+       breaks — keep them rather than collapsing everything into one block. */
+    white-space: pre-wrap;
+    line-height: 1.55;
 }
 </style>

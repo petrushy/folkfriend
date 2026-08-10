@@ -1,13 +1,13 @@
 {
     "name": "folkfriend",
-    "version": "3.8.0",
+    "version": "3.9.0",
     "private": true,
     "scripts": {
         "serve": "vue-cli-service serve",
         "build:wasm": "bash build-wasm.sh",
         "prebuild": "bash build-wasm.sh",
         "build": "vue-cli-service build",
-        "test": "node test/tune-index-cache.test.mjs && node test/source-links.test.mjs && node test/sessionAnalysis.test.mjs && node test/liveScoreFollow.test.mjs && node test/mic.test.mjs",
+        "test": "node test/tune-index-cache.test.mjs && node test/source-links.test.mjs && node test/sessionAnalysis.test.mjs && node test/liveScoreFollow.test.mjs && node test/mic.test.mjs && node test/aiSummary.test.mjs && node test/aiSummaryStore.test.mjs",
         "test:e2e": "node test/e2e/settings-wiring.mjs && node test/e2e/offline-index.mjs && node test/e2e/unreachable-host.mjs"
     },
     "dependencies": {

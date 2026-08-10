@@ -4,6 +4,7 @@
 import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
+import {estimateCostUsd, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
 import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
 import {
@@ -20,7 +21,29 @@ const USER_SETTING_DEFAULTS = {
     useMlTranscriber: false, // opt-in experimental basic-pitch ML transcription
     autoGainControl: false, // let the OS auto-boost quiet mic input at capture
     autoUpdateTuneData: true, // check for a newer tune index on startup
+    aiSummariesEnabled: false, // show the (i) tune-background button; needs an API key
+    aiSummaryModel: DEFAULT_AI_MODEL, // which Claude model writes the background note
 };
+
+// The Anthropic API key lives under its own localStorage key, NOT in
+// userSettings. exportUserData() serialises userSettings wholesale into a
+// downloadable backup that users share; a key placed there would leak into that
+// file. Kept out of both export and import for the same reason.
+const API_KEY_STORAGE_KEY = 'anthropicApiKey';
+
+// Running total of what the AI summary feature has cost, so the number in
+// Settings is measured rather than guessed. localStorage, not IndexedDB: it is
+// tiny, non-critical, and read synchronously when the panel renders.
+const AI_USAGE_STORAGE_KEY = 'aiSummaryUsage';
+
+// One record per tuneID: { text, model, generatedAt, sourceUrl }. Kept in its
+// own IndexedDB key rather than only on favourites so that summaries survive
+// un-favouriting and are available for tunes the user never starred.
+const KEY_AI_SUMMARIES = 'aiTuneSummaries';
+
+// Favourites are pushed to Firestore as one document containing the whole
+// array, so summary text mirrored onto them is the field most able to bloat it.
+const AI_SUMMARY_MAX_CHARS = 1200;
 
 class Store {
     constructor() {
@@ -57,7 +80,16 @@ class Store {
             LISTENING: 'listening',
         };
 
-        this.userSettings = JSON.parse(localStorage.getItem('userSettings')) || USER_SETTING_DEFAULTS;
+        // Spread over the defaults rather than `stored || DEFAULTS`. With the
+        // old `||`, any user who had ever saved settings read every
+        // newly-added key as undefined, because their stored blob simply did
+        // not contain it — which is why so many call sites coalesce with
+        // `|| false`. Merging means a new default actually reaches existing
+        // installs.
+        this.userSettings = {
+            ...USER_SETTING_DEFAULTS,
+            ...(JSON.parse(localStorage.getItem('userSettings')) || {}),
+        };
         this.searchState = this.searchStates.READY;
 
         this._favouriteIDs = null;
@@ -65,6 +97,7 @@ class Store {
         this._settingTagsCache = null;  // Map<settingID string, string[]>
         this._tuneTagsCache = null;     // Map<tuneID string, string[]> — union across all settings
         this._favouriteTempoCache = null; // Map<settingID string, number|null>
+        this._aiSummariesCache = null;    // object, tuneID string -> summary record
         this.analytics = null;
         this.analyticsLoaded = new Promise(resolve => {
             this.setAnalyticsLoaded = resolve;
@@ -83,6 +116,15 @@ class Store {
     }
 
     async updateUserSettings(userSettings) {
+        // Fill in any key the incoming object lacks. This matters on the import
+        // path: a backup written by an older version has no entry for a setting
+        // added since, and without this every consumer would read undefined.
+        // Mutated in place rather than merged into a copy, because several views
+        // hold a reference to this object and rely on it staying the same one.
+        for (const [key, value] of Object.entries(USER_SETTING_DEFAULTS)) {
+            if (userSettings[key] === undefined) userSettings[key] = value;
+        }
+
         // Usable immediately and synchronously by the entire application.
         this.userSettings = userSettings;
 
@@ -303,6 +345,199 @@ class Store {
         if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
+    // ---- Anthropic API key -------------------------------------------------
+    // Deliberately not part of userSettings; see API_KEY_STORAGE_KEY above.
+
+    getApiKey() {
+        try {
+            return localStorage.getItem(API_KEY_STORAGE_KEY) || '';
+        } catch (e) {
+            return '';
+        }
+    }
+
+    hasApiKey() {
+        return this.getApiKey().length > 0;
+    }
+
+    setApiKey(key) {
+        const trimmed = (key || '').trim();
+        if (!trimmed) {
+            this.clearApiKey();
+            return;
+        }
+        localStorage.setItem(API_KEY_STORAGE_KEY, trimmed);
+    }
+
+    clearApiKey() {
+        localStorage.removeItem(API_KEY_STORAGE_KEY);
+    }
+
+    // ---- AI summary spend tracking -----------------------------------------
+
+    getAiUsage() {
+        let stored = null;
+        try {
+            stored = JSON.parse(localStorage.getItem(AI_USAGE_STORAGE_KEY));
+        } catch (e) {
+            stored = null;
+        }
+        return {
+            calls: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            costUsd: 0,
+            ...(stored && typeof stored === 'object' ? stored : {}),
+        };
+    }
+
+    // Called once per successful generation. The cost is an estimate at list
+    // prices — see estimateCostUsd — but a measured token count beats an
+    // unknowable one.
+    recordAiUsage(usage, model) {
+        const total = this.getAiUsage();
+        total.calls += 1;
+        total.inputTokens += Number(usage && usage.input_tokens) || 0;
+        total.outputTokens += Number(usage && usage.output_tokens) || 0;
+        total.costUsd += estimateCostUsd(usage, model);
+        localStorage.setItem(AI_USAGE_STORAGE_KEY, JSON.stringify(total));
+        return total;
+    }
+
+    resetAiUsage() {
+        localStorage.removeItem(AI_USAGE_STORAGE_KEY);
+    }
+
+    // ---- AI summary cache --------------------------------------------------
+
+    async _loadAiSummaries() {
+        if (this._aiSummariesCache === null) {
+            let stored;
+            try {
+                stored = await get(KEY_AI_SUMMARIES);
+            } catch (e) {
+                console.error(`IndexedDB read error (${KEY_AI_SUMMARIES})`, e);
+                stored = null;
+            }
+            this._aiSummariesCache = (stored && typeof stored === 'object') ? stored : {};
+        }
+        return this._aiSummariesCache;
+    }
+
+    async getAiSummary(tuneID) {
+        if (!tuneID) return null;
+        const summaries = await this._loadAiSummaries();
+        return summaries[String(tuneID)] || null;
+    }
+
+    async countAiSummaries() {
+        const summaries = await this._loadAiSummaries();
+        return Object.keys(summaries).length;
+    }
+
+    async setAiSummary(tuneID, record) {
+        if (!tuneID || !record || !record.text) return;
+        tuneID = String(tuneID);
+
+        const stored = {
+            text: String(record.text).slice(0, AI_SUMMARY_MAX_CHARS),
+            model: record.model || null,
+            generatedAt: record.generatedAt || Date.now(),
+            sourceUrl: record.sourceUrl || '',
+        };
+
+        const summaries = await this._loadAiSummaries();
+        summaries[tuneID] = stored;
+        await this._dbSet(KEY_AI_SUMMARIES, summaries);
+
+        // Mirror onto any favourited setting of this tune. That is the only
+        // channel that syncs — sync.js knows about the favourites document and
+        // nothing else — so a summary generated on the phone reaches the laptop
+        // for tunes the user cares enough to have starred.
+        const items = await this.getFavourites();
+        let touched = false;
+        for (const item of items) {
+            const itemTuneID = item.result && item.result.setting && item.result.setting.tune_id;
+            if (itemTuneID != null && String(itemTuneID) === tuneID) {
+                item.aiSummary = stored;
+                touched = true;
+            }
+        }
+        if (touched) {
+            await this._dbSet('favouriteItems', items);
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        }
+    }
+
+    async clearAiSummaries() {
+        this._aiSummariesCache = {};
+        await this._dbSet(KEY_AI_SUMMARIES, {});
+
+        // Strip the mirrors too, otherwise the next inbound snapshot (or the
+        // next harvest) would quietly restore everything the user just cleared.
+        const items = await this.getFavourites();
+        let touched = false;
+        for (const item of items) {
+            if (item.aiSummary) {
+                delete item.aiSummary;
+                touched = true;
+            }
+        }
+        if (touched) {
+            await this._dbSet('favouriteItems', items);
+            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        }
+    }
+
+    // An inbound Firestore snapshot replaces the whole favourites array, so any
+    // summary a remote device does not know about would be destroyed. Harvest
+    // incoming summaries into the local cache, and keep the newer of the two
+    // where both sides have one — the local cache, not the synced document, is
+    // the durable copy.
+    async _harvestAiSummaries(items) {
+        if (!Array.isArray(items) || !items.length) return;
+        const summaries = await this._loadAiSummaries();
+        let changed = false;
+
+        for (const item of items) {
+            const incoming = item && item.aiSummary;
+            const tuneID = item && item.result && item.result.setting && item.result.setting.tune_id;
+            if (!incoming || !incoming.text || tuneID == null) continue;
+
+            const key = String(tuneID);
+            const existing = summaries[key];
+            if (!existing || (incoming.generatedAt || 0) > (existing.generatedAt || 0)) {
+                summaries[key] = incoming;
+                changed = true;
+            }
+        }
+
+        if (changed) await this._dbSet(KEY_AI_SUMMARIES, summaries);
+    }
+
+    // Re-apply locally cached summaries onto a favourites array that arrived
+    // without them, so the next outbound push carries them rather than
+    // propagating the deletion.
+    async _reapplyAiSummaries(items) {
+        if (!Array.isArray(items) || !items.length) return false;
+        const summaries = await this._loadAiSummaries();
+        let changed = false;
+
+        for (const item of items) {
+            const tuneID = item && item.result && item.result.setting && item.result.setting.tune_id;
+            if (tuneID == null) continue;
+            const cached = summaries[String(tuneID)];
+            if (!cached) continue;
+            const current = item.aiSummary;
+            if (!current || (cached.generatedAt || 0) > (current.generatedAt || 0)) {
+                item.aiSummary = cached;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
     async clearHistory() {
         await this._dbSet('historyItems', []);
     }
@@ -356,6 +591,8 @@ class Store {
         await this._dbSet('historyItems', payload.historyItems || []);
         // v1/v2 exports may have folderId on items; getFavourites() will migrate them on next load
         await this._dbSet('favouriteItems', payload.favouriteItems || []);
+        // Backups made after 3.9.0 carry AI summaries on favourited settings.
+        await this._harvestAiSummaries(payload.favouriteItems || []);
         if (payload.favouriteFolders) await this._dbSet('favouriteFolders', payload.favouriteFolders);
         await this.updateUserSettings(payload.userSettings || this.userSettings);
         this._invalidateFavouriteCache();
@@ -375,8 +612,16 @@ class Store {
         eventBus.$emit('authStateChanged', user);
         this._unsubscribeSync = syncSubscribe(user.uid, () => this.getFavourites(), async (type, items) => {
             if (type === 'favourites') {
+                // The incoming array replaces the local one wholesale, so AI
+                // summaries have to be reconciled around that write: harvest
+                // anything new the remote device knows, then re-apply anything
+                // it does not, so a device that has never generated a summary
+                // cannot silently delete them.
+                await this._harvestAiSummaries(items);
+                const restored = await this._reapplyAiSummaries(items);
                 await this._dbSet('favouriteItems', items);
                 this._invalidateFavouriteCache();
+                if (restored && this.currentUser) pushFavourites(this.currentUser.uid, items);
                 eventBus.$emit('syncComplete');
             }
         });

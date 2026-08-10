@@ -313,6 +313,11 @@ modes it was: never saved, or saved-then-evicted.
 - `'historyItems'` — array of `HistoryItem` objects (capped at 100)
 - `'ffIndexRaw'` / `'ffIndexManifest'` — tune index and its commit marker
 - `'tuneIndex'` / `'tuneIndexMetadata'` — legacy tune index (read-only, migrated away)
+- `'aiTuneSummaries'` — AI background notes, `{ tuneID: { text, model, generatedAt, sourceUrl } }`
+
+Not IndexedDB, but worth listing alongside — localStorage keys: `'userSettings'`,
+`'favouritesLocalUpdatedAt'`, `'anthropicApiKey'` (deliberately outside
+`userSettings` so it stays out of exported backups) and `'aiSummaryUsage'`.
 
 ### Firebase / Firestore
 
@@ -420,6 +425,8 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 ### User settings added
 
 - `recordingTimeLimitSecs` (default: 10, range: 5–60) — max recording length before auto-stop. Note: the search algorithm is optimised for ~10s; longer recordings can reduce accuracy due to NW alignment scoring and quadratic query time.
+- `aiSummariesEnabled` (default: false) — shows the (i) tune-background button. See "AI tune background notes" under Recent changes.
+- `aiSummaryModel` (default: `claude-haiku-4-5`) — which model writes the note.
 
 ### Help/About page additions
 
@@ -535,6 +542,120 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 - The Results page shows a small debug line: transcriber (ML/DSP) + the contour string — compare against the CLI's `transcribe` output for the same clip.
 
 ## Recent changes
+
+### AI tune background notes (August 2026 — v3.9.0)
+
+An **(i)** button on the Tune view writes a ~10-line program note about the tune —
+origin, earliest documented date, the story attached to it — via the Claude API
+using the **user's own** API key. Off by default (Settings → *AI Tune Summaries*).
+
+`app/src/services/aiSummary.js` is the whole network layer;
+`app/src/views/Tune.vue` holds the button and dialog; `store.js` owns the cache,
+the key and the spend counter.
+
+**No proxy, no Cloud Function, and none needed.** Both hops go straight from the
+browser:
+
+- **thesession.org** `/tunes/{id}?format=json` for hard facts (name, aliases,
+  type, meter, mode). This origin already serves CORS-permissive JSON to this
+  app — `Settings.vue`'s bookmarks import has fetched it from the browser in
+  production for months. Failure here is deliberately **non-fatal**: it resolves
+  to `null` and the note is written anyway.
+- **api.anthropic.com** `/v1/messages`, which permits browser calls when the
+  request carries `anthropic-dangerous-direct-browser-access: true`. There is no
+  server-side infrastructure in this repo (no `functions/`, hosting-only
+  `app/firebase.json`) and this feature does not add any.
+
+**The API key is deliberately NOT in `userSettings`.** `exportUserData()`
+serialises `userSettings` wholesale into the downloadable backup users share, so
+a key placed there would leak into that file. It lives under its own
+localStorage key (`anthropicApiKey`) and is excluded from both export and
+import. There is a test asserting the exported JSON does not contain it.
+
+#### Three API details that 400 if you get them wrong
+
+1. **The `web_fetch` tool version is model-gated.** The `_20260209` variant
+   (dynamic filtering) requires Opus 4.6+ / Sonnet 4.6+, so **Haiku 4.5 must use
+   `web_fetch_20250910`**. `webFetchToolFor()` encodes this and a unit test pins
+   it, so adding a model can't silently 400.
+2. **Some deployments require `anthropic-beta: web-fetch-2025-09-10`.** Rather
+   than guess, `requestWithLadder()` degrades: bare request → retry with the beta
+   header → retry with the tool removed entirely (note written from the model's
+   own knowledge, `degraded: true`). A 400 therefore never reaches the user as
+   "HTTP 400", and the open question of whether Haiku 4.5 serves `web_fetch` at
+   all resolves itself at runtime.
+3. **Thinking is left at each model's default.** Haiku 4.5 has no adaptive
+   thinking; Sonnet 5 runs adaptive when `thinking` is omitted, which is *wanted*
+   here because a thinking-disabled Sonnet 5 reaches for tools noticeably less
+   often and `web_fetch` firing is the point. Hence `max_tokens: 1500` — that cap
+   covers thinking *and* visible text together.
+
+#### Response-handling traps (all silent when got wrong)
+
+- **Never `content[0].text`.** With a server tool in play, `content[0]` is a
+  `web_fetch_tool_result` or a thinking block. Filter by `type === 'text'`.
+- **`web_fetch` errors do not raise** — they arrive as HTTP 200 with an error
+  object inside the result block. Treated as "no page text"; the note still
+  returns, with `pageRead: 'error'` so the dialog can caveat it.
+- **Check `stop_reason` before reading `content`.** On a refusal `content` is
+  empty, so indexing it throws a `TypeError` instead of reporting what happened.
+- **`pause_turn` must be resumed** (re-send with the assistant turn appended, no
+  synthetic "continue" message) but capped — 2 continuations, then `incomplete`.
+
+#### Cost guardrails
+
+Nothing is ever generated automatically: opening the dialog reads the cache and
+stops, so a cache miss shows a Generate button and waits for a tap. Results are
+cached permanently, so a tune costs at most one call per account. Default model
+is Haiku 4.5 (~$0.009/note; Sonnet 5 ~$0.03). `max_content_tokens: 6000` bounds
+the page read, `max_uses: 1` bounds the fetching, and `allowed_domains` is
+derived from the tune's own URL so the model cannot be talked into fetching
+anything else. Settings shows call count and approximate spend.
+
+#### Storage, and the invariant that matters
+
+Two copies, on purpose:
+
+- **`aiTuneSummaries`** (IndexedDB, `{ tuneID: { text, model, generatedAt,
+  sourceUrl } }`) is the durable copy. Covers every tune and survives
+  un-favouriting.
+- **`FavouriteItem.aiSummary`** is a mirror that exists *only* so the note rides
+  the existing favourites Firestore sync to the user's other devices. `sync.js`
+  knows about the favourites document and nothing else. Text is capped at 1200
+  chars because that document is the whole array in one `setDoc`.
+
+**The hazard:** an inbound snapshot replaces the local favourites array
+wholesale, so a second device that has never generated a summary would strip
+every mirror and propagate that deletion. `store.onChange` therefore
+`_harvestAiSummaries` (take anything newer the remote knows) then
+`_reapplyAiSummaries` (put back anything it does not) and re-pushes if it
+restored something. `npm test` asserts the property directly — *if a summary
+existed before a snapshot, it exists after* — and reinstating the naive
+wholesale replace fails 3 tests.
+
+#### Also fixed here: `userSettings` never picked up new defaults
+
+`store.js` loaded settings as `JSON.parse(stored) || USER_SETTING_DEFAULTS` — an
+`||`, not a merge. Any user who had ever saved settings read **every
+subsequently added key as `undefined`**, which is why call sites throughout the
+app coalesce with `|| false` / `?? 10`. Now spread over the defaults on load, and
+`updateUserSettings()` fills in missing keys in place (mutating rather than
+replacing, because several views hold a reference to that object and rely on its
+identity). This is what makes the two new settings reach existing installs.
+
+#### Tests
+
+- `app/test/aiSummary.test.mjs` (21 cases) — the network layer with a faked
+  `fetch`: block-type extraction, refusal, `pause_turn` resume and cap, the
+  web_fetch error path, the three-rung ladder, status→kind mapping, the bounded
+  deadline, and offline/no-key short-circuits that must not spend a request.
+- `app/test/aiSummaryStore.test.mjs` (14 cases) — the sync invariant above, key
+  exclusion from backups, truncation, mirror targeting, and spend accounting.
+- `scripts/probe_tune_summary.mjs` — live probe (`ANTHROPIC_API_KEY=... node
+  scripts/probe_tune_summary.mjs 14109 [model]`). Not in CI: it costs money.
+  Prints which ladder rung served, whether the page was actually read, real
+  token usage and cost. **This is the only way to confirm the `web_fetch` /
+  beta-header behaviour for a given model** — the unit tests fake the network.
 
 ### Microphone capture recovery after app switching (July 2026 — v3.8.0)
 
