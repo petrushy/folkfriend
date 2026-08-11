@@ -45,11 +45,15 @@ async function test(name, fn) {
 
 // --- fakes ----------------------------------------------------------------
 
+// Writes yield before committing, as a real IndexedDB transaction does. Without
+// that gap two overlapping installs would appear to interleave safely here and
+// the concurrency test would pass against racy code.
 const FAKE_IDB = `
+const yieldTick = () => new Promise(r => setImmediate(r));
 export const __db = new Map();
-export async function get(key) { return __db.get(key); }
-export async function set(key, value) { __db.set(key, value); }
-export async function del(key) { __db.delete(key); }
+export async function get(key) { await yieldTick(); return __db.get(key); }
+export async function set(key, value) { await yieldTick(); __db.set(key, value); }
+export async function del(key) { await yieldTick(); __db.delete(key); }
 `;
 
 const FAKE_COMLINK = `
@@ -71,6 +75,9 @@ export const __net = {
     metaError: null,
     body: null,
     bodyError: null,
+    // When set, a download parks here until the test releases it. Lets a second
+    // install be started while the first is provably still in flight.
+    gate: null,
     requests: [],
 };
 export function isDefinitelyOffline() { return !!__net.offline; }
@@ -82,9 +89,14 @@ export async function fetchTuneIndexMetadata() {
 export async function fetchTuneIndexText(bypassCacheVersion = null, onProgress = null) {
     __net.requests.push(bypassCacheVersion);
     if (__net.offline) throw new NetworkUnavailableError('Device is offline');
+    // Captured when the request is made, not when it completes — a response
+    // body is decided by the server at the start of the transfer, so a download
+    // parked at the gate must not pick up a payload the test set afterwards.
+    const body = __net.body;
+    if (__net.gate) await __net.gate;
     if (__net.bodyError) throw new NetworkUnavailableError(__net.bodyError);
-    if (onProgress) onProgress({ received: __net.body.length, total: __net.body.length });
-    return __net.body;
+    if (onProgress) onProgress({ received: body.length, total: body.length });
+    return body;
 }
 `;
 
@@ -140,6 +152,7 @@ function makeIndex(tag, n = 150) {
 
 const RAW_V1 = makeIndex('v1');
 const RAW_V2 = makeIndex('v2');
+const RAW_V3 = makeIndex('v3');
 
 // Everything a broken 200 response can plausibly be. Each of these previously
 // replaced the user's working offline copy.
@@ -215,6 +228,7 @@ function resetFakes() {
         metaError: null,
         body: RAW_V2,
         bodyError: null,
+        gate: null,
         requests: [],
     });
     Object.assign(wasmMod.__wasm,
@@ -418,9 +432,9 @@ async function run() {
         await assertOfflineCopyIs('v2', 2, 'download after a refused cache');
     });
 
-    await test('a payload that is no longer a tune index IS cleared on read', async () => {
-        // The other half of keeping unloadable copies: something written by an
-        // older build that never validated must not stick around forever.
+    await test('junk written by this schema IS cleared on read', async () => {
+        // The other half of keeping unloadable copies: something committed by a
+        // pre-validation release of THIS schema must not stick around forever.
         resetFakes();
         await storeMod.writeIndex('{"error":"not found"}', { v: 1, date: '2026-01-01' });
         assert.equal(await storeMod.readIndex(), null);
@@ -428,7 +442,152 @@ async function run() {
         assert.equal(idbMod.__db.has('ffIndexManifest'), false);
     });
 
+    await test('a payload from a NEWER schema is not deleted by this build', async () => {
+        // An older client must not destroy a database a later release wrote.
+        // "I cannot recognise this" is not "this is junk" — the same reasoning
+        // that used to delete a good copy whenever WASM refused to load it.
+        resetFakes();
+        idbMod.__db.set('ffIndexRaw', '{"tunes":[],"format":"schema-3"}');
+        idbMod.__db.set('ffIndexManifest',
+            { schema: storeMod.SCHEMA_VERSION + 1, v: 99, date: '2027-01-01', bytes: 33 });
+
+        assert.equal(await storeMod.readIndex(), null, 'it must not be used');
+        assert.equal(idbMod.__db.has('ffIndexRaw'), true, 'but it must not be deleted either');
+    });
+
+    await test('an unrecognisable payload with no manifest is not deleted', async () => {
+        resetFakes();
+        idbMod.__db.set('ffIndexRaw', '{"something":"else"}');
+        assert.equal(await storeMod.readIndex(), null);
+        assert.equal(idbMod.__db.has('ffIndexRaw'), true);
+    });
+
+    await test('...and a validated download still replaces it', async () => {
+        // Retaining junk costs nothing: writeIndex targets the same key.
+        netMod.__net.meta = { v: 5, date: '2026-05-01' };
+        netMod.__net.body = RAW_V2;
+        const wrapper = await newWorker();
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        await assertOfflineCopyIs('v2', 5, 'download over retained junk');
+    });
+
     // --- the status the UI reads ------------------------------------------
+
+    // --- only one install at a time ---------------------------------------
+
+    console.log('\nUpdates never run concurrently');
+
+    // Park a download and hand back the release lever.
+    function parkDownloads() {
+        let release, fail;
+        netMod.__net.gate = new Promise((res, rej) => { release = res; fail = rej; });
+        return { release: () => { netMod.__net.gate = null; release(); }, fail };
+    }
+
+    async function waitForDownloadsToStart(n) {
+        for (let i = 0; i < 500 && netMod.__net.requests.length < n; i++) {
+            await new Promise(r => setImmediate(r));
+        }
+        assert.equal(netMod.__net.requests.length, n,
+            `expected ${n} download(s) to have started`);
+    }
+
+    await test('a manual refresh joins a running background update', async () => {
+        // setupTuneIndex fires the background check WITHOUT awaiting it and then
+        // clears _setupInFlight, so this is reachable simply by tapping "Update
+        // offline copy" while the startup update is still downloading.
+        resetFakes();
+        await seedGoodCopy();
+        const wrapper = await newWorker();
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        netMod.__net.meta = { v: 2, date: '2026-02-01' };
+        netMod.__net.body = RAW_V2;
+        const gate = parkDownloads();
+
+        wrapper.autoUpdateEnabled = true;
+        const background = wrapper._checkForUpdateInBackground(await storeMod.readManifest());
+        await waitForDownloadsToStart(1);
+
+        // The host has moved on by the time the user taps Update, so an
+        // unguarded second install would carry a DIFFERENT payload — which is
+        // what makes a crossed manifest/payload pair possible at all.
+        netMod.__net.meta = { v: 3, date: '2026-03-01' };
+        netMod.__net.body = RAW_V3;
+        const manual = new Promise(r => wrapper.refreshTuneIndex(r));
+        await new Promise(r => setImmediate(r));
+
+        gate.release();
+        const result = await manual;
+        await background;
+
+        assert.equal(netMod.__net.requests.length, 1,
+            'the second caller must join the running install, not start another '
+            + '42 MB transfer');
+        assert.equal(result.ok, true);
+        await assertOfflineCopyIs('v2', 2, 'joined install');
+
+        // ffIndexRaw and ffIndexManifest are separate transactions, so two
+        // overlapping installs could commit a manifest from one and a payload
+        // from the other — undetectable at read time when the payloads happen
+        // to be the same length. Serialising is what rules it out; assert the
+        // pairing directly rather than through readIndex's bytes check.
+        const raw = idbMod.__db.get('ffIndexRaw');
+        const manifest = idbMod.__db.get('ffIndexManifest');
+        assert.equal(manifest.bytes, raw.length,
+            'the manifest must describe the payload sitting next to it');
+        assert.equal(JSON.parse(raw).settings['1000'].dance, 'v2');
+        assert.equal(Object.values(wasmMod.__wasm.loaded.settings)[0].dance, 'v2',
+            'the loaded index and the saved index must be the same generation');
+    });
+
+    await test('a joined install that fails restores the previous version, not undefined',
+        async () => {
+            // The snapshot is taken while the pipeline reads 'downloading',
+            // which carries no version — reading it from indexDetail would
+            // restore READY with v=undefined and blank the Settings/About
+            // version display.
+            resetFakes();
+            await seedGoodCopy();
+            const wrapper = await newWorker();
+            await new Promise(r => wrapper.setupTuneIndex(r));
+
+            netMod.__net.meta = { v: 2, date: '2026-02-01' };
+            netMod.__net.body = RAW_V2;
+            const gate = parkDownloads();
+
+            wrapper.autoUpdateEnabled = true;
+            const background = wrapper._checkForUpdateInBackground(await storeMod.readManifest());
+            await waitForDownloadsToStart(1);
+            const manual = new Promise(r => wrapper.refreshTuneIndex(r));
+            await new Promise(r => setImmediate(r));
+
+            netMod.__net.bodyError = 'connection reset mid-transfer';
+            gate.release();
+            const result = await manual;
+            await background;
+
+            assert.equal(result.ok, false);
+            assert.equal(wrapper.indexStatus, 'ready');
+            assert.equal(wrapper.indexDetail.v, 1, 'the old version must still be reported');
+            assert.equal(wrapper.indexDetail.date, '2026-01-01');
+            assert.ok(wrapper.indexDetail.updateError);
+            await assertOfflineCopyIs('v1', 1, 'failed joined install');
+        });
+
+    await test('a second refresh after the first finished starts a new install', async () => {
+        // The guard must not latch: once an install completes, the next one runs.
+        resetFakes();
+        await seedGoodCopy();
+        const wrapper = await newWorker();
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        netMod.__net.body = RAW_V2;
+        await new Promise(r => wrapper.refreshTuneIndex(r));
+        await new Promise(r => wrapper.refreshTuneIndex(r));
+        assert.equal(netMod.__net.requests.length, 2);
+        assert.equal(wrapper._indexUpdateInFlight, null, 'the guard must be released');
+    });
 
     console.log('\nStatus never contradicts usability');
 

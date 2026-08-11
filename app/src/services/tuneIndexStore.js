@@ -184,8 +184,23 @@ export async function readIndex() {
 
             const problem = indexPayloadProblem(parsed);
             if (problem) {
-                console.warn(`Cached tune index is not a tune index (${problem}); discarding`);
-                await clearIndex();
+                // Unusable — but "don't use it" and "destroy it" are separate
+                // decisions, and only one of them is irreversible.
+                //
+                // Delete ONLY when this build's own schema wrote it, which is
+                // exactly the case worth cleaning up: a payload committed by a
+                // pre-validation release of schema 2. A manifest naming another
+                // schema (or no manifest at all) may be a NEWER format that a
+                // later release wrote and this older client simply cannot
+                // recognise — the same "I can't consume it, therefore it must
+                // be junk" reasoning that used to delete a perfectly good copy
+                // whenever WASM failed to load it. Retaining it costs nothing:
+                // writeIndex targets the same key, so the next validated
+                // download overwrites it either way.
+                const ours = manifest && manifest.schema === SCHEMA_VERSION;
+                console.warn(`Cached tune index is not a tune index (${problem}); `
+                    + (ours ? 'discarding' : 'keeping it but not using it'));
+                if (ours) await clearIndex();
                 return null;
             }
 

@@ -69,6 +69,17 @@ class FolkFriendWASMWrapper {
             this._resolveIndexSettled = resolve;
         });
         this._setupInFlight = null;
+        // Guards the whole install (metadata → download → validate → WASM load
+        // → persist). SEPARATE from _setupInFlight, which cannot cover it:
+        // setup fires the background update check WITHOUT awaiting it and then
+        // clears _setupInFlight, so a manual refresh a second later saw no
+        // guard at all and ran a second install concurrently.
+        this._indexUpdateInFlight = null;
+        // What is actually loaded in WASM right now. Kept apart from
+        // indexDetail because indexDetail describes the PIPELINE: mid-update it
+        // reads 'downloading' and carries no version, so a snapshot taken then
+        // would restore READY with v=undefined on failure.
+        this._loadedIndexInfo = null;
 
         import ('@/wasm/folkfriend.js').then(wasm => {
             this.folkfriendWASM = new wasm.FolkFriendWASM();
@@ -129,7 +140,7 @@ class FolkFriendWASMWrapper {
     _snapshotIndexState() {
         return {
             usable: this.indexUsable,
-            detail: { ...this.indexDetail },
+            info: this._loadedIndexInfo ? { ...this._loadedIndexInfo } : null,
         };
     }
 
@@ -140,11 +151,12 @@ class FolkFriendWASMWrapper {
     _restoreAfterFailedInstall(snapshot, error) {
         const message = (error && error.message) || String(error);
         if (snapshot.usable) {
+            const info = snapshot.info || {};
             this._setIndexStatus(INDEX_STATUS.READY, {
-                source: snapshot.detail.source || 'cache',
-                v: snapshot.detail.v,
-                date: snapshot.detail.date,
-                legacy: !!snapshot.detail.legacy,
+                source: info.source || 'cache',
+                v: info.v,
+                date: info.date,
+                legacy: !!info.legacy,
                 updateError: message,
             });
         } else {
@@ -212,12 +224,13 @@ class FolkFriendWASMWrapper {
             if (cached) {
                 try {
                     await this.loadTuneIndex(cached.index);
-                    this._setIndexStatus(INDEX_STATUS.READY, {
+                    this._loadedIndexInfo = {
                         source: 'cache',
                         v: cached.manifest.v,
                         date: cached.manifest.date,
                         legacy: !!cached.manifest.legacy,
-                    });
+                    };
+                    this._setIndexStatus(INDEX_STATUS.READY, { ...this._loadedIndexInfo });
                     analyticsData['tune_index_metadata_version'] = cached.manifest.v;
                     analyticsData['tune_index_metadata_date'] = cached.manifest.date || null;
                     analyticsData['days_since_update'] = 0;
@@ -262,7 +275,7 @@ class FolkFriendWASMWrapper {
                 return this._finishSetup(analyticsData, t0);
             }
 
-            const installed = await this._downloadAndInstall(null);
+            const installed = await this._installExclusively(null);
             if (cachedLoadError) analyticsData['cached_load_error'] = cachedLoadError;
             analyticsData['newly_installed'] = true;
             analyticsData['days_since_update'] = 0;
@@ -383,14 +396,45 @@ class FolkFriendWASMWrapper {
         }
         raw = null; // release the ~42 MB string
 
+        this._loadedIndexInfo = { source: 'network', v: version.v, date: version.date };
         this._setIndexStatus(INDEX_STATUS.READY, {
-            source: 'network',
-            v: version.v,
-            date: version.date,
+            ...this._loadedIndexInfo,
             persistError,
         });
 
         return { v: version.v, date: version.date, persistError };
+    }
+
+    // Run an install with at most one in flight across the whole worker.
+    //
+    // Two installs could previously overlap: setup fires the background update
+    // check without awaiting it (deliberately — readiness must never wait on
+    // the network), then clears _setupInFlight, so tapping "Update offline
+    // copy" in Settings while that background update was still downloading
+    // started a second one. Both would validate before writing, so neither
+    // could store junk — but their writes interleave, and ffIndexRaw and
+    // ffIndexManifest are separate transactions. The end state could be a
+    // manifest from one install describing the payload of the other. When the
+    // two payloads differ in length readIndex catches the mismatch and reports
+    // the version as unknown, costing a redundant download; when they happen to
+    // be the same length nothing detects it and the version is simply wrong.
+    //
+    // A second caller JOINS the running install rather than queueing another:
+    // both want the same thing (the newest data, validated and saved), and
+    // queueing would mean a second 42 MB transfer on what is usually mobile
+    // data. The joiner gets the same resolution or rejection, and restores its
+    // own snapshot on failure.
+    async _installExclusively(bypassCacheVersion) {
+        if (this._indexUpdateInFlight) {
+            console.debug('Tune index install already in flight; joining it');
+            return await this._indexUpdateInFlight;
+        }
+        this._indexUpdateInFlight = this._downloadAndInstall(bypassCacheVersion);
+        try {
+            return await this._indexUpdateInFlight;
+        } finally {
+            this._indexUpdateInFlight = null;
+        }
     }
 
     async _checkForUpdateInBackground(manifest) {
@@ -417,7 +461,7 @@ class FolkFriendWASMWrapper {
         console.debug(`Upgrading tune index v${manifest.v} -> v${remote.v}`);
         const snapshot = this._snapshotIndexState();
         try {
-            await this._downloadAndInstall(remote.v);
+            await this._installExclusively(remote.v);
         } catch (e) {
             // Non-fatal: the cached index is loaded and usable, and the failed
             // update changed nothing on disk. Restore READY so a failed
@@ -450,7 +494,7 @@ class FolkFriendWASMWrapper {
             const snapshot = this._snapshotIndexState();
             try {
                 // Unique query string forces a fresh copy past any HTTP cache.
-                const installed = await this._downloadAndInstall(Date.now());
+                const installed = await this._installExclusively(Date.now());
                 return {
                     ok: true,
                     v: installed.v,

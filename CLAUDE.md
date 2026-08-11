@@ -230,6 +230,33 @@ must be treated as sacred:
    that parses is usable, full stop" — to "parses *and is shaped like a tune
    index*". Bookkeeping is still never grounds for discarding data; being a
    different document entirely is.
+
+   **That read-side delete is gated on provenance**, because otherwise it
+   reintroduces the very reasoning rule 8 forbids. It fires only when
+   `manifest.schema === SCHEMA_VERSION` — i.e. *this* build's format, which is
+   exactly the pre-validation-release case worth cleaning up. A manifest naming
+   another schema, or no manifest at all, may be a **newer** format a later
+   release wrote and this older client cannot recognise; that is not used, but
+   it is not deleted either. Retaining it is free: `writeIndex` targets the same
+   key, so the next validated download overwrites it regardless.
+10. **Only one install runs at a time** (`_indexUpdateInFlight`). `_setupInFlight`
+   could not cover this: setup fires the background update check *without*
+   awaiting it (deliberately — readiness must never wait on the network) and
+   then clears `_setupInFlight`, so tapping "Update offline copy" while the
+   startup update was still downloading started a second install. Post-rule-7
+   neither could store junk, but their writes interleave, and `ffIndexRaw` and
+   `ffIndexManifest` are separate transactions — so the pair could end up
+   crossed, a manifest from one install describing the payload of the other.
+   `readIndex`'s byte-length check catches that only when the two payloads
+   differ in length.
+
+   A second caller **joins** the running install rather than queueing another:
+   both want the same thing, and queueing means a second 42 MB transfer on what
+   is usually mobile data. Which is also why `_snapshotIndexState` reads
+   `_loadedIndexInfo` rather than `indexDetail` — a joiner takes its snapshot
+   while the pipeline reads `downloading`, which carries no version, so
+   restoring from `indexDetail` would report `v: undefined` on failure and blank
+   the version display.
 8. **Failing to consume the data is not proof the data is bad.** A cached copy
    that threw on `loadTuneIndex` used to be deleted on the spot, on the
    assumption that unloadable meant corrupt. On iOS the likelier causes are
@@ -364,8 +391,8 @@ modes it was: never saved, or saved-then-evicted.
 - `app/test/tune-index-cache.test.mjs` (21 cases) — the store and network layers
   with in-memory fakes. Quota failure, partial writes, corrupt payloads, legacy
   reads, stall aborts, and the interruption walk described in rule 5.
-- `app/test/tune-index-install.test.mjs` (32 cases) — the *install* path, i.e.
-  rules 7–9. It drives the real `worker.js` with its imports rewritten to fakes
+- `app/test/tune-index-install.test.mjs` (38 cases) — the *install* path, i.e.
+  rules 7–10. It drives the real `worker.js` with its imports rewritten to fakes
   (in-memory IndexedDB, a scriptable network, a WASM stand-in that can refuse a
   payload), deliberately rather than a reimplementation: the bug was entirely in
   the ORDER of four statements, and a test restating that order would have
@@ -375,7 +402,16 @@ modes it was: never saved, or saved-then-evicted.
   afterwards and confirm it is still the complete, parseable, loadable previous
   version. Verified by reinstating each old behaviour in turn: the write-first
   ordering fails 11, delete-on-load-failure fails 3, the `wasReady`
-  read-after-DOWNLOADING fails 1.
+  read-after-DOWNLOADING fails 1, unguarded concurrent installs fail 1,
+  snapshotting from `indexDetail` fails 1, and an unconditional read-side delete
+  fails 2.
+
+  Its fake IndexedDB yields before committing each write, as a real transaction
+  does — without that gap two overlapping installs interleave in lockstep and
+  the concurrency test passes against racy code. Its fake network captures the
+  response body when the request is *made*, not when it completes, so a download
+  parked mid-flight cannot pick up a payload the test set afterwards. Both
+  details are load-bearing; a fake that is too tidy proves nothing.
 - `npm run test:e2e` — real headless Chrome, driven over CDP. See
   `app/test/e2e/README.md`, which also documents the traps (CDP network
   emulation does not reach Web Workers; Chrome's HTTP cache masks the failure;
