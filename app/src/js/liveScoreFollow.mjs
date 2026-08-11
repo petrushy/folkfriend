@@ -81,3 +81,25 @@ export function applyOverride(previous, option) {
         changed: true,
     };
 }
+
+// The overlay component is destroyed on close (v-if) and recreated on reopen,
+// which would otherwise lose `target`/`abcSetting` and make resolveFollowTarget()
+// see `previous: null` — forcing a full reload indistinguishable from a genuine
+// tune change, even when the same tune is still playing. That reload can sit
+// behind the live-analysis worker queue until the next detection cycle, so
+// reopening looked like it was "waiting for a new detection". This module-level
+// cache survives remounts (there is only ever one overlay instance at a time) so
+// the component can seed itself with what was already on screen.
+let lastShown = { target: null, abcSetting: null, favourited: false };
+
+export function getLastShown() {
+    return lastShown;
+}
+
+export function setLastShown(state) {
+    lastShown = { ...lastShown, ...state };
+}
+
+export function clearLastShown() {
+    lastShown = { target: null, abcSetting: null, favourited: false };
+}

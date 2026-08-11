@@ -97,7 +97,7 @@ import store from '@/services/store.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import AbcDisplay from '@/components/AbcDisplay.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
-import { resolveFollowTarget, applyOverride } from '@/js/liveScoreFollow.mjs';
+import { resolveFollowTarget, applyOverride, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
 
 export default {
     name: 'LiveScoreFollow',
@@ -109,14 +109,19 @@ export default {
         },
     },
     data() {
+        // Seed from whatever was on screen the last time this overlay was open,
+        // so closing and reopening on the same still-playing tune shows it
+        // instantly instead of forcing a reload — see the comment on
+        // getLastShown() in liveScoreFollow.mjs.
+        const lastShown = getLastShown();
         return {
-            target: null,
-            abcSetting: null,
-            selectedTuneKey: null,
+            target: lastShown.target,
+            abcSetting: lastShown.abcSetting,
+            selectedTuneKey: lastShown.target ? this._optionKeyFor(lastShown.target) : null,
             loading: false,
             loadError: '',
             elapsedSeconds: liveAnalysisService.elapsedSeconds,
-            favourited: false,
+            favourited: lastShown.favourited,
             starIcon: mdiStar,
             starOutlineIcon: mdiStarOutline,
         };
@@ -178,6 +183,7 @@ export default {
         document.removeEventListener('visibilitychange', this._onVisibilityChange);
         eventBus.$off('liveAnalysisTimerTick', this._onTimerTick);
         this._releaseWakeLock();
+        setLastShown({ target: this.target, abcSetting: this.abcSetting, favourited: this.favourited });
     },
     methods: {
         formatSecondsAsClock,

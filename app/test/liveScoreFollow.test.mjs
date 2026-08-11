@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { resolveFollowTarget, applyOverride } from '../src/js/liveScoreFollow.mjs';
+import { resolveFollowTarget, applyOverride, getLastShown, setLastShown, clearLastShown } from '../src/js/liveScoreFollow.mjs';
 
 function opt(tuneId, settingId, title, score) {
     return {
@@ -151,6 +151,29 @@ function det(tuneId, settingId, title, bestScore, alternatives = []) {
 {
     const { target } = resolveFollowTarget([{ tuneId: 1, settingId: 10, title: 'A', bestScore: 0.5 }], null);
     assert.deepEqual(target.tuneOptions, []);
+}
+
+// getLastShown()/setLastShown() persist across the overlay's close/reopen
+// cycle, so a reopen on an unchanged tune can resolve `changed: false`
+// against a real previous target instead of null.
+{
+    clearLastShown();
+    assert.deepEqual(getLastShown(), { target: null, abcSetting: null, favourited: false });
+
+    const target = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
+    const abcSetting = { setting_id: 10, abc: 'X:1\n' };
+    setLastShown({ target, abcSetting, favourited: true });
+
+    const reopened = getLastShown();
+    assert.equal(reopened.target.tuneId, 1);
+    assert.equal(reopened.abcSetting, abcSetting);
+    assert.equal(reopened.favourited, true);
+
+    // Same tune still playing after reopen → no reload needed
+    const { changed } = resolveFollowTarget([det(1, 10, 'The Kesh', 0.73)], reopened.target);
+    assert.equal(changed, false);
+
+    clearLastShown();
 }
 
 console.log('liveScoreFollow.test.mjs passed');
