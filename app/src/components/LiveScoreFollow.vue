@@ -97,7 +97,7 @@ import store from '@/services/store.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import AbcDisplay from '@/components/AbcDisplay.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
-import { resolveFollowTarget, applyOverride, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
+import { resolveFollowTarget, applyOverride, cachedScoreMatchesTarget, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
 
 export default {
     name: 'LiveScoreFollow',
@@ -147,7 +147,12 @@ export default {
                 // that window read the stale cache and snapped the star back,
                 // making it look like the tap hadn't registered.
                 if (changed) this._syncFavourited();
-                if (changed) this.loadScore();
+                // Beyond a real tune change, a reload is also needed on reopen if
+                // the cached abcSetting (from before close) doesn't actually
+                // belong to this target — e.g. the tune changed while a load was
+                // still in flight when the overlay was closed. See
+                // cachedScoreMatchesTarget().
+                if (changed || !cachedScoreMatchesTarget(this.abcSetting, target)) this.loadScore();
             },
         },
     },

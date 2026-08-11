@@ -82,6 +82,23 @@ export function applyOverride(previous, option) {
     };
 }
 
+/**
+ * Whether `abcSetting` (as returned by settingsFromTuneID, carrying its own
+ * `tune_id`) is actually the score for `target`, rather than a previous
+ * tune's score that's still on screen while a newer load is in flight.
+ * loadScore() deliberately leaves the old abcSetting visible during a load
+ * (see its comment) so target and abcSetting can be legitimately out of sync
+ * for the duration of a fetch — including across a close/reopen if the user
+ * is fast enough. Only tune_id is compared, not setting_id: falling back to
+ * settings[0] when a specific settingId isn't found is an intentional,
+ * pre-existing choice in loadScore(), not a mismatch to correct here.
+ */
+export function cachedScoreMatchesTarget(abcSetting, target) {
+    if (!target) return true;
+    if (!abcSetting) return false;
+    return String(abcSetting.tune_id) === String(target.tuneId);
+}
+
 // The overlay component is destroyed on close (v-if) and recreated on reopen,
 // which would otherwise lose `target`/`abcSetting` and make resolveFollowTarget()
 // see `previous: null` — forcing a full reload indistinguishable from a genuine

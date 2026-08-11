@@ -1,6 +1,13 @@
 import assert from 'node:assert/strict';
 
-import { resolveFollowTarget, applyOverride, getLastShown, setLastShown, clearLastShown } from '../src/js/liveScoreFollow.mjs';
+import {
+    resolveFollowTarget,
+    applyOverride,
+    cachedScoreMatchesTarget,
+    getLastShown,
+    setLastShown,
+    clearLastShown,
+} from '../src/js/liveScoreFollow.mjs';
 
 function opt(tuneId, settingId, title, score) {
     return {
@@ -161,7 +168,7 @@ function det(tuneId, settingId, title, bestScore, alternatives = []) {
     assert.deepEqual(getLastShown(), { target: null, abcSetting: null, favourited: false });
 
     const target = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
-    const abcSetting = { setting_id: 10, abc: 'X:1\n' };
+    const abcSetting = { tune_id: 1, setting_id: 10, abc: 'X:1\n' };
     setLastShown({ target, abcSetting, favourited: true });
 
     const reopened = getLastShown();
@@ -172,6 +179,50 @@ function det(tuneId, settingId, title, bestScore, alternatives = []) {
     // Same tune still playing after reopen → no reload needed
     const { changed } = resolveFollowTarget([det(1, 10, 'The Kesh', 0.73)], reopened.target);
     assert.equal(changed, false);
+
+    clearLastShown();
+}
+
+// cachedScoreMatchesTarget(): the basics
+{
+    assert.equal(cachedScoreMatchesTarget(null, null), true, 'nothing to load');
+    assert.equal(cachedScoreMatchesTarget({ tune_id: 1 }, null), true, 'no target means nothing to load, regardless of stale abc');
+    assert.equal(cachedScoreMatchesTarget(null, { tuneId: 1 }), false, 'a target with no loaded abc must be loaded');
+    assert.equal(cachedScoreMatchesTarget({ tune_id: 1 }, { tuneId: 1 }), true);
+    assert.equal(cachedScoreMatchesTarget({ tune_id: 1 }, { tuneId: 2 }), false);
+    // tune_id/tuneId types can differ (schema.rs stores TuneID as a string;
+    // detection rows aren't guaranteed to match that exactly) — compared as strings.
+    assert.equal(cachedScoreMatchesTarget({ tune_id: '1' }, { tuneId: 1 }), true);
+}
+
+// Regression: closing the overlay mid-load must not let a stale abcSetting
+// masquerade as the new tune's score on reopen. loadScore() deliberately
+// keeps the previous abcSetting on screen while a newer one loads (see its
+// comment), so target and abcSetting can be genuinely out of sync — the
+// overlay must reload rather than trust `changed: false` alone.
+{
+    clearLastShown();
+
+    // Tune A was fully loaded and shown.
+    const targetA = resolveFollowTarget([det(1, 10, 'Tune A', 0.71)], null).target;
+    const abcSettingA = { tune_id: 1, setting_id: 10, abc: 'X:1\nTune A\n' };
+
+    // Detection moves to tune B; target updates immediately but the load for
+    // B's score hasn't resolved yet, so abcSetting is still A's (loadScore's
+    // documented behaviour). The user closes the overlay in this window.
+    const { target: targetB, changed } = resolveFollowTarget([det(2, 20, 'Tune B', 0.66)], targetA);
+    assert.equal(changed, true);
+    setLastShown({ target: targetB, abcSetting: abcSettingA, favourited: false });
+
+    // Reopen while B is still the current detection.
+    const reopened = getLastShown();
+    const resolved = resolveFollowTarget([det(2, 20, 'Tune B', 0.68)], reopened.target);
+    assert.equal(resolved.changed, false, 'tune has not changed again since the cached target');
+    assert.equal(
+        cachedScoreMatchesTarget(reopened.abcSetting, resolved.target),
+        false,
+        'cached abc is still Tune A — a reload must be forced even though changed is false',
+    );
 
     clearLastShown();
 }
