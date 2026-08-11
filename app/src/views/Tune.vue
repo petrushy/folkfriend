@@ -4,23 +4,19 @@
             {{ name }}
         </h1>
 
-        <v-container v-if="displayableAliases.length" class="mt-0 mb-2 py-0">
-            <span class="akaSpan pl-2 pr-1">Also known as</span>
-            <v-chip v-for="alias in displayableAliases" :key="alias" class="ma-1 px-2" small>
-                {{ alias }}
-            </v-chip>
+        <v-container class="mt-0 mb-2 py-0">
+            <template v-if="displayableAliases.length">
+                <span class="akaSpan pl-2 pr-1">Also known as</span>
+                <v-chip v-for="alias in displayableAliases" :key="alias" class="ma-1 px-2" small>
+                    {{ alias }}
+                </v-chip>
+            </template>
             <v-chip small class="sourceChip ma-1 px-2" @click="sourceClicked">
                 {{ sourceName }}&nbsp;<v-icon small>
                     {{ icons.openInNew }}
                 </v-icon>
             </v-chip>
-        </v-container>
-        <v-container v-else class="mt-0 mb-2 py-0">
-            <v-chip small class="sourceChip ma-1 px-2 py-2" @click="sourceClicked">
-                {{ sourceName }}&nbsp;<v-icon small>
-                    {{ icons.openInNew }}
-                </v-icon>
-            </v-chip>
+            <TuneBackgroundButton class="ma-1" :tuneID="tuneID" :displayName="name || displayName" :sourceUrl="folkwikiSourceUrl" />
         </v-container>
 
         <v-alert v-if="offlineFallback" dense text type="info" class="mx-2 my-2">
@@ -113,6 +109,7 @@
                 </v-expansion-panel-content>
             </v-expansion-panel>
         </v-expansion-panels>
+
     </v-container>
     <v-container v-else-if="loadError" class="px-10">
         <p>{{ loadError }}</p>
@@ -139,6 +136,7 @@ import {
     mdiTagPlusOutline,
 } from '@mdi/js';
 import store from '@/services/store.js';
+import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
 // fire: ffBackend.indexReady() resolves as soon as the worker's state machine
@@ -149,7 +147,7 @@ const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
     name: 'TuneView',
-    components: { AbcDisplay },
+    components: { AbcDisplay, TuneBackgroundButton },
     props: {
         tuneID: {
             type: String,
@@ -204,6 +202,14 @@ export default {
                 displayName: this.name || this.displayName,
                 sourceUrl: selectedSetting ? selectedSetting.source_url : '',
             });
+        },
+        // The raw `source_url` off the index, not the derived link. Folkwiki
+        // tunes are the only ones that carry it, and it is the only way to
+        // reconstruct their page URL — thesession tunes derive theirs from the
+        // tune ID, so passing '' for them is correct rather than lossy.
+        folkwikiSourceUrl() {
+            const selectedSetting = this.currentSettingForSource;
+            return (selectedSetting && selectedSetting.source_url) || '';
         },
         currentSettingForSource() {
             if (!this.settings || this.settings.length === 0) {
@@ -488,7 +494,7 @@ export default {
         },
         $openUrl: function (url) {
             window.open(url);
-        }
+        },
     },
 };
 </script>

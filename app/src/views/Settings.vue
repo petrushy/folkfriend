@@ -117,6 +117,113 @@
         </v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
+                AI Tune Summaries
+            </h1>
+            <p>
+                Adds an <strong>(i)</strong> button to each tune that writes a short
+                background note — origin, earliest documented date, the story attached to
+                it — suitable as a program note. Each note is generated once and then
+                saved, so opening the same tune again costs nothing and works offline.
+            </p>
+            <p class="caption text--secondary">
+                This uses <em>your</em> Anthropic API key and is billed to your own
+                account. A key kept in a browser can be read by anyone with access to this
+                device, so use a dedicated key with a spend limit rather than your main
+                one. It is stored only on this device and is deliberately left out of
+                exported backups.
+            </p>
+            <v-row>
+                <v-switch
+                    v-model="userSettings.aiSummariesEnabled"
+                    inset
+                    label="Show tune background notes"
+                    hint="Nothing is ever generated automatically — you tap to generate."
+                    persistent-hint
+                    class="my-0 pl-2"
+                    @change="settingsChanged"
+                />
+            </v-row>
+            <v-text-field
+                v-model="apiKeyInput"
+                label="Anthropic API key"
+                placeholder="sk-ant-..."
+                :type="showApiKey ? 'text' : 'password'"
+                :append-icon="showApiKey ? icons.eyeOff : icons.eye"
+                autocomplete="off"
+                spellcheck="false"
+                class="mt-4"
+                hint="Create one at console.anthropic.com. Stored on this device only."
+                persistent-hint
+                @click:append="showApiKey = !showApiKey"
+                @change="onApiKeyChanged"
+            />
+            <v-select
+                v-model="userSettings.aiSummaryModel"
+                :items="aiModelItems"
+                label="Model"
+                class="mt-4"
+                :hint="aiModelHint"
+                persistent-hint
+                @change="settingsChanged"
+            />
+            <v-simple-table dense class="mt-5 mb-2">
+                <tbody>
+                    <tr>
+                        <td class="text--secondary pr-4">Notes saved</td>
+                        <td>{{ aiSummaryCount === null ? 'checking…' : aiSummaryCount }}</td>
+                    </tr>
+                    <tr>
+                        <td class="text--secondary pr-4">API calls made</td>
+                        <td>{{ aiUsage.calls }}</td>
+                    </tr>
+                    <tr>
+                        <td class="text--secondary pr-4">Tokens used</td>
+                        <td>
+                            {{ aiUsage.inputTokens.toLocaleString() }} in,
+                            {{ aiUsage.outputTokens.toLocaleString() }} out
+                        </td>
+                    </tr>
+                    <tr>
+                        <td class="text--secondary pr-4">Approximate spend</td>
+                        <td>{{ formatUsd(aiUsage.costUsd) }}</td>
+                    </tr>
+                </tbody>
+            </v-simple-table>
+            <p class="caption text--secondary">
+                Spend is estimated from token counts at list prices, so treat it as a
+                guide — your Anthropic console is the real figure.
+            </p>
+            <v-row class="px-2">
+                <v-btn class="mr-3 mb-2" :disabled="!aiSummaryCount" @click="confirmClearAiSummaries">
+                    Clear saved notes
+                </v-btn>
+                <v-btn class="mb-2" text :disabled="!aiUsage.calls" @click="resetAiUsage">
+                    Reset counters
+                </v-btn>
+            </v-row>
+            <p v-if="aiMessage" class="mt-2 mb-0">
+                {{ aiMessage }}
+            </p>
+        </v-card>
+
+        <v-dialog v-model="clearAiDialog" max-width="360">
+            <v-card>
+                <v-card-title>Clear saved notes?</v-card-title>
+                <v-card-text>
+                    This deletes all {{ aiSummaryCount }} saved background notes on this
+                    device and removes them from your synced favourites. Generating them
+                    again will cost money again.
+                </v-card-text>
+                <v-card-actions>
+                    <v-spacer />
+                    <v-btn text @click="clearAiDialog = false">Cancel</v-btn>
+                    <v-btn text color="red" @click="clearAiSummaries">Delete</v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
+
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
                 Transfer Data
             </h1>
             <p>
@@ -317,6 +424,11 @@ import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
 import { fetchTuneIndexMetadata } from '@/services/tuneIndexNetwork.js';
 import {
+    MODELS as AI_MODELS,
+    DEFAULT_MODEL as DEFAULT_AI_MODEL,
+    estimateCostPerNoteUsd,
+} from '@/services/aiSummary.js';
+import {
     // mdiCellphoneArrowDownVariant,
     mdiAccountCircle,
     mdiCellphoneArrowDown,
@@ -324,6 +436,8 @@ import {
     mdiDotsVertical,
     mdiDownload,
     mdiExportVariant,
+    mdiEye,
+    mdiEyeOff,
     mdiGoogle,
     mdiImport,
     mdiLogout,
@@ -391,6 +505,8 @@ export default {
             installMobile: mdiCellphoneArrowDown,
             dotsVertical: mdiDotsVertical,
             download: mdiDownload,
+            eye: mdiEye,
+            eyeOff: mdiEyeOff,
             refresh: mdiRefresh,
             upload: mdiUpload,
         },
@@ -398,8 +514,29 @@ export default {
         userSettings: store.userSettings,
         isPWA: utils.checkStandalone(),
         restoreMessage: null,
+        // AI tune summaries. The key is read out of its own localStorage slot,
+        // never out of userSettings — see store.js.
+        apiKeyInput: store.getApiKey(),
+        showApiKey: false,
+        aiUsage: store.getAiUsage(),
+        aiSummaryCount: null,
+        aiMessage: null,
+        clearAiDialog: false,
     }),
     computed: {
+        aiModelItems() {
+            return Object.entries(AI_MODELS).map(([value, spec]) => ({
+                value,
+                text: spec.label,
+            }));
+        },
+        aiModelHint() {
+            const model = this.userSettings.aiSummaryModel || DEFAULT_AI_MODEL;
+            const spec = AI_MODELS[model] || AI_MODELS[DEFAULT_AI_MODEL];
+            return `$${spec.inputPerMTok.toFixed(2)} per million input tokens, ` +
+                `$${spec.outputPerMTok.toFixed(2)} per million output — up to about ` +
+                `${this.formatUsd(estimateCostPerNoteUsd(model))} per note, once per tune.`;
+        },
         offlineReady() {
             if (this.offlineStatus === null) return null;
             return !!this.offlineStatus.manifest;
@@ -488,6 +625,7 @@ export default {
         eventBus.$on('indexStatusChanged', this._onIndexStatus);
         this._fetchRemoteMetadata();
         this._refreshOfflineStatus();
+        this._refreshAiSummaryCount();
         // Ask for durable storage from a user-visible screen: some browsers
         // only grant it in response to engagement, and this is the page where
         // the user is explicitly thinking about offline use.
@@ -560,6 +698,35 @@ export default {
         },
         settingsChanged() {
             store.updateUserSettings(this.userSettings);
+        },
+        formatUsd(amount) {
+            const value = Number(amount) || 0;
+            if (value > 0 && value < 0.01) return '<$0.01';
+            return `$${value.toFixed(2)}`;
+        },
+        async _refreshAiSummaryCount() {
+            this.aiSummaryCount = await store.countAiSummaries();
+        },
+        onApiKeyChanged() {
+            store.setApiKey(this.apiKeyInput);
+            this.apiKeyInput = store.getApiKey();
+            this.aiMessage = this.apiKeyInput
+                ? 'API key saved on this device.'
+                : 'API key removed.';
+        },
+        confirmClearAiSummaries() {
+            this.clearAiDialog = true;
+        },
+        async clearAiSummaries() {
+            this.clearAiDialog = false;
+            await store.clearAiSummaries();
+            await this._refreshAiSummaryCount();
+            this.aiMessage = 'Saved background notes deleted.';
+        },
+        resetAiUsage() {
+            store.resetAiUsage();
+            this.aiUsage = store.getAiUsage();
+            this.aiMessage = 'Usage counters reset.';
         },
         onMlTranscriberChanged() {
             store.updateUserSettings(this.userSettings);

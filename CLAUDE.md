@@ -309,10 +309,18 @@ modes it was: never saved, or saved-then-evicted.
 
 ### IndexedDB (idb-keyval) — full key list
 
-- `'favouriteItems'` — array of `FavouriteItem` objects
+- `'favouriteItems'` — array of `FavouriteItem` objects (optionally carrying
+  `aiSummary` and `aiSummaryDeletedAt`; both are synced)
 - `'historyItems'` — array of `HistoryItem` objects (capped at 100)
 - `'ffIndexRaw'` / `'ffIndexManifest'` — tune index and its commit marker
 - `'tuneIndex'` / `'tuneIndexMetadata'` — legacy tune index (read-only, migrated away)
+- `'aiTuneSummaries'` — AI background notes, `{ tuneID: { text, model, generatedAt, sourceUrl } }`
+
+Not IndexedDB, but worth listing alongside — localStorage keys: `'userSettings'`,
+`'favouritesLocalUpdatedAt'`, `'anthropicApiKey'` (deliberately outside
+`userSettings` so it stays out of exported backups), `'aiSummaryUsage'` and
+`'aiSummariesClearedAt'` (the local, never-synced watermark that stops a stale
+device resurrecting cleared notes).
 
 ### Firebase / Firestore
 
@@ -420,6 +428,8 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 ### User settings added
 
 - `recordingTimeLimitSecs` (default: 10, range: 5–60) — max recording length before auto-stop. Note: the search algorithm is optimised for ~10s; longer recordings can reduce accuracy due to NW alignment scoring and quadratic query time.
+- `aiSummariesEnabled` (default: false) — shows the (i) tune-background button. See "AI tune background notes" under Recent changes.
+- `aiSummaryModel` (default: `claude-haiku-4-5`) — which model writes the note.
 
 ### Help/About page additions
 
@@ -535,6 +545,383 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 - The Results page shows a small debug line: transcriber (ML/DSP) + the contour string — compare against the CLI's `transcribe` output for the same clip.
 
 ## Recent changes
+
+### AI tune background notes (August 2026 — v3.9.0)
+
+An **(i)** button on the Tune view writes a ~10-line program note about the tune —
+origin, earliest documented date, the story attached to it — via the Claude API
+using the **user's own** API key. Off by default (Settings → *AI Tune Summaries*).
+
+`app/src/services/aiSummary.js` is the whole network layer;
+`app/src/components/TuneBackgroundButton.vue` is the (i) button,
+`app/src/components/TuneBackgroundDialog.vue` the panel it opens; `store.js` owns
+the cache, the key and the spend counter.
+
+#### One dialog, four buttons
+
+The button appears on the Tune view, on each search result row
+(`ResultRow.vue`), on each favourite (`FavouriteRow.vue`) and in the live session
+follow view (`LiveScoreFollow.vue`). The **dialog is mounted once, in `App.vue`**,
+and buttons open it with `eventBus.$emit('showTuneBackground', { tuneID,
+displayName, sourceUrl })`.
+
+That split is not cosmetic. A per-row dialog would instantiate one `v-dialog` per
+favourite — a lot of DOM for something at most one of which is ever visible — and
+would copy the cost guardrails (cache-first, never generate without a tap, single
+in-flight request) into four places. Centralising introduces exactly one new
+failure mode, and the dialog guards it: `show()` clears `summary`, `grounding`
+and `commentCount` **when the tune ID changed**, so opening the panel for tune B
+can never show tune A's note.
+
+`FavouriteRow` takes `tuneID` and `sourceUrl` as their own props rather than
+digging them out of `setting`, because the tag- and date-grouped favourite lists
+deliberately do not bind `setting` (no ABC preview there) and would otherwise
+lose the button. `Favourites.vue::_toRow` lifts both out.
+
+`HistoryRow.vue` has no button: it is passed only `name`/`descriptor`/
+`timestamp` and carries no tune identity at all, so adding one means changing
+what `History.vue` passes down.
+
+**No proxy, no Cloud Function, and none needed.** Both hops go straight from the
+browser:
+
+- **thesession.org** `/tunes/{id}?format=json` for hard facts (name, aliases,
+  type, meter, mode). This origin already serves CORS-permissive JSON to this
+  app — `Settings.vue`'s bookmarks import has fetched it from the browser in
+  production for months. Failure here is deliberately **non-fatal**: it resolves
+  to `null` and the note is written anyway.
+- **api.anthropic.com** `/v1/messages`, which permits browser calls when the
+  request carries `anthropic-dangerous-direct-browser-access: true`. There is no
+  server-side infrastructure in this repo (no `functions/`, hosting-only
+  `app/firebase.json`) and this feature does not add any.
+
+**The API key is deliberately NOT in `userSettings`.** `exportUserData()`
+serialises `userSettings` wholesale into the downloadable backup users share, so
+a key placed there would leak into that file. It lives under its own
+localStorage key (`anthropicApiKey`) and is excluded from both export and
+import. There is a test asserting the exported JSON does not contain it.
+
+#### Three API details that 400 if you get them wrong
+
+1. **The `web_fetch` tool version is model-gated.** The `_20260209` variant
+   (dynamic filtering) requires Opus 4.6+ / Sonnet 4.6+, so **Haiku 4.5 must use
+   `web_fetch_20250910`**. `webFetchToolFor()` encodes this and a unit test pins
+   it, so adding a model can't silently 400.
+2. **Some deployments require `anthropic-beta: web-fetch-2025-09-10`.** Rather
+   than guess, `requestWithLadder()` degrades: bare request → retry with the beta
+   header → retry with the tool removed entirely (note written from the model's
+   own knowledge, `degraded: true`). A 400 therefore never reaches the user as
+   "HTTP 400", and the open question of whether Haiku 4.5 serves `web_fetch` at
+   all resolves itself at runtime.
+3. **Thinking is left at each model's default.** Haiku 4.5 has no adaptive
+   thinking; Sonnet 5 runs adaptive when `thinking` is omitted, which is *wanted*
+   here because a thinking-disabled Sonnet 5 reaches for tools noticeably less
+   often and `web_fetch` firing is the point. Hence `max_tokens: 1500` — that cap
+   covers thinking *and* visible text together.
+
+#### What the first on-device test actually broke (August 2026)
+
+The unit tests fake `fetch`, so they could not have caught any of this. The first
+real generation returned a *refusal* rather than a note, and it took three
+separate bugs to produce it. All three are now pinned by tests, each verified by
+reinstating the bug:
+
+1. **The tool-call preamble was being treated as part of the note.** The model
+   narrates before calling a server tool ("I'll fetch that page to research the
+   tune's history"), and `extractText` joined *every* `text` block, so that
+   narration was prepended to the summary. It now takes only prose **after the
+   last `web_fetch_tool_result`**, falling back to all text when no tool ran.
+   This affected successful notes too, not just failures.
+2. **A fetch that failed at runtime made the model decline entirely.** The
+   ladder below only covers the API *rejecting* the tool with a 400; a tool that
+   is accepted and then cannot reach the page returns HTTP 200 with an error
+   object. The prompt still said "fetch this page first and prefer what it says",
+   so the model reported the network problem and refused to write — reinforced by
+   the honesty rule ("don't fill gaps with invention"), which it read as "no
+   record exists". Fixed at both levels: the prompt now says a failed fetch means
+   silently fall back to knowledge and **never decline**, and
+   `generateTuneSummary` **regenerates once with the tool and the fetch
+   instruction removed** when `pageRead === 'error'`. If that retry also fails,
+   the first attempt is kept rather than turning a caveated note into an error.
+3. **It asked the reader to paste the page in.** The model had no idea it was
+   writing into a one-shot panel. The prompt now states that the reply is
+   rendered verbatim with no reply channel, so it must never ask a question,
+   suggest retrying, or describe its own tools and difficulties.
+
+A fourth, latent version of (2): rung 3 of the ladder dropped the tool but
+**reused the prompt built for rung 1**, leaving "fetch this page first" in a
+request with no fetch tool — precisely the state that causes the refusal. The
+ladder now takes a `makeBody(canFetch)` function and rebuilds the prompt.
+
+Also hardened: `allowed_domains` now carries **both** host spellings
+(`thesession.org` and `www.thesession.org`), since a redirect between them would
+be blocked by our own allowlist and would look like an unexplained fetch failure.
+
+**The lesson:** a prompt that names an authority the model may not be able to
+reach needs an explicit instruction for what to do when it cannot — and the
+fallback path must rebuild the prompt, not just strip the tool.
+
+**The actual cause of that first failure was our own allowlist.** With the `www.`
+variant added the fetch started working, so a redirect between `thesession.org`
+and `www.thesession.org` was being blocked by `allowed_domains`. It surfaced as a
+"network issue" the model reported in prose, which is about as indirect as a bug
+report gets.
+
+#### Then the notes were shallow (August 2026)
+
+Once the page was reachable, notes came back restating the tune's aliases, key
+and type — all of which the Tune view renders inches above the note — with almost
+no history. Three causes, two of them self-inflicted:
+
+1. **We were feeding it the metadata and telling it to prefer it.** `factsBlock`
+   listed title/aliases/type/meter/key/setting-count under the heading "Known
+   facts from the source database (authoritative — **prefer these over the
+   page**…)". That is an instruction to write about metadata. Meter, mode and
+   setting count are no longer collected at all, and what remains is labelled
+   identification-only with an explicit "none of it belongs in your note".
+2. **The prompt never said what to leave out.** It now names the five things the
+   UI already shows (aliases, key/mode/meter, tune type, setting count, melodic
+   description) and forbids them, and asks in priority order for geography,
+   dates, named sources, named people, and disputes — "prefer specifics over
+   characterisation".
+3. **`max_content_tokens: 6000` was probably truncating before the comments.** A
+   thesession page carries a full ABC block *per setting* above the discussion,
+   and notation is token-dense, so on a tune with many settings the budget was
+   spent before the comments began — leaving the header metadata as the only
+   thing the model actually saw. Raised to **30000**, and the prompt now says
+   explicitly that the notation is near the top, the discussion is lower down,
+   and the discussion is the point.
+
+#### And then the model stopped being asked to fetch at all (August 2026)
+
+Raising the budget did not fix it either, because truncation was never the cause.
+The decisive observation came from a note on tune 1316 (*Maggie's Pancakes*)
+generated with **Sonnet 5**: it claimed no documentary record existed, while the
+page names the composer in its *first line* and carries 36 comments including the
+composer's own post dating the tune to Live Aid day. Two things follow:
+
+- Truncation keeps the **top** of a page, so any page content at all would have
+  carried the composer. Not a `max_content_tokens` problem.
+- The dialog showed **no caveat**, meaning `pageRead === 'ok'` — the tool ran and
+  reported success — while the model plainly had nothing. Sonnet 5 uses the
+  `_20260209` web_fetch variant, whose dynamic filtering runs code over the page
+  before it reaches the model; on a page that is mostly ABC notation and link
+  lists that can discard the discussion entirely.
+
+So **`pageRead === 'ok'` is worthless as a quality signal** — worse, it silently
+told the reader the source had been read when it had not, which is what hid this
+for two rounds. It is replaced by `grounding`
+(`'comments' | 'page' | 'knowledge'`), and the page path only counts as grounded
+when `pageFetchStats()` reports substantial text that reaches the comments.
+
+**The app now fetches the discussion itself and puts it in the prompt**
+(`fetchSessionComments`): `?format=json` first (that origin+format is
+CORS-proven), falling back to the HTML page parsed with `DOMParser`, selecting
+`[id^="comment"]` and then a comments-heading slice. When comments are in hand the
+`web_fetch` tool is **not offered at all** — leaving it attached invites a
+re-fetch and reintroduces the filtering step that lost them.
+
+This is cheaper as well as better: a few thousand tokens of prose instead of tens
+of thousands of notation, so `WEB_FETCH_MAX_CONTENT_TOKENS` went back down to
+10000 (it now only governs the fallback) and the default model stays Haiku 4.5 —
+with the material supplied, a cheap model summarising real text beats an
+expensive one guessing.
+
+> ⚠️ **Whether thesession.org sends CORS headers on HTML is unverified.**
+> `?format=json` demonstrably does; the HTML page is a bet. It could not be tested
+> from a Claude Code session (the host is blocked by egress policy), which is why
+> the JSON attempt comes first and the whole thing degrades to `'knowledge'`
+> rather than failing. If `grounding` reads `'page'` or `'knowledge'` on every
+> tune in the field, that bet lost and the next step is a read-only proxy — which
+> this repo has no infrastructure for.
+
+`estimateCostPerNoteUsd()` derives the Settings figure from `MAX_COMMENTS_CHARS`,
+so changing the cap cannot leave a stale (flatteringly cheap) number on screen:
+~$0.009 per note on Haiku 4.5 and ~$0.027 on Sonnet 5, once per tune, cached
+forever.
+
+**`pageFetchStats()` is how to tell whether any of this worked**, since "the
+fetch succeeded" and "the model saw the comments" are different claims. It digs
+the fetched text back out of the `web_fetch_tool_result` and reports its length
+plus whether comment markers appear; it is logged to the console on every
+generation and printed by `scripts/probe_tune_summary.mjs`. If `looksLikeComments`
+is false, the budget is still too small — that is the number to raise.
+
+> ⚠️ **`thesession.org` is blocked by the sandbox egress policy**, so none of the
+> above could be verified from a Claude Code session — not by `curl`, not by
+> `WebFetch`. The unit tests fake the network. Whether the discussion actually
+> reaches the model can only be established on a real device or with a real key
+> via the probe script, which is exactly what `pageFetchStats` exists to answer.
+
+#### Response-handling traps (all silent when got wrong)
+
+- **Never `content[0].text`.** With a server tool in play, `content[0]` is a
+  `web_fetch_tool_result` or a thinking block — and the *first* text block is
+  usually the pre-tool preamble, not the answer. See (1) above.
+- **`web_fetch` errors do not raise** — they arrive as HTTP 200 with an error
+  object inside the result block. `pageRead` is the only way to detect it, and it
+  now drives a regeneration rather than just a UI caveat. See (2) above.
+- **Check `stop_reason` before reading `content`.** On a refusal `content` is
+  empty, so indexing it throws a `TypeError` instead of reporting what happened.
+- **`pause_turn` must be resumed** (re-send with the assistant turn appended, no
+  synthetic "continue" message) but capped — 2 continuations, then `incomplete`.
+
+#### Cost guardrails
+
+Nothing is ever generated automatically: opening the dialog reads the cache and
+stops, so a cache miss shows a Generate button and waits for a tap. Results are
+cached permanently, so a tune costs at most one call per account. Default model
+is Haiku 4.5 (~$0.009/note; Sonnet 5 ~$0.03). `max_content_tokens: 6000` bounds
+the page read, `max_uses: 1` bounds the fetching, and `allowed_domains` is
+derived from the tune's own URL so the model cannot be talked into fetching
+anything else. Settings shows call count and approximate spend.
+
+#### Storage, and the invariant that matters
+
+Two copies, on purpose:
+
+- **`aiTuneSummaries`** (IndexedDB, `{ tuneID: { text, model, generatedAt,
+  sourceUrl } }`) is the durable copy. Covers every tune and survives
+  un-favouriting.
+- **`FavouriteItem.aiSummary`** is a mirror that exists *only* so the note rides
+  the existing favourites Firestore sync to the user's other devices. `sync.js`
+  knows about the favourites document and nothing else. Text is capped at 1200
+  chars because that document is the whole array in one `setDoc`.
+
+**The hazard:** an inbound snapshot replaces the local favourites array
+wholesale, so a second device that has never generated a summary would strip
+every mirror and propagate that deletion. `store.onChange` therefore
+`_harvestAiSummaries` (take anything newer the remote knows) then
+`_reapplyAiSummaries` (put back anything it does not) and re-pushes if it
+restored something. `npm test` asserts the property directly — *if a summary
+existed before a snapshot, it exists after* — and reinstating the naive
+wholesale replace fails 3 tests.
+
+**The other half of that hazard: deletion cannot be encoded as absence.** The
+repair above is *why* — `_reapplyAiSummaries` is supposed to treat a favourite
+with no `aiSummary` as a device that never generated one, and restore it. So
+"Clear saved notes" stripping the mirrors was undone by the user's other device:
+it read the deletion as ignorance, put its own cached copy back and pushed it.
+The confirm dialog promises the clear reaches "your synced favourites", so this
+was a broken promise, not just a design choice.
+
+`clearAiSummaries` therefore writes a tombstone, **`FavouriteItem.aiSummaryDeletedAt`**
+(millis), onto *every* favourite — not only ones that currently carry a mirror,
+because another device may hold a note this one has never seen and "clear all"
+has to reach that too. `_harvestAiSummaries` honours a tombstone newer than the
+local copy by deleting it; `_reapplyAiSummaries` refuses to restore under one.
+`setAiSummary` **deletes the tombstone** when it mirrors, so regenerating after a
+clear wins. Both comparisons use `>=` deliberately: a clear and a generate in the
+same millisecond is unresolvable either way, and what matters is that the two
+functions agree — disagreeing would let the pair delete in one and restore in the
+other on the same snapshot.
+
+**The synced tombstone cannot protect the device that wrote it.** Favourites sync
+is whole-document last-writer-wins, arbitrated by a document-level `Date.now()`
+(`sync.js`, `clientUpdatedAt`). A device that has not yet processed the clear can
+touch an unrelated favourite and push its whole array — still carrying the note,
+and with no tombstone, because it never saw one — and that write is legitimately
+newer *at the document level*. Reconciliation only ever sees the incoming array,
+so the tombstone this device wrote is not in the conversation, and `!existing`
+cannot tell "never had it" from "deleted it". The note came back.
+
+So there is also a local watermark, **`localStorage['aiSummariesClearedAt']`**,
+never synced. `_harvestAiSummaries` drops any incoming note with
+`generatedAt <= clearedAt`; `_reapplyAiSummaries` strips such a note from the
+inbound array and **re-stamps the tombstone**, so the correction propagates —
+without that the two devices trade the note back and forth forever, because the
+only device that knows it was deleted never says so.
+
+A single timestamp, not a per-tune tombstone map, for two reasons: "Clear saved
+notes" is inherently clear-*all*, and per-tune markers cannot cover a note the
+*other* device holds and this one never had — there is no local marker to consult
+for that tune and the stale write carries none either. `npm test` pins that case
+specifically.
+
+**Protection has to be transitive, so an incoming tombstone advances the
+watermark.** `_adoptIncomingClear` takes the newest `aiSummaryDeletedAt` in a
+snapshot and raises the local watermark to it (`max`, never lowering).
+Without it only the device where Clear was pressed is defended: a device that
+merely *hears* about the clear deletes its copy and is then defenceless — no
+cached note left to compare against and no watermark of its own — so a third
+device that never saw the clear resurrects the note there. It runs as a pre-pass
+rather than inside the reconciliation loop, so a tombstone and a stale note in the
+*same* snapshot are both judged against the clear and item order cannot decide
+the outcome.
+
+⚠️ That promotes a per-favourite marker into a global watermark, which is only
+sound because `aiSummaryDeletedAt` is written in exactly two places and both mean
+clear-*all*: `clearAiSummaries`, and the re-stamp in `_reapplyAiSummaries` (which
+derives from this same watermark). **A per-tune delete must not reuse that
+field** — it would read as "clear everything older than this" and take out
+unrelated notes.
+
+`importUserData` clears the watermark first: restoring a backup is an explicit
+request for its contents, so it outranks an earlier clear rather than having its
+older notes silently filtered out.
+
+This is wall-clock across devices, so a badly skewed clock can still slip a note
+through. Every other conflict decision in favourites sync has the same exposure,
+and losing this one costs a resurrected note rather than a lost one.
+
+#### The async race that the tune-ID guards do *not* cover
+
+`TuneBackgroundDialog.generateSummary()` captures **every** input to the request
+synchronously, before the first `await`, into a `request` object. Reading
+`displayName` or `sourceUrl` off `this` after an await is a bug: the dialog is
+dismissible by tapping outside it, so the user can reopen it for another tune
+while the comment fetch is still in flight, and tune A's note then gets built
+with tune B's title and page URL — and saved under A. `sourceUrl` also derives
+`allowed_domains`, so a crossed request is pointed at the wrong page, not merely
+mislabelled.
+
+The `String(this.tuneID) === String(tuneID)` guards further down govern only what
+is *displayed*. They cannot un-poison a record that has already been written.
+This got materially more reachable when the (i) button moved onto list rows,
+where dismiss-and-tap-the-next-row is a natural gesture.
+
+`app/test/tuneBackgroundDialog.test.mjs` pins it by holding
+`fetchSessionComments` unresolved, switching the dialog to another tune, then
+releasing. It needs no Vue runtime: the component is a plain Options-API object,
+so the test lifts its `<script>` block out of the SFC, rewrites the three
+imports to fakes, and calls `methods.generateSummary` against a fake `this` built
+from `data()`. That only works because the network layer is kept out of the
+component — worth preserving.
+
+#### Also fixed here: `userSettings` never picked up new defaults
+
+`store.js` loaded settings as `JSON.parse(stored) || USER_SETTING_DEFAULTS` — an
+`||`, not a merge. Any user who had ever saved settings read **every
+subsequently added key as `undefined`**, which is why call sites throughout the
+app coalesce with `|| false` / `?? 10`. Now spread over the defaults on load, and
+`updateUserSettings()` fills in missing keys in place (mutating rather than
+replacing, because several views hold a reference to that object and rely on its
+identity). This is what makes the two new settings reach existing installs.
+
+#### Tests
+
+- `app/test/aiSummary.test.mjs` (21 cases) — the network layer with a faked
+  `fetch`: block-type extraction, refusal, `pause_turn` resume and cap, the
+  web_fetch error path, the three-rung ladder, status→kind mapping, the bounded
+  deadline, and offline/no-key short-circuits that must not spend a request.
+- `app/test/aiSummaryStore.test.mjs` (23 cases) — both storage invariants above.
+  The deletion half is covered from seven angles, because each one fails a
+  different plausible implementation: a tombstoned deletion must not be
+  resurrected; a *stale device's* push must not resurrect it either; nor must one
+  for a tune this device never held; a *third* device must not resurrect it at a
+  device that only heard about the clear; a note generated elsewhere *after* the
+  clear must still be accepted, including after an adopted clear; and a
+  regenerate on this device must stick. Plus key exclusion from backups,
+  truncation, mirror targeting, and spend accounting.
+- `app/test/tuneBackgroundDialog.test.mjs` (8 cases) — the shared dialog: the
+  request is built only from the tune it started for, a late result is saved but
+  not shown, opening never generates, reopening a different tune clears the
+  previous note, and a double tap collapses to one paid call.
+- `scripts/probe_tune_summary.mjs` — live probe (`ANTHROPIC_API_KEY=... node
+  scripts/probe_tune_summary.mjs 14109 [model]`). Not in CI: it costs money.
+  Prints which ladder rung served, whether the page was actually read, real
+  token usage and cost. **This is the only way to confirm the `web_fetch` /
+  beta-header behaviour for a given model** — the unit tests fake the network.
 
 ### Microphone capture recovery after app switching (July 2026 — v3.8.0)
 
