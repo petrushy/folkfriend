@@ -372,6 +372,7 @@ import liveAnalysisService from '@/services/liveAnalysis.js';
 import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
 import LiveScoreFollow from '@/components/LiveScoreFollow.vue';
+import { clearLastShown } from '@/js/liveScoreFollow.mjs';
 import {
     buildTuneListText,
     buildTuneOptions,
@@ -757,6 +758,11 @@ export default {
         async startLiveAnalysis() {
             this.liveMicError = '';
             this.detections = [];
+            // A fresh session's first detection can coincidentally share a
+            // tuneId with whatever the follow overlay last showed, which would
+            // otherwise read as "same tune, no reload needed" and could also
+            // resurrect a stale manual override from the previous session.
+            clearLastShown();
             this.analysisSummary.acceptedWindows = 0;
             this.analysisStage = 'analyzing';
             this.analysisError = '';
