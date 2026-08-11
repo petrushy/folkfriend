@@ -291,6 +291,111 @@ await test('a clear on one device is not undone by a second device', async () =>
     );
 });
 
+await test('a clear survives a stale note pushed by a device that missed it', async () => {
+    // Favourites sync is whole-document last-writer-wins, and sync.js decides
+    // which side is newer by a document-level Date.now(). So a device that had
+    // not yet processed the clear can touch an unrelated favourite, push its
+    // whole array — still carrying the note, and with no tombstone, because it
+    // never saw one — and that write is legitimately newer at the document
+    // level. The incoming array is then the only thing reconciliation looks at,
+    // so a tombstone that lives only on the outgoing favourites is gone.
+    const { store, idb, sync } = await loadStore();
+    idb.__db.set('favouriteItems', [favourite(101, '7')]);
+    await store.setAiSummary('7', { text: 'Note.', generatedAt: 1000 });
+    await store.onSignedIn({ uid: 'user-1' });
+
+    await store.clearAiSummaries();
+    assert.equal(await store.getAiSummary('7'), null);
+    sync.__pushes.length = 0;
+
+    // The stale device's whole-document write arrives.
+    const stale = favourite(101, '7');
+    stale.aiSummary = { text: 'Note.', generatedAt: 1000 };
+    await sync.__onChange('favourites', [stale]);
+
+    assert.equal(await store.getAiSummary('7'), null,
+        'a note older than the clear must not be resurrected');
+    assert.equal(idb.__db.get('favouriteItems')[0].aiSummary, undefined,
+        'the stale mirror must be stripped, not adopted');
+    // Otherwise the two devices flip the note back and forth forever; the
+    // device that knows about the deletion has to state it again.
+    assert.ok(
+        sync.__pushes.some(items => items[0] && items[0].aiSummaryDeletedAt),
+        'the tombstone must be re-pushed so the stale device learns of it',
+    );
+});
+
+await test('a clear also blocks a stale note this device never held', async () => {
+    // This is why the guard is a single watermark and not a per-tune tombstone
+    // map: there is no local marker for a tune this device never had a note for,
+    // and the stale write carries none either, so a per-tune design has nothing
+    // to consult and adopts the note.
+    const { store, idb, sync } = await loadStore();
+    idb.__db.set('favouriteItems', [favourite(101, '7'), favourite(201, '9')]);
+    await store.setAiSummary('7', { text: 'Only tune 7 here.', generatedAt: 1000 });
+    await store.onSignedIn({ uid: 'user-1' });
+
+    await store.clearAiSummaries();
+
+    // The other device holds a note for tune 9, which this one never generated.
+    const stale = [favourite(101, '7'), favourite(201, '9')];
+    stale[1].aiSummary = { text: 'Note for 9, made elsewhere.', generatedAt: 1500 };
+    await sync.__onChange('favourites', stale);
+
+    assert.equal(await store.getAiSummary('9'), null,
+        'a note predating the clear must not arrive as a novelty');
+    assert.equal(await store.countAiSummaries(), 0);
+});
+
+await test('a note generated elsewhere after the clear is still accepted', async () => {
+    // The watermark must not become a permanent embargo on syncing.
+    const { store, idb, sync } = await loadStore();
+    idb.__db.set('favouriteItems', [favourite(101, '7')]);
+    await store.setAiSummary('7', { text: 'Old note.', generatedAt: 1000 });
+    await store.onSignedIn({ uid: 'user-1' });
+    await store.clearAiSummaries();
+
+    const fresh = favourite(101, '7');
+    fresh.aiSummary = { text: 'Generated on the phone after the clear.', generatedAt: Date.now() + 1000 };
+    await sync.__onChange('favourites', [fresh]);
+
+    assert.equal((await store.getAiSummary('7')).text, 'Generated on the phone after the clear.');
+});
+
+await test('regenerating on this device after a real clear sticks', async () => {
+    const { store, idb, sync } = await loadStore();
+    idb.__db.set('favouriteItems', [favourite(101, '7')]);
+    await store.setAiSummary('7', { text: 'Old note.', generatedAt: 1000 });
+    await store.onSignedIn({ uid: 'user-1' });
+    await store.clearAiSummaries();
+
+    await store.setAiSummary('7', { text: 'Paid for again.', generatedAt: Date.now() + 1000 });
+
+    // The echo of our own push comes back; it must not be read as stale.
+    const echoed = JSON.parse(JSON.stringify(idb.__db.get('favouriteItems')));
+    await sync.__onChange('favourites', echoed);
+
+    assert.equal((await store.getAiSummary('7')).text, 'Paid for again.',
+        'the watermark must not eat a note generated after it');
+});
+
+await test('restoring a backup outranks an earlier clear', async () => {
+    const { store, idb } = await loadStore();
+    idb.__db.set('favouriteItems', [favourite(101, '7')]);
+    await store.setAiSummary('7', { text: 'Note.', generatedAt: 1000 });
+    await store.clearAiSummaries();
+
+    // Importing is an explicit request for the file's contents, so its notes
+    // must not be silently filtered by a clear that happened afterwards.
+    const item = favourite(101, '7');
+    item.aiSummary = { text: 'Note from the backup.', generatedAt: 1000 };
+    await store.importUserData(JSON.stringify({
+        version: 3, favouriteItems: [item], historyItems: [], userSettings: {},
+    }));
+
+    assert.equal((await store.getAiSummary('7')).text, 'Note from the backup.');
+});
+
 await test('regenerating after a clear beats the tombstone', async () => {
     const { store, idb, sync } = await loadStore();
     idb.__db.set('favouriteItems', [favourite(101, '7')]);

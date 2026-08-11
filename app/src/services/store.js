@@ -36,6 +36,11 @@ const API_KEY_STORAGE_KEY = 'anthropicApiKey';
 // tiny, non-critical, and read synchronously when the panel renders.
 const AI_USAGE_STORAGE_KEY = 'aiSummaryUsage';
 
+// When this device last cleared its saved notes, so a stale inbound snapshot
+// cannot resurrect them. Local-only and never synced — see
+// _getAiSummariesClearedAt for why the synced tombstone is not enough.
+const AI_CLEARED_AT_STORAGE_KEY = 'aiSummariesClearedAt';
+
 // One record per tuneID: { text, model, generatedAt, sourceUrl }. Kept in its
 // own IndexedDB key rather than only on favourites so that summaries survive
 // un-favouriting and are available for tunes the user never starred.
@@ -410,6 +415,28 @@ class Store {
 
     // ---- AI summary cache --------------------------------------------------
 
+    // When this device last cleared its notes. Deliberately **not** synced: it
+    // is this device's own defence against being told to un-delete, and it is
+    // read on every inbound snapshot.
+    //
+    // The synced `FavouriteItem.aiSummaryDeletedAt` tombstone tells *other*
+    // devices about the deletion, but it cannot protect this one. Favourites
+    // sync is whole-document last-writer-wins, arbitrated by a document-level
+    // `Date.now()`: a device that has not yet processed the clear can touch an
+    // unrelated favourite and push its whole array, still carrying the note and
+    // no tombstone, and that write is legitimately newer at the document level.
+    // Reconciliation only ever sees the incoming array, so the tombstone this
+    // device wrote is simply not in the conversation. The watermark is.
+    //
+    // A single timestamp rather than a per-tune tombstone map, because "Clear
+    // saved notes" is inherently clear-*all* — and because per-tune markers
+    // cannot cover the case where the other device holds a note this one never
+    // had: there would be no local tombstone to consult for that tune, and the
+    // stale write carries none either.
+    _getAiSummariesClearedAt() {
+        return Number(localStorage.getItem(AI_CLEARED_AT_STORAGE_KEY) || 0) || 0;
+    }
+
     async _loadAiSummaries() {
         if (this._aiSummariesCache === null) {
             let stored;
@@ -494,6 +521,8 @@ class Store {
         // carry a mirror: another device may hold a note this one has never
         // seen, and "clear all" has to reach that too.
         const deletedAt = Date.now();
+        localStorage.setItem(AI_CLEARED_AT_STORAGE_KEY, String(deletedAt));
+
         const items = await this.getFavourites();
         for (const item of items) {
             delete item.aiSummary;
@@ -513,6 +542,7 @@ class Store {
     async _harvestAiSummaries(items) {
         if (!Array.isArray(items) || !items.length) return;
         const summaries = await this._loadAiSummaries();
+        const clearedAt = this._getAiSummariesClearedAt();
         let changed = false;
 
         for (const item of items) {
@@ -542,6 +572,17 @@ class Store {
                 continue;
             }
 
+            // A note this device deleted must not come back just because another
+            // device still had it. `!existing` below cannot tell "never had it"
+            // from "deleted it", so the watermark is the only thing standing
+            // between a clear and a stale device undoing it.
+            //
+            // This is wall-clock across devices, so a badly skewed clock can
+            // still slip a note through. Every other conflict decision in
+            // favourites sync has the same exposure, and losing this one costs a
+            // resurrected note rather than a lost one.
+            if (clearedAt && (incoming.generatedAt || 0) <= clearedAt) continue;
+
             if (!existing || (incoming.generatedAt || 0) > (existing.generatedAt || 0)) {
                 summaries[key] = incoming;
                 changed = true;
@@ -557,12 +598,26 @@ class Store {
     async _reapplyAiSummaries(items) {
         if (!Array.isArray(items) || !items.length) return false;
         const summaries = await this._loadAiSummaries();
+        const clearedAt = this._getAiSummariesClearedAt();
         let changed = false;
 
         for (const item of items) {
             const tuneID = item && item.result && item.result.setting && item.result.setting.tune_id;
             if (tuneID == null) continue;
             const cached = summaries[String(tuneID)];
+
+            // Re-state a deletion the sending device had not heard about yet.
+            // Without this the two devices trade the note back and forth: it
+            // strips nothing, so the next push carries the note straight back
+            // out, and the device that actually knows it was deleted never says
+            // so. Stamping the tombstone is what ends the loop.
+            if (clearedAt && item.aiSummary && (item.aiSummary.generatedAt || 0) <= clearedAt) {
+                delete item.aiSummary;
+                item.aiSummaryDeletedAt = Math.max(item.aiSummaryDeletedAt || 0, clearedAt);
+                changed = true;
+                continue;
+            }
+
             if (!cached) continue;
             // Never re-apply over a deletion that is newer than what we hold —
             // that is the case this device is being *told* about, not one it
@@ -633,6 +688,11 @@ class Store {
         // v1/v2 exports may have folderId on items; getFavourites() will migrate them on next load
         await this._dbSet('favouriteItems', payload.favouriteItems || []);
         // Backups made after 3.9.0 carry AI summaries on favourited settings.
+        // Restoring a backup is an explicit request for its contents, so it
+        // outranks an earlier clear on this device — drop the watermark first,
+        // or notes older than that clear would be silently dropped from the
+        // import.
+        localStorage.removeItem(AI_CLEARED_AT_STORAGE_KEY);
         await this._harvestAiSummaries(payload.favouriteItems || []);
         if (payload.favouriteFolders) await this._dbSet('favouriteFolders', payload.favouriteFolders);
         await this.updateUserSettings(payload.userSettings || this.userSettings);

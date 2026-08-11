@@ -318,7 +318,9 @@ modes it was: never saved, or saved-then-evicted.
 
 Not IndexedDB, but worth listing alongside — localStorage keys: `'userSettings'`,
 `'favouritesLocalUpdatedAt'`, `'anthropicApiKey'` (deliberately outside
-`userSettings` so it stays out of exported backups) and `'aiSummaryUsage'`.
+`userSettings` so it stays out of exported backups), `'aiSummaryUsage'` and
+`'aiSummariesClearedAt'` (the local, never-synced watermark that stops a stale
+device resurrecting cleared notes).
 
 ### Firebase / Firestore
 
@@ -814,6 +816,36 @@ same millisecond is unresolvable either way, and what matters is that the two
 functions agree — disagreeing would let the pair delete in one and restore in the
 other on the same snapshot.
 
+**The synced tombstone cannot protect the device that wrote it.** Favourites sync
+is whole-document last-writer-wins, arbitrated by a document-level `Date.now()`
+(`sync.js`, `clientUpdatedAt`). A device that has not yet processed the clear can
+touch an unrelated favourite and push its whole array — still carrying the note,
+and with no tombstone, because it never saw one — and that write is legitimately
+newer *at the document level*. Reconciliation only ever sees the incoming array,
+so the tombstone this device wrote is not in the conversation, and `!existing`
+cannot tell "never had it" from "deleted it". The note came back.
+
+So there is also a local watermark, **`localStorage['aiSummariesClearedAt']`**,
+never synced. `_harvestAiSummaries` drops any incoming note with
+`generatedAt <= clearedAt`; `_reapplyAiSummaries` strips such a note from the
+inbound array and **re-stamps the tombstone**, so the correction propagates —
+without that the two devices trade the note back and forth forever, because the
+only device that knows it was deleted never says so.
+
+A single timestamp, not a per-tune tombstone map, for two reasons: "Clear saved
+notes" is inherently clear-*all*, and per-tune markers cannot cover a note the
+*other* device holds and this one never had — there is no local marker to consult
+for that tune and the stale write carries none either. `npm test` pins that case
+specifically.
+
+`importUserData` clears the watermark first: restoring a backup is an explicit
+request for its contents, so it outranks an earlier clear rather than having its
+older notes silently filtered out.
+
+This is wall-clock across devices, so a badly skewed clock can still slip a note
+through. Every other conflict decision in favourites sync has the same exposure,
+and losing this one costs a resurrected note rather than a lost one.
+
 #### The async race that the tune-ID guards do *not* cover
 
 `TuneBackgroundDialog.generateSummary()` captures **every** input to the request
@@ -854,10 +886,13 @@ identity). This is what makes the two new settings reach existing installs.
   `fetch`: block-type extraction, refusal, `pause_turn` resume and cap, the
   web_fetch error path, the three-rung ladder, status→kind mapping, the bounded
   deadline, and offline/no-key short-circuits that must not spend a request.
-- `app/test/aiSummaryStore.test.mjs` (16 cases) — the sync invariant above, the
-  two-device clear (a tombstoned deletion must not be resurrected, and a
-  regenerate must beat a stale tombstone), key exclusion from backups,
-  truncation, mirror targeting, and spend accounting.
+- `app/test/aiSummaryStore.test.mjs` (21 cases) — both storage invariants above.
+  The deletion half is covered from five angles, because each one fails a
+  different plausible implementation: a tombstoned deletion must not be
+  resurrected; a *stale device's* push must not resurrect it either; nor must one
+  for a tune this device never held; a note generated elsewhere *after* the clear
+  must still be accepted; and a regenerate on this device must stick. Plus key
+  exclusion from backups, truncation, mirror targeting, and spend accounting.
 - `app/test/tuneBackgroundDialog.test.mjs` (8 cases) — the shared dialog: the
   request is built only from the tune it started for, a late result is saved but
   not shown, opening never generates, reopening a different tune clears the
