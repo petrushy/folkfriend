@@ -123,6 +123,8 @@
                     :tags="row.tags"
                     :allTags="allTags"
                     :setting="row.setting"
+                    :tuneID="row.tuneID"
+                    :sourceUrl="row.sourceUrl"
                     @favouriteItemClicked="loadFavouriteItem"
                     @unstar="removeFavourite"
                     @toggle="toggleSelected"
@@ -164,6 +166,8 @@
                             :selected="selectedIDs.has(row.settingID)"
                             :tags="row.tags"
                             :allTags="allTags"
+                            :tuneID="row.tuneID"
+                            :sourceUrl="row.sourceUrl"
                             @favouriteItemClicked="loadFavouriteItem"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
@@ -204,6 +208,8 @@
                             :selected="selectedIDs.has(row.settingID)"
                             :tags="row.tags"
                             :allTags="allTags"
+                            :tuneID="row.tuneID"
+                            :sourceUrl="row.sourceUrl"
                             @favouriteItemClicked="loadFavouriteItem"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
@@ -486,6 +492,11 @@ export default {
                 timestamp: item.timestamp,
                 tags: item.tags || [],
                 setting: item.result.setting || null,
+                // Lifted out of `setting` so the tag-grouped list — which does
+                // not bind `setting` (it has no ABC preview) — can still offer
+                // the tune-background button.
+                tuneID: (item.result.setting && item.result.setting.tune_id) || '',
+                sourceUrl: (item.result.setting && item.result.setting.source_url) || '',
             };
         },
         loadFavourites() {

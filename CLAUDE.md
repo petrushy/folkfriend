@@ -550,8 +550,34 @@ origin, earliest documented date, the story attached to it — via the Claude AP
 using the **user's own** API key. Off by default (Settings → *AI Tune Summaries*).
 
 `app/src/services/aiSummary.js` is the whole network layer;
-`app/src/views/Tune.vue` holds the button and dialog; `store.js` owns the cache,
-the key and the spend counter.
+`app/src/components/TuneBackgroundButton.vue` is the (i) button,
+`app/src/components/TuneBackgroundDialog.vue` the panel it opens; `store.js` owns
+the cache, the key and the spend counter.
+
+#### One dialog, four buttons
+
+The button appears on the Tune view, on each search result row
+(`ResultRow.vue`), on each favourite (`FavouriteRow.vue`) and in the live session
+follow view (`LiveScoreFollow.vue`). The **dialog is mounted once, in `App.vue`**,
+and buttons open it with `eventBus.$emit('showTuneBackground', { tuneID,
+displayName, sourceUrl })`.
+
+That split is not cosmetic. A per-row dialog would instantiate one `v-dialog` per
+favourite — a lot of DOM for something at most one of which is ever visible — and
+would copy the cost guardrails (cache-first, never generate without a tap, single
+in-flight request) into four places. Centralising introduces exactly one new
+failure mode, and the dialog guards it: `show()` clears `summary`, `grounding`
+and `commentCount` **when the tune ID changed**, so opening the panel for tune B
+can never show tune A's note.
+
+`FavouriteRow` takes `tuneID` and `sourceUrl` as their own props rather than
+digging them out of `setting`, because the tag- and date-grouped favourite lists
+deliberately do not bind `setting` (no ABC preview there) and would otherwise
+lose the button. `Favourites.vue::_toRow` lifts both out.
+
+`HistoryRow.vue` has no button: it is passed only `name`/`descriptor`/
+`timestamp` and carries no tune identity at all, so adding one means changing
+what `History.vue` passes down.
 
 **No proxy, no Cloud Function, and none needed.** Both hops go straight from the
 browser:

@@ -40,6 +40,9 @@
         <!-- eslint-disable-next-line vue/no-v-html -->
         <div v-if="showAbcPreview" class="abc-preview" :style="{ width: abcPreviewDisplayWidth + 'px' }" @click.stop="favouriteItemClicked" v-html="abcSvg" />
 
+        <!-- Tune background (i) — outside the clickable container so it does not navigate -->
+        <TuneBackgroundButton :tuneID="tuneID" :displayName="name" :sourceUrl="sourceUrl" :small="false" />
+
         <!-- Add tag button — outside the clickable container, left of star, easy to tap -->
         <v-menu v-model="addTagMenu" :close-on-content-click="false" offset-y left>
             <template #activator="{ on }">
@@ -76,6 +79,7 @@
 import { mdiStar, mdiTagPlusOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
 import utils from '@/js/utils';
+import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 
 // Minimum row width (px) before the ABC preview is shown.
 // Left of preview: checkbox(~40) + tune info min(~180) = ~220
@@ -85,8 +89,14 @@ const ABC_PREVIEW_MIN_ROW_WIDTH = 540;
 
 export default {
     name: 'FavouriteRow',
+    components: { TuneBackgroundButton },
     props: {
         name: { type: String, required: true },
+        // Passed separately from `setting` because the tag- and date-grouped
+        // lists do not bind `setting` (they have no ABC preview) but still want
+        // the background button.
+        tuneID: { type: [String, Number], default: '' },
+        sourceUrl: { type: String, default: '' },
         descriptor: { type: String, required: true },
         settingID: { type: String, required: true },
         timestamp: { type: Number, required: true },

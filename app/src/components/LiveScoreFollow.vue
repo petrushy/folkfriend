@@ -14,6 +14,7 @@
                             {{ favourited ? starIcon : starOutlineIcon }}
                         </v-icon>
                     </button>
+                    <TuneBackgroundButton v-if="target" class="backgroundBtn" :tuneID="target.tuneId" :displayName="target.title" :sourceUrl="abcSetting ? abcSetting.source_url || '' : ''" />
                 </h2>
                 <div class="tuneMeta">
                     <span v-if="target" class="scoreReadout">
@@ -96,12 +97,13 @@ import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import AbcDisplay from '@/components/AbcDisplay.vue';
+import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
 import { resolveFollowTarget, applyOverride } from '@/js/liveScoreFollow.mjs';
 
 export default {
     name: 'LiveScoreFollow',
-    components: { AbcDisplay },
+    components: { AbcDisplay, TuneBackgroundButton },
     props: {
         detections: {
             type: Array,
@@ -336,6 +338,14 @@ export default {
     vertical-align: middle;
     line-height: 1;
     -webkit-tap-highlight-color: transparent;
+}
+
+/* Scoped styles reach a child component's root element, so this lands on the
+   v-btn itself — aligning it with the star beside it without the button
+   stretching the title's line height. */
+.backgroundBtn {
+    vertical-align: middle;
+    margin: -10px 0 -10px 2px;
 }
 
 .tuneMeta {

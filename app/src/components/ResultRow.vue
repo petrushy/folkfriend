@@ -45,6 +45,9 @@
             <!-- eslint-disable-next-line vue/no-v-html -->
             <div v-if="showAbcPreview" class="abc-preview" :style="{ width: abcPreviewDisplayWidth + 'px' }" @click="addToHistory" v-html="abcSvg" />
         </router-link>
+        <!-- Outside the router-link, so tapping it opens the note rather than
+             navigating to the tune. -->
+        <TuneBackgroundButton :tuneID="setting.tune_id" :displayName="name" :sourceUrl="setting.source_url || ''" :small="false" />
         <v-btn icon class="mr-2" :disabled="!hasValidSettingID && !favourited" @click.stop="toggleFavourite">
             <v-icon :color="favourited ? 'amber darken-1' : 'grey lighten-1'">
                 {{ favourited ? starIcon : starOutlineIcon }}
@@ -60,6 +63,7 @@ import utils from '@/js/utils.js';
 import store from '@/services/store.js';
 import ffBackend from '@/services/backend.js';
 import { HistoryItem } from '@/js/schema';
+import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 
 // Minimum row width (px) before showing the ABC preview.
 // Reserved: min text (~180) + star btn (~52) + preview min (~200) = ~432; use 480.
@@ -67,6 +71,7 @@ const ABC_PREVIEW_MIN_ROW_WIDTH = 480;
 
 export default {
     name: 'ResultRow',
+    components: { TuneBackgroundButton },
     props: {
         setting: {
             type: Object,

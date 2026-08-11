@@ -205,6 +205,11 @@
         <v-snackbar v-model="syncErrorSnackbar" :timeout="5000" bottom>
             {{ syncErrorText }}
         </v-snackbar>
+
+        <!-- One dialog for the whole app, opened from any (i) button via the
+             event bus. Mounted here so a list of favourites does not create one
+             dialog per row. -->
+        <TuneBackgroundDialog />
     </v-app>
 </template>
 
@@ -237,9 +242,11 @@ import {
     // mdiShareVariant,
 } from '@mdi/js';
 import utils from '@/js/utils.js';
+import TuneBackgroundDialog from '@/components/TuneBackgroundDialog.vue';
 
 export default {
     name: 'App',
+    components: { TuneBackgroundDialog },
     data: () => ({
         drawer: null,
         menu: null,
