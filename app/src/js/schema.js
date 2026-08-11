@@ -17,5 +17,11 @@ export class FavouriteItem {
         // the user's other devices. The durable copy lives in the
         // 'aiTuneSummaries' IndexedDB key. Like `tags` and `tempo` before it,
         // read it defensively — records stored before 3.9.0 do not have it.
+        //
+        // Also not set here: `aiSummaryDeletedAt`, a millis tombstone written by
+        // store.clearAiSummaries. It exists because a favourite with no
+        // `aiSummary` is indistinguishable from one on a device that never
+        // generated the note, so deletion cannot be encoded as absence — see
+        // _harvestAiSummaries / _reapplyAiSummaries.
     }
 }

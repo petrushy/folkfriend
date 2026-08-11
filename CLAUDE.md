@@ -309,7 +309,8 @@ modes it was: never saved, or saved-then-evicted.
 
 ### IndexedDB (idb-keyval) — full key list
 
-- `'favouriteItems'` — array of `FavouriteItem` objects
+- `'favouriteItems'` — array of `FavouriteItem` objects (optionally carrying
+  `aiSummary` and `aiSummaryDeletedAt`; both are synced)
 - `'historyItems'` — array of `HistoryItem` objects (capped at 100)
 - `'ffIndexRaw'` / `'ffIndexManifest'` — tune index and its commit marker
 - `'tuneIndex'` / `'tuneIndexMetadata'` — legacy tune index (read-only, migrated away)
@@ -794,6 +795,49 @@ restored something. `npm test` asserts the property directly — *if a summary
 existed before a snapshot, it exists after* — and reinstating the naive
 wholesale replace fails 3 tests.
 
+**The other half of that hazard: deletion cannot be encoded as absence.** The
+repair above is *why* — `_reapplyAiSummaries` is supposed to treat a favourite
+with no `aiSummary` as a device that never generated one, and restore it. So
+"Clear saved notes" stripping the mirrors was undone by the user's other device:
+it read the deletion as ignorance, put its own cached copy back and pushed it.
+The confirm dialog promises the clear reaches "your synced favourites", so this
+was a broken promise, not just a design choice.
+
+`clearAiSummaries` therefore writes a tombstone, **`FavouriteItem.aiSummaryDeletedAt`**
+(millis), onto *every* favourite — not only ones that currently carry a mirror,
+because another device may hold a note this one has never seen and "clear all"
+has to reach that too. `_harvestAiSummaries` honours a tombstone newer than the
+local copy by deleting it; `_reapplyAiSummaries` refuses to restore under one.
+`setAiSummary` **deletes the tombstone** when it mirrors, so regenerating after a
+clear wins. Both comparisons use `>=` deliberately: a clear and a generate in the
+same millisecond is unresolvable either way, and what matters is that the two
+functions agree — disagreeing would let the pair delete in one and restore in the
+other on the same snapshot.
+
+#### The async race that the tune-ID guards do *not* cover
+
+`TuneBackgroundDialog.generateSummary()` captures **every** input to the request
+synchronously, before the first `await`, into a `request` object. Reading
+`displayName` or `sourceUrl` off `this` after an await is a bug: the dialog is
+dismissible by tapping outside it, so the user can reopen it for another tune
+while the comment fetch is still in flight, and tune A's note then gets built
+with tune B's title and page URL — and saved under A. `sourceUrl` also derives
+`allowed_domains`, so a crossed request is pointed at the wrong page, not merely
+mislabelled.
+
+The `String(this.tuneID) === String(tuneID)` guards further down govern only what
+is *displayed*. They cannot un-poison a record that has already been written.
+This got materially more reachable when the (i) button moved onto list rows,
+where dismiss-and-tap-the-next-row is a natural gesture.
+
+`app/test/tuneBackgroundDialog.test.mjs` pins it by holding
+`fetchSessionComments` unresolved, switching the dialog to another tune, then
+releasing. It needs no Vue runtime: the component is a plain Options-API object,
+so the test lifts its `<script>` block out of the SFC, rewrites the three
+imports to fakes, and calls `methods.generateSummary` against a fake `this` built
+from `data()`. That only works because the network layer is kept out of the
+component — worth preserving.
+
 #### Also fixed here: `userSettings` never picked up new defaults
 
 `store.js` loaded settings as `JSON.parse(stored) || USER_SETTING_DEFAULTS` — an
@@ -810,8 +854,14 @@ identity). This is what makes the two new settings reach existing installs.
   `fetch`: block-type extraction, refusal, `pause_turn` resume and cap, the
   web_fetch error path, the three-rung ladder, status→kind mapping, the bounded
   deadline, and offline/no-key short-circuits that must not spend a request.
-- `app/test/aiSummaryStore.test.mjs` (14 cases) — the sync invariant above, key
-  exclusion from backups, truncation, mirror targeting, and spend accounting.
+- `app/test/aiSummaryStore.test.mjs` (16 cases) — the sync invariant above, the
+  two-device clear (a tombstoned deletion must not be resurrected, and a
+  regenerate must beat a stale tombstone), key exclusion from backups,
+  truncation, mirror targeting, and spend accounting.
+- `app/test/tuneBackgroundDialog.test.mjs` (8 cases) — the shared dialog: the
+  request is built only from the tune it started for, a late result is saved but
+  not shown, opening never generates, reopening a different tune clears the
+  previous note, and a double tap collapses to one paid call.
 - `scripts/probe_tune_summary.mjs` — live probe (`ANTHROPIC_API_KEY=... node
   scripts/probe_tune_summary.mjs 14109 [model]`). Not in CI: it costs money.
   Prints which ladder rung served, whether the page was actually read, real

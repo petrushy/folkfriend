@@ -460,6 +460,11 @@ class Store {
             const itemTuneID = item.result && item.result.setting && item.result.setting.tune_id;
             if (itemTuneID != null && String(itemTuneID) === tuneID) {
                 item.aiSummary = stored;
+                // Regenerating after a clear must win. The tombstone is only
+                // meaningful against an older summary, and this one is newer by
+                // construction, so drop it rather than leave a stale marker for
+                // the comparison in _harvestAiSummaries to reason about.
+                delete item.aiSummaryDeletedAt;
                 touched = true;
             }
         }
@@ -475,15 +480,26 @@ class Store {
 
         // Strip the mirrors too, otherwise the next inbound snapshot (or the
         // next harvest) would quietly restore everything the user just cleared.
+        //
+        // Stripping alone is not enough, because absence is ambiguous: a
+        // favourite with no `aiSummary` is exactly what a device that never
+        // generated one looks like, and _reapplyAiSummaries is *supposed* to
+        // restore those from its durable cache. Without a tombstone, a second
+        // device would read this deletion as ignorance, put its own copy back
+        // and push it — undoing the clear the confirm dialog promised would
+        // reach the user's synced favourites. So record *when* the deletion
+        // happened and let the timestamps decide.
+        //
+        // The marker goes on every favourite, not only the ones that currently
+        // carry a mirror: another device may hold a note this one has never
+        // seen, and "clear all" has to reach that too.
+        const deletedAt = Date.now();
         const items = await this.getFavourites();
-        let touched = false;
         for (const item of items) {
-            if (item.aiSummary) {
-                delete item.aiSummary;
-                touched = true;
-            }
+            delete item.aiSummary;
+            item.aiSummaryDeletedAt = deletedAt;
         }
-        if (touched) {
+        if (items.length) {
             await this._dbSet('favouriteItems', items);
             if (this.currentUser) pushFavourites(this.currentUser.uid, items);
         }
@@ -502,10 +518,30 @@ class Store {
         for (const item of items) {
             const incoming = item && item.aiSummary;
             const tuneID = item && item.result && item.result.setting && item.result.setting.tune_id;
-            if (!incoming || !incoming.text || tuneID == null) continue;
+            if (tuneID == null) continue;
 
             const key = String(tuneID);
             const existing = summaries[key];
+            const deletedAt = (item && item.aiSummaryDeletedAt) || 0;
+
+            if (!incoming || !incoming.text) {
+                // A tombstone is a deliberate deletion on another device, which
+                // is a different thing from a device that simply never had the
+                // note. Honour it, but only against a copy older than it — a
+                // note regenerated since the clear must not be undone by the
+                // old marker.
+                //
+                // Equality deletes, matching _reapplyAiSummaries below. A clear
+                // and a generate in the same millisecond is unresolvable either
+                // way; what matters is that the two functions agree, or the pair
+                // could delete here and restore there on the same snapshot.
+                if (deletedAt && existing && deletedAt >= (existing.generatedAt || 0)) {
+                    delete summaries[key];
+                    changed = true;
+                }
+                continue;
+            }
+
             if (!existing || (incoming.generatedAt || 0) > (existing.generatedAt || 0)) {
                 summaries[key] = incoming;
                 changed = true;
@@ -528,6 +564,11 @@ class Store {
             if (tuneID == null) continue;
             const cached = summaries[String(tuneID)];
             if (!cached) continue;
+            // Never re-apply over a deletion that is newer than what we hold —
+            // that is the case this device is being *told* about, not one it
+            // knows better than.
+            const deletedAt = item.aiSummaryDeletedAt || 0;
+            if (deletedAt >= (cached.generatedAt || 0)) continue;
             const current = item.aiSummary;
             if (!current || (cached.generatedAt || 0) > (current.generatedAt || 0)) {
                 item.aiSummary = cached;

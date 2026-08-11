@@ -149,7 +149,21 @@ export default {
                 return;
             }
 
-            const tuneID = this.tuneID;
+            // Every input to the request is captured synchronously, before the
+            // first await. Reading any of them off `this` afterwards is a bug:
+            // the dialog can be dismissed by tapping outside it and reopened for
+            // another tune while the fetches are still in flight, which would
+            // build tune A's note with tune B's title and source URL — and then
+            // store that under A. The tune-ID guards further down only govern
+            // what is *displayed*; they cannot un-poison a saved record.
+            const request = {
+                tuneID: this.tuneID,
+                displayName: this.displayName,
+                sourceUrl: this.sourceUrl,
+                model: store.userSettings.aiSummaryModel || DEFAULT_AI_MODEL,
+            };
+            const tuneID = request.tuneID;
+
             this.summaryLoading = true;
             this.summaryError = '';
             this.summaryGrounding = null;
@@ -167,11 +181,11 @@ export default {
 
                 const record = await generateTuneSummary({
                     tuneID,
-                    displayName: this.displayName,
-                    sourceUrl: this.sourceUrl,
+                    displayName: request.displayName,
+                    sourceUrl: request.sourceUrl,
                     facts,
                     comments,
-                    model: store.userSettings.aiSummaryModel || DEFAULT_AI_MODEL,
+                    model: request.model,
                     apiKey,
                 });
 

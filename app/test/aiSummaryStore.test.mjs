@@ -257,6 +257,62 @@ await test('clearing removes the cache and the mirrors', async () => {
     // Leaving the mirror behind would let the next sync or import restore
     // exactly what the user just asked to delete.
     assert.equal(idb.__db.get('favouriteItems')[0].aiSummary, undefined);
+    // Absence is ambiguous, so the deletion has to be recorded positively.
+    assert.ok(idb.__db.get('favouriteItems')[0].aiSummaryDeletedAt > 0,
+        'a cleared favourite must carry a tombstone, not just a missing field');
+});
+
+await test('a clear on one device is not undone by a second device', async () => {
+    // The confirm dialog promises the clear "removes them from your synced
+    // favourites". Encoding the deletion as a missing `aiSummary` cannot deliver
+    // that: to the receiving device it is indistinguishable from a device that
+    // never generated the note, which _reapplyAiSummaries is *supposed* to
+    // repair from its durable cache. It would restore the note and push it back.
+    const { store, idb, sync } = await loadStore();
+
+    // This device is the phone: it holds the note in its own durable cache.
+    idb.__db.set('favouriteItems', [favourite(101, '7')]);
+    await store.setAiSummary('7', { text: 'Note on the phone.', generatedAt: 1000 });
+    await store.onSignedIn({ uid: 'user-1' });
+    sync.__pushes.length = 0;
+
+    // The laptop clears, and its favourites arrive here.
+    const cleared = favourite(101, '7');
+    cleared.aiSummaryDeletedAt = 2000;
+    await sync.__onChange('favourites', [cleared]);
+
+    assert.equal(await store.getAiSummary('7'), null,
+        'a deletion newer than the local copy must be honoured');
+    assert.equal(idb.__db.get('favouriteItems')[0].aiSummary, undefined,
+        'the mirror must not be put back');
+    assert.ok(
+        !sync.__pushes.some(items => items[0] && items[0].aiSummary),
+        'the deleted note must not be pushed back to Firestore',
+    );
+});
+
+await test('regenerating after a clear beats the tombstone', async () => {
+    const { store, idb, sync } = await loadStore();
+    idb.__db.set('favouriteItems', [favourite(101, '7')]);
+    await store.onSignedIn({ uid: 'user-1' });
+
+    // A clear happened at t=2000 on some device, and this device then paid for a
+    // fresh note. The old marker must not delete it on the next snapshot.
+    const cleared = favourite(101, '7');
+    cleared.aiSummaryDeletedAt = 2000;
+    await sync.__onChange('favourites', [cleared]);
+
+    await store.setAiSummary('7', { text: 'Regenerated.', generatedAt: 3000 });
+    assert.equal(idb.__db.get('favouriteItems')[0].aiSummaryDeletedAt, undefined,
+        'writing a newer note must drop the stale tombstone');
+
+    const echoed = favourite(101, '7');
+    echoed.aiSummaryDeletedAt = 2000;
+    echoed.aiSummary = { text: 'Regenerated.', generatedAt: 3000 };
+    await sync.__onChange('favourites', [echoed]);
+
+    assert.equal((await store.getAiSummary('7')).text, 'Regenerated.',
+        'a note newer than the deletion must survive');
 });
 
 console.log('\nsync — the invariant that matters');
