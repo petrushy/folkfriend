@@ -288,31 +288,43 @@ export default {
 
             this.loading = true;
             this.loadError = '';
-            // The previous score deliberately stays on screen until the new one
-            // is ready, so a tune change doesn't flash an empty page.
-            const settings = await ffBackend.settingsFromTuneID(target.tuneId);
-            // A newer call already claimed _loadingTargetKey for its own key —
-            // leave it alone, only our own token's bookkeeping is stale here.
-            if (token !== this._loadToken) return;
+            try {
+                // The previous score deliberately stays on screen until the new
+                // one is ready, so a tune change doesn't flash an empty page.
+                const settings = await ffBackend.settingsFromTuneID(target.tuneId);
+                // A newer call already claimed _loadingTargetKey for its own key
+                // — leave it alone, only our own token's bookkeeping is stale.
+                if (token !== this._loadToken) return;
 
-            this.loading = false;
+                if (!settings || !settings.length) {
+                    // Index-dependent worker calls fail fast with [] when the
+                    // tune index is unavailable, rather than hanging.
+                    this.abcSetting = null;
+                    this._abcTargetKey = null;
+                    this.loadError = ffBackend.indexUnavailableMessage();
+                    return;
+                }
 
-            if (!settings || !settings.length) {
-                // Index-dependent worker calls fail fast with [] when the tune
-                // index is unavailable, rather than hanging.
+                const chosen = settings.find(
+                    setting => String(setting.setting_id) === String(target.settingId)
+                ) || settings[0];
+                this.abcSetting = chosen;
+                this._abcTargetKey = key;
+            } catch (e) {
+                // A rejection (rather than the [] settingsFromTuneID normally
+                // resolves with) must still clear loading/_loadingTargetKey —
+                // otherwise this target reads as permanently "in flight" and
+                // needsScoreLoad() never lets it be retried.
+                if (token !== this._loadToken) return;
                 this.abcSetting = null;
                 this._abcTargetKey = null;
                 this.loadError = ffBackend.indexUnavailableMessage();
-                if (this._loadingTargetKey === key) this._loadingTargetKey = null;
-                return;
+            } finally {
+                if (token === this._loadToken) {
+                    this.loading = false;
+                    if (this._loadingTargetKey === key) this._loadingTargetKey = null;
+                }
             }
-
-            const chosen = settings.find(
-                setting => String(setting.setting_id) === String(target.settingId)
-            ) || settings[0];
-            this.abcSetting = chosen;
-            this._abcTargetKey = key;
-            if (this._loadingTargetKey === key) this._loadingTargetKey = null;
         },
     },
 };
