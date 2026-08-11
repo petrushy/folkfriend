@@ -40,6 +40,32 @@ module.exports = {
         theme_color: '#055581',
         background_color: '#055581',
         workboxOptions: {
+            // WITHOUT THIS THE APP DOES NOT WORK OFFLINE AT ALL.
+            //
+            // Workbox precaches nothing larger than 2 MiB by default, and the
+            // WASM module is ~14 MB (tract, the ONNX runtime for the ML
+            // transcriber, dominates it). So the single executable the whole
+            // app runs on was being dropped from the precache manifest, with
+            // only a build-log line to say so:
+            //
+            //   /<hash>.module.wasm is 13.9 MB, and won't be precached.
+            //
+            // Everything still appeared to work — including the offline e2e
+            // tests — because Chrome's ordinary HTTP cache was serving it. That
+            // cache is evictable and unrelated to the service worker, so the
+            // real behaviour was: open the app on a plane after the HTTP cache
+            // has turned over and there is no backend, no queries, and a
+            // perfectly intact 42 MB tune index in IndexedDB that nothing can
+            // read. Exactly the failure the offline work exists to prevent,
+            // hiding behind the layer below it.
+            //
+            // 20 MB leaves headroom for the WASM to grow while still sitting
+            // well below the 42 MB tune index, which must NOT be precached (see
+            // runtimeCaching below) and which a local build does leave in
+            // public/res/. So this limit doubles as the guard that keeps the
+            // dataset out of the service worker.
+            maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
+
             // The ~42 MB tune index is deliberately NOT cached by the service
             // worker. It used to be (StaleWhileRevalidate, cache
             // 'folkfriend-tune-data') while ALSO being stored in IndexedDB by

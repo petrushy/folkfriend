@@ -471,9 +471,18 @@ class FolkFriendWASMWrapper {
         }
     }
 
-    // Force a fresh download + persist, regardless of version. Used by the
-    // Settings "Save offline copy" / "Refresh tune data" actions, and by the
-    // 'online' handler when the index is currently unavailable.
+    // Download + persist regardless of the local version. Used by the Settings
+    // "Save offline copy" / "Refresh tune data" actions, and by the 'online'
+    // handler when the index is currently unavailable.
+    //
+    // NOT unconditionally a *fresh* download: if an install is already running
+    // this joins it (see _installExclusively) rather than starting a second
+    // 42 MB transfer. So if a background update to v2 is in flight and the host
+    // has since published v3, this reports success at v2. That is the right
+    // trade on mobile data — the user asked for their offline copy to be
+    // brought up to date, and it was — but it does mean a tap can land one
+    // version behind the very newest. Re-checking the metadata after joining
+    // and only then downloading again would close that gap cheaply.
     async refreshTuneIndex(cb) {
         if (this._setupInFlight) {
             await this._setupInFlight;

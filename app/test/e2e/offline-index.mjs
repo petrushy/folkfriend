@@ -213,8 +213,37 @@ try {
         !swCaches.includes('folkfriend-tune-data'),
         `caches: ${swCaches.join(', ')}`);
 
+    // The WASM module is the app's executable — no transcription, no query
+    // engine, and the saved tune index is just 42 MB of unreadable text without
+    // it. Workbox skips anything over 2 MiB by default and this file is ~14 MB,
+    // so for a long time it was NOT precached and everything below still passed
+    // because Chrome's ordinary HTTP cache was serving it.
+    const cachedWasm = await evaluate(`
+        (async () => {
+            const out = [];
+            for (const name of await caches.keys()) {
+                const cache = await caches.open(name);
+                for (const req of await cache.keys()) {
+                    if (req.url.endsWith('.wasm')) out.push(req.url);
+                }
+            }
+            return out;
+        })()`);
+    check('the WASM module is in the service worker precache',
+        cachedWasm.length > 0,
+        cachedWasm.length ? cachedWasm[0].split('/').pop() : 'NO .wasm IN CacheStorage');
+
     // ---- 2. Reload fully offline (the aeroplane case) --------------------
     console.log('\n2. Reload with the network fully offline');
+    // Drop Chrome's HTTP cache first. It is evictable, unrelated to the service
+    // worker, and would otherwise satisfy requests for app assets that the
+    // service worker is supposed to own — which is precisely how a missing WASM
+    // precache entry stayed invisible. From here on, anything that loads came
+    // from CacheStorage or IndexedDB.
+    await send('Network.clearBrowserCache', {}, pageSession).catch(async () => {
+        await send('Network.enable', {}, pageSession).catch(() => {});
+        await send('Network.clearBrowserCache', {}, pageSession);
+    });
     await setOffline(true);
     await navigate(APP);
     ms = await waitFor(INDEX_READY, 60000, 'index ready from cache while offline');

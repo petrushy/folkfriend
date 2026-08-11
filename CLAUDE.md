@@ -343,6 +343,36 @@ must be treated as sacred:
 
 - **Precache:** all webpack-emitted assets — JS, CSS, WASM, fonts, icons,
   soundfonts. This is the app shell and it must be complete for offline start.
+- **`maximumFileSizeToCacheInBytes: 20 * 1024 * 1024` — without it the app does
+  not work offline at all** (found August 2026). Workbox precaches nothing over
+  **2 MiB** by default, and the WASM module is ~14 MB (tract, the ONNX runtime
+  behind the ML transcriber, dominates it). So the one executable the entire app
+  runs on was being dropped from the precache manifest, announced only by a
+  build-log line:
+
+  ```text
+  /<hash>.module.wasm is 13.9 MB, and won't be precached.
+  ```
+
+  Everything still worked — *including the offline e2e tests* — because
+  **Chrome's ordinary HTTP cache was serving it.** That cache is evictable and
+  has nothing to do with the service worker, so the real behaviour was: open the
+  app on a plane once the HTTP cache has turned over, and there is no query
+  engine, no transcription, and a perfectly intact 42 MB tune index in
+  IndexedDB that nothing can read. The failure the whole offline effort exists
+  to prevent, hiding one layer below where anyone was looking.
+
+  Note this sits above the ~14 MB WASM but well below the 42 MB dataset, so it
+  doubles as the guard keeping the index out of the service worker — a local
+  build does leave `folkfriend-non-user-data.json` in `public/res/`.
+
+  Guarded now at both levels: CI asserts the emitted `.wasm` appears in
+  `dist/service-worker.js` (and that the tune index does not), and
+  `offline-index.mjs` asserts a `.wasm` is in CacheStorage and then **clears
+  Chrome's HTTP cache before going offline**, so nothing below that point can
+  quietly borrow it. Third instance of the same rule as the soundfont and
+  `nud-meta.json` cases: **a required asset needs a post-build assertion, not a
+  config option assumed to have worked.**
 - **`runtimeCaching: []`** — deliberately empty for the tune index. See rule 1.
   `public/sw-cleanup.js` is `importScripts`-ed into the generated service worker
   and deletes the obsolete `folkfriend-tune-data` cache on activate, reclaiming

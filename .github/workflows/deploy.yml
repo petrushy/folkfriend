@@ -143,6 +143,46 @@ jobs:
           done
           echo "soundfont OK: $count notes"
 
+      # The WASM module is the app's executable: without it there is no
+      # transcription, no query engine, and the saved tune index is unreadable.
+      # Workbox silently drops anything over 2 MiB from the precache manifest
+      # and says so only in a build-log line nobody reads, so every deploy
+      # shipped a service worker with no WASM in it — and the offline tests
+      # still passed, because Chrome's HTTP cache was quietly covering for it.
+      #
+      # Same rule as the soundfont check above: an asset that is required by the
+      # deployed app needs a post-build assertion, not a config option that is
+      # assumed to have worked.
+      - name: Verify the WASM is in the service worker precache
+        working-directory: app
+        run: |
+          wasm=$(ls dist/*.wasm 2>/dev/null | head -1)
+          if [ -z "$wasm" ]; then
+            echo "no .wasm emitted into dist/ — the build is broken"
+            exit 1
+          fi
+          name=$(basename "$wasm")
+          # Workbox 6 inlines the manifest into service-worker.js; older majors
+          # emitted precache-manifest.*.js. Search whichever exist.
+          manifests=$(ls dist/service-worker.js dist/precache-manifest*.js 2>/dev/null)
+          if [ -z "$manifests" ]; then
+            echo "no service worker emitted into dist/"
+            exit 1
+          fi
+          if ! grep -qF "$name" $manifests; then
+            echo "$name is NOT in the precache manifest ($manifests)."
+            echo "Workbox almost certainly skipped it for size — check"
+            echo "maximumFileSizeToCacheInBytes in vue.config.js against:"
+            ls -l "$wasm"
+            exit 1
+          fi
+          echo "precache OK: $name ($(du -h "$wasm" | cut -f1))"
+          # The 42 MB dataset must NOT be in there (it lives in IndexedDB).
+          if grep -qF 'folkfriend-non-user-data.json' $manifests; then
+            echo "the tune index is in the precache manifest — it must not be"
+            exit 1
+          fi
+
       - name: Report bundle size
         working-directory: app
         run: du -sh dist && du -sh dist/* | sort -h | tail -5
