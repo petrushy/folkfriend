@@ -28,11 +28,24 @@
 //  4. Reads never throw. Every failure mode resolves to null ("no offline
 //     copy"), because a hang or an exception here is what strands the user
 //     with no tunes on a plane.
+//
+//  5. A KNOWN-GOOD COPY IS IMMUTABLE UNTIL A REPLACEMENT HAS PROVED ITSELF.
+//     writeIndex() is the point of no return — once it returns, the previous
+//     copy is gone — so nothing may call it with a payload that has not been
+//     parsed, structurally checked (indexPayloadProblem) and successfully
+//     loaded into WASM. See _downloadAndInstall in worker.js.
 
 import { get, set, del } from 'idb-keyval';
 
 // Bump when the on-disk format changes; a mismatched manifest is discarded.
 export const SCHEMA_VERSION = 2;
+
+// A real index carries ~62k settings. This floor exists only to reject things
+// that are obviously not the tune index at all — an error document, a captive
+// portal's JSON, nud-meta.json served from the wrong path, `{}`. It is kept
+// deliberately low: a false rejection here means the user can never update
+// again, which is a far worse outcome than accepting a small odd payload.
+export const MIN_PLAUSIBLE_SETTINGS = 100;
 
 const KEY_MANIFEST = 'ffIndexManifest';
 const KEY_RAW = 'ffIndexRaw';
@@ -85,6 +98,48 @@ export function splitIndexPayload(parsed) {
     return { indexData: parsed, abcStrings, sourceUrls };
 }
 
+// Structural sanity check on a freshly parsed index payload.
+//
+// JSON.parse alone is not enough to establish that a download is the tune
+// index. A captive portal's login page is not valid JSON (so parse catches
+// it), but an error document, a redirect body, nud-meta.json served from the
+// wrong path, or a half-built dataset all parse perfectly well and would
+// happily overwrite the user's only working copy.
+//
+// Returns null when `parsed` looks like a tune index, otherwise a short
+// human-readable reason why it does not. Cheap: it samples one setting rather
+// than walking 62k of them.
+export function indexPayloadProblem(parsed) {
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return 'not a JSON object';
+    }
+    const settings = parsed.settings;
+    const aliases = parsed.aliases;
+    if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+        return 'no settings object';
+    }
+    if (!aliases || typeof aliases !== 'object' || Array.isArray(aliases)) {
+        return 'no aliases object';
+    }
+    const settingIDs = Object.keys(settings);
+    if (settingIDs.length < MIN_PLAUSIBLE_SETTINGS) {
+        return `only ${settingIDs.length} settings (expected at least ${MIN_PLAUSIBLE_SETTINGS})`;
+    }
+    if (Object.keys(aliases).length === 0) {
+        return 'no tune aliases';
+    }
+    // The Rust side deserialises settings with serde and unwraps, so a wrong
+    // shape here is a WASM panic rather than an error. tune_id and contour are
+    // deliberately strings on both sides (see rust/src/index/schema.rs).
+    const sample = settings[settingIDs[0]];
+    if (!sample || typeof sample !== 'object'
+        || typeof sample.tune_id !== 'string'
+        || typeof sample.contour !== 'string') {
+        return 'settings entries are not tune settings';
+    }
+    return null;
+}
+
 // Read the manifest only — cheap enough to call from the UI for diagnostics.
 // Returns null when there is no usable offline copy.
 export async function readManifest() {
@@ -114,13 +169,25 @@ export async function readIndex() {
 
     const raw = await safeGet(KEY_RAW);
 
-    // A payload that parses is usable, full stop. Never discard one because its
-    // bookkeeping looks odd — an offline user has no way to get it back.
+    // A payload that parses AND looks like a tune index is usable, full stop.
+    // Never discard one because its bookkeeping looks odd — an offline user has
+    // no way to get it back. The structural check is not bookkeeping: it is the
+    // difference between "this is the tune index" and "this is some other JSON
+    // document", and it is the only thing standing between a payload written by
+    // an older build (which committed before validating) and an install that
+    // can never load and is never replaced.
     if (typeof raw === 'string' && raw.length > 0) {
         try {
             console.time('index-parse-from-cache');
             const parsed = JSON.parse(raw);
             console.timeEnd('index-parse-from-cache');
+
+            const problem = indexPayloadProblem(parsed);
+            if (problem) {
+                console.warn(`Cached tune index is not a tune index (${problem}); discarding`);
+                await clearIndex();
+                return null;
+            }
 
             let effective = manifest;
             if (!manifest || manifest.schema !== SCHEMA_VERSION) {
@@ -186,8 +253,16 @@ async function readLegacyIndex() {
 // callers can tell the user their offline copy did not save — silently failing
 // here is exactly how people end up with no tunes on a plane.
 //
+// THIS DESTROYS THE PREVIOUS OFFLINE COPY. Call it only with a payload that has
+// already been parsed, passed indexPayloadProblem() and been loaded into WASM
+// successfully — see rule 5 at the top of this file. The cheap guard below
+// cannot prove that, but it does stop the two most obvious mistakes.
+//
 // `metadata` is { v, date } from nud-meta.json.
 export async function writeIndex(rawText, metadata) {
+    if (typeof rawText !== 'string' || rawText.length === 0) {
+        throw new Error('refusing to write an empty tune index payload');
+    }
     console.time('index-persist');
 
     // ORDERING IS A RELIABILITY PROPERTY. Payload first, manifest second, and

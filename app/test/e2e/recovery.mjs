@@ -3,28 +3,35 @@
 // the offline copy without the user restarting anything.
 //
 // The real CDN is replaced by a local origin whose reachability we can flip at
-// will. A copy of the production build (dist-test) has its data URL rewritten to
-// point at it — host remapping with a self-signed cert does not work here
-// because .app is HSTS-preloaded, and CDP network emulation does not reach the
-// Web Worker that actually fetches the index.
+// will. A copy of the production build has its data URL rewritten to point at
+// it — host remapping with a self-signed cert does not work here because .app
+// is HSTS-preloaded, and CDP network emulation does not reach the Web Worker
+// that actually fetches the index.
 //
-// Setup:
-//   cp -R app/dist dist-test && sed -i '' 's|https://folkfriend-data.web.app/|http://127.0.0.1:8444/|' dist-test/js/*.js
-//   npx serve dist-test -s -l 3001
+// No setup: this builds that copy and serves it itself, so it runs from
+// `npm run test:e2e` like the others. It needs two things to exist —
+// `app/dist` (run `npm run build`) and a copy of the tune index, taken from
+// $FF_INDEX_JSON or app/public/res/. CI moves the index aside before building
+// rather than deleting it, precisely so this test can still find it.
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, existsSync, cpSync, readdirSync,
+         statSync, writeFileSync, createReadStream } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { CHROME, BASE_ARGS } from './chrome.mjs';
 
-const APP = 'http://localhost:3001';  // dist-test: CDN URL repointed at the local stand-in
+const APP_PORT = 3001;
+const APP = `http://localhost:${APP_PORT}`;  // CDN URL repointed at the local stand-in
 const DATA_PORT = 8444;
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const DIST_DIR = path.join(APP_DIR, 'dist');
 const RES_DIR = path.join(APP_DIR, 'public', 'res');
+const CDN_ORIGIN = 'https://folkfriend-data.web.app/';
 const work = mkdtempSync(path.join(tmpdir(), 'ff-rec-'));
 const profile = path.join(work, 'profile');
+const appRoot = path.join(work, 'dist-test');
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const results = [];
@@ -35,25 +42,104 @@ function check(name, ok, detail = '') {
 
 // --- controllable stand-in for folkfriend-data.web.app -------------------
 
-if (!existsSync(path.join(RES_DIR, 'folkfriend-non-user-data.json'))) {
-    console.error(`missing ${RES_DIR}/folkfriend-non-user-data.json — run app/download_tune_data.sh`);
+if (!existsSync(path.join(DIST_DIR, 'index.html'))) {
+    console.error(`missing ${DIST_DIR}/index.html — run \`npm run build\` first`);
     process.exit(1);
 }
 
-const meta = readFileSync(path.join(RES_DIR, 'nud-meta.json'));
-const index = readFileSync(path.join(RES_DIR, 'folkfriend-non-user-data.json'));
+const indexJson = process.env.FF_INDEX_JSON
+    || path.join(RES_DIR, 'folkfriend-non-user-data.json');
+if (!existsSync(indexJson)) {
+    console.error(`missing ${indexJson} — run app/download_tune_data.sh, `
+        + 'or point $FF_INDEX_JSON at a copy');
+    process.exit(1);
+}
+const metaJson = existsSync(path.join(RES_DIR, 'nud-meta.json'))
+    ? path.join(RES_DIR, 'nud-meta.json')
+    : path.join(DIST_DIR, 'res', 'nud-meta.json');
+
+const meta = readFileSync(metaJson);
+const index = readFileSync(indexJson);
+
+// --- the app under test: dist with its data origin repointed here ---------
+
+// Rewriting file CONTENT only, never file names: the service worker's precache
+// manifest keys on the hashed filenames webpack emitted, so the app still finds
+// every asset it was built expecting.
+function repointDataOrigin(dir) {
+    let rewritten = 0;
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+            rewritten += repointDataOrigin(full);
+        } else if (entry.name.endsWith('.js')) {
+            const before = readFileSync(full, 'utf8');
+            if (!before.includes(CDN_ORIGIN)) continue;
+            writeFileSync(full, before.split(CDN_ORIGIN).join(`http://127.0.0.1:${DATA_PORT}/`));
+            rewritten++;
+        }
+    }
+    return rewritten;
+}
+
+cpSync(DIST_DIR, appRoot, { recursive: true });
+const rewritten = repointDataOrigin(appRoot);
+if (rewritten === 0) {
+    console.error(`no file under ${DIST_DIR} references ${CDN_ORIGIN} — this test would `
+        + 'silently exercise the real CDN instead of the stand-in');
+    process.exit(1);
+}
+
+const MIME = {
+    '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
+    '.json': 'application/json', '.wasm': 'application/wasm', '.mp3': 'audio/mpeg',
+    '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
+    '.woff': 'font/woff', '.woff2': 'font/woff2', '.ttf': 'font/ttf',
+    '.eot': 'application/vnd.ms-fontobject', '.map': 'application/json',
+    '.txt': 'text/plain', '.webmanifest': 'application/manifest+json',
+};
+
+// Mirrors Firebase Hosting: static file if it exists, index.html otherwise.
+const appServer = http.createServer((req, res) => {
+    const rel = decodeURIComponent(req.url.split('?')[0]).replace(/^\/+/, '');
+    let file = path.join(appRoot, rel);
+    if (!file.startsWith(appRoot) || !existsSync(file) || statSync(file).isDirectory()) {
+        file = path.join(appRoot, 'index.html');
+    }
+    res.writeHead(200, {
+        'content-type': MIME[path.extname(file)] || 'application/octet-stream',
+        // The service worker must be re-evaluated on each load, and a stale
+        // 304 for the app shell would hide exactly the behaviour under test.
+        'cache-control': 'no-store',
+    });
+    createReadStream(file).pipe(res);
+});
+await new Promise(r => appServer.listen(APP_PORT, '127.0.0.1', r));
 
 // Plain HTTP on purpose: the real host is folkfriend-data.web.app, and .app is
 // HSTS-preloaded, so Chrome refuses a self-signed stand-in for it no matter
 // what flags you pass. The test build has its data URL repointed here instead.
-let mode = 'hang'; // 'hang' | 'serve'
+// 'hang'    — accepts the connection and never answers (captive portal)
+// 'serve'   — the real dataset
+// 'garbage' — announces a NEWER version and then serves a truncated body. This
+//             is the update that must never be allowed to replace a working
+//             offline copy; before the install path validated before writing,
+//             it did exactly that and the damage only showed up at the next
+//             cold start, offline.
+let mode = 'hang';
 let requests = 0;
+const NEXT_VERSION = (JSON.parse(meta).v || 0) + 1;
+const GARBAGE_META = Buffer.from(JSON.stringify({ v: NEXT_VERSION, date: '2099-01-01' }));
+const GARBAGE_INDEX = index.subarray(0, Math.floor(index.length / 2));
 const sockets = new Set();
 const dataServer = http.createServer((req, res) => {
     requests++;
     console.log(`   [server] ${mode} <- ${req.url}`);
     if (mode === 'hang') return; // accept, then answer never — captive portal
-    const body = req.url.startsWith('/nud-meta.json') ? meta : index;
+    const isMeta = req.url.startsWith('/nud-meta.json');
+    const body = mode === 'garbage'
+        ? (isMeta ? GARBAGE_META : GARBAGE_INDEX)
+        : (isMeta ? meta : index);
     res.writeHead(200, {
         'content-type': 'application/json',
         'content-length': body.length,
@@ -218,18 +304,45 @@ try {
     const manifest = await evaluate(IDB_MANIFEST);
     check('offline copy saved during recovery', !!manifest && manifest.bytes > 1000000,
         manifest ? `v${manifest.v}, ${(manifest.bytes / 1048576).toFixed(1)} MB` : 'no manifest');
+    // This is the known-good copy every later step is measured against.
+    const savedVersion = manifest && manifest.v;
+    const savedBytes = manifest && manifest.bytes;
 
-    console.log('\n3. Host goes away again; restart the app');
+    console.log('\n3. A newer version is announced, and the download is rubbish');
+    // The field failure this guards: the update is committed to IndexedDB
+    // before anything establishes it is a usable index, the old index stays
+    // loaded so the session looks perfectly healthy, and the user finds out at
+    // the next cold start — in a pub, offline, with no way to recover.
+    setMode('garbage');
+    const before = requests;
+    await navigate(APP);
+    await waitFor(INDEX_READY, 60000, 'index ready from the saved copy');
+    // Wait for the update check to have asked for both files and given up.
+    for (let i = 0; i < 100 && requests < before + 2; i++) await sleep(200);
+    await sleep(2000);
+
+    const afterBad = await evaluate(IDB_MANIFEST);
+    check('a bad update does not replace the saved copy',
+        !!afterBad && afterBad.v === savedVersion && afterBad.bytes === savedBytes,
+        afterBad ? `v${afterBad.v}, ${(afterBad.bytes / 1048576).toFixed(1)} MB` : 'NO OFFLINE COPY');
+    check('the app stays usable after the bad update', await evaluate(INDEX_READY));
+
+    console.log('\n4. Host goes away entirely; cold start offline');
     setMode('hang');
     await navigate(APP);
     ms = await waitFor(INDEX_READY, 60000, 'index ready from the saved copy');
     check('saved copy is used, host is never needed', true, `${ms} ms`);
+    const finalManifest = await evaluate(IDB_MANIFEST);
+    check('the offline copy is still the known-good one',
+        !!finalManifest && finalManifest.v === savedVersion,
+        finalManifest ? `v${finalManifest.v}` : 'none');
 } catch (e) {
     console.error('\nFATAL:', e.message);
     results.push({ name: 'harness', ok: false, detail: e.message });
 } finally {
     chrome.kill();
     dataServer.close();
+    appServer.close();
     await sleep(500);
     try { rmSync(work, { recursive: true, force: true }); } catch (e) { /* exiting */ }
 }

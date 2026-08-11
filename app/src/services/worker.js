@@ -4,8 +4,8 @@ import {
     readIndex,
     readManifest,
     writeIndex,
-    clearIndex,
     splitIndexPayload,
+    indexPayloadProblem,
     estimateStorage,
 } from '@/services/tuneIndexStore';
 import {
@@ -120,6 +120,42 @@ class FolkFriendWASMWrapper {
             : { status: this.indexStatus });
     }
 
+    // Capture enough of the current state to put it back if an install fails.
+    //
+    // Taken BEFORE _downloadAndInstall, because that sets DOWNLOADING as its
+    // first action: asking "was it ready?" afterwards always answers no, which
+    // is how a failed manual refresh used to report UNAVAILABLE while the old
+    // index was still loaded and answering queries perfectly.
+    _snapshotIndexState() {
+        return {
+            usable: this.indexUsable,
+            detail: { ...this.indexDetail },
+        };
+    }
+
+    // Put back the state captured by _snapshotIndexState after a failed
+    // install. An install that fails changes nothing durable (the offline copy
+    // is only written once a download has proved itself) and leaves the
+    // previously loaded index in WASM, so if we had a usable index we still do.
+    _restoreAfterFailedInstall(snapshot, error) {
+        const message = (error && error.message) || String(error);
+        if (snapshot.usable) {
+            this._setIndexStatus(INDEX_STATUS.READY, {
+                source: snapshot.detail.source || 'cache',
+                v: snapshot.detail.v,
+                date: snapshot.detail.date,
+                legacy: !!snapshot.detail.legacy,
+                updateError: message,
+            });
+        } else {
+            this._setIndexStatus(INDEX_STATUS.UNAVAILABLE, {
+                reason: error instanceof NetworkUnavailableError ? 'network' : 'error',
+                message,
+                offline: isDefinitelyOffline(),
+            });
+        }
+    }
+
     // Await a terminal index state and report whether it is usable. Returns
     // promptly once the state machine has settled — index-dependent calls use
     // this instead of blocking on a promise that may never resolve.
@@ -168,6 +204,8 @@ class FolkFriendWASMWrapper {
         };
         console.time('tune-index-setup');
 
+        let cachedLoadError = null;
+
         try {
             const cached = await readIndex();
 
@@ -191,10 +229,22 @@ class FolkFriendWASMWrapper {
 
                     return this._finishSetup(analyticsData, t0);
                 } catch (e) {
-                    // Structurally valid but unloadable (e.g. schema change that
-                    // panics WASM). Discard it and fall through to a download.
-                    console.warn('Cached tune index failed to load; discarding', e);
-                    await clearIndex();
+                    // KEEP THE COPY. Failing to consume the data is not proof
+                    // that the data is bad: readIndex has already established
+                    // that it parses and is shaped like a tune index, so the
+                    // likely causes here are memory pressure, a worker killed
+                    // mid-load, or a bug in this particular build — all of which
+                    // a later launch may well survive. Deleting it meant one bad
+                    // startup cost the user their only offline copy, and they
+                    // found out the next time they had no signal.
+                    //
+                    // A genuinely unloadable payload is not stuck forever: the
+                    // download below replaces it as soon as there is a network,
+                    // and a payload that stops looking like a tune index at all
+                    // is cleared by readIndex.
+                    cachedLoadError = (e && e.message) || String(e);
+                    console.warn('Cached tune index failed to load into WASM; '
+                        + 'keeping the offline copy and trying the network', e);
                 }
             }
 
@@ -205,12 +255,15 @@ class FolkFriendWASMWrapper {
                 this._setIndexStatus(INDEX_STATUS.UNAVAILABLE, {
                     reason: 'offline',
                     offline: true,
+                    loadError: cachedLoadError,
                 });
                 analyticsData.error = 'No offline copy of the tune index, and you are offline.';
+                if (cachedLoadError) analyticsData['cached_load_error'] = cachedLoadError;
                 return this._finishSetup(analyticsData, t0);
             }
 
             const installed = await this._downloadAndInstall(null);
+            if (cachedLoadError) analyticsData['cached_load_error'] = cachedLoadError;
             analyticsData['newly_installed'] = true;
             analyticsData['days_since_update'] = 0;
             analyticsData['tune_index_metadata_version'] = installed.v;
@@ -240,9 +293,32 @@ class FolkFriendWASMWrapper {
         return analyticsData;
     }
 
-    // Download, load and persist the index. Persisting happens BEFORE parsing
-    // so that the offline copy is secured as early as possible — the whole
-    // point of the exercise is that this survives to the next launch.
+    // Download, VALIDATE, load and only then persist the index.
+    //
+    // ORDER IS A RELIABILITY PROPERTY, and this is the second half of the rule
+    // writeIndex documents: a known-good offline copy is immutable until a
+    // replacement has proved itself. writeIndex overwrites the previous copy
+    // irrecoverably, so everything that can reject the download must happen
+    // first:
+    //
+    //   download → JSON.parse → indexPayloadProblem → load into WASM → write
+    //
+    // This used to persist first, "to secure the offline copy as early as
+    // possible". It secured the wrong thing. Any 200 response that happened to
+    // be valid JSON — an error document, a truncated body that still closed its
+    // braces, a captive portal's API response, a half-built dataset — replaced
+    // a working offline copy before anything checked it was usable. During a
+    // background update the old index stays loaded in WASM and the caller
+    // restores READY, so the session looked completely healthy; the user found
+    // out at the next cold start, offline, which is precisely when they could
+    // do nothing about it.
+    //
+    // The cost is holding the ~42 MB raw string alive across the WASM load
+    // instead of releasing it just before, so peak memory during an install is
+    // higher. That trade is right: running out of memory here now fails BEFORE
+    // the write and leaves the previous copy untouched, whereas the old order
+    // could survive the write and still leave the user with an index that
+    // cannot load.
     async _downloadAndInstall(bypassCacheVersion) {
         this._setIndexStatus(INDEX_STATUS.DOWNLOADING, { received: 0, total: 0 });
 
@@ -266,6 +342,35 @@ class FolkFriendWASMWrapper {
 
         const version = { v: metadata.v || 0, date: metadata.date || null };
 
+        // --- Prove the download is good, before anything durable changes ----
+
+        // A parse failure throws out of here with nothing written: truncated
+        // bodies, HTML error pages and captive-portal interception all land
+        // here. try/finally because the timer must be closed on the throwing
+        // path too — otherwise every failed update leaks its label and the next
+        // one reports a nonsense duration.
+        let parsed;
+        console.time('index-parse-from-network');
+        try {
+            parsed = JSON.parse(raw);
+        } finally {
+            console.timeEnd('index-parse-from-network');
+        }
+
+        // Valid JSON is not the same as "is the tune index".
+        const problem = indexPayloadProblem(parsed);
+        if (problem) {
+            throw new Error(`Downloaded tune index is not usable (${problem})`);
+        }
+
+        // The final proof, and the only one that covers a payload the Rust side
+        // rejects: if this throws, the previous index is still the one loaded in
+        // WASM (use_tune_index runs only after serde has deserialised the whole
+        // thing) and the previous offline copy is still on disk.
+        await this.loadTuneIndex(splitIndexPayload(parsed));
+
+        // --- Only now may the previous offline copy be replaced -------------
+
         let persistError = null;
         try {
             await writeIndex(raw, version);
@@ -276,13 +381,7 @@ class FolkFriendWASMWrapper {
             console.error('Could not persist offline copy of tune index', e);
             persistError = (e && e.message) || String(e);
         }
-
-        console.time('index-parse-from-network');
-        const parsed = JSON.parse(raw);
-        console.timeEnd('index-parse-from-network');
-        raw = null; // let the ~42 MB string go before we build the split payload
-
-        await this.loadTuneIndex(splitIndexPayload(parsed));
+        raw = null; // release the ~42 MB string
 
         this._setIndexStatus(INDEX_STATUS.READY, {
             source: 'network',
@@ -316,19 +415,15 @@ class FolkFriendWASMWrapper {
         }
 
         console.debug(`Upgrading tune index v${manifest.v} -> v${remote.v}`);
+        const snapshot = this._snapshotIndexState();
         try {
             await this._downloadAndInstall(remote.v);
         } catch (e) {
-            // Non-fatal: the cached index is loaded and usable. Restore READY
-            // so a failed background update can't leave the app looking broken.
+            // Non-fatal: the cached index is loaded and usable, and the failed
+            // update changed nothing on disk. Restore READY so a failed
+            // background update can't leave the app looking broken.
             console.warn('Tune index update failed; keeping cached version', e);
-            this._setIndexStatus(INDEX_STATUS.READY, {
-                source: 'cache',
-                v: manifest.v,
-                date: manifest.date,
-                legacy: !!manifest.legacy,
-                updateError: (e && e.message) || String(e),
-            });
+            this._restoreAfterFailedInstall(snapshot, e);
         }
     }
 
@@ -345,6 +440,14 @@ class FolkFriendWASMWrapper {
             if (isDefinitelyOffline()) {
                 return { ok: false, error: 'You are offline.' };
             }
+            // Captured before the download starts, because _downloadAndInstall
+            // sets DOWNLOADING immediately — reading the status in the catch
+            // block below always saw DOWNLOADING, never READY, so every failed
+            // manual refresh reported UNAVAILABLE even with a perfectly good
+            // index still loaded. That produced status='unavailable' alongside
+            // usable=true, and which of the two a given view believed decided
+            // whether it showed tunes or an error.
+            const snapshot = this._snapshotIndexState();
             try {
                 // Unique query string forces a fresh copy past any HTTP cache.
                 const installed = await this._downloadAndInstall(Date.now());
@@ -355,14 +458,7 @@ class FolkFriendWASMWrapper {
                     persistError: installed.persistError,
                 };
             } catch (e) {
-                const wasReady = this.indexStatus === INDEX_STATUS.READY;
-                if (!wasReady) {
-                    this._setIndexStatus(INDEX_STATUS.UNAVAILABLE, {
-                        reason: 'network',
-                        message: e && e.message,
-                        offline: isDefinitelyOffline(),
-                    });
-                }
+                this._restoreAfterFailedInstall(snapshot, e);
                 return { ok: false, error: (e && e.message) || String(e) };
             }
         })();

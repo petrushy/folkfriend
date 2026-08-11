@@ -94,14 +94,30 @@ async function loadNetwork() {
     ]);
 }
 
+// Pad a payload out past MIN_PLAUSIBLE_SETTINGS.
+//
+// readIndex now refuses a payload that is not plausibly the tune index at all
+// (see indexPayloadProblem in tuneIndexStore.js), because "parses as JSON" does
+// not distinguish the dataset from an error document or a captive portal's
+// reply — and accepting one of those overwrote the user's only working copy.
+// A two-entry object is indistinguishable from those; the real index carries
+// ~62k settings. The identifying entries below are what the assertions use;
+// the filler only makes the payload plausible.
+function padded(settings, aliases, idBase) {
+    for (let i = 0; i < 150; i++) {
+        settings[String(idBase + i)] = {
+            tune_id: String(idBase + i), abc: `FILLER-${i}`, contour: 'vtvt',
+        };
+        aliases[String(idBase + i)] = [`Filler ${i}`];
+    }
+    return JSON.stringify({ settings, aliases });
+}
+
 // A minimal but structurally faithful index payload.
-const SAMPLE = JSON.stringify({
-    settings: {
-        '101': { tune_id: '7', abc: 'ABC-ONE', contour: 'tttt', source_url: 'https://x/1' },
-        '102': { tune_id: '7', abc: 'ABC-TWO', contour: 'vvvv' },
-    },
-    aliases: { '7': ['The Kesh'] },
-});
+const SAMPLE = padded({
+    '101': { tune_id: '7', abc: 'ABC-ONE', contour: 'tttt', source_url: 'https://x/1' },
+    '102': { tune_id: '7', abc: 'ABC-TWO', contour: 'vvvv' },
+}, { '7': ['The Kesh'] }, 1000);
 
 console.log('\ntuneIndexStore');
 
@@ -258,10 +274,9 @@ console.log('\ntuneIndexStore — exhaustive fault injection');
 // That holds regardless of how writeIndex is implemented, so it survives a
 // future rewrite that reintroduces the same mistake in a different shape.
 
-const NEWER = JSON.stringify({
-    settings: { '201': { tune_id: '9', abc: 'NEW-ABC', contour: 'qqqq' } },
-    aliases: { '9': ['A Newer Tune'] },
-});
+const NEWER = padded(
+    { '201': { tune_id: '9', abc: 'NEW-ABC', contour: 'qqqq' } },
+    { '9': ['A Newer Tune'] }, 5000);
 
 await test('a good copy survives an interruption at EVERY step of an update', async () => {
     // Discover how many operations a successful update takes.

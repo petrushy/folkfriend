@@ -193,6 +193,66 @@ must be treated as sacred:
 6. Automatic update checking can be turned off entirely (Settings → *Check for
    new tune data automatically*, `userSettings.autoUpdateTuneData`). With it
    off, the saved copy is only ever replaced by an explicit tap.
+7. **A known-good copy is immutable until a replacement has proved itself**
+   (August 2026). Rules 1–5 all cover an update that *fails*. They said nothing
+   about an update that *succeeds at storing the wrong thing*, and
+   `_downloadAndInstall` did `download → writeIndex → JSON.parse → load into
+   WASM` — committing 42 MB to `ffIndexRaw` before anything established it was a
+   usable index. Any 200 response that was valid JSON replaced the working copy:
+   an error document, a captive portal's API reply, `nud-meta.json` from the
+   wrong path, a truncated body that still closed its braces, a half-built
+   dataset. The order is now:
+
+   ```text
+   download → JSON.parse → indexPayloadProblem → load into WASM → writeIndex
+   ```
+
+   **This was invisible for a whole session, which is what makes it the worst of
+   the failures here.** During a background update the old index stays loaded in
+   WASM and `_checkForUpdateInBackground` restores `READY`, so the app behaves
+   perfectly until the next cold start — offline, when nothing can be done.
+
+   `indexPayloadProblem()` (in `tuneIndexStore.js`) is the structural gate:
+   settings and aliases objects, at least `MIN_PLAUSIBLE_SETTINGS` (100, against
+   ~62k real) entries, and one sampled setting carrying string `tune_id` and
+   `contour`. It samples rather than walks — the point is to reject documents
+   that are not the tune index, not to validate 62k records. The floor is
+   deliberately low: **a false rejection means the user can never update again**,
+   which is worse than accepting an odd-but-small payload.
+
+   The cost is holding the raw 42 MB string alive across the WASM load rather
+   than releasing it just before, so peak memory during an install is higher.
+   That trade is right: an OOM now fails *before* the write and leaves the
+   previous copy untouched.
+
+   `readIndex` applies the same check, so a bad payload written by a pre-fix
+   build is cleared rather than kept forever. This narrows rule 3 — "a payload
+   that parses is usable, full stop" — to "parses *and is shaped like a tune
+   index*". Bookkeeping is still never grounds for discarding data; being a
+   different document entirely is.
+8. **Failing to consume the data is not proof the data is bad.** A cached copy
+   that threw on `loadTuneIndex` used to be deleted on the spot, on the
+   assumption that unloadable meant corrupt. On iOS the likelier causes are
+   memory pressure, a worker killed mid-load, or a bug in that one build — all
+   survivable at the next launch. It is now kept, the failure is recorded in
+   `indexDetail.loadError`, and the app falls through to a download. A genuinely
+   incompatible payload is not stuck forever: the next successful download
+   replaces it, and rule 7's read-side check clears anything that stopped being
+   a tune index at all.
+9. **Status must never contradict usability.** `refreshTuneIndex`'s failure path
+   asked `this.indexStatus === READY` *after* `_downloadAndInstall` had already
+   set `DOWNLOADING`, so it always answered no: every failed manual refresh
+   reported `UNAVAILABLE` while the old index sat in WASM answering queries,
+   giving `status='unavailable'` with `usable=true`. Which of the two a given
+   view happened to read decided whether the user saw tunes or an error, so the
+   app looked randomly broken. Both update callers now take
+   `_snapshotIndexState()` *before* starting and restore through
+   `_restoreAfterFailedInstall()`, which reports `READY` + the old version +
+   `updateError` when an index was loaded, and `UNAVAILABLE` only when one was
+   not. `backend.indexReady()` is the client half of the same distinction: it
+   resolves on `store.state.indexLoaded`, not on the status reading `'ready'`,
+   so callers no longer block on a background download that has no bearing on
+   whether their query works.
 
 ### How the index is stored
 
@@ -239,7 +299,9 @@ must be treated as sacred:
 `eventBus.$emit('indexStatusChanged')`. It always reaches a terminal state.
 
 - `ffBackend.indexReady()` resolves `true`/`false` — never hangs. Use it instead
-  of racing the one-shot `indexLoaded` event against your component's mount.
+  of racing the one-shot `indexLoaded` event against your component's mount. It
+  answers on **usability**, not on the status string, so a background update
+  does not make it wait (see reliability rule 9).
 - Index-dependent worker calls (`settingsFromTuneID`, `aliasesFromTuneID`,
   `runNameQuery`, `runTranscriptionQuery`) **fail fast with `[]`** when the index
   is unavailable, so callers fall back immediately.
@@ -299,13 +361,37 @@ modes it was: never saved, or saved-then-evicted.
 
 ### Tests
 
-- `npm test` — unit tests for the store and network layers, with in-memory
-  fakes. Covers quota failure, partial writes, corrupt payloads, legacy reads,
-  stall aborts.
+- `app/test/tune-index-cache.test.mjs` (21 cases) — the store and network layers
+  with in-memory fakes. Quota failure, partial writes, corrupt payloads, legacy
+  reads, stall aborts, and the interruption walk described in rule 5.
+- `app/test/tune-index-install.test.mjs` (32 cases) — the *install* path, i.e.
+  rules 7–9. It drives the real `worker.js` with its imports rewritten to fakes
+  (in-memory IndexedDB, a scriptable network, a WASM stand-in that can refuse a
+  payload), deliberately rather than a reimplementation: the bug was entirely in
+  the ORDER of four statements, and a test restating that order would have
+  passed against the broken code. Nine bad-but-plausible response bodies are
+  each pushed through a background update, a manual refresh and a WASM refusal,
+  and the assertion is always the same — read what is actually on disk
+  afterwards and confirm it is still the complete, parseable, loadable previous
+  version. Verified by reinstating each old behaviour in turn: the write-first
+  ordering fails 11, delete-on-load-failure fails 3, the `wasReady`
+  read-after-DOWNLOADING fails 1.
 - `npm run test:e2e` — real headless Chrome, driven over CDP. See
   `app/test/e2e/README.md`, which also documents the traps (CDP network
   emulation does not reach Web Workers; Chrome's HTTP cache masks the failure;
   `.app` is HSTS-preloaded).
+
+  `recovery.mjs` **existed but was never in the `test:e2e` script**, so the one
+  scenario closest to the field failure was not being run. It is now, and it
+  bootstraps itself rather than needing the manual `cp -R dist dist-test && sed
+  && npx serve` dance: it copies `dist`, rewrites the CDN origin in the emitted
+  JS, and serves the result with an SPA fallback on :3001 alongside its
+  controllable stand-in for the data host on :8444. It walks captive portal →
+  recovery → **a newer version announced with a truncated body** → cold start
+  with the host gone, asserting after the bad update that the manifest still
+  names the same version and byte count. CI therefore no longer *deletes* the
+  tune index before building — it moves it to `/tmp/ff-index/` and passes
+  `FF_INDEX_JSON`, because the stand-in has to serve something real.
 
 ### IndexedDB (idb-keyval) — full key list
 

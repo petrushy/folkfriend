@@ -77,8 +77,13 @@ jobs:
       # was adding ~42 MB to every deploy. nud-meta.json MUST stay: it is in the
       # service worker's precache manifest, and a 404 there fails the service
       # worker install and takes offline support down with it.
+      #
+      # Moved aside rather than deleted: test/e2e/recovery.mjs serves it from a
+      # local stand-in for the CDN, so the e2e step below still needs a copy.
       - name: Drop the tune index from the deployed bundle
-        run: rm -f app/public/res/folkfriend-non-user-data.json
+        run: |
+          mkdir -p /tmp/ff-index
+          mv app/public/res/folkfriend-non-user-data.json /tmp/ff-index/ || true
 
       # Only the build needs wasm-pack (via the prebuild hook), so install it
       # here rather than up front — a flake fetching it then blocked the tests
@@ -162,6 +167,9 @@ jobs:
         working-directory: app
         env:
           CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          # recovery.mjs stands in for the tune-data CDN, so it needs the index
+          # that the build step moved out of public/res/.
+          FF_INDEX_JSON: /tmp/ff-index/folkfriend-non-user-data.json
         run: npm run test:e2e
 
       # Preview channel for PRs: a temporary URL that expires after 7 days.

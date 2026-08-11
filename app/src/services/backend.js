@@ -96,17 +96,26 @@ class FFBackend {
         return 'Could not load the tune database. Your favourites are still available.';
     }
 
-    // Resolves as soon as the index reaches a terminal state — true when it is
-    // usable, false when the caller should fall back to locally saved data.
-    // Never hangs: the worker's state machine always settles.
+    // Resolves as soon as the index is usable, or as soon as it is known not to
+    // be — true when queries will work, false when the caller should fall back
+    // to locally saved data. Never hangs: the worker's state machine always
+    // settles.
+    //
+    // USABILITY, NOT PIPELINE STATUS. A loaded index keeps answering queries
+    // while a newer one downloads in the background, so waiting for the status
+    // to read 'ready' meant every caller — the Tune view, TheSession bookmark
+    // import — blocked on a 42 MB transfer that had no bearing on whether their
+    // query would work. Same distinction the worker draws between indexUsable
+    // and indexStatus; this is the client side of it.
     indexReady() {
-        if (store.state.indexStatus === 'ready') return Promise.resolve(true);
+        if (store.state.indexLoaded) return Promise.resolve(true);
         if (store.state.indexStatus === 'unavailable') return Promise.resolve(false);
         return new Promise(resolve => {
             const onChange = detail => {
-                if (detail.status === 'ready' || detail.status === 'unavailable') {
+                const usable = !!detail.usable || detail.status === 'ready';
+                if (usable || detail.status === 'unavailable') {
                     eventBus.$off('indexStatusChanged', onChange);
-                    resolve(detail.status === 'ready');
+                    resolve(usable);
                 }
             };
             eventBus.$on('indexStatusChanged', onChange);
