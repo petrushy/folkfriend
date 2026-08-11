@@ -534,6 +534,40 @@ class Store {
         }
     }
 
+    // Adopt the newest clear-all this snapshot tells us about, and return the
+    // effective watermark for reconciling it.
+    //
+    // Deletion protection has to be **transitive**. Without this, a device that
+    // merely *hears* about a clear deletes its copy and is then defenceless: it
+    // has no cached note left to compare against and no watermark of its own, so
+    // a third device that never saw the clear resurrects the note there. Only
+    // the device where the user pressed Clear was protected.
+    //
+    // Adopted before reconciling rather than during it, so a tombstone and a
+    // stale note arriving in the *same* snapshot are judged against the clear
+    // too — the ordering of items in the array must not decide the outcome.
+    //
+    // ⚠️ This promotes a per-favourite marker into a global watermark, which is
+    // only sound because `aiSummaryDeletedAt` is written in exactly two places
+    // and both mean clear-*all*: clearAiSummaries, and the re-stamp in
+    // _reapplyAiSummaries (which derives from this same watermark). **A per-tune
+    // delete must not reuse this field** — it would read as "clear everything
+    // older than this" and take out unrelated notes.
+    _adoptIncomingClear(items) {
+        let incomingClear = 0;
+        for (const item of items) {
+            const deletedAt = (item && item.aiSummaryDeletedAt) || 0;
+            if (deletedAt > incomingClear) incomingClear = deletedAt;
+        }
+
+        const local = this._getAiSummariesClearedAt();
+        if (incomingClear > local) {
+            localStorage.setItem(AI_CLEARED_AT_STORAGE_KEY, String(incomingClear));
+            return incomingClear;
+        }
+        return local;
+    }
+
     // An inbound Firestore snapshot replaces the whole favourites array, so any
     // summary a remote device does not know about would be destroyed. Harvest
     // incoming summaries into the local cache, and keep the newer of the two
@@ -542,7 +576,7 @@ class Store {
     async _harvestAiSummaries(items) {
         if (!Array.isArray(items) || !items.length) return;
         const summaries = await this._loadAiSummaries();
-        const clearedAt = this._getAiSummariesClearedAt();
+        const clearedAt = this._adoptIncomingClear(items);
         let changed = false;
 
         for (const item of items) {

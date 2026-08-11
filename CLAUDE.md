@@ -838,6 +838,24 @@ notes" is inherently clear-*all*, and per-tune markers cannot cover a note the
 for that tune and the stale write carries none either. `npm test` pins that case
 specifically.
 
+**Protection has to be transitive, so an incoming tombstone advances the
+watermark.** `_adoptIncomingClear` takes the newest `aiSummaryDeletedAt` in a
+snapshot and raises the local watermark to it (`max`, never lowering).
+Without it only the device where Clear was pressed is defended: a device that
+merely *hears* about the clear deletes its copy and is then defenceless — no
+cached note left to compare against and no watermark of its own — so a third
+device that never saw the clear resurrects the note there. It runs as a pre-pass
+rather than inside the reconciliation loop, so a tombstone and a stale note in the
+*same* snapshot are both judged against the clear and item order cannot decide
+the outcome.
+
+⚠️ That promotes a per-favourite marker into a global watermark, which is only
+sound because `aiSummaryDeletedAt` is written in exactly two places and both mean
+clear-*all*: `clearAiSummaries`, and the re-stamp in `_reapplyAiSummaries` (which
+derives from this same watermark). **A per-tune delete must not reuse that
+field** — it would read as "clear everything older than this" and take out
+unrelated notes.
+
 `importUserData` clears the watermark first: restoring a backup is an explicit
 request for its contents, so it outranks an earlier clear rather than having its
 older notes silently filtered out.
@@ -886,13 +904,15 @@ identity). This is what makes the two new settings reach existing installs.
   `fetch`: block-type extraction, refusal, `pause_turn` resume and cap, the
   web_fetch error path, the three-rung ladder, status→kind mapping, the bounded
   deadline, and offline/no-key short-circuits that must not spend a request.
-- `app/test/aiSummaryStore.test.mjs` (21 cases) — both storage invariants above.
-  The deletion half is covered from five angles, because each one fails a
+- `app/test/aiSummaryStore.test.mjs` (23 cases) — both storage invariants above.
+  The deletion half is covered from seven angles, because each one fails a
   different plausible implementation: a tombstoned deletion must not be
   resurrected; a *stale device's* push must not resurrect it either; nor must one
-  for a tune this device never held; a note generated elsewhere *after* the clear
-  must still be accepted; and a regenerate on this device must stick. Plus key
-  exclusion from backups, truncation, mirror targeting, and spend accounting.
+  for a tune this device never held; a *third* device must not resurrect it at a
+  device that only heard about the clear; a note generated elsewhere *after* the
+  clear must still be accepted, including after an adopted clear; and a
+  regenerate on this device must stick. Plus key exclusion from backups,
+  truncation, mirror targeting, and spend accounting.
 - `app/test/tuneBackgroundDialog.test.mjs` (8 cases) — the shared dialog: the
   request is built only from the tune it started for, a late result is saved but
   not shown, opening never generates, reopening a different tune clears the

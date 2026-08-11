@@ -325,6 +325,59 @@ await test('a clear survives a stale note pushed by a device that missed it', as
     );
 });
 
+await test('a device that only hears about a clear defends against it too', async () => {
+    // Three devices. The watermark protects the device that pressed Clear, but
+    // deletion protection has to be transitive: a device that merely *receives*
+    // the tombstone deletes its copy and is then defenceless, because it has
+    // neither a cached note to compare against nor a watermark of its own. A
+    // third device that never saw the clear resurrects the note there.
+    const { store, idb, sync } = await loadStore();
+
+    // This device is B: it holds the note, and did not perform the clear.
+    idb.__db.set('favouriteItems', [favourite(101, '7')]);
+    await store.setAiSummary('7', { text: 'Note.', generatedAt: 1000 });
+    await store.onSignedIn({ uid: 'user-1' });
+
+    // A cleared at t=2000; its tombstone arrives here.
+    const cleared = favourite(101, '7');
+    cleared.aiSummaryDeletedAt = 2000;
+    await sync.__onChange('favourites', [cleared]);
+    assert.equal(await store.getAiSummary('7'), null, 'the tombstone must be honoured');
+    sync.__pushes.length = 0;
+
+    // C was offline through all of that and now pushes its stale whole document.
+    const stale = favourite(101, '7');
+    stale.aiSummary = { text: 'Note.', generatedAt: 1000 };
+    await sync.__onChange('favourites', [stale]);
+
+    assert.equal(await store.getAiSummary('7'), null,
+        'hearing about a clear must confer the same protection as performing one');
+    assert.equal(idb.__db.get('favouriteItems')[0].aiSummary, undefined);
+    assert.ok(
+        sync.__pushes.some(items => items[0] && items[0].aiSummaryDeletedAt),
+        'the deletion must be re-stated so the stale device learns of it',
+    );
+});
+
+await test('an adopted clear still admits a note generated after it', async () => {
+    // The promotion must not turn into a permanent embargo on the device that
+    // merely heard about the clear.
+    const { store, idb, sync } = await loadStore();
+    idb.__db.set('favouriteItems', [favourite(101, '7')]);
+    await store.setAiSummary('7', { text: 'Note.', generatedAt: 1000 });
+    await store.onSignedIn({ uid: 'user-1' });
+
+    const cleared = favourite(101, '7');
+    cleared.aiSummaryDeletedAt = 2000;
+    await sync.__onChange('favourites', [cleared]);
+
+    const fresh = favourite(101, '7');
+    fresh.aiSummary = { text: 'Regenerated on a third device.', generatedAt: 3000 };
+    await sync.__onChange('favourites', [fresh]);
+
+    assert.equal((await store.getAiSummary('7')).text, 'Regenerated on a third device.');
+});
+
 await test('a clear also blocks a stale note this device never held', async () => {
     // This is why the guard is a single watermark and not a per-tune tombstone
     // map: there is no local marker for a tune this device never had a note for,
