@@ -77,8 +77,13 @@ jobs:
       # was adding ~42 MB to every deploy. nud-meta.json MUST stay: it is in the
       # service worker's precache manifest, and a 404 there fails the service
       # worker install and takes offline support down with it.
+      #
+      # Moved aside rather than deleted: test/e2e/recovery.mjs serves it from a
+      # local stand-in for the CDN, so the e2e step below still needs a copy.
       - name: Drop the tune index from the deployed bundle
-        run: rm -f app/public/res/folkfriend-non-user-data.json
+        run: |
+          mkdir -p /tmp/ff-index
+          mv app/public/res/folkfriend-non-user-data.json /tmp/ff-index/ || true
 
       # Only the build needs wasm-pack (via the prebuild hook), so install it
       # here rather than up front — a flake fetching it then blocked the tests
@@ -138,6 +143,57 @@ jobs:
           done
           echo "soundfont OK: $count notes"
 
+      # The WASM module is the app's executable: without it there is no
+      # transcription, no query engine, and the saved tune index is unreadable.
+      # Workbox silently drops anything over 2 MiB from the precache manifest
+      # and says so only in a build-log line nobody reads, so every deploy
+      # shipped a service worker with no WASM in it — and the offline tests
+      # still passed, because Chrome's HTTP cache was quietly covering for it.
+      #
+      # Same rule as the soundfont check above: an asset that is required by the
+      # deployed app needs a post-build assertion, not a config option that is
+      # assumed to have worked.
+      - name: Verify the WASM is in the service worker precache
+        working-directory: app
+        run: |
+          # No `ls` on globs here. Under `bash -e`, `ls a b*` returns 2 when the
+          # b* pattern matches nothing even though it listed `a` perfectly well,
+          # which kills the step — and with 2>/dev/null attached, silently.
+          wasm=""
+          for f in dist/*.wasm; do
+            [ -f "$f" ] && wasm="$f" && break
+          done
+          if [ -z "$wasm" ]; then
+            echo "no .wasm emitted into dist/ — the build is broken"
+            exit 1
+          fi
+          name=$(basename "$wasm")
+
+          # Workbox 6 inlines the manifest into service-worker.js; older majors
+          # emitted precache-manifest.*.js. Search whichever exist.
+          manifests=""
+          for f in dist/service-worker.js dist/precache-manifest*.js; do
+            [ -f "$f" ] && manifests="$manifests $f"
+          done
+          if [ -z "$manifests" ]; then
+            echo "no service worker emitted into dist/"
+            exit 1
+          fi
+
+          if ! grep -qF "$name" $manifests; then
+            echo "$name is NOT in the precache manifest ($manifests)."
+            echo "Workbox almost certainly skipped it for size — check"
+            echo "maximumFileSizeToCacheInBytes in vue.config.js against:"
+            ls -l "$wasm"
+            exit 1
+          fi
+          echo "precache OK: $name ($(du -h "$wasm" | cut -f1)) in$manifests"
+          # The 42 MB dataset must NOT be in there (it lives in IndexedDB).
+          if grep -qF 'folkfriend-non-user-data.json' $manifests; then
+            echo "the tune index is in the precache manifest — it must not be"
+            exit 1
+          fi
+
       - name: Report bundle size
         working-directory: app
         run: du -sh dist && du -sh dist/* | sort -h | tail -5
@@ -162,6 +218,9 @@ jobs:
         working-directory: app
         env:
           CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
+          # recovery.mjs stands in for the tune-data CDN, so it needs the index
+          # that the build step moved out of public/res/.
+          FF_INDEX_JSON: /tmp/ff-index/folkfriend-non-user-data.json
         run: npm run test:e2e
 
       # Preview channel for PRs: a temporary URL that expires after 7 days.
