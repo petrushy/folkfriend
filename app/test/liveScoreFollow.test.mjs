@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import {
     resolveFollowTarget,
     applyOverride,
-    cachedScoreMatchesTarget,
+    targetScoreKey,
+    needsScoreLoad,
     getLastShown,
     setLastShown,
     clearLastShown,
@@ -165,11 +166,11 @@ function det(tuneId, settingId, title, bestScore, alternatives = []) {
 // against a real previous target instead of null.
 {
     clearLastShown();
-    assert.deepEqual(getLastShown(), { target: null, abcSetting: null, favourited: false });
+    assert.deepEqual(getLastShown(), { target: null, abcSetting: null, abcTargetKey: null, favourited: false });
 
     const target = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
     const abcSetting = { tune_id: 1, setting_id: 10, abc: 'X:1\n' };
-    setLastShown({ target, abcSetting, favourited: true });
+    setLastShown({ target, abcSetting, abcTargetKey: targetScoreKey(target), favourited: true });
 
     const reopened = getLastShown();
     assert.equal(reopened.target.tuneId, 1);
@@ -177,22 +178,31 @@ function det(tuneId, settingId, title, bestScore, alternatives = []) {
     assert.equal(reopened.favourited, true);
 
     // Same tune still playing after reopen → no reload needed
-    const { changed } = resolveFollowTarget([det(1, 10, 'The Kesh', 0.73)], reopened.target);
+    const { target: resolvedTarget, changed } = resolveFollowTarget([det(1, 10, 'The Kesh', 0.73)], reopened.target);
     assert.equal(changed, false);
+    assert.equal(needsScoreLoad(resolvedTarget, reopened.abcTargetKey, null), false);
 
     clearLastShown();
 }
 
-// cachedScoreMatchesTarget(): the basics
+// targetScoreKey(): identifies a (tune, setting) pair, null for no target
 {
-    assert.equal(cachedScoreMatchesTarget(null, null), true, 'nothing to load');
-    assert.equal(cachedScoreMatchesTarget({ tune_id: 1 }, null), true, 'no target means nothing to load, regardless of stale abc');
-    assert.equal(cachedScoreMatchesTarget(null, { tuneId: 1 }), false, 'a target with no loaded abc must be loaded');
-    assert.equal(cachedScoreMatchesTarget({ tune_id: 1 }, { tuneId: 1 }), true);
-    assert.equal(cachedScoreMatchesTarget({ tune_id: 1 }, { tuneId: 2 }), false);
-    // tune_id/tuneId types can differ (schema.rs stores TuneID as a string;
-    // detection rows aren't guaranteed to match that exactly) — compared as strings.
-    assert.equal(cachedScoreMatchesTarget({ tune_id: '1' }, { tuneId: 1 }), true);
+    assert.equal(targetScoreKey(null), null);
+    assert.equal(targetScoreKey({ tuneId: 1, settingId: '10' }), '1::10');
+    assert.equal(targetScoreKey({ tuneId: 1, settingId: '11' }), '1::11', 'different setting, different key');
+    assert.equal(targetScoreKey({ tuneId: 2, settingId: '10' }), '2::10', 'different tune, different key');
+}
+
+// needsScoreLoad(): the basics
+{
+    const target = { tuneId: 1, settingId: '10' };
+    const key = targetScoreKey(target);
+    assert.equal(needsScoreLoad(null, null, null), false, 'nothing to load');
+    assert.equal(needsScoreLoad(target, null, null), true, 'no cached and no in-flight score');
+    assert.equal(needsScoreLoad(target, key, null), false, 'already have the score for this exact target');
+    assert.equal(needsScoreLoad(target, key, key), false, 'already have it, even if (redundantly) also "loading" it');
+    assert.equal(needsScoreLoad(target, null, key), false, 'already loading this exact target — do not restart it');
+    assert.equal(needsScoreLoad(target, 'other::key', null), true);
 }
 
 // Regression: closing the overlay mid-load must not let a stale abcSetting
@@ -206,22 +216,56 @@ function det(tuneId, settingId, title, bestScore, alternatives = []) {
     // Tune A was fully loaded and shown.
     const targetA = resolveFollowTarget([det(1, 10, 'Tune A', 0.71)], null).target;
     const abcSettingA = { tune_id: 1, setting_id: 10, abc: 'X:1\nTune A\n' };
+    const abcTargetKeyA = targetScoreKey(targetA);
 
     // Detection moves to tune B; target updates immediately but the load for
-    // B's score hasn't resolved yet, so abcSetting is still A's (loadScore's
-    // documented behaviour). The user closes the overlay in this window.
+    // B's score hasn't resolved yet, so abcSetting/abcTargetKey are still A's
+    // (loadScore's documented behaviour). The user closes the overlay here.
     const { target: targetB, changed } = resolveFollowTarget([det(2, 20, 'Tune B', 0.66)], targetA);
     assert.equal(changed, true);
-    setLastShown({ target: targetB, abcSetting: abcSettingA, favourited: false });
+    setLastShown({ target: targetB, abcSetting: abcSettingA, abcTargetKey: abcTargetKeyA, favourited: false });
 
     // Reopen while B is still the current detection.
     const reopened = getLastShown();
     const resolved = resolveFollowTarget([det(2, 20, 'Tune B', 0.68)], reopened.target);
     assert.equal(resolved.changed, false, 'tune has not changed again since the cached target');
     assert.equal(
-        cachedScoreMatchesTarget(reopened.abcSetting, resolved.target),
-        false,
+        needsScoreLoad(resolved.target, reopened.abcTargetKey, null),
+        true,
         'cached abc is still Tune A — a reload must be forced even though changed is false',
+    );
+
+    clearLastShown();
+}
+
+// Regression (same-tune, different setting): a manual override to a
+// different setting of the SAME tune must not be masked by a tune_id-only
+// check. This is exactly the scenario a tune_id-only comparison would miss.
+{
+    clearLastShown();
+
+    const detection = det(1, 10, 'The Kesh', 0.71, [opt(1, 11, 'The Kesh (alt)', 0.68)]);
+    const shown10 = resolveFollowTarget([detection], null).target;
+    const abcSetting10 = { tune_id: 1, setting_id: 10, abc: 'X:1\nsetting 10\n' };
+    const abcTargetKey10 = targetScoreKey(shown10);
+
+    // User overrides to setting 11 of the same tune; its load hasn't resolved
+    // (abcSetting/abcTargetKey are still setting 10's) when the overlay closes.
+    const overridden = applyOverride(shown10, detection.tuneOptions[1]).target;
+    assert.equal(overridden.tuneId, 1);
+    assert.equal(overridden.settingId, '11');
+    setLastShown({ target: overridden, abcSetting: abcSetting10, abcTargetKey: abcTargetKey10, favourited: false });
+
+    // Reopen: same tune is still playing, so resolveFollowTarget alone says
+    // "unchanged" — but the cached score is for the wrong setting.
+    const reopened = getLastShown();
+    const resolved = resolveFollowTarget([det(1, 10, 'The Kesh', 0.74)], reopened.target);
+    assert.equal(resolved.changed, false);
+    assert.equal(resolved.target.settingId, '11', 'the override is still what should be on screen');
+    assert.equal(
+        needsScoreLoad(resolved.target, reopened.abcTargetKey, null),
+        true,
+        'cached abc is setting 10, target is setting 11 of the same tune — must reload',
     );
 
     clearLastShown();
