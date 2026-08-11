@@ -99,7 +99,7 @@ import liveAnalysisService from '@/services/liveAnalysis.js';
 import AbcDisplay from '@/components/AbcDisplay.vue';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
-import { resolveFollowTarget, applyOverride } from '@/js/liveScoreFollow.mjs';
+import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
 
 export default {
     name: 'LiveScoreFollow',
@@ -111,14 +111,23 @@ export default {
         },
     },
     data() {
+        // Seed from whatever was on screen the last time this overlay was open,
+        // so closing and reopening on the same still-playing tune shows it
+        // instantly instead of forcing a reload — see the comment on
+        // getLastShown() in liveScoreFollow.mjs.
+        const lastShown = getLastShown();
+        // Non-reactive: which target the cached/loading abcSetting is for.
+        // See needsScoreLoad() in liveScoreFollow.mjs.
+        this._abcTargetKey = lastShown.abcTargetKey || null;
+        this._loadingTargetKey = null;
         return {
-            target: null,
-            abcSetting: null,
-            selectedTuneKey: null,
+            target: lastShown.target,
+            abcSetting: lastShown.abcSetting,
+            selectedTuneKey: lastShown.target ? this._optionKeyFor(lastShown.target) : null,
             loading: false,
             loadError: '',
             elapsedSeconds: liveAnalysisService.elapsedSeconds,
-            favourited: false,
+            favourited: lastShown.favourited,
             starIcon: mdiStar,
             starOutlineIcon: mdiStarOutline,
         };
@@ -144,7 +153,13 @@ export default {
                 // that window read the stale cache and snapped the star back,
                 // making it look like the tap hadn't registered.
                 if (changed) this._syncFavourited();
-                if (changed) this.loadScore();
+                // needsScoreLoad() covers a real tune change (this.abcTargetKey
+                // stops matching) and also a stale-on-reopen cache (same idea,
+                // caught by the key rather than by `changed`) — while also
+                // deduping against an in-flight load for this same target, so
+                // the many detections ticks that land while one fetch is
+                // outstanding don't each restart it. See its comment.
+                if (needsScoreLoad(target, this._abcTargetKey, this._loadingTargetKey)) this.loadScore();
             },
         },
     },
@@ -180,6 +195,12 @@ export default {
         document.removeEventListener('visibilitychange', this._onVisibilityChange);
         eventBus.$off('liveAnalysisTimerTick', this._onTimerTick);
         this._releaseWakeLock();
+        setLastShown({
+            target: this.target,
+            abcSetting: this.abcSetting,
+            abcTargetKey: this._abcTargetKey,
+            favourited: this.favourited,
+        });
     },
     methods: {
         formatSecondsAsClock,
@@ -209,10 +230,10 @@ export default {
         },
         onOverrideChange(value) {
             const option = this.target.tuneOptions.find(o => o.value === value);
-            const { target, changed } = applyOverride(this.target, option);
+            const { target } = applyOverride(this.target, option);
             this.target = target;
             this._syncFavourited();
-            if (changed) this.loadScore();
+            if (needsScoreLoad(target, this._abcTargetKey, this._loadingTargetKey)) this.loadScore();
         },
         _syncFavourited() {
             const token = ++this._favouriteToken;
@@ -255,35 +276,57 @@ export default {
         async loadScore() {
             const token = ++this._loadToken;
             const target = this.target;
+            const key = targetScoreKey(target);
+            this._loadingTargetKey = key;
 
             if (!target) {
                 this.abcSetting = null;
+                this._abcTargetKey = null;
                 this.loadError = '';
                 this.loading = false;
+                if (this._loadingTargetKey === key) this._loadingTargetKey = null;
                 return;
             }
 
             this.loading = true;
             this.loadError = '';
-            // The previous score deliberately stays on screen until the new one
-            // is ready, so a tune change doesn't flash an empty page.
-            const settings = await ffBackend.settingsFromTuneID(target.tuneId);
-            if (token !== this._loadToken) return;
+            try {
+                // The previous score deliberately stays on screen until the new
+                // one is ready, so a tune change doesn't flash an empty page.
+                const settings = await ffBackend.settingsFromTuneID(target.tuneId);
+                // A newer call already claimed _loadingTargetKey for its own key
+                // — leave it alone, only our own token's bookkeeping is stale.
+                if (token !== this._loadToken) return;
 
-            this.loading = false;
+                if (!settings || !settings.length) {
+                    // Index-dependent worker calls fail fast with [] when the
+                    // tune index is unavailable, rather than hanging.
+                    this.abcSetting = null;
+                    this._abcTargetKey = null;
+                    this.loadError = ffBackend.indexUnavailableMessage();
+                    return;
+                }
 
-            if (!settings || !settings.length) {
-                // Index-dependent worker calls fail fast with [] when the tune
-                // index is unavailable, rather than hanging.
+                const chosen = settings.find(
+                    setting => String(setting.setting_id) === String(target.settingId)
+                ) || settings[0];
+                this.abcSetting = chosen;
+                this._abcTargetKey = key;
+            } catch (e) {
+                // A rejection (rather than the [] settingsFromTuneID normally
+                // resolves with) must still clear loading/_loadingTargetKey —
+                // otherwise this target reads as permanently "in flight" and
+                // needsScoreLoad() never lets it be retried.
+                if (token !== this._loadToken) return;
                 this.abcSetting = null;
+                this._abcTargetKey = null;
                 this.loadError = ffBackend.indexUnavailableMessage();
-                return;
+            } finally {
+                if (token === this._loadToken) {
+                    this.loading = false;
+                    if (this._loadingTargetKey === key) this._loadingTargetKey = null;
+                }
             }
-
-            const chosen = settings.find(
-                setting => String(setting.setting_id) === String(target.settingId)
-            ) || settings[0];
-            this.abcSetting = chosen;
         },
     },
 };
