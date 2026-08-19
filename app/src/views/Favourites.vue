@@ -32,6 +32,29 @@
             </v-menu>
         </div>
 
+        <!-- Place filter bar. Only appears once geo-tagging has produced places
+             that actually contain favourites, so it costs nothing for anyone not
+             using the feature. -->
+        <div v-if="placeFilterOptions.length > 0" class="tag-filter-bar mb-3">
+            <div class="d-flex flex-wrap align-center" style="gap:6px">
+                <span class="caption grey--text mr-1">
+                    <v-icon x-small class="pb-1">{{ icons.mapMarker }}</v-icon>
+                    Heard at:
+                </span>
+                <v-chip
+                    v-for="place in placeFilterOptions"
+                    :key="place.id"
+                    small
+                    :color="activePlaceIDs.includes(place.id) ? 'primary' : undefined"
+                    :outlined="!activePlaceIDs.includes(place.id)"
+                    @click="toggleActivePlace(place.id)"
+                >{{ place.name }} <span class="pl-1 caption">{{ place.matchCount }}</span></v-chip>
+                <v-btn v-if="activePlaceIDs.length > 0" x-small text @click="activePlaceIDs = []">Clear</v-btn>
+                <v-spacer />
+                <v-btn x-small text color="grey" to="/places">Manage places</v-btn>
+            </div>
+        </div>
+
         <!-- Tag filter bar -->
         <div v-if="allTags.length > 0" class="tag-filter-bar mb-3">
             <div class="d-flex flex-wrap align-center" style="gap:6px">
@@ -296,7 +319,7 @@
 </template>
 
 <script>
-import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth } from '@mdi/js';
+import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
@@ -326,6 +349,11 @@ export default {
             favouriteItems: [],
             selectedIDs: new Set(),
             activeTags: Array.isArray(persisted.activeTags) ? persisted.activeTags : [],
+            activePlaceIDs: Array.isArray(persisted.activePlaceIDs) ? persisted.activePlaceIDs : [],
+            // Sightings and places, loaded once and refreshed on the event —
+            // filtering must not hit IndexedDB per row.
+            sightings: [],
+            places: [],
             nameFilter: typeof persisted.nameFilter === 'string' ? persisted.nameFilter : '',
             groupBy: persisted.groupBy === 'tag' || persisted.groupBy === 'date' ? persisted.groupBy : null,
             collapsedTagGroups: new Set(Array.isArray(persisted.collapsedTagGroups) ? persisted.collapsedTagGroups : []),
@@ -358,6 +386,7 @@ export default {
                 tagPlus: mdiTagPlusOutline,
                 groupDate: mdiCalendarMonth,
                 sort: mdiSort,
+                mapMarker: mdiMapMarker,
             },
         };
     },
@@ -374,6 +403,15 @@ export default {
             const needle = (this.nameFilter || '').trim().toLowerCase();
             const filtered = this.favouriteItems.filter(item => {
                 if (this.activeTags.length > 0 && !this.activeTags.every(t => (item.tags || []).includes(t))) return false;
+                // OR across places, unlike tags which are AND. Selecting two
+                // places means "heard at either" — the useful reading, since a
+                // tune heard at *both* of two named pubs is a rare thing to ask
+                // for and would usually filter to nothing.
+                if (this.activePlaceIDs.length > 0) {
+                    const tuneID = item.result.setting && item.result.setting.tune_id;
+                    const placeIDs = tuneID ? this.placeIDsByTune.get(String(tuneID)) : null;
+                    if (!placeIDs || !this.activePlaceIDs.some(id => placeIDs.has(id))) return false;
+                }
                 if (needle && !utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle)) return false;
                 return true;
             });
@@ -411,6 +449,37 @@ export default {
                     break;
             }
             return sorted;
+        },
+        // tuneID -> Set(placeID). Built once per sightings change rather than
+        // per row: a favourites list of 200 against a few thousand sightings is
+        // otherwise a nested scan on every keystroke in the name filter.
+        placeIDsByTune() {
+            const map = new Map();
+            for (const sighting of this.sightings) {
+                if (!sighting.placeID) continue;
+                const key = String(sighting.tuneID);
+                if (!map.has(key)) map.set(key, new Set());
+                map.get(key).add(sighting.placeID);
+            }
+            return map;
+        },
+        // Only places that actually contain a favourite, with the count, so the
+        // bar never offers a chip that filters to nothing.
+        placeFilterOptions() {
+            const counts = new Map();
+            for (const item of this.favouriteItems) {
+                const tuneID = item.result.setting && item.result.setting.tune_id;
+                if (!tuneID) continue;
+                const placeIDs = this.placeIDsByTune.get(String(tuneID));
+                if (!placeIDs) continue;
+                for (const placeID of placeIDs) {
+                    counts.set(placeID, (counts.get(placeID) || 0) + 1);
+                }
+            }
+            return this.places
+                .filter(place => counts.has(place.id))
+                .map(place => ({ ...place, matchCount: counts.get(place.id) }))
+                .sort((a, b) => b.matchCount - a.matchCount || a.name.localeCompare(b.name));
         },
         allTags() {
             const tags = new Set();
@@ -455,6 +524,7 @@ export default {
     },
     watch: {
         activeTags: { handler() { this._persistFilterState(); }, deep: true },
+        activePlaceIDs: { handler() { this._persistFilterState(); }, deep: true },
         nameFilter() { this._persistFilterState(); },
         groupBy() { this._persistFilterState(); },
         sortBy() { this._persistFilterState(); },
@@ -464,16 +534,20 @@ export default {
     created() {
         eventBus.$emit('parentViewActivated');
         this.loadFavourites();
+        this.loadPlaces();
         eventBus.$on('syncComplete', this.loadFavourites);
+        eventBus.$on('sightingsChanged', this.loadPlaces);
     },
     beforeDestroy() {
         eventBus.$off('syncComplete', this.loadFavourites);
+        eventBus.$off('sightingsChanged', this.loadPlaces);
     },
     methods: {
         _persistFilterState() {
             try {
                 sessionStorage.setItem(FILTER_STATE_KEY, JSON.stringify({
                     activeTags: this.activeTags,
+                    activePlaceIDs: this.activePlaceIDs,
                     nameFilter: this.nameFilter,
                     groupBy: this.groupBy,
                     sortBy: this.sortBy,
@@ -538,6 +612,29 @@ export default {
                 this.allRows.forEach(r => next.add(r.settingID));
             }
             this.selectedIDs = next;
+        },
+        async loadPlaces() {
+            if (!store.userSettings.geoTagDetections) {
+                this.sightings = [];
+                this.places = [];
+                return;
+            }
+            const [sightings, places] = await Promise.all([
+                store.getSightings(),
+                store.getPlaces(),
+            ]);
+            this.sightings = sightings;
+            this.places = places;
+            // A place the user has since deleted must not stay silently active,
+            // filtering the list against something no chip can clear.
+            const known = new Set(places.map(p => p.id));
+            const stillValid = this.activePlaceIDs.filter(id => known.has(id));
+            if (stillValid.length !== this.activePlaceIDs.length) this.activePlaceIDs = stillValid;
+        },
+        toggleActivePlace(placeID) {
+            const i = this.activePlaceIDs.indexOf(placeID);
+            if (i >= 0) this.activePlaceIDs.splice(i, 1);
+            else this.activePlaceIDs.push(placeID);
         },
         toggleActiveTag(tag) {
             const i = this.activeTags.indexOf(tag);

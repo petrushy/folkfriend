@@ -27,28 +27,42 @@
         </v-card>
 
         <template v-else>
-            <!-- A tile-free scatter: no basemap, because a map service would mean a
-                 network request on every pan and this app is built to work in a cellar
-                 with no signal. Shape and grouping are real; absolute geography is not. -->
-            <v-card v-if="mapPoints.length > 1" class="pa-3 my-3">
-                <svg class="miniMap" viewBox="0 0 100 100" preserveAspectRatio="none">
-                    <circle
-                        v-for="point in mapPoints"
-                        :key="point.key"
-                        :cx="point.x * 100"
-                        :cy="point.y * 100"
-                        :r="point.radius"
-                        :class="point.named ? 'miniMapDot miniMapDot--named' : 'miniMapDot'"
-                    />
-                </svg>
-                <p class="text--secondary mb-0 mt-2" style="font-size: 0.78rem;">
-                    Relative positions only — larger dots are places you have heard more tunes.
-                </p>
+            <!-- A real map when tiles can be reached, and the tile-free scatter when
+                 they cannot. The fallback is not decoration: tiles are the one part of
+                 this app that genuinely needs a network the first time, and a blank grey
+                 rectangle is worse than an honest relative plot. -->
+            <v-card v-if="mapPoints.length" class="pa-3 my-3">
+                <PlacesMap
+                    v-if="!mapUnavailable"
+                    ref="map"
+                    :groups="mapGroups"
+                    :focus-key="focusKey"
+                    @select="onMarkerSelected"
+                    @unavailable="onMapUnavailable"
+                />
+                <template v-else>
+                    <svg class="miniMap" viewBox="0 0 100 100" preserveAspectRatio="none">
+                        <circle
+                            v-for="point in mapPoints"
+                            :key="point.key"
+                            :cx="point.x * 100"
+                            :cy="point.y * 100"
+                            :r="point.radius"
+                            :class="point.named ? 'miniMapDot miniMapDot--named' : 'miniMapDot'"
+                        />
+                    </svg>
+                    <p class="text--secondary mb-0 mt-2" style="font-size: 0.78rem;">
+                        {{ mapUnavailableReason === 'library'
+                            ? 'Map could not load — showing relative positions only.'
+                            : 'Map tiles need a connection. Showing relative positions only; places you have viewed before stay available offline.' }}
+                    </p>
+                </template>
             </v-card>
 
             <v-card
                 v-for="group in groups"
                 :key="group.key"
+                :data-group-key="group.key"
                 class="pa-4 my-2"
             >
                 <div class="d-flex align-center">
@@ -164,9 +178,11 @@ import {
     projectPoints,
     DEFAULT_PLACE_RADIUS_M,
 } from '@/js/places.mjs';
+import PlacesMap from '@/components/PlacesMap.vue';
 
 export default {
     name: 'PlacesView',
+    components: { PlacesMap },
     data() {
         return {
             groups: [],
@@ -177,6 +193,9 @@ export default {
             radiusInput: DEFAULT_PLACE_RADIUS_M,
             snackbar: false,
             snackbarText: '',
+            mapUnavailable: false,
+            mapUnavailableReason: null,
+            focusKey: null,
             icons: {
                 chevronDown: mdiChevronDown,
                 chevronUp: mdiChevronUp,
@@ -189,6 +208,11 @@ export default {
         };
     },
     computed: {
+        // The real map takes true coordinates; mapPoints below is the projected
+        // fallback. Both are derived from the same groups so they cannot drift.
+        mapGroups() {
+            return this.groups.filter(g => Number.isFinite(g.lat) && Number.isFinite(g.lon));
+        },
         mapPoints() {
             const projected = projectPoints(this.groups.filter(g => g.lat != null));
             if (!projected) return [];
@@ -239,6 +263,21 @@ export default {
         },
         toggle(group) {
             group.expanded = !group.expanded;
+        },
+        onMapUnavailable(reason) {
+            this.mapUnavailable = true;
+            this.mapUnavailableReason = reason;
+        },
+        // Tapping a marker opens that place's card, so the map is a way into
+        // the list rather than a separate thing to read.
+        onMarkerSelected(key) {
+            const group = this.groups.find(g => g.key === key);
+            if (!group) return;
+            group.expanded = true;
+            this.$nextTick(() => {
+                const el = this.$el.querySelector(`[data-group-key="${cssEscape(key)}"]`);
+                if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            });
         },
         formatDate(millis) {
             if (!millis) return 'unknown';
@@ -298,6 +337,13 @@ export default {
         },
     },
 };
+
+// Group keys are generated from coordinates ("unnamed-53.34--6.27"), so they
+// contain dots and minus signs that a CSS attribute selector reads as syntax.
+function cssEscape(value) {
+    if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(value);
+    return String(value).replace(/["\\]/g, '\\$&');
+}
 
 // Collapses a place's sightings into one row per tune, most recent first.
 function summariseTunes(sightings) {

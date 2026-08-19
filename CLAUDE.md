@@ -373,7 +373,23 @@ must be treated as sacred:
   quietly borrow it. Third instance of the same rule as the soundfont and
   `nud-meta.json` cases: **a required asset needs a post-build assertion, not a
   config option assumed to have worked.**
-- **`runtimeCaching: []`** — deliberately empty for the tune index. See rule 1.
+- **`runtimeCaching` holds exactly one entry, for map tiles** (August 2026).
+  It was empty before that, and the reason it was empty still stands for
+  everything else: the tune index must never be cached here (rule 1), because a
+  second 42 MB copy of what is already in IndexedDB roughly doubles the chance
+  the browser evicts the copy that makes the app work.
+
+  Map tiles clear that bar and nothing else has: they are small, bounded by
+  `maxEntries: 400` (~8 MB worst case), and are **not** a duplicate of anything
+  in IndexedDB — without the cache they simply cannot be shown offline at all.
+  `CacheFirst`, not StaleWhileRevalidate: a tile for a fixed coordinate does not
+  change in any way a user of this app cares about, and revalidating would spend
+  mobile data re-fetching identical PNGs on every visit to Places.
+  `cacheableResponse.statuses` must include **0** — these are opaque
+  cross-origin responses, and without it the cache silently stores nothing.
+
+  **Anything else added here needs the same argument made explicitly.**
+
   `public/sw-cleanup.js` is `importScripts`-ed into the generated service worker
   and deletes the obsolete `folkfriend-tune-data` cache on activate, reclaiming
   ~42 MB from existing installs.
@@ -776,7 +792,71 @@ an evening is not measurable.
    backgrounded app never requests a position — the prompt would be invisible and
    on iOS the request tends to hang.
 
-#### No reverse geocoding, and no basemap
+#### The map, and the two things that nearly broke it
+
+`app/src/components/PlacesMap.vue` — Leaflet 1.9, OpenStreetMap tiles.
+
+**Loaded with a dynamic `import()`**, so it lands in its own chunk (146 KB /
+42 KB gzipped) that never reaches a user who does not open Places, and a
+failure to load it degrades to the scatter rather than breaking the view.
+
+**Markers are `L.circleMarker`, never `L.marker`.** The default marker pulls PNG
+icons through webpack's asset pipeline, which is the single most common
+Leaflet-with-webpack breakage (`marker-icon.png` 404s at a hashed path). Circles
+also carry the hearing count naturally, by *area* — scaling the radius linearly
+makes a busy place look wildly more dominant than it is. Named places are
+filled, unnamed ones hollow, because an unnamed place is a question the user has
+not answered yet and the map is where they will notice it.
+
+**Never put a `:class` binding on the element Leaflet is mounted into.** This
+was a real bug, caught only by a browser check. Leaflet writes its own classes
+straight onto the container (`leaflet-container`, `leaflet-touch`,
+`leaflet-touch-drag`, `leaflet-touch-zoom`, the fade/zoom-anim classes); a
+reactive class binding makes Vue re-render the `class` attribute whenever the
+bound value changes, silently stripping all of them. A `ready` flag flipping
+false→true was enough. **The map still looked perfect** — the panes Leaflet
+created underneath keep their own classes — but the container lost
+`position`/`overflow` and, critically, `touch-action: none`, so pinch and drag
+on iOS quietly stopped working. That is the entire reason Leaflet is here rather
+than a hand-rolled tile grid. State classes go on the wrapper.
+
+The container class list is the assertion to make: after mount it must still
+contain `leaflet-touch-drag` and `leaflet-touch-zoom`.
+
+**Tiles are the one part of this app that genuinely cannot work offline the
+first time**, which is why the tile-free scatter stays as a fallback rather than
+being deleted. `PlacesMap` emits `unavailable` when *no* tile has loaded and
+several have failed — a partial failure does not count, since a map drawn from
+last week's cached tiles is still a useful map — and `Places.vue` swaps in the
+scatter with an honest note about why. `scrollWheelZoom` is off: the map sits
+inside a scrolling page, and grabbing the wheel would trap it.
+
+Attribution is required by the OSM tile usage policy and is on by default via
+Leaflet's attribution control. If this app ever gets real traffic, that policy
+expects a different tile provider.
+
+#### Filtering favourites by place
+
+`Favourites.vue` gains a "Heard at" chip bar, above the tag bar, which only
+appears once geo-tagging has produced places that actually contain favourites —
+so it costs nothing for anyone not using the feature, and never offers a chip
+that would filter to nothing (each carries its match count).
+
+Two decisions worth knowing:
+
+- **Places are OR; tags are AND.** Selecting two tags means "has both", which is
+  the useful reading for labels the user applied deliberately. Selecting two
+  places means "heard at either" — a tune heard at *both* of two named pubs is a
+  rare thing to ask for and would usually filter to nothing.
+- **`placeIDsByTune` is a computed index**, not a per-row lookup. Favourites are
+  matched to sightings by `tune_id` (sightings are per tune, favourites per
+  setting), and doing that as a nested scan would run over the whole sightings
+  log on every keystroke in the name filter.
+
+A place deleted from the Places view is dropped from `activePlaceIDs` on reload —
+otherwise the list stays filtered against something no chip can clear.
+
+#### No reverse geocoding
 
 Place names come from clustering the user's own coordinates, not from a geocoding
 service. A geocoder means a third-party request carrying the user's location
@@ -791,9 +871,15 @@ back room are not the same size); unnamed proposal clusters use a tighter 80,
 because merging two proposals by giving them one name is easier for a user than
 splitting one that swallowed the pub next door.
 
-The mini-map on `/places` is a **tile-free SVG scatter** for the same reason: map
-tiles need a CDN and a connection. Shape and grouping are real, absolute
-geography is not, and the page says so. Dot area (not radius) tracks the count.
+Note this is a different decision from the basemap. Tiles are a picture the user
+looks at; a geocoder would be told *where they were*, which is the part that must
+not leave the device. Tiles are fetched by z/x/y for an area the user is already
+looking at, and the tile server is never sent a place name, a tune, or anything
+tying the request to this user.
+
+The **tile-free SVG scatter** is still there as the fallback when tiles cannot be
+reached — shape and grouping are real, absolute geography is not, and the page
+says so. Dot area (not radius) tracks the count.
 
 #### Where sightings are captured
 
