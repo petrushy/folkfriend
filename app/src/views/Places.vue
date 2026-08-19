@@ -98,6 +98,16 @@
                                 heard {{ tune.count }}×, last {{ formatDate(tune.lastSeen) }}
                             </v-list-item-subtitle>
                         </v-list-item-content>
+                        <v-list-item-action>
+                            <v-btn
+                                icon
+                                small
+                                title="This tune was not played here"
+                                @click.stop="removeTuneFromGroup(group, tune)"
+                            >
+                                <v-icon small>{{ icons.close }}</v-icon>
+                            </v-btn>
+                        </v-list-item-action>
                     </v-list-item>
                 </v-list>
 
@@ -154,8 +164,13 @@
             </v-card>
         </v-dialog>
 
-        <v-snackbar v-model="snackbar" :timeout="4000">
+        <v-snackbar v-model="snackbar" :timeout="8000">
             {{ snackbarText }}
+            <template v-if="removedSightings.length" #action="{ attrs }">
+                <v-btn text v-bind="attrs" @click="undoRemove">
+                    Undo
+                </v-btn>
+            </template>
         </v-snackbar>
     </v-container>
 </template>
@@ -164,6 +179,7 @@
 import {
     mdiChevronDown,
     mdiChevronUp,
+    mdiClose,
     mdiDelete,
     mdiMapMarker,
     mdiMapMarkerQuestion,
@@ -193,12 +209,16 @@ export default {
             radiusInput: DEFAULT_PLACE_RADIUS_M,
             snackbar: false,
             snackbarText: '',
+            // Kept only so Undo can restore them with their original
+            // timestamps — a removed hearing cannot be recreated.
+            removedSightings: [],
             mapUnavailable: false,
             mapUnavailableReason: null,
             focusKey: null,
             icons: {
                 chevronDown: mdiChevronDown,
                 chevronUp: mdiChevronUp,
+                close: mdiClose,
                 delete: mdiDelete,
                 mapMarker: mdiMapMarker,
                 mapMarkerQuestion: mdiMapMarkerQuestion,
@@ -263,6 +283,25 @@ export default {
         },
         toggle(group) {
             group.expanded = !group.expanded;
+        },
+        // "We never played that here" — the correction for a misheard tune,
+        // which is the failure mode automatic capture will always have.
+        async removeTuneFromGroup(group, tune) {
+            const placeID = group.place ? group.place.id : null;
+            const removed = await store.removeTuneFromPlace(tune.tuneID, placeID);
+            if (!removed.length) return;
+            this.removedSightings = removed;
+            const label = group.place ? group.place.name : 'this location';
+            const name = tune.displayName || `Tune ${tune.tuneID}`;
+            this.notify(`Removed ${name} from ${label}.`, true);
+            await this.load();
+        },
+        async undoRemove() {
+            if (!this.removedSightings.length) return;
+            await store.restoreSightings(this.removedSightings);
+            this.removedSightings = [];
+            this.snackbar = false;
+            await this.load();
         },
         onMapUnavailable(reason) {
             this.mapUnavailable = true;
@@ -331,7 +370,11 @@ export default {
             await store.clearSightings();
             await this.load();
         },
-        notify(text) {
+        // `undoable` guards the Undo button: without it, a later unrelated
+        // message (a failed save, say) would inherit the previous removal's
+        // records and offer to undo something the user was not told about.
+        notify(text, undoable = false) {
+            if (!undoable) this.removedSightings = [];
             this.snackbarText = text;
             this.snackbar = true;
         },

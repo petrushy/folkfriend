@@ -756,20 +756,51 @@ class Store {
     // "I heard this tune on the 3rd of March" is still worth keeping, and
     // making the log conditional on a successful fix would mean an evening
     // indoors with no signal vanishes entirely.
-    async addSighting({ tuneID, settingID = null, displayName = '', fix = null, source = 'live', timestamp = null }) {
+    async addSighting({
+        tuneID, settingID = null, displayName = '',
+        fix = null, source = 'live', timestamp = null,
+        // Set by the manual path, which names a place directly rather than
+        // deriving one from coordinates: the user is recording "we played this
+        // at the Cobblestone last Tuesday" from their sofa, where a fix would be
+        // both unavailable and wrong.
+        placeID = null,
+    } = {}) {
         if (tuneID == null || tuneID === '') return null;
 
         const sightings = await this.getSightings();
+        const places = await this.getPlaces();
         const at = timestamp || Date.now();
 
-        const duplicate = sightings.some(s =>
-            String(s.tuneID) === String(tuneID) &&
-            Math.abs((s.timestamp || 0) - at) < SIGHTING_DEDUP_MS
-        );
-        if (duplicate) return null;
+        const explicitPlace = placeID ? places.find(p => p.id === placeID) || null : null;
+        // An explicit placeID that names nothing is a caller bug, not a reason
+        // to silently record an unplaced sighting the user cannot see.
+        if (placeID && !explicitPlace) return null;
 
-        const places = await this.getPlaces();
-        const place = isValidFix(fix) ? matchPlace(fix, places) : null;
+        // Resolved before the duplicate check, not after: a manual add made
+        // with a fix ("here now") still lands at whichever named place contains
+        // that fix, and must be compared against sightings at THAT place rather
+        // than against the unplaced bucket.
+        const place = explicitPlace || (isValidFix(fix) ? matchPlace(fix, places) : null);
+
+        if (source === 'manual') {
+            // Deliberate acts are not deduplicated by time — the whole point is
+            // that the user is adding something the detector missed, possibly
+            // long after the fact. They ARE deduplicated by (tune, place): the
+            // UI says "this tune was heard here", which is a fact that is either
+            // true or not, so recording it twice adds nothing. The existing
+            // record is returned so the caller still sees success.
+            const already = sightings.find(s =>
+                String(s.tuneID) === String(tuneID) &&
+                (s.placeID || null) === (place ? place.id : null)
+            );
+            if (already) return already;
+        } else {
+            const duplicate = sightings.some(s =>
+                String(s.tuneID) === String(tuneID) &&
+                Math.abs((s.timestamp || 0) - at) < SIGHTING_DEDUP_MS
+            );
+            if (duplicate) return null;
+        }
 
         const sighting = {
             id: `${at}-${tuneID}-${Math.random().toString(36).slice(2, 8)}`,
@@ -777,9 +808,9 @@ class Store {
             settingID: settingID == null ? null : String(settingID),
             displayName: displayName || '',
             timestamp: at,
-            source, // 'live' | 'search' — how the tune was recognised
-            lat: isValidFix(fix) ? fix.lat : null,
-            lon: isValidFix(fix) ? fix.lon : null,
+            source, // 'live' | 'search' | 'manual' — how it came to be recorded
+            lat: isValidFix(fix) ? fix.lat : (explicitPlace ? explicitPlace.lat : null),
+            lon: isValidFix(fix) ? fix.lon : (explicitPlace ? explicitPlace.lon : null),
             accuracy: isValidFix(fix) ? (fix.accuracy ?? null) : null,
             placeID: place ? place.id : null,
         };
@@ -788,6 +819,50 @@ class Store {
         await this._dbSet(KEY_SIGHTINGS, sightings.slice(0, MAX_SIGHTINGS));
         eventBus.$emit('sightingsChanged');
         return sighting;
+    }
+
+    // Un-tags a tune from a place: "we never actually played this here".
+    //
+    // Works at tune-at-place granularity rather than per hearing, because that
+    // is the claim the UI makes ("Heard at The Cobblestone ×3") and therefore
+    // the claim the user is disagreeing with. Removing one of three hearings
+    // would leave the chip in place and look like nothing happened.
+    //
+    // `placeID` of null targets the unnamed bucket, which is what the "an
+    // unnamed place" chip refers to.
+    //
+    // Returns the removed records so the caller can offer an undo — these are
+    // observations that cannot be recreated, and a mis-tap on a small screen
+    // must not be final.
+    async removeTuneFromPlace(tuneID, placeID = null) {
+        if (tuneID == null || tuneID === '') return [];
+        const target = placeID || null;
+        const sightings = await this.getSightings();
+        const removed = sightings.filter(s =>
+            String(s.tuneID) === String(tuneID) && (s.placeID || null) === target
+        );
+        if (!removed.length) return [];
+
+        const removedIDs = new Set(removed.map(s => s.id));
+        await this._dbSet(KEY_SIGHTINGS, sightings.filter(s => !removedIDs.has(s.id)));
+        eventBus.$emit('sightingsChanged');
+        return removed;
+    }
+
+    // Puts back records removed by removeTuneFromPlace. Restoring by whole
+    // record rather than re-adding keeps the original timestamps, so an undone
+    // removal does not quietly rewrite when the tune was heard.
+    async restoreSightings(records) {
+        if (!Array.isArray(records) || !records.length) return;
+        const sightings = await this.getSightings();
+        const known = new Set(sightings.map(s => s.id));
+        const missing = records.filter(r => r && r.id && !known.has(r.id));
+        if (!missing.length) return;
+        const merged = [...missing, ...sightings]
+            .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+            .slice(0, MAX_SIGHTINGS);
+        await this._dbSet(KEY_SIGHTINGS, merged);
+        eventBus.$emit('sightingsChanged');
     }
 
     // Names a location. `fix` is the centre — normally the leader of an unnamed

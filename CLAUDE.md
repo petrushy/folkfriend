@@ -914,6 +914,58 @@ says so. Dot area (not radius) tracks the count.
 `HistoryRow` still has no capture point: it is passed only
 `name`/`descriptor`/`timestamp` and carries no tune identity.
 
+#### Correcting the log by hand
+
+Automatic capture has two failure modes no amount of tuning removes: the
+detector sometimes identifies the wrong tune, and it never hears the tunes
+played while the phone was in a pocket. Without a way to correct that, the log
+is a subset of the truth with errors baked in — so both directions are editable.
+
+**Un-tagging** works at **tune-at-place** granularity
+(`store.removeTuneFromPlace(tuneID, placeID)`), not per hearing. That is the
+claim the UI makes ("Heard at The Cobblestone ×3") and therefore the claim the
+user is disagreeing with; removing one of three would leave the chip in place
+and look like nothing happened. `placeID` of `null` targets the unnamed bucket,
+which is what the "an unnamed place" chip refers to. Two entry points: the ✕ on
+each "Heard at" chip on the Tune view, and a ✕ per tune row under a place on the
+Places view.
+
+**Every removal is undoable**, and `restoreSightings` puts back the *whole
+records* rather than re-adding them, so an undone removal keeps the original
+timestamps and does not quietly rewrite when the tune was heard. Sightings
+cannot be recreated after the fact and the chips are small targets on a phone,
+so a mis-tap must not be final. `Places.vue::notify(text, undoable)` gates the
+Undo button — without that flag a later unrelated message inherits the previous
+removal's records and offers to undo something the user was never told about.
+
+**Manual tagging** is `TunePlaceDialog.vue`, opened from an "Add place" chip on
+the Tune view, with two ways in for two genuinely different situations:
+
+- *"I'm here now"* takes a fix, for tagging in the pub. It calls
+  `geoService.requestPermission()` rather than `getFix()`, because a deliberate
+  tap is the right moment to raise the OS prompt and an earlier refusal must not
+  leave the button silently doing nothing forever.
+- *Picking a named place* needs no fix at all, for tagging afterwards — where a
+  fix would be both unavailable and actively wrong. That is the same reasoning
+  that made sightings a separate log rather than a field on favourites.
+
+`addSighting` grew `placeID` and `source: 'manual'` for this. Three details that
+are easy to get wrong:
+
+1. **The place is resolved before the duplicate check, not after.** A manual
+   "here now" must be compared against sightings at the place its fix lands in,
+   not against the unplaced bucket — otherwise an existing unplaced sighting for
+   the same tune silently swallows it. This was a real bug, caught by a test.
+2. **Manual adds skip the time-window dedup** (`SIGHTING_DEDUP_MS`), which
+   exists to collapse double taps during live capture. The user is deliberately
+   adding something the detector missed, possibly months later. They are instead
+   deduplicated by **(tune, place)**: "this tune was heard here" is either true
+   or not, so recording it twice adds nothing — and the existing record is
+   returned so the caller still sees success.
+3. **An explicit `placeID` naming no known place is refused**, rather than
+   falling back to an unplaced sighting. A record the user cannot see anywhere
+   is worse than no record.
+
 #### Export includes them; sync never does
 
 `exportUserData` is now **version 4** and carries `tuneSightings` + `places`.
@@ -925,7 +977,7 @@ so restoring an older backup does not wipe sightings recorded since.
 
 #### Tests
 
-`app/test/sightings.test.mjs` (28 cases, in the `npm test` chain) — geometry and
+`app/test/sightings.test.mjs` (38 cases, in the `npm test` chain) — geometry and
 clustering, the store log, and the geo service, with `store.js` and `geo.js`
 loaded from source against in-memory fakes and a scriptable `navigator.geolocation`.
 `places.mjs` is used **for real** rather than faked: it is pure geometry with no

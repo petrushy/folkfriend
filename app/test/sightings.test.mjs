@@ -427,6 +427,132 @@ async function run() {
         assert.ok(!serialised.includes('53.34'), 'coordinates must not reach the synced favourites array');
     });
 
+    console.log('\nstore — correcting the log by hand');
+
+    await test('a manual tag records a tune at a named place with no fix', async () => {
+        const { store } = await loadStore();
+        const place = await store.namePlace({ name: 'The Cobblestone', ...COBBLESTONE });
+        const sighting = await store.addSighting({
+            tuneID: '42', displayName: 'The Kesh', source: 'manual', placeID: place.id,
+        });
+        assert.ok(sighting, 'tagging from the sofa must not need a location');
+        assert.equal(sighting.placeID, place.id);
+        assert.equal(sighting.source, 'manual');
+        // Coordinates come from the place, so it plots on the map like any other.
+        assert.equal(Math.round(sighting.lat), 53);
+    });
+
+    await test('a manual tag is not blocked by the time-window dedup', async () => {
+        const { store } = await loadStore();
+        const a = await store.namePlace({ name: 'A', ...COBBLESTONE });
+        const b = await store.namePlace({ name: 'B', ...STOCKHOLM });
+        const now = Date.now();
+        await store.addSighting({ tuneID: '42', source: 'manual', placeID: a.id, timestamp: now });
+        const second = await store.addSighting({ tuneID: '42', source: 'manual', placeID: b.id, timestamp: now });
+        assert.ok(second, 'two deliberate taggings seconds apart are both real');
+        assert.equal((await store.getSightings()).length, 2);
+    });
+
+    await test('tagging the same tune at the same place twice is idempotent', async () => {
+        const { store } = await loadStore();
+        const place = await store.namePlace({ name: 'The Cobblestone', ...COBBLESTONE });
+        const first = await store.addSighting({ tuneID: '42', source: 'manual', placeID: place.id });
+        const again = await store.addSighting({ tuneID: '42', source: 'manual', placeID: place.id });
+        assert.equal(again.id, first.id, 'a repeat tap must return the existing record, not add one');
+        assert.equal((await store.getSightings()).length, 1);
+    });
+
+    await test('a manual tag with a fix lands at the place containing it', async () => {
+        const { store } = await loadStore();
+        const place = await store.namePlace({ name: 'The Cobblestone', ...COBBLESTONE });
+        // An unplaced sighting for the same tune already exists. Deduplicating
+        // against the unnamed bucket instead of the resolved place would treat
+        // this as a repeat and silently drop it.
+        await store.addSighting({ tuneID: '42', fix: STOCKHOLM, timestamp: 1000 });
+        const sighting = await store.addSighting({ tuneID: '42', source: 'manual', fix: NEARBY });
+        assert.ok(sighting, 'a manual "here now" must resolve its place before deduplicating');
+        assert.equal(sighting.placeID, place.id);
+    });
+
+    await test('an unknown placeID is refused rather than logged as unplaced', async () => {
+        const { store } = await loadStore();
+        const sighting = await store.addSighting({ tuneID: '42', source: 'manual', placeID: 'nope' });
+        assert.equal(sighting, null, 'a sighting the user cannot see is worse than none');
+        assert.equal((await store.getSightings()).length, 0);
+    });
+
+    await test('un-tagging removes every hearing of that tune at that place', async () => {
+        const { store } = await loadStore();
+        const place = await store.namePlace({ name: 'The Cobblestone', ...COBBLESTONE });
+        // Three hearings of the misheard tune, plus traffic that must survive.
+        for (let i = 0; i < 3; i++) {
+            await store.addSighting({ tuneID: '42', fix: COBBLESTONE, timestamp: 1000 + i * 120_000 });
+        }
+        await store.addSighting({ tuneID: '77', fix: COBBLESTONE, timestamp: 9_000_000 });
+        await store.addSighting({ tuneID: '42', fix: STOCKHOLM, timestamp: 9_500_000 });
+
+        const removed = await store.removeTuneFromPlace('42', place.id);
+        assert.equal(removed.length, 3, 'removing one of three would leave the chip in place');
+        const left = await store.getSightings();
+        assert.equal(left.length, 2);
+        assert.ok(left.some(s => s.tuneID === '77'), 'another tune at the same place must survive');
+        assert.ok(
+            left.some(s => s.tuneID === '42' && !s.placeID),
+            'the same tune heard elsewhere must survive',
+        );
+    });
+
+    await test('un-tagging targets the unnamed bucket when given no place', async () => {
+        const { store } = await loadStore();
+        const place = await store.namePlace({ name: 'The Cobblestone', ...COBBLESTONE });
+        await store.addSighting({ tuneID: '42', fix: COBBLESTONE, timestamp: 1000 });
+        await store.addSighting({ tuneID: '42', fix: STOCKHOLM, timestamp: 500_000 });
+
+        const removed = await store.removeTuneFromPlace('42', null);
+        assert.equal(removed.length, 1, 'the "unnamed place" chip must remove exactly that group');
+        const left = await store.getSightings();
+        assert.equal(left.length, 1);
+        assert.equal(left[0].placeID, place.id);
+    });
+
+    await test('un-tagging something that was never tagged changes nothing', async () => {
+        const { store } = await loadStore();
+        await store.addSighting({ tuneID: '42', fix: COBBLESTONE, timestamp: 1000 });
+        assert.deepEqual(await store.removeTuneFromPlace('99', null), []);
+        assert.deepEqual(await store.removeTuneFromPlace('', null), []);
+        assert.equal((await store.getSightings()).length, 1);
+    });
+
+    await test('undo restores the removed hearings with their original times', async () => {
+        const { store } = await loadStore();
+        const place = await store.namePlace({ name: 'The Cobblestone', ...COBBLESTONE });
+        await store.addSighting({ tuneID: '42', fix: COBBLESTONE, timestamp: 1000 });
+        await store.addSighting({ tuneID: '42', fix: COBBLESTONE, timestamp: 500_000 });
+
+        const removed = await store.removeTuneFromPlace('42', place.id);
+        assert.equal((await store.getSightings()).length, 0);
+
+        await store.restoreSightings(removed);
+        const restored = await store.getSightings();
+        assert.equal(restored.length, 2);
+        assert.deepEqual(
+            restored.map(s => s.timestamp).sort((a, b) => a - b),
+            [1000, 500_000],
+            'undo must not rewrite when the tune was heard',
+        );
+        assert.ok(restored.every(s => s.placeID === place.id));
+    });
+
+    await test('undo twice does not duplicate the restored hearings', async () => {
+        const { store } = await loadStore();
+        const place = await store.namePlace({ name: 'The Cobblestone', ...COBBLESTONE });
+        await store.addSighting({ tuneID: '42', fix: COBBLESTONE, timestamp: 1000 });
+        const removed = await store.removeTuneFromPlace('42', place.id);
+        await store.restoreSightings(removed);
+        await store.restoreSightings(removed);
+        assert.equal((await store.getSightings()).length, 1);
+    });
+
     // --- tests: the geo service -------------------------------------------
 
     console.log('\ngeo.js — one fix per session');
