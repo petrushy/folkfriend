@@ -78,7 +78,38 @@ module.exports = {
             //
             // Delete the stale cache left over from previous builds so upgrading
             // users get that 42 MB back.
-            runtimeCaching: [],
+            // The ONE runtime cache, and the reasoning above is exactly why it
+            // is safe: map tiles are small, bounded here by maxEntries, and —
+            // unlike the tune index — they are not a second copy of something
+            // already in IndexedDB. Nothing else in the app may be added here
+            // without the same argument.
+            //
+            // CacheFirst, not StaleWhileRevalidate: a tile for a fixed
+            // coordinate does not change in any way a user of this app cares
+            // about, and revalidating would spend mobile data re-fetching
+            // identical PNGs every time the Places view opens.
+            //
+            // 400 tiles is roughly 8 MB worst case — a few screenfuls at
+            // several zoom levels for each place someone actually plays at.
+            // That makes the pub you visit weekly work on a plane, while a
+            // place you have never looked at does not, which is the honest
+            // limit of what a tile server can offer offline.
+            //
+            // statuses [0, 200] because these are opaque cross-origin
+            // responses; without the 0 the cache silently stores nothing.
+            runtimeCaching: [{
+                urlPattern: /^https:\/\/tile\.openstreetmap\.org\//,
+                handler: 'CacheFirst',
+                options: {
+                    cacheName: 'folkfriend-map-tiles',
+                    expiration: {
+                        maxEntries: 400,
+                        maxAgeSeconds: 60 * 60 * 24 * 60, // 60 days
+                        purgeOnQuotaError: true,
+                    },
+                    cacheableResponse: { statuses: [0, 200] },
+                },
+            }],
             cleanupOutdatedCaches: true,
             importScripts: ['sw-cleanup.js'],
         },

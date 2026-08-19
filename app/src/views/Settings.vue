@@ -117,6 +117,46 @@
         </v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
+                Places
+            </h1>
+            <p>
+                Records roughly where each tune was recognised, so you can see which session
+                you first heard something at. The same tune is kept for every place you hear
+                it, and you name a spot once — every hearing already logged nearby takes that
+                name too.
+            </p>
+            <p class="caption text--secondary">
+                One location fix is taken when a listening session starts, not a continuous
+                track, so the battery cost is negligible beside running the microphone. These
+                records stay on this device — unlike favourites, they are never synced — but
+                they <strong>are</strong> included in exported backups, so a backup file
+                discloses where you have played.
+            </p>
+            <v-row>
+                <v-switch
+                    v-model="userSettings.geoTagDetections"
+                    inset
+                    label="Record where tunes are heard"
+                    hint="Asks for location permission the first time you switch this on."
+                    persistent-hint
+                    class="my-0 pl-2"
+                    @change="onGeoTaggingChanged"
+                />
+            </v-row>
+            <p v-if="geoStatus" class="mt-3 mb-0" :class="geoError ? 'error--text' : 'text--secondary'">
+                {{ geoStatus }}
+            </p>
+            <v-row v-if="userSettings.geoTagDetections" class="mt-3 pl-2">
+                <v-btn small :loading="geoChecking" @click="checkLocation">
+                    Test location
+                </v-btn>
+                <v-btn small text to="/places" class="ml-2">
+                    View places
+                </v-btn>
+            </v-row>
+        </v-card>
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
                 AI Tune Summaries
             </h1>
             <p>
@@ -420,6 +460,7 @@
 <script>
 import store from '@/services/store.js';
 import ffBackend from '@/services/backend.js';
+import geoService from '@/services/geo.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
 import { fetchTuneIndexMetadata } from '@/services/tuneIndexNetwork.js';
@@ -478,6 +519,9 @@ export default {
         importError: false,
         refreshingTuneData: false,
         refreshMessage: null,
+        geoStatus: null,
+        geoError: false,
+        geoChecking: false,
         remoteMetadata: null,
         storageIsPersistent: null,
         // What is actually on disk (read from IndexedDB, not inferred from
@@ -657,6 +701,39 @@ export default {
             } catch (e) {
                 console.warn('Could not read offline tune index status', e);
                 this.offlineStatus = { manifest: null, storage: null };
+            }
+        },
+        // The permission prompt belongs here, on a deliberate tap in Settings —
+        // never mid-session, over a tune, where the user cannot answer it and
+        // the interruption costs them the recording.
+        async onGeoTaggingChanged(enabled) {
+            this.settingsChanged();
+            this.geoStatus = null;
+            this.geoError = false;
+            if (!enabled) return;
+            await this.checkLocation();
+        },
+        async checkLocation() {
+            this.geoChecking = true;
+            this.geoStatus = 'Checking location…';
+            this.geoError = false;
+            try {
+                const result = await geoService.requestPermission();
+                if (result.ok) {
+                    const accuracy = result.fix.accuracy;
+                    this.geoStatus = accuracy
+                        ? `Location available, accurate to about ${accuracy} m.`
+                        : 'Location available.';
+                    this.geoError = false;
+                } else {
+                    // Deliberately not switched back off: the setting is the
+                    // user's intent, and permission can be granted later in
+                    // OS settings without them having to find this toggle again.
+                    this.geoStatus = `${result.error} Tunes will still be logged, without a place.`;
+                    this.geoError = true;
+                }
+            } finally {
+                this.geoChecking = false;
             }
         },
         async _fetchRemoteMetadata() {

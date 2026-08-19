@@ -32,6 +32,29 @@
             </v-menu>
         </div>
 
+        <!-- Place filter bar. Only appears once geo-tagging has produced places
+             that actually contain favourites, so it costs nothing for anyone not
+             using the feature. -->
+        <div v-if="placeFilterOptions.length > 0" class="tag-filter-bar mb-3">
+            <div class="d-flex flex-wrap align-center" style="gap:6px">
+                <span class="caption grey--text mr-1">
+                    <v-icon x-small class="pb-1">{{ icons.mapMarker }}</v-icon>
+                    Heard at:
+                </span>
+                <v-chip
+                    v-for="place in placeFilterOptions"
+                    :key="place.id"
+                    small
+                    :color="activePlaceIDs.includes(place.id) ? 'primary' : undefined"
+                    :outlined="!activePlaceIDs.includes(place.id)"
+                    @click="toggleActivePlace(place.id)"
+                >{{ place.name }} <span class="pl-1 caption">{{ place.matchCount }}</span></v-chip>
+                <v-btn v-if="activePlaceIDs.length > 0" x-small text @click="activePlaceIDs = []">Clear</v-btn>
+                <v-spacer />
+                <v-btn x-small text color="grey" to="/places">Manage places</v-btn>
+            </div>
+        </div>
+
         <!-- Tag filter bar -->
         <div v-if="allTags.length > 0" class="tag-filter-bar mb-3">
             <div class="d-flex flex-wrap align-center" style="gap:6px">
@@ -221,6 +244,51 @@
             </div>
         </template>
 
+        <!-- Grouped by place. A tune heard at three sessions appears under all
+             three: that repetition is the answer to "what do we play here", not
+             a bug. Same shape as the tag grouping, where a row appears under
+             each of its tags. -->
+        <template v-else-if="groupBy === 'place'">
+            <div v-for="group in placeGroups" :key="group.key" class="mb-2">
+                <v-list class="resultsTable">
+                    <div class="tag-group-header d-flex align-center px-2 py-1">
+                        <v-checkbox
+                            :input-value="groupAllSelected(group.rows)"
+                            :indeterminate="groupSomeSelected(group.rows) && !groupAllSelected(group.rows)"
+                            class="mt-0 pt-0 mr-0 flex-grow-0"
+                            hide-details
+                            @click.stop="toggleGroupSelect(group.rows)"
+                        />
+                        <div class="d-flex align-center flex-grow-1 group-collapse-trigger" @click="togglePlaceGroup(group.key)">
+                            <v-icon small class="mr-1">{{ collapsedPlaceGroups.has(group.key) ? icons.chevronRight : icons.chevronDown }}</v-icon>
+                            <span class="tag-group-title">{{ group.label }}</span>
+                            <span class="ml-1 caption grey--text">({{ group.rows.length }})</span>
+                        </div>
+                    </div>
+                    <template v-if="!collapsedPlaceGroups.has(group.key)">
+                        <FavouriteRow
+                            v-for="row in group.rows"
+                            :key="row.settingID"
+                            :name="row.name"
+                            :descriptor="row.descriptor"
+                            :settingID="row.settingID"
+                            :timestamp="row.timestamp"
+                            :selected="selectedIDs.has(row.settingID)"
+                            :tags="row.tags"
+                            :allTags="allTags"
+                            :tuneID="row.tuneID"
+                            :sourceUrl="row.sourceUrl"
+                            @favouriteItemClicked="loadFavouriteItem"
+                            @unstar="removeFavourite"
+                            @toggle="toggleSelected"
+                            @addTag="addTag"
+                            @removeTag="removeTag"
+                        />
+                    </template>
+                </v-list>
+            </div>
+        </template>
+
         <p v-if="favouriteItems.length === 0" class="mt-4 grey--text">
             No favourites yet. Star a tune from the results list to save it here.
         </p>
@@ -296,7 +364,7 @@
 </template>
 
 <script>
-import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth } from '@mdi/js';
+import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
@@ -326,10 +394,16 @@ export default {
             favouriteItems: [],
             selectedIDs: new Set(),
             activeTags: Array.isArray(persisted.activeTags) ? persisted.activeTags : [],
+            activePlaceIDs: Array.isArray(persisted.activePlaceIDs) ? persisted.activePlaceIDs : [],
+            // Sightings and places, loaded once and refreshed on the event —
+            // filtering must not hit IndexedDB per row.
+            sightings: [],
+            places: [],
             nameFilter: typeof persisted.nameFilter === 'string' ? persisted.nameFilter : '',
-            groupBy: persisted.groupBy === 'tag' || persisted.groupBy === 'date' ? persisted.groupBy : null,
+            groupBy: ['tag', 'date', 'place'].includes(persisted.groupBy) ? persisted.groupBy : null,
             collapsedTagGroups: new Set(Array.isArray(persisted.collapsedTagGroups) ? persisted.collapsedTagGroups : []),
             collapsedDateGroups: new Set(Array.isArray(persisted.collapsedDateGroups) ? persisted.collapsedDateGroups : []),
+            collapsedPlaceGroups: new Set(Array.isArray(persisted.collapsedPlaceGroups) ? persisted.collapsedPlaceGroups : []),
             manageTagsDialog: false,
             renameTagDialog: false,
             renameTagOld: '',
@@ -358,6 +432,8 @@ export default {
                 tagPlus: mdiTagPlusOutline,
                 groupDate: mdiCalendarMonth,
                 sort: mdiSort,
+                mapMarker: mdiMapMarker,
+                groupPlace: mdiMapMarkerMultipleOutline,
             },
         };
     },
@@ -365,15 +441,27 @@ export default {
         groupByLabel() {
             if (this.groupBy === 'tag') return 'Grouped by tag';
             if (this.groupBy === 'date') return 'Grouped by date';
+            if (this.groupBy === 'place') return 'Grouped by place';
             return 'No grouping';
         },
         groupByIcon() {
-            return this.groupBy === 'date' ? this.icons.groupDate : this.icons.groupTag;
+            if (this.groupBy === 'date') return this.icons.groupDate;
+            if (this.groupBy === 'place') return this.icons.groupPlace;
+            return this.icons.groupTag;
         },
         filteredItems() {
             const needle = (this.nameFilter || '').trim().toLowerCase();
             const filtered = this.favouriteItems.filter(item => {
                 if (this.activeTags.length > 0 && !this.activeTags.every(t => (item.tags || []).includes(t))) return false;
+                // OR across places, unlike tags which are AND. Selecting two
+                // places means "heard at either" — the useful reading, since a
+                // tune heard at *both* of two named pubs is a rare thing to ask
+                // for and would usually filter to nothing.
+                if (this.activePlaceIDs.length > 0) {
+                    const tuneID = item.result.setting && item.result.setting.tune_id;
+                    const placeIDs = tuneID ? this.placeIDsByTune.get(String(tuneID)) : null;
+                    if (!placeIDs || !this.activePlaceIDs.some(id => placeIDs.has(id))) return false;
+                }
                 if (needle && !utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle)) return false;
                 return true;
             });
@@ -412,6 +500,37 @@ export default {
             }
             return sorted;
         },
+        // tuneID -> Set(placeID). Built once per sightings change rather than
+        // per row: a favourites list of 200 against a few thousand sightings is
+        // otherwise a nested scan on every keystroke in the name filter.
+        placeIDsByTune() {
+            const map = new Map();
+            for (const sighting of this.sightings) {
+                if (!sighting.placeID) continue;
+                const key = String(sighting.tuneID);
+                if (!map.has(key)) map.set(key, new Set());
+                map.get(key).add(sighting.placeID);
+            }
+            return map;
+        },
+        // Only places that actually contain a favourite, with the count, so the
+        // bar never offers a chip that filters to nothing.
+        placeFilterOptions() {
+            const counts = new Map();
+            for (const item of this.favouriteItems) {
+                const tuneID = item.result.setting && item.result.setting.tune_id;
+                if (!tuneID) continue;
+                const placeIDs = this.placeIDsByTune.get(String(tuneID));
+                if (!placeIDs) continue;
+                for (const placeID of placeIDs) {
+                    counts.set(placeID, (counts.get(placeID) || 0) + 1);
+                }
+            }
+            return this.places
+                .filter(place => counts.has(place.id))
+                .map(place => ({ ...place, matchCount: counts.get(place.id) }))
+                .sort((a, b) => b.matchCount - a.matchCount || a.name.localeCompare(b.name));
+        },
         allTags() {
             const tags = new Set();
             this.filteredItems.forEach(item => (item.tags || []).forEach(t => tags.add(t)));
@@ -439,6 +558,61 @@ export default {
                 rows: items.map(i => this._toRow(i)),
             }));
         },
+        // One group per place, ordered by most recently heard there — last
+        // night's session first, which is the order someone actually wants when
+        // they open this after a session.
+        placeGroups() {
+            const lastSeenByPlace = new Map();
+            for (const sighting of this.sightings) {
+                if (!sighting.placeID) continue;
+                const seen = lastSeenByPlace.get(sighting.placeID) || 0;
+                if ((sighting.timestamp || 0) > seen) lastSeenByPlace.set(sighting.placeID, sighting.timestamp || 0);
+            }
+
+            const groups = [];
+            // When places are being filtered, group only by those — otherwise
+            // selecting one place and grouping by place would still show every
+            // other place's (now empty) heading.
+            const placesToShow = this.activePlaceIDs.length > 0
+                ? this.places.filter(p => this.activePlaceIDs.includes(p.id))
+                : this.places;
+
+            for (const place of placesToShow) {
+                const items = this.filteredItems.filter(item => {
+                    const tuneID = item.result.setting && item.result.setting.tune_id;
+                    const placeIDs = tuneID ? this.placeIDsByTune.get(String(tuneID)) : null;
+                    return !!placeIDs && placeIDs.has(place.id);
+                });
+                if (items.length === 0) continue;
+                groups.push({
+                    key: place.id,
+                    label: place.name,
+                    lastSeen: lastSeenByPlace.get(place.id) || 0,
+                    rows: items.map(i => this._toRow(i)),
+                });
+            }
+            groups.sort((a, b) => b.lastSeen - a.lastSeen);
+
+            // Favourites with no sighting anywhere go last, and only when no
+            // place filter is active — under a filter they are precisely what
+            // the user asked to exclude.
+            if (this.activePlaceIDs.length === 0) {
+                const unplaced = this.filteredItems.filter(item => {
+                    const tuneID = item.result.setting && item.result.setting.tune_id;
+                    const placeIDs = tuneID ? this.placeIDsByTune.get(String(tuneID)) : null;
+                    return !placeIDs || placeIDs.size === 0;
+                });
+                if (unplaced.length > 0) {
+                    groups.push({
+                        key: '__unplaced__',
+                        label: 'Not heard anywhere yet',
+                        lastSeen: 0,
+                        rows: unplaced.map(i => this._toRow(i)),
+                    });
+                }
+            }
+            return groups;
+        },
         tagGroups() {
             const tagsToShow = this.activeTags.length > 0 ? this.activeTags : this.allTags;
             const groups = [];
@@ -455,30 +629,37 @@ export default {
     },
     watch: {
         activeTags: { handler() { this._persistFilterState(); }, deep: true },
+        activePlaceIDs: { handler() { this._persistFilterState(); }, deep: true },
         nameFilter() { this._persistFilterState(); },
         groupBy() { this._persistFilterState(); },
         sortBy() { this._persistFilterState(); },
         collapsedTagGroups() { this._persistFilterState(); },
         collapsedDateGroups() { this._persistFilterState(); },
+        collapsedPlaceGroups() { this._persistFilterState(); },
     },
     created() {
         eventBus.$emit('parentViewActivated');
         this.loadFavourites();
+        this.loadPlaces();
         eventBus.$on('syncComplete', this.loadFavourites);
+        eventBus.$on('sightingsChanged', this.loadPlaces);
     },
     beforeDestroy() {
         eventBus.$off('syncComplete', this.loadFavourites);
+        eventBus.$off('sightingsChanged', this.loadPlaces);
     },
     methods: {
         _persistFilterState() {
             try {
                 sessionStorage.setItem(FILTER_STATE_KEY, JSON.stringify({
                     activeTags: this.activeTags,
+                    activePlaceIDs: this.activePlaceIDs,
                     nameFilter: this.nameFilter,
                     groupBy: this.groupBy,
                     sortBy: this.sortBy,
                     collapsedTagGroups: [...this.collapsedTagGroups],
                     collapsedDateGroups: [...this.collapsedDateGroups],
+                    collapsedPlaceGroups: [...this.collapsedPlaceGroups],
                 }));
             } catch (e) {
                 // sessionStorage may be unavailable (private mode, quota); ignore.
@@ -511,8 +692,12 @@ export default {
             });
         },
         cycleGroupBy() {
+            // 'place' is skipped entirely when there is nothing to group by —
+            // otherwise anyone not using geo-tagging cycles through a mode that
+            // can only ever show one "Not heard anywhere yet" heading.
             if (this.groupBy === null) this.groupBy = 'tag';
             else if (this.groupBy === 'tag') this.groupBy = 'date';
+            else if (this.groupBy === 'date') this.groupBy = this.placeFilterOptions.length > 0 ? 'place' : null;
             else this.groupBy = null;
         },
         groupAllSelected(rows) {
@@ -539,6 +724,29 @@ export default {
             }
             this.selectedIDs = next;
         },
+        async loadPlaces() {
+            if (!store.userSettings.geoTagDetections) {
+                this.sightings = [];
+                this.places = [];
+                return;
+            }
+            const [sightings, places] = await Promise.all([
+                store.getSightings(),
+                store.getPlaces(),
+            ]);
+            this.sightings = sightings;
+            this.places = places;
+            // A place the user has since deleted must not stay silently active,
+            // filtering the list against something no chip can clear.
+            const known = new Set(places.map(p => p.id));
+            const stillValid = this.activePlaceIDs.filter(id => known.has(id));
+            if (stillValid.length !== this.activePlaceIDs.length) this.activePlaceIDs = stillValid;
+        },
+        toggleActivePlace(placeID) {
+            const i = this.activePlaceIDs.indexOf(placeID);
+            if (i >= 0) this.activePlaceIDs.splice(i, 1);
+            else this.activePlaceIDs.push(placeID);
+        },
         toggleActiveTag(tag) {
             const i = this.activeTags.indexOf(tag);
             if (i >= 0) this.activeTags.splice(i, 1);
@@ -549,6 +757,12 @@ export default {
             if (next.has(tag)) next.delete(tag);
             else next.add(tag);
             this.collapsedTagGroups = next;
+        },
+        togglePlaceGroup(key) {
+            const next = new Set(this.collapsedPlaceGroups);
+            if (next.has(key)) next.delete(key);
+            else next.add(key);
+            this.collapsedPlaceGroups = next;
         },
         toggleDateGroup(label) {
             const next = new Set(this.collapsedDateGroups);

@@ -98,6 +98,21 @@
                     </v-list-item>
                 </router-link>
 
+                <router-link to="/places">
+                    <v-list-item @click="0">
+                        <v-list-item-action>
+                            <v-icon medium>
+                                {{ icons.mapMarker }}
+                            </v-icon>
+                        </v-list-item-action>
+                        <v-list-item-content>
+                            <v-list-item-title class="navBarEntry">
+                                Places
+                            </v-list-item-title>
+                        </v-list-item-content>
+                    </v-list-item>
+                </router-link>
+
                 <router-link to="/settings">
                     <v-list-item @click="0">
                         <v-list-item-action>
@@ -234,6 +249,7 @@ import {
     mdiHistory,
     mdiHeart,
     mdiMagnify,
+    mdiMapMarker,
     mdiMenu,
     mdiMicrophone,
     mdiMusicNote,
@@ -272,6 +288,7 @@ export default {
             help: mdiHelpCircleOutline,
             history: mdiHistory,
             magnify: mdiMagnify,
+            mapMarker: mdiMapMarker,
             menu: mdiMenu,
             microphone: mdiMicrophone,
             musicNote: mdiMusicNote,

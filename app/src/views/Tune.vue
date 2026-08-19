@@ -19,6 +19,54 @@
             <TuneBackgroundButton class="ma-1" :tuneID="tuneID" :displayName="name || displayName" :sourceUrl="folkwikiSourceUrl" />
         </v-container>
 
+        <v-container v-if="geoTaggingOn" class="heardAt py-1">
+            <span class="heardAtLabel pr-1">
+                <v-icon small class="pb-1">{{ icons.mapMarker }}</v-icon>
+                {{ heardAt.length ? 'Heard at' : 'Not tagged to a place' }}
+            </span>
+            <v-chip
+                v-for="entry in heardAt"
+                :key="entry.key"
+                class="ma-1 px-2"
+                small
+                close
+                :close-icon="icons.close"
+                :title="`Last heard ${formatDate(entry.lastSeen)} — tap to see it on the map, ✕ to remove`"
+                @click="openPlaces"
+                @click:close="removePlace(entry)"
+            >
+                {{ entry.label }}
+                <span v-if="entry.count > 1" class="heardAtCount pl-1">×{{ entry.count }}</span>
+            </v-chip>
+            <v-chip
+                class="ma-1 px-2"
+                small
+                outlined
+                title="Record that you heard this tune somewhere"
+                @click="placeDialog = true"
+            >
+                <v-icon x-small left>{{ icons.plus }}</v-icon>
+                Add place
+            </v-chip>
+        </v-container>
+
+        <TunePlaceDialog
+            v-model="placeDialog"
+            :tuneID="tuneID"
+            :settingID="settingID"
+            :displayName="name || displayName"
+            @added="_loadHeardAt"
+        />
+
+        <v-snackbar v-model="placeSnackbar" :timeout="8000">
+            {{ placeSnackbarText }}
+            <template #action="{ attrs }">
+                <v-btn text v-bind="attrs" @click="undoRemovePlace">
+                    Undo
+                </v-btn>
+            </template>
+        </v-snackbar>
+
         <v-alert v-if="offlineFallback" dense text type="info" class="mx-2 my-2">
             Showing your saved offline copy. Connect to the internet to see all
             settings for this tune.
@@ -125,6 +173,8 @@
 <script>
 import utils from '@/js/utils.js';
 import { sourceNameForTuneID, settingSourceUrl, tuneSourceUrl } from '@/js/source.mjs';
+import { placesForTune } from '@/js/places.mjs';
+import TunePlaceDialog from '@/components/TunePlaceDialog.vue';
 import AbcDisplay from '@/components/AbcDisplay';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus';
@@ -133,6 +183,9 @@ import {
     mdiOpenInNew,
     mdiStar,
     mdiStarOutline,
+    mdiCloseCircle,
+    mdiMapMarker,
+    mdiPlus,
     mdiTagPlusOutline,
 } from '@mdi/js';
 import store from '@/services/store.js';
@@ -147,7 +200,7 @@ const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
     name: 'TuneView',
-    components: { AbcDisplay, TuneBackgroundButton },
+    components: { AbcDisplay, TuneBackgroundButton, TunePlaceDialog },
     props: {
         tuneID: {
             type: String,
@@ -176,6 +229,19 @@ export default {
             // user's saved (favourite) copy instead — shown as a banner.
             offlineFallback: false,
 
+            // Where this tune has been heard — several places for one tune is
+            // the normal case, which is why sightings are a log rather than a
+            // field on history or favourites.
+            heardAt: [],
+            geoTaggingOn: false,
+            placeDialog: false,
+            placeSnackbar: false,
+            placeSnackbarText: '',
+            // Records pulled out by the last removal, kept only so Undo can put
+            // them back with their original timestamps. Sightings cannot be
+            // recreated after the fact, so a mis-tap must not be final.
+            removedSightings: [],
+
             expandedIndex: [],
             favouritedSettings: {},
             settingTags: {},
@@ -188,6 +254,9 @@ export default {
                 star: mdiStar,
                 starOutline: mdiStarOutline,
                 tagPlus: mdiTagPlusOutline,
+                mapMarker: mdiMapMarker,
+                close: mdiCloseCircle,
+                plus: mdiPlus,
             },
         };
     },
@@ -230,6 +299,12 @@ export default {
         if (this.tuneID === '') {
             return;
         }
+
+        // Independent of the tune index: sightings are local, so this strip
+        // renders even when the tune itself falls back to an offline copy.
+        this._loadHeardAt();
+        this._onSightingsChanged = () => this._loadHeardAt();
+        eventBus.$on('sightingsChanged', this._onSightingsChanged);
 
         try {
             const loaded = await this._loadSettingsAndAliases();
@@ -321,12 +396,58 @@ export default {
     },
     beforeDestroy: function () {
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
+        if (this._onSightingsChanged) eventBus.$off('sightingsChanged', this._onSightingsChanged);
     },
     beforeRouteLeave: function (_to, _from, next) {
         eventBus.$emit('stopSynthPlayback');
         next();
     },
     methods: {
+        async _loadHeardAt() {
+            this.geoTaggingOn = !!store.userSettings.geoTagDetections;
+            if (!this.geoTaggingOn) {
+                this.heardAt = [];
+                return;
+            }
+            const [sightings, places] = await Promise.all([
+                store.getSightings(),
+                store.getPlaces(),
+            ]);
+            this.heardAt = placesForTune(sightings, places, this.tuneID).map(entry => ({
+                key: entry.place ? entry.place.id : 'unnamed',
+                // null is the unnamed bucket, which removeTuneFromPlace targets
+                // directly — not "no place selected".
+                placeID: entry.place ? entry.place.id : null,
+                label: entry.place ? entry.place.name : 'an unnamed place',
+                count: entry.count,
+                lastSeen: entry.lastSeen,
+            }));
+        },
+        async removePlace(entry) {
+            const removed = await store.removeTuneFromPlace(this.tuneID, entry.placeID);
+            if (!removed.length) return;
+            this.removedSightings = removed;
+            const times = removed.length === 1 ? 'hearing' : 'hearings';
+            this.placeSnackbarText = `Removed ${removed.length} ${times} at ${entry.label}.`;
+            this.placeSnackbar = true;
+            await this._loadHeardAt();
+        },
+        async undoRemovePlace() {
+            if (!this.removedSightings.length) return;
+            await store.restoreSightings(this.removedSightings);
+            this.removedSightings = [];
+            this.placeSnackbar = false;
+            await this._loadHeardAt();
+        },
+        formatDate(millis) {
+            if (!millis) return 'at an unknown time';
+            return new Date(millis).toLocaleDateString(undefined, {
+                year: 'numeric', month: 'short', day: 'numeric',
+            });
+        },
+        openPlaces() {
+            this.$router.push({ name: 'places' });
+        },
         async _reloadFromIndex() {
             if (!this.tuneID || this._reloading) return;
             this._reloading = true;
@@ -553,6 +674,22 @@ h1 {
 .akaSpan {
     font-size: smaller;
     font-style: italic;
+}
+
+.heardAt {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.heardAtLabel {
+    font-size: 0.85rem;
+    opacity: 0.7;
+}
+
+.heardAtCount {
+    opacity: 0.65;
+    font-size: 0.78rem;
 }
 
 .settingMeta {

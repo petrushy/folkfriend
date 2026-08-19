@@ -373,7 +373,23 @@ must be treated as sacred:
   quietly borrow it. Third instance of the same rule as the soundfont and
   `nud-meta.json` cases: **a required asset needs a post-build assertion, not a
   config option assumed to have worked.**
-- **`runtimeCaching: []`** — deliberately empty for the tune index. See rule 1.
+- **`runtimeCaching` holds exactly one entry, for map tiles** (August 2026).
+  It was empty before that, and the reason it was empty still stands for
+  everything else: the tune index must never be cached here (rule 1), because a
+  second 42 MB copy of what is already in IndexedDB roughly doubles the chance
+  the browser evicts the copy that makes the app work.
+
+  Map tiles clear that bar and nothing else has: they are small, bounded by
+  `maxEntries: 400` (~8 MB worst case), and are **not** a duplicate of anything
+  in IndexedDB — without the cache they simply cannot be shown offline at all.
+  `CacheFirst`, not StaleWhileRevalidate: a tile for a fixed coordinate does not
+  change in any way a user of this app cares about, and revalidating would spend
+  mobile data re-fetching identical PNGs on every visit to Places.
+  `cacheableResponse.statuses` must include **0** — these are opaque
+  cross-origin responses, and without it the cache silently stores nothing.
+
+  **Anything else added here needs the same argument made explicitly.**
+
   `public/sw-cleanup.js` is `importScripts`-ed into the generated service worker
   and deletes the obsolete `folkfriend-tune-data` cache on activate, reclaiming
   ~42 MB from existing installs.
@@ -467,6 +483,8 @@ modes it was: never saved, or saved-then-evicted.
 - `'ffIndexRaw'` / `'ffIndexManifest'` — tune index and its commit marker
 - `'tuneIndex'` / `'tuneIndexMetadata'` — legacy tune index (read-only, migrated away)
 - `'aiTuneSummaries'` — AI background notes, `{ tuneID: { text, model, generatedAt, sourceUrl } }`
+- `'tuneSightings'` — where tunes were heard, append-only, capped at 5000. **Local-only, never synced**
+- `'places'` — user-named locations, `{ id, name, lat, lon, radiusM, createdAt }`
 
 Not IndexedDB, but worth listing alongside — localStorage keys: `'userSettings'`,
 `'favouritesLocalUpdatedAt'`, `'anthropicApiKey'` (deliberately outside
@@ -697,6 +715,321 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 - The Results page shows a small debug line: transcriber (ML/DSP) + the contour string — compare against the CLI's `transcribe` output for the same clip.
 
 ## Recent changes
+
+### Geo-tagged tune sightings (August 2026 — v3.10.0)
+
+Records roughly **where** each tune was recognised, so the app can answer "which
+session did I learn this at". Off by default (Settings → *Places*,
+`userSettings.geoTagDetections`). New view at `/places`; a "Heard at" chip strip
+on the Tune view.
+
+`app/src/js/places.mjs` is the pure geometry and clustering,
+`app/src/services/geo.js` is the location layer, `store.js` owns the log, and
+`app/src/views/Places.vue` is the UI.
+
+#### It is a log, not a field — and that is the whole design
+
+The obvious implementation is a `lat`/`lon` on `HistoryItem` or `FavouriteItem`.
+Both are wrong, for reasons that only show up once the feature is used:
+
+- **`addToHistory` deliberately deletes the previous entry for a tune** (see its
+  dedup loop). A location there answers "where did I *last* hear this", never
+  "the six sessions this tune came up at" — which is the actual question. The
+  same tune in several places is the normal case, not an edge case.
+- **Starring happens on the sofa, days later.** A location captured at
+  favouriting time is not merely absent, it is *wrong*, and confidently so.
+- **Favourites sync to Firestore.** Coordinates there would push a log of the
+  user's physical movements to the cloud and into every synced device, which is
+  a materially different class of data from a list of tune IDs.
+
+So sightings are their own append-only IndexedDB key, `'tuneSightings'`, capped
+at 5000 (history's 100 is far too low — an evening that was not logged cannot be
+recovered), **local-only**, and never touched by `sync.js`. A test asserts
+directly that coordinates never reach `favouriteItems`.
+
+#### Battery: one fix per session, and high accuracy on purpose
+
+What drains a phone is `watchPosition` with high accuracy held open — the
+navigation-app pattern. This never watches. `geoService.beginSession()` takes
+**one** fix when a capture opens (live analysis start, or the record button) and
+every sighting that evening is stamped with it; you do not move between tunes.
+`FIX_MAX_AGE_MS` (30 min) bounds how long that holds, so a change of venue
+mid-evening still re-fixes.
+
+`enableHighAccuracy: true` reverses the obvious power-saving instinct, and
+deliberately. The feature is "which pub"; a network-derived fix is 50–100 m,
+which in a city centre is several pubs, so a coarse fix would save nothing
+measurable and produce data that cannot answer the question. `maximumAge: 2 min`
+lets the platform skip the radio entirely when it already knows where it is —
+that is the real saving.
+
+Set against what the app already does during a session (microphone open,
+AudioContext running, every window through DSP or a 14 MB ONNX model), one fix
+an evening is not measurable.
+
+#### Rules the tests pin (each verified by reinstating the bug)
+
+1. **The same tune in several places is never deduplicated.** Reinstating
+   history-style dedup in `addSighting` fails 1 test. `SIGHTING_DEDUP_MS` is 60 s
+   and exists only to collapse a double tap or two capture paths logging the same
+   detection — a genuine A-B-A set must still record two hearings of A.
+2. **Naming is retroactive.** People play somewhere for weeks before naming it;
+   if naming only labelled future sightings the feature would look broken to
+   exactly the people using it most. `namePlace` adopts every *unplaced* sighting
+   inside the radius. Making it forward-only fails 2 tests.
+3. **A sighting is recorded with no fix at all.** Refused permission, no signal
+   in a cellar, or a slow radio must still leave "I heard this tune that night".
+   Location is the bonus, not the record.
+4. **Deleting a place keeps its sightings**, returning them to unplaced. They are
+   observations; the name was only ever a label over them. Same reasoning as
+   never deleting the offline index on a failure path.
+5. **Concurrent callers join one acquisition** (`geo._inFlight`, assigned before
+   the first await — same shape as `micService._healthCheck`). Removing it fails
+   1 test. Several detections can land in one analysis cycle.
+6. **A refusal is sticky for the run.** Retrying re-prompts on some platforms and
+   spins the radio on others, and the user has just said no.
+7. **A failed refresh keeps the previous fix** rather than nulling it, and a
+   backgrounded app never requests a position — the prompt would be invisible and
+   on iOS the request tends to hang.
+
+#### The map, and the two things that nearly broke it
+
+`app/src/components/PlacesMap.vue` — Leaflet 1.9, OpenStreetMap tiles.
+
+**Loaded with a dynamic `import()`**, so it lands in its own chunk (146 KB /
+42 KB gzipped) that never reaches a user who does not open Places, and a
+failure to load it degrades to the scatter rather than breaking the view.
+
+**Markers are `L.circleMarker`, never `L.marker`.** The default marker pulls PNG
+icons through webpack's asset pipeline, which is the single most common
+Leaflet-with-webpack breakage (`marker-icon.png` 404s at a hashed path). Circles
+also carry the hearing count naturally, by *area* — scaling the radius linearly
+makes a busy place look wildly more dominant than it is. Named places are
+filled, unnamed ones hollow, because an unnamed place is a question the user has
+not answered yet and the map is where they will notice it.
+
+**Never put a `:class` binding on the element Leaflet is mounted into.** This
+was a real bug, caught only by a browser check. Leaflet writes its own classes
+straight onto the container (`leaflet-container`, `leaflet-touch`,
+`leaflet-touch-drag`, `leaflet-touch-zoom`, the fade/zoom-anim classes); a
+reactive class binding makes Vue re-render the `class` attribute whenever the
+bound value changes, silently stripping all of them. A `ready` flag flipping
+false→true was enough. **The map still looked perfect** — the panes Leaflet
+created underneath keep their own classes — but the container lost
+`position`/`overflow` and, critically, `touch-action: none`, so pinch and drag
+on iOS quietly stopped working. That is the entire reason Leaflet is here rather
+than a hand-rolled tile grid. State classes go on the wrapper.
+
+The container class list is the assertion to make: after mount it must still
+contain `leaflet-touch-drag` and `leaflet-touch-zoom`.
+
+**Tiles are the one part of this app that genuinely cannot work offline the
+first time**, which is why the tile-free scatter stays as a fallback rather than
+being deleted. `PlacesMap` emits `unavailable` when *no* tile has loaded and
+several have failed — a partial failure does not count, since a map drawn from
+last week's cached tiles is still a useful map — and `Places.vue` swaps in the
+scatter with an honest note about why. `scrollWheelZoom` is off: the map sits
+inside a scrolling page, and grabbing the wheel would trap it.
+
+Attribution is required by the OSM tile usage policy and is on by default via
+Leaflet's attribution control. If this app ever gets real traffic, that policy
+expects a different tile provider.
+
+#### Filtering and grouping favourites by place
+
+`Favourites.vue` gains a "Heard at" chip bar, above the tag bar, which only
+appears once geo-tagging has produced places that actually contain favourites —
+so it costs nothing for anyone not using the feature, and never offers a chip
+that would filter to nothing (each carries its match count).
+
+Two decisions worth knowing:
+
+- **Places are OR; tags are AND.** Selecting two tags means "has both", which is
+  the useful reading for labels the user applied deliberately. Selecting two
+  places means "heard at either" — a tune heard at *both* of two named pubs is a
+  rare thing to ask for and would usually filter to nothing.
+- **`placeIDsByTune` is a computed index**, not a per-row lookup. Favourites are
+  matched to sightings by `tune_id` (sightings are per tune, favourites per
+  setting), and doing that as a nested scan would run over the whole sightings
+  log on every keystroke in the name filter.
+
+A place deleted from the Places view is dropped from `activePlaceIDs` on reload —
+otherwise the list stays filtered against something no chip can clear.
+
+**Grouping** is the fourth mode on the existing group-by button (none → tag →
+date → place), ordered by most recently heard there, so last night's session is
+at the top when someone opens the view after a session. Three details:
+
+- **A tune heard at three sessions appears under all three.** That repetition is
+  the answer to "what do we play here", not a bug — and it matches the tag
+  grouping, where a row already appears under each of its tags.
+- **`place` is skipped in the cycle when there is nothing to group by**, so
+  anyone not using geo-tagging does not tab through a mode that can only show one
+  "Not heard anywhere yet" heading.
+- **Under an active place filter, only the filtered places get headings**, and
+  the "Not heard anywhere yet" group is suppressed entirely — those favourites
+  are precisely what the filter was asked to exclude.
+
+#### No reverse geocoding
+
+Place names come from clustering the user's own coordinates, not from a geocoding
+service. A geocoder means a third-party request carrying the user's location
+off-device, and it stops working exactly where this app is supposed to keep
+working. Instead: a sighting stores raw coordinates, the user names a spot once,
+and `sightingsToAdopt` labels everything within the radius. After two or three
+evenings the tagging is automatic, fully offline, and the names are the ones the
+user actually says.
+
+`DEFAULT_PLACE_RADIUS_M` is 150 (per-place overridable — a festival field and a
+back room are not the same size); unnamed proposal clusters use a tighter 80,
+because merging two proposals by giving them one name is easier for a user than
+splitting one that swallowed the pub next door.
+
+Note this is a different decision from the basemap. Tiles are a picture the user
+looks at; a geocoder would be told *where they were*, which is the part that must
+not leave the device. Tiles are fetched by z/x/y for an area the user is already
+looking at, and the tile server is never sent a place name, a tune, or anything
+tying the request to this user.
+
+The **tile-free SVG scatter** is still there as the fallback when tiles cannot be
+reached — shape and grouping are real, absolute geography is not, and the page
+says so. Dot area (not radius) tracks the count.
+
+#### Where sightings are captured
+
+- **`liveAnalysis._recordSighting()`** — the important one. An evening in a pub
+  is 30+ hearings that previously vanished entirely: follow mode recognises tune
+  after tune and wrote nothing unless something was starred. It logs on the
+  **edge**, when the tail detection's `tuneId` differs from the last logged one.
+  `collapseConsecutiveSameTune` has already merged a continuing tune into one
+  tail entry, so that edge is exactly the musical event wanted — and A, B, A
+  across an evening correctly gives three sightings. Recording per cycle would
+  log one reel forty times. Fire-and-forget: a sighting must never delay or break
+  the analysis loop.
+- **`ResultRow.addToHistory`** — tapping a result is the user confirming which
+  tune it was, which makes it the honest moment on the search path (the query
+  itself produces a ranked list, not an identification). `RecorderButton` warms
+  the fix when recording starts, so the tap reads a cached value.
+
+`HistoryRow` still has no capture point: it is passed only
+`name`/`descriptor`/`timestamp` and carries no tune identity.
+
+#### Creating places, not just naming what was recorded
+
+At first a place could only come into existence one way: play somewhere with
+geo-tagging on, then name the cluster that produced. That covers the pub you
+were just in and nothing else — you could not set up the session you are going
+to on Tuesday, or move a pin that landed in the car park.
+
+`PlacePickerDialog.vue` adds an explicit "Add a place", with three ways to
+choose a point, in the order people reach for them:
+
+1. **Tap the map.** The primary route, and the reason Leaflet was worth adding.
+2. **Take a fix** ("Use my location"), via `geoService.requestPermission()` — a
+   deliberate tap is the right moment for the OS prompt, and an earlier refusal
+   must not leave the button permanently inert.
+3. **Type coordinates.** Not a power-user afterthought: the map needs tiles and
+   tiles need a network, so offline with nothing cached the first route is gone.
+   The panel opens itself automatically when the map fails.
+
+The same dialog handles naming an unnamed cluster and editing an existing place,
+so there is one code path for all three. Naming a cluster starts the pin at its
+centre — the picker is there to nudge it, not to make the user find it again.
+
+**The radius is drawn as a live circle on the map**, not just a slider value. It
+is the setting that decides which past hearings the new name adopts, and 150 m
+means nothing until you see it over a street. Other places are drawn faintly for
+context, which is what stops someone unknowingly creating a second pin for a pub
+they already named.
+
+**`groupSightingsByPlace` had to change to list places with no hearings.** It
+previously returned only places that had sightings, which was correct when the
+only way to create one was to record there — and silently wrong the moment
+places could be created deliberately: saving a new place left the Places view
+still saying "Nothing recorded yet", so it looked like the save had failed.
+Empty places sort last, having `lastSeen` 0. Two tests pin this, both verified
+against the old filter.
+
+**Not built: search by place name.** It is the obvious convenience — type "The
+Cobblestone" instead of panning — and it would need a geocoder such as
+Nominatim. That is a *different* privacy question from the reverse geocoding
+this feature has always refused: a forward search sends a string the user typed,
+not their coordinates. It is defensible, but it adds a third-party dependency
+and a usage policy to respect, so it is a deliberate open decision rather than
+an oversight.
+
+#### Correcting the log by hand
+
+Automatic capture has two failure modes no amount of tuning removes: the
+detector sometimes identifies the wrong tune, and it never hears the tunes
+played while the phone was in a pocket. Without a way to correct that, the log
+is a subset of the truth with errors baked in — so both directions are editable.
+
+**Un-tagging** works at **tune-at-place** granularity
+(`store.removeTuneFromPlace(tuneID, placeID)`), not per hearing. That is the
+claim the UI makes ("Heard at The Cobblestone ×3") and therefore the claim the
+user is disagreeing with; removing one of three would leave the chip in place
+and look like nothing happened. `placeID` of `null` targets the unnamed bucket,
+which is what the "an unnamed place" chip refers to. Two entry points: the ✕ on
+each "Heard at" chip on the Tune view, and a ✕ per tune row under a place on the
+Places view.
+
+**Every removal is undoable**, and `restoreSightings` puts back the *whole
+records* rather than re-adding them, so an undone removal keeps the original
+timestamps and does not quietly rewrite when the tune was heard. Sightings
+cannot be recreated after the fact and the chips are small targets on a phone,
+so a mis-tap must not be final. `Places.vue::notify(text, undoable)` gates the
+Undo button — without that flag a later unrelated message inherits the previous
+removal's records and offers to undo something the user was never told about.
+
+**Manual tagging** is `TunePlaceDialog.vue`, opened from an "Add place" chip on
+the Tune view, with two ways in for two genuinely different situations:
+
+- *"I'm here now"* takes a fix, for tagging in the pub. It calls
+  `geoService.requestPermission()` rather than `getFix()`, because a deliberate
+  tap is the right moment to raise the OS prompt and an earlier refusal must not
+  leave the button silently doing nothing forever.
+- *Picking a named place* needs no fix at all, for tagging afterwards — where a
+  fix would be both unavailable and actively wrong. That is the same reasoning
+  that made sightings a separate log rather than a field on favourites.
+
+`addSighting` grew `placeID` and `source: 'manual'` for this. Three details that
+are easy to get wrong:
+
+1. **The place is resolved before the duplicate check, not after.** A manual
+   "here now" must be compared against sightings at the place its fix lands in,
+   not against the unplaced bucket — otherwise an existing unplaced sighting for
+   the same tune silently swallows it. This was a real bug, caught by a test.
+2. **Manual adds skip the time-window dedup** (`SIGHTING_DEDUP_MS`), which
+   exists to collapse double taps during live capture. The user is deliberately
+   adding something the detector missed, possibly months later. They are instead
+   deduplicated by **(tune, place)**: "this tune was heard here" is either true
+   or not, so recording it twice adds nothing — and the existing record is
+   returned so the caller still sees success.
+3. **An explicit `placeID` naming no known place is refused**, rather than
+   falling back to an unplaced sighting. A record the user cannot see anywhere
+   is worse than no record.
+
+#### Export includes them; sync never does
+
+`exportUserData` is now **version 4** and carries `tuneSightings` + `places`.
+This is the only copy of that data — it is never synced — and a backup that
+silently drops the one dataset that cannot be regenerated is not a backup. The
+Settings panel says plainly that a backup file therefore discloses where the user
+has played. `importUserData` accepts v1–v4 and only writes the keys when present,
+so restoring an older backup does not wipe sightings recorded since.
+
+#### Tests
+
+`app/test/sightings.test.mjs` (40 cases, in the `npm test` chain) — geometry and
+clustering, the store log, and the geo service, with `store.js` and `geo.js`
+loaded from source against in-memory fakes and a scriptable `navigator.geolocation`.
+`places.mjs` is used **for real** rather than faked: it is pure geometry with no
+browser surface, and stubbing it would weaken the store tests that depend on
+proximity matching.
+
+Note `aiSummaryStore.test.mjs` also had to learn about `places.mjs`, since
+`store.js` now imports it — its loader copies the real module alongside `schema`.
 
 ### AI tune background notes (August 2026 — v3.9.0)
 

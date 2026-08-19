@@ -5,6 +5,7 @@ import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
 import {estimateCostUsd, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
+import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '@/js/places.mjs';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
 import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
 import {
@@ -23,6 +24,7 @@ const USER_SETTING_DEFAULTS = {
     autoUpdateTuneData: true, // check for a newer tune index on startup
     aiSummariesEnabled: false, // show the (i) tune-background button; needs an API key
     aiSummaryModel: DEFAULT_AI_MODEL, // which Claude model writes the background note
+    geoTagDetections: false, // record where each tune was heard; needs location permission
 };
 
 // The Anthropic API key lives under its own localStorage key, NOT in
@@ -49,6 +51,36 @@ const KEY_AI_SUMMARIES = 'aiTuneSummaries';
 // Favourites are pushed to Firestore as one document containing the whole
 // array, so summary text mirrored onto them is the field most able to bloat it.
 const AI_SUMMARY_MAX_CHARS = 1200;
+
+// Where tunes have been heard. An append-only log, NOT a field on history or
+// favourites, for two reasons:
+//
+//  - The same tune is legitimately heard in many places, and that is the whole
+//    point of the feature. addToHistory() deliberately removes the previous
+//    entry for a tune (see its dedup loop), so a location there would only ever
+//    answer "where did I last hear this" — and starring happens on the sofa
+//    days later, where the location is not merely absent but wrong.
+//  - It is deliberately local-only, like history and unlike favourites. These
+//    records are a log of the user's physical movements; putting them on the
+//    favourites document would sync them to Firestore, which is a materially
+//    different class of data from a list of tune IDs.
+const KEY_SIGHTINGS = 'tuneSightings';
+
+// Named locations, matched to sightings by proximity rather than by any
+// geocoding service. See src/js/places.mjs for why.
+const KEY_PLACES = 'places';
+
+// Sightings are the data that cannot be recovered after the fact — an evening
+// that was not logged is gone — so the cap is far higher than history's 100.
+// At roughly 30 tunes an evening this is several years of playing.
+const MAX_SIGHTINGS = 5000;
+
+// Guards against one detection being logged twice by two capture paths (the
+// live loop and a result-row tap for the same tune), and against double taps.
+// Deliberately short: within one session the semantic rule is "the recognised
+// tune changed", which lives in liveAnalysis.js, and a genuine A-B-A set must
+// still record two sightings of A.
+const SIGHTING_DEDUP_MS = 60 * 1000;
 
 class Store {
     constructor() {
@@ -697,13 +729,232 @@ class Store {
         await this._dbSet('historyItems', historyItems);
     }
 
+    // ---- Tune sightings (where a tune was heard) ---------------------------
+
+    async getSightings() {
+        try {
+            return await get(KEY_SIGHTINGS) || [];
+        } catch (e) {
+            console.error(`IndexedDB read error (${KEY_SIGHTINGS})`, e);
+            return [];
+        }
+    }
+
+    async getPlaces() {
+        try {
+            return await get(KEY_PLACES) || [];
+        } catch (e) {
+            console.error(`IndexedDB read error (${KEY_PLACES})`, e);
+            return [];
+        }
+    }
+
+    // Records that `tuneID` was heard, optionally at `fix`. Returns the stored
+    // sighting, or null if it was suppressed as a duplicate.
+    //
+    // A sighting is recorded even with no fix at all. Location is the bonus;
+    // "I heard this tune on the 3rd of March" is still worth keeping, and
+    // making the log conditional on a successful fix would mean an evening
+    // indoors with no signal vanishes entirely.
+    async addSighting({
+        tuneID, settingID = null, displayName = '',
+        fix = null, source = 'live', timestamp = null,
+        // Set by the manual path, which names a place directly rather than
+        // deriving one from coordinates: the user is recording "we played this
+        // at the Cobblestone last Tuesday" from their sofa, where a fix would be
+        // both unavailable and wrong.
+        placeID = null,
+    } = {}) {
+        if (tuneID == null || tuneID === '') return null;
+
+        const sightings = await this.getSightings();
+        const places = await this.getPlaces();
+        const at = timestamp || Date.now();
+
+        const explicitPlace = placeID ? places.find(p => p.id === placeID) || null : null;
+        // An explicit placeID that names nothing is a caller bug, not a reason
+        // to silently record an unplaced sighting the user cannot see.
+        if (placeID && !explicitPlace) return null;
+
+        // Resolved before the duplicate check, not after: a manual add made
+        // with a fix ("here now") still lands at whichever named place contains
+        // that fix, and must be compared against sightings at THAT place rather
+        // than against the unplaced bucket.
+        const place = explicitPlace || (isValidFix(fix) ? matchPlace(fix, places) : null);
+
+        if (source === 'manual') {
+            // Deliberate acts are not deduplicated by time — the whole point is
+            // that the user is adding something the detector missed, possibly
+            // long after the fact. They ARE deduplicated by (tune, place): the
+            // UI says "this tune was heard here", which is a fact that is either
+            // true or not, so recording it twice adds nothing. The existing
+            // record is returned so the caller still sees success.
+            const already = sightings.find(s =>
+                String(s.tuneID) === String(tuneID) &&
+                (s.placeID || null) === (place ? place.id : null)
+            );
+            if (already) return already;
+        } else {
+            const duplicate = sightings.some(s =>
+                String(s.tuneID) === String(tuneID) &&
+                Math.abs((s.timestamp || 0) - at) < SIGHTING_DEDUP_MS
+            );
+            if (duplicate) return null;
+        }
+
+        const sighting = {
+            id: `${at}-${tuneID}-${Math.random().toString(36).slice(2, 8)}`,
+            tuneID: String(tuneID),
+            settingID: settingID == null ? null : String(settingID),
+            displayName: displayName || '',
+            timestamp: at,
+            source, // 'live' | 'search' | 'manual' — how it came to be recorded
+            lat: isValidFix(fix) ? fix.lat : (explicitPlace ? explicitPlace.lat : null),
+            lon: isValidFix(fix) ? fix.lon : (explicitPlace ? explicitPlace.lon : null),
+            accuracy: isValidFix(fix) ? (fix.accuracy ?? null) : null,
+            placeID: place ? place.id : null,
+        };
+
+        sightings.unshift(sighting);
+        await this._dbSet(KEY_SIGHTINGS, sightings.slice(0, MAX_SIGHTINGS));
+        eventBus.$emit('sightingsChanged');
+        return sighting;
+    }
+
+    // Un-tags a tune from a place: "we never actually played this here".
+    //
+    // Works at tune-at-place granularity rather than per hearing, because that
+    // is the claim the UI makes ("Heard at The Cobblestone ×3") and therefore
+    // the claim the user is disagreeing with. Removing one of three hearings
+    // would leave the chip in place and look like nothing happened.
+    //
+    // `placeID` of null targets the unnamed bucket, which is what the "an
+    // unnamed place" chip refers to.
+    //
+    // Returns the removed records so the caller can offer an undo — these are
+    // observations that cannot be recreated, and a mis-tap on a small screen
+    // must not be final.
+    async removeTuneFromPlace(tuneID, placeID = null) {
+        if (tuneID == null || tuneID === '') return [];
+        const target = placeID || null;
+        const sightings = await this.getSightings();
+        const removed = sightings.filter(s =>
+            String(s.tuneID) === String(tuneID) && (s.placeID || null) === target
+        );
+        if (!removed.length) return [];
+
+        const removedIDs = new Set(removed.map(s => s.id));
+        await this._dbSet(KEY_SIGHTINGS, sightings.filter(s => !removedIDs.has(s.id)));
+        eventBus.$emit('sightingsChanged');
+        return removed;
+    }
+
+    // Puts back records removed by removeTuneFromPlace. Restoring by whole
+    // record rather than re-adding keeps the original timestamps, so an undone
+    // removal does not quietly rewrite when the tune was heard.
+    async restoreSightings(records) {
+        if (!Array.isArray(records) || !records.length) return;
+        const sightings = await this.getSightings();
+        const known = new Set(sightings.map(s => s.id));
+        const missing = records.filter(r => r && r.id && !known.has(r.id));
+        if (!missing.length) return;
+        const merged = [...missing, ...sightings]
+            .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+            .slice(0, MAX_SIGHTINGS);
+        await this._dbSet(KEY_SIGHTINGS, merged);
+        eventBus.$emit('sightingsChanged');
+    }
+
+    // Names a location. `fix` is the centre — normally the leader of an unnamed
+    // cluster the user tapped. Every unplaced sighting within the radius adopts
+    // it, which is what makes naming retroactive: play somewhere six times,
+    // name it once, and all six evenings are labelled.
+    async namePlace({ name, lat, lon, radiusM = DEFAULT_PLACE_RADIUS_M, id = null }) {
+        const trimmed = (name || '').trim();
+        if (!trimmed) return null;
+        const centre = { lat: Number(lat), lon: Number(lon) };
+        if (!isValidFix(centre)) return null;
+
+        const places = await this.getPlaces();
+        let place = id ? places.find(p => p.id === id) : null;
+
+        if (place) {
+            place.name = trimmed;
+            place.lat = centre.lat;
+            place.lon = centre.lon;
+            place.radiusM = radiusM;
+        } else {
+            place = {
+                id: `place-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                name: trimmed,
+                lat: centre.lat,
+                lon: centre.lon,
+                radiusM,
+                createdAt: Date.now(),
+            };
+            places.push(place);
+        }
+        await this._dbSet(KEY_PLACES, places);
+
+        const sightings = await this.getSightings();
+        const adopting = new Set(sightingsToAdopt(place, sightings).map(s => s.id));
+        if (adopting.size) {
+            for (const sighting of sightings) {
+                if (adopting.has(sighting.id)) sighting.placeID = place.id;
+            }
+            await this._dbSet(KEY_SIGHTINGS, sightings);
+        }
+
+        eventBus.$emit('sightingsChanged');
+        return place;
+    }
+
+    // Deletes a place. Its sightings are kept and returned to unplaced — they
+    // are observations, and the name was only ever a label over them. Losing an
+    // evening's log because a name was tidied up would be the same class of
+    // mistake as deleting the offline index on a failed update.
+    async deletePlace(placeID) {
+        const places = (await this.getPlaces()).filter(p => p.id !== placeID);
+        await this._dbSet(KEY_PLACES, places);
+
+        const sightings = await this.getSightings();
+        let changed = false;
+        for (const sighting of sightings) {
+            if (sighting.placeID === placeID) {
+                sighting.placeID = null;
+                changed = true;
+            }
+        }
+        if (changed) await this._dbSet(KEY_SIGHTINGS, sightings);
+        eventBus.$emit('sightingsChanged');
+    }
+
+    async deleteSighting(sightingID) {
+        const sightings = (await this.getSightings()).filter(s => s.id !== sightingID);
+        await this._dbSet(KEY_SIGHTINGS, sightings);
+        eventBus.$emit('sightingsChanged');
+    }
+
+    async clearSightings() {
+        await this._dbSet(KEY_SIGHTINGS, []);
+        await this._dbSet(KEY_PLACES, []);
+        eventBus.$emit('sightingsChanged');
+    }
+
     async exportUserData() {
         const payload = {
-            version: 3,
+            version: 4,
             exportedAt: Date.now(),
             userSettings: this.userSettings,
             historyItems: await this.getHistoryItems(),
             favouriteItems: await this.getFavourites(),
+            // Sightings carry coordinates, so a shared backup file discloses
+            // where the user has played. They are included regardless: this is
+            // the only copy (they are never synced), and a backup that silently
+            // drops the one dataset that cannot be regenerated is not a backup.
+            // The Settings panel warns before the file is written.
+            tuneSightings: await this.getSightings(),
+            places: await this.getPlaces(),
         };
         return JSON.stringify(payload, null, 2);
     }
@@ -715,10 +966,14 @@ class Store {
         } catch (e) {
             throw new Error('Could not parse import file: invalid JSON.');
         }
-        if (payload.version !== 1 && payload.version !== 2 && payload.version !== 3) {
+        if (![1, 2, 3, 4].includes(payload.version)) {
             throw new Error(`Unsupported data version: ${payload.version}`);
         }
         await this._dbSet('historyItems', payload.historyItems || []);
+        // Absent in v1-v3 backups. Only written when the key is present, so
+        // restoring an older backup does not wipe sightings recorded since.
+        if (payload.tuneSightings) await this._dbSet(KEY_SIGHTINGS, payload.tuneSightings);
+        if (payload.places) await this._dbSet(KEY_PLACES, payload.places);
         // v1/v2 exports may have folderId on items; getFavourites() will migrate them on next load
         await this._dbSet('favouriteItems', payload.favouriteItems || []);
         // Backups made after 3.9.0 carry AI summaries on favourited settings.

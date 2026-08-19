@@ -103,12 +103,20 @@ async function loadStore({ storedSettings = null } = {}) {
         path.join(tmpDir, 'schema.mjs'),
         await readFile(path.join(srcDir, 'js', 'schema.js'), 'utf8'),
     );
+    // Real, not a fake: places.mjs is pure geometry with no browser surface, so
+    // there is nothing to stub and stubbing it would weaken the store tests
+    // that depend on proximity matching.
+    await writeFile(
+        path.join(tmpDir, 'places.mjs'),
+        await readFile(path.join(srcDir, 'js', 'places.mjs'), 'utf8'),
+    );
 
     let source = await readFile(path.join(srcDir, 'services', 'store.js'), 'utf8');
     const replacements = [
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from 'idb-keyval'", "from './fake-idb.mjs'"],
         ["from '@/js/schema'", "from './schema.mjs'"],
+        ["from '@/js/places.mjs'", "from './places.mjs'"],
         ["from './aiSummary.js'", "from './fake-ai.mjs'"],
         ["from 'firebase/auth'", "from './fake-firebase-auth.mjs'"],
         ["from './sync.js'", "from './fake-sync.mjs'"],

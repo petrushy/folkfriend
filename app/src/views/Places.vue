@@ -1,0 +1,423 @@
+<template>
+    <v-container class="viewContainerWrapper">
+        <h1 class="my-2">
+            Places
+        </h1>
+
+        <v-card v-if="!enabled" class="pa-5 my-3">
+            <p class="mb-2">
+                Recording where you hear tunes is switched off.
+            </p>
+            <p class="text--secondary mb-4" style="font-size: 0.9rem;">
+                When it is on, FolkFriend notes roughly where each tune was recognised, so you can
+                see which session you learned something at. It takes one location fix when a
+                listening session starts — not a continuous track — so the battery cost is
+                negligible next to running the microphone.
+            </p>
+            <v-btn color="primary" to="/settings">
+                Open Settings
+            </v-btn>
+        </v-card>
+
+        <v-card v-else-if="!groups.length" class="pa-5 my-3">
+            <p class="mb-3">
+                Nothing recorded yet. Start a live session or search for a tune, and the places
+                you hear tunes in will collect here — or add one now and tag tunes to it by hand.
+            </p>
+            <v-btn color="primary" @click="openNewPlaceDialog">
+                <v-icon left>{{ icons.plus }}</v-icon>
+                Add a place
+            </v-btn>
+        </v-card>
+
+        <template v-else>
+            <!-- A real map when tiles can be reached, and the tile-free scatter when
+                 they cannot. The fallback is not decoration: tiles are the one part of
+                 this app that genuinely needs a network the first time, and a blank grey
+                 rectangle is worse than an honest relative plot. -->
+            <v-card v-if="mapPoints.length" class="pa-3 my-3">
+                <PlacesMap
+                    v-if="!mapUnavailable"
+                    ref="map"
+                    :groups="mapGroups"
+                    :focus-key="focusKey"
+                    @select="onMarkerSelected"
+                    @unavailable="onMapUnavailable"
+                />
+                <template v-else>
+                    <svg class="miniMap" viewBox="0 0 100 100" preserveAspectRatio="none">
+                        <circle
+                            v-for="point in mapPoints"
+                            :key="point.key"
+                            :cx="point.x * 100"
+                            :cy="point.y * 100"
+                            :r="point.radius"
+                            :class="point.named ? 'miniMapDot miniMapDot--named' : 'miniMapDot'"
+                        />
+                    </svg>
+                    <p class="text--secondary mb-0 mt-2" style="font-size: 0.78rem;">
+                        {{ mapUnavailableReason === 'library'
+                            ? 'Map could not load — showing relative positions only.'
+                            : 'Map tiles need a connection. Showing relative positions only; places you have viewed before stay available offline.' }}
+                    </p>
+                </template>
+            </v-card>
+
+            <v-card
+                v-for="group in groups"
+                :key="group.key"
+                :data-group-key="group.key"
+                class="pa-4 my-2"
+            >
+                <div class="d-flex align-center">
+                    <div class="flex-grow-1" style="min-width: 0;">
+                        <h2 class="text-h6 mb-1">
+                            <v-icon left small>{{ group.place ? icons.mapMarker : icons.mapMarkerQuestion }}</v-icon>
+                            {{ group.place ? group.place.name : 'Unnamed location' }}
+                        </h2>
+                        <p class="text--secondary mb-0" style="font-size: 0.85rem;">
+                            {{ group.tuneCount }} {{ group.tuneCount === 1 ? 'tune' : 'tunes' }},
+                            {{ group.count }} {{ group.count === 1 ? 'hearing' : 'hearings' }} ·
+                            last {{ formatDate(group.lastSeen) }}
+                        </p>
+                    </div>
+                    <v-btn icon :title="group.place ? 'Rename' : 'Name this place'" @click="openNameDialog(group)">
+                        <v-icon>{{ group.place ? icons.pencil : icons.tagPlus }}</v-icon>
+                    </v-btn>
+                    <v-btn icon :title="group.expanded ? 'Hide tunes' : 'Show tunes'" @click="toggle(group)">
+                        <v-icon>{{ group.expanded ? icons.chevronUp : icons.chevronDown }}</v-icon>
+                    </v-btn>
+                </div>
+
+                <v-list v-if="group.expanded" dense class="mt-2">
+                    <v-list-item
+                        v-for="tune in group.tunes"
+                        :key="tune.tuneID"
+                        class="px-0"
+                        @click="openTune(tune)"
+                    >
+                        <v-list-item-content>
+                            <v-list-item-title>{{ tune.displayName || `Tune ${tune.tuneID}` }}</v-list-item-title>
+                            <v-list-item-subtitle>
+                                heard {{ tune.count }}×, last {{ formatDate(tune.lastSeen) }}
+                            </v-list-item-subtitle>
+                        </v-list-item-content>
+                        <v-list-item-action>
+                            <v-btn
+                                icon
+                                small
+                                title="This tune was not played here"
+                                @click.stop="removeTuneFromGroup(group, tune)"
+                            >
+                                <v-icon small>{{ icons.close }}</v-icon>
+                            </v-btn>
+                        </v-list-item-action>
+                    </v-list-item>
+                </v-list>
+
+                <div v-if="group.expanded && group.place" class="mt-2">
+                    <v-btn small text color="error" @click="confirmDeletePlace(group.place)">
+                        <v-icon left small>{{ icons.delete }}</v-icon>
+                        Forget this name
+                    </v-btn>
+                    <span class="text--secondary" style="font-size: 0.78rem;">
+                        The tunes stay; only the name is removed.
+                    </span>
+                </div>
+            </v-card>
+
+            <div class="d-flex flex-wrap mt-4" style="gap: 8px;">
+                <v-btn color="primary" @click="openNewPlaceDialog">
+                    <v-icon left>{{ icons.plus }}</v-icon>
+                    Add a place
+                </v-btn>
+                <v-btn @click="confirmClear">
+                    <v-icon left>{{ icons.delete }}</v-icon>
+                    Clear all places
+                </v-btn>
+            </div>
+        </template>
+
+        <PlacePickerDialog
+            v-model="pickerDialog"
+            :place="editingPlace"
+            :start="editingStart"
+            :otherPlaces="places"
+            @save="savePlace"
+        />
+
+        <v-snackbar v-model="snackbar" :timeout="8000">
+            {{ snackbarText }}
+            <template v-if="removedSightings.length" #action="{ attrs }">
+                <v-btn text v-bind="attrs" @click="undoRemove">
+                    Undo
+                </v-btn>
+            </template>
+        </v-snackbar>
+    </v-container>
+</template>
+
+<script>
+import {
+    mdiChevronDown,
+    mdiChevronUp,
+    mdiClose,
+    mdiDelete,
+    mdiMapMarker,
+    mdiMapMarkerQuestion,
+    mdiPencil,
+    mdiPlus,
+    mdiTagPlus,
+} from '@mdi/js';
+import eventBus from '@/eventBus';
+import store from '@/services/store';
+import router from '@/router/index.js';
+import {
+    groupSightingsByPlace,
+    projectPoints,
+} from '@/js/places.mjs';
+import PlacesMap from '@/components/PlacesMap.vue';
+import PlacePickerDialog from '@/components/PlacePickerDialog.vue';
+
+export default {
+    name: 'PlacesView',
+    components: { PlacesMap, PlacePickerDialog },
+    data() {
+        return {
+            groups: [],
+            enabled: false,
+            pickerDialog: false,
+            // The place being edited, or null when creating a new one.
+            editingPlace: null,
+            // Starting coordinates for a new place — an unnamed cluster's
+            // centre when naming one, nothing when adding from scratch.
+            editingStart: null,
+            places: [],
+            snackbar: false,
+            snackbarText: '',
+            // Kept only so Undo can restore them with their original
+            // timestamps — a removed hearing cannot be recreated.
+            removedSightings: [],
+            mapUnavailable: false,
+            mapUnavailableReason: null,
+            focusKey: null,
+            icons: {
+                chevronDown: mdiChevronDown,
+                chevronUp: mdiChevronUp,
+                close: mdiClose,
+                plus: mdiPlus,
+                delete: mdiDelete,
+                mapMarker: mdiMapMarker,
+                mapMarkerQuestion: mdiMapMarkerQuestion,
+                pencil: mdiPencil,
+                tagPlus: mdiTagPlus,
+            },
+        };
+    },
+    computed: {
+        // The real map takes true coordinates; mapPoints below is the projected
+        // fallback. Both are derived from the same groups so they cannot drift.
+        mapGroups() {
+            return this.groups.filter(g => Number.isFinite(g.lat) && Number.isFinite(g.lon));
+        },
+        mapPoints() {
+            const projected = projectPoints(this.groups.filter(g => g.lat != null));
+            if (!projected) return [];
+            const busiest = Math.max(...projected.map(p => p.count), 1);
+            return projected.map(point => ({
+                key: point.key,
+                x: point.x,
+                y: point.y,
+                named: !!point.place,
+                // Area, not radius, tracks the count — a radius-linear scale
+                // makes a busy place look wildly more dominant than it is.
+                radius: 1.6 + 3.4 * Math.sqrt(point.count / busiest),
+            }));
+        },
+    },
+    created() {
+        eventBus.$emit('parentViewActivated');
+        this.enabled = !!store.userSettings.geoTagDetections;
+        this._onSightingsChanged = () => this.load();
+        eventBus.$on('sightingsChanged', this._onSightingsChanged);
+        this.load();
+    },
+    beforeDestroy() {
+        eventBus.$off('sightingsChanged', this._onSightingsChanged);
+    },
+    methods: {
+        async load() {
+            const [sightings, places] = await Promise.all([
+                store.getSightings(),
+                store.getPlaces(),
+            ]);
+            // Held so the picker can draw existing places faintly for context,
+            // which is what stops a user unknowingly creating an overlapping
+            // second pin for a pub they already named.
+            this.places = places;
+            // Expansion state is per-render, so preserve what the user opened
+            // rather than collapsing everything whenever a sighting lands.
+            const openKeys = new Set(this.groups.filter(g => g.expanded).map(g => g.key));
+            this.groups = groupSightingsByPlace(sightings, places).map(group => {
+                const key = group.place ? group.place.id : `unnamed-${group.lat}-${group.lon}`;
+                return {
+                    ...group,
+                    key,
+                    expanded: openKeys.has(key),
+                    tunes: summariseTunes(group.sightings),
+                    // Named places have their own centre; unnamed clusters
+                    // carry their leader's coordinates.
+                    lat: group.place ? group.place.lat : group.lat,
+                    lon: group.place ? group.place.lon : group.lon,
+                };
+            });
+        },
+        toggle(group) {
+            group.expanded = !group.expanded;
+        },
+        // "We never played that here" — the correction for a misheard tune,
+        // which is the failure mode automatic capture will always have.
+        async removeTuneFromGroup(group, tune) {
+            const placeID = group.place ? group.place.id : null;
+            const removed = await store.removeTuneFromPlace(tune.tuneID, placeID);
+            if (!removed.length) return;
+            this.removedSightings = removed;
+            const label = group.place ? group.place.name : 'this location';
+            const name = tune.displayName || `Tune ${tune.tuneID}`;
+            this.notify(`Removed ${name} from ${label}.`, true);
+            await this.load();
+        },
+        async undoRemove() {
+            if (!this.removedSightings.length) return;
+            await store.restoreSightings(this.removedSightings);
+            this.removedSightings = [];
+            this.snackbar = false;
+            await this.load();
+        },
+        onMapUnavailable(reason) {
+            this.mapUnavailable = true;
+            this.mapUnavailableReason = reason;
+        },
+        // Tapping a marker opens that place's card, so the map is a way into
+        // the list rather than a separate thing to read.
+        onMarkerSelected(key) {
+            const group = this.groups.find(g => g.key === key);
+            if (!group) return;
+            group.expanded = true;
+            this.$nextTick(() => {
+                const el = this.$el.querySelector(`[data-group-key="${cssEscape(key)}"]`);
+                if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            });
+        },
+        formatDate(millis) {
+            if (!millis) return 'unknown';
+            return new Date(millis).toLocaleDateString(undefined, {
+                year: 'numeric', month: 'short', day: 'numeric',
+            });
+        },
+        openTune(tune) {
+            router.push({
+                name: 'tune',
+                query: {
+                    tuneID: tune.tuneID,
+                    displayName: tune.displayName || '',
+                    settingID: tune.settingID || '',
+                },
+            });
+        },
+        openNameDialog(group) {
+            this.editingPlace = group.place || null;
+            // Naming an unnamed cluster starts the pin at its centre, which is
+            // almost always right — the picker is there to nudge it, not to
+            // make the user find it again.
+            this.editingStart = group.place ? null : { lat: group.lat, lon: group.lon };
+            this.pickerDialog = true;
+        },
+        openNewPlaceDialog() {
+            this.editingPlace = null;
+            this.editingStart = null;
+            this.pickerDialog = true;
+        },
+        async savePlace(details) {
+            const place = await store.namePlace(details);
+            this.editingPlace = null;
+            this.editingStart = null;
+            if (!place) {
+                this.notify('That place could not be saved.');
+                return;
+            }
+            await this.load();
+        },
+        async confirmDeletePlace(place) {
+            if (!window.confirm(`Forget the name "${place.name}"? The tunes heard there are kept.`)) return;
+            await store.deletePlace(place.id);
+            await this.load();
+        },
+        async confirmClear() {
+            if (!window.confirm('Delete every recorded place and hearing? This cannot be undone.')) return;
+            await store.clearSightings();
+            await this.load();
+        },
+        // `undoable` guards the Undo button: without it, a later unrelated
+        // message (a failed save, say) would inherit the previous removal's
+        // records and offer to undo something the user was not told about.
+        notify(text, undoable = false) {
+            if (!undoable) this.removedSightings = [];
+            this.snackbarText = text;
+            this.snackbar = true;
+        },
+    },
+};
+
+// Group keys are generated from coordinates ("unnamed-53.34--6.27"), so they
+// contain dots and minus signs that a CSS attribute selector reads as syntax.
+function cssEscape(value) {
+    if (typeof CSS !== 'undefined' && CSS.escape) return CSS.escape(value);
+    return String(value).replace(/["\\]/g, '\\$&');
+}
+
+// Collapses a place's sightings into one row per tune, most recent first.
+function summariseTunes(sightings) {
+    const byTune = new Map();
+    for (const sighting of sightings) {
+        const key = String(sighting.tuneID);
+        const existing = byTune.get(key);
+        if (existing) {
+            existing.count++;
+            if (sighting.timestamp > existing.lastSeen) {
+                existing.lastSeen = sighting.timestamp;
+                // Keep the most recent naming and setting — display names drift
+                // as the index is updated.
+                if (sighting.displayName) existing.displayName = sighting.displayName;
+                if (sighting.settingID) existing.settingID = sighting.settingID;
+            }
+        } else {
+            byTune.set(key, {
+                tuneID: key,
+                displayName: sighting.displayName || '',
+                settingID: sighting.settingID || '',
+                count: 1,
+                lastSeen: sighting.timestamp || 0,
+            });
+        }
+    }
+    return [...byTune.values()].sort((a, b) => b.lastSeen - a.lastSeen);
+}
+</script>
+
+<style scoped>
+.miniMap {
+    width: 100%;
+    height: 160px;
+    display: block;
+}
+
+.miniMapDot {
+    fill: var(--v-primary-base, #1976d2);
+    opacity: 0.45;
+}
+
+.miniMapDot--named {
+    opacity: 0.9;
+}
+</style>
