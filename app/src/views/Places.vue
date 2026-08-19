@@ -20,10 +20,14 @@
         </v-card>
 
         <v-card v-else-if="!groups.length" class="pa-5 my-3">
-            <p class="mb-0">
+            <p class="mb-3">
                 Nothing recorded yet. Start a live session or search for a tune, and the places
-                you hear tunes in will collect here.
+                you hear tunes in will collect here — or add one now and tag tunes to it by hand.
             </p>
+            <v-btn color="primary" @click="openNewPlaceDialog">
+                <v-icon left>{{ icons.plus }}</v-icon>
+                Add a place
+            </v-btn>
         </v-card>
 
         <template v-else>
@@ -122,47 +126,25 @@
                 </div>
             </v-card>
 
-            <v-btn class="mt-4" @click="confirmClear">
-                <v-icon left>{{ icons.delete }}</v-icon>
-                Clear all places
-            </v-btn>
+            <div class="d-flex flex-wrap mt-4" style="gap: 8px;">
+                <v-btn color="primary" @click="openNewPlaceDialog">
+                    <v-icon left>{{ icons.plus }}</v-icon>
+                    Add a place
+                </v-btn>
+                <v-btn @click="confirmClear">
+                    <v-icon left>{{ icons.delete }}</v-icon>
+                    Clear all places
+                </v-btn>
+            </div>
         </template>
 
-        <v-dialog v-model="nameDialog" max-width="420">
-            <v-card class="pa-4">
-                <h2 class="text-h6 mb-3">
-                    {{ editing && editing.place ? 'Rename place' : 'Name this place' }}
-                </h2>
-                <v-text-field
-                    v-model="nameInput"
-                    label="Name"
-                    placeholder="e.g. The Cobblestone"
-                    autofocus
-                    @keyup.enter="savePlace"
-                />
-                <p class="text--secondary" style="font-size: 0.82rem;">
-                    Every hearing recorded within {{ radiusInput }} m of here takes this name,
-                    including the ones already logged.
-                </p>
-                <v-slider
-                    v-model="radiusInput"
-                    :min="25"
-                    :max="500"
-                    :step="25"
-                    label="Radius"
-                    thumb-label
-                    class="mt-2"
-                />
-                <div class="d-flex justify-end">
-                    <v-btn text @click="nameDialog = false">
-                        Cancel
-                    </v-btn>
-                    <v-btn color="primary" :disabled="!nameInput.trim()" @click="savePlace">
-                        Save
-                    </v-btn>
-                </div>
-            </v-card>
-        </v-dialog>
+        <PlacePickerDialog
+            v-model="pickerDialog"
+            :place="editingPlace"
+            :start="editingStart"
+            :otherPlaces="places"
+            @save="savePlace"
+        />
 
         <v-snackbar v-model="snackbar" :timeout="8000">
             {{ snackbarText }}
@@ -184,6 +166,7 @@ import {
     mdiMapMarker,
     mdiMapMarkerQuestion,
     mdiPencil,
+    mdiPlus,
     mdiTagPlus,
 } from '@mdi/js';
 import eventBus from '@/eventBus';
@@ -192,21 +175,24 @@ import router from '@/router/index.js';
 import {
     groupSightingsByPlace,
     projectPoints,
-    DEFAULT_PLACE_RADIUS_M,
 } from '@/js/places.mjs';
 import PlacesMap from '@/components/PlacesMap.vue';
+import PlacePickerDialog from '@/components/PlacePickerDialog.vue';
 
 export default {
     name: 'PlacesView',
-    components: { PlacesMap },
+    components: { PlacesMap, PlacePickerDialog },
     data() {
         return {
             groups: [],
             enabled: false,
-            nameDialog: false,
-            editing: null,
-            nameInput: '',
-            radiusInput: DEFAULT_PLACE_RADIUS_M,
+            pickerDialog: false,
+            // The place being edited, or null when creating a new one.
+            editingPlace: null,
+            // Starting coordinates for a new place — an unnamed cluster's
+            // centre when naming one, nothing when adding from scratch.
+            editingStart: null,
+            places: [],
             snackbar: false,
             snackbarText: '',
             // Kept only so Undo can restore them with their original
@@ -219,6 +205,7 @@ export default {
                 chevronDown: mdiChevronDown,
                 chevronUp: mdiChevronUp,
                 close: mdiClose,
+                plus: mdiPlus,
                 delete: mdiDelete,
                 mapMarker: mdiMapMarker,
                 mapMarkerQuestion: mdiMapMarkerQuestion,
@@ -264,6 +251,10 @@ export default {
                 store.getSightings(),
                 store.getPlaces(),
             ]);
+            // Held so the picker can draw existing places faintly for context,
+            // which is what stops a user unknowingly creating an overlapping
+            // second pin for a pub they already named.
+            this.places = places;
             // Expansion state is per-render, so preserve what the user opened
             // rather than collapsing everything whenever a sighting lands.
             const openKeys = new Set(this.groups.filter(g => g.expanded).map(g => g.key));
@@ -335,27 +326,24 @@ export default {
             });
         },
         openNameDialog(group) {
-            this.editing = group;
-            this.nameInput = group.place ? group.place.name : '';
-            this.radiusInput = group.place && group.place.radiusM
-                ? group.place.radiusM
-                : DEFAULT_PLACE_RADIUS_M;
-            this.nameDialog = true;
+            this.editingPlace = group.place || null;
+            // Naming an unnamed cluster starts the pin at its centre, which is
+            // almost always right — the picker is there to nudge it, not to
+            // make the user find it again.
+            this.editingStart = group.place ? null : { lat: group.lat, lon: group.lon };
+            this.pickerDialog = true;
         },
-        async savePlace() {
-            const group = this.editing;
-            if (!group || !this.nameInput.trim()) return;
-            const place = await store.namePlace({
-                id: group.place ? group.place.id : null,
-                name: this.nameInput,
-                lat: group.lat,
-                lon: group.lon,
-                radiusM: this.radiusInput,
-            });
-            this.nameDialog = false;
-            this.editing = null;
+        openNewPlaceDialog() {
+            this.editingPlace = null;
+            this.editingStart = null;
+            this.pickerDialog = true;
+        },
+        async savePlace(details) {
+            const place = await store.namePlace(details);
+            this.editingPlace = null;
+            this.editingStart = null;
             if (!place) {
-                this.notify('That location could not be saved.');
+                this.notify('That place could not be saved.');
                 return;
             }
             await this.load();

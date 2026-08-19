@@ -29,11 +29,10 @@
 <script>
 // A real slippy map for the Places view.
 //
-// Leaflet is loaded with a dynamic import rather than a top-level one, for two
-// reasons. It keeps ~150 KB of mapping code out of the main bundle, which every
-// user pays for on first load whether or not they ever switch geo-tagging on;
-// and it means a failure to load the chunk (offline, first visit) degrades to
-// the tile-free scatter in Places.vue instead of breaking the view.
+// Leaflet is loaded lazily via js/leaflet.mjs, which keeps ~150 KB of mapping
+// code out of the main bundle and lets a failure to fetch the chunk (offline,
+// first visit) degrade to the tile-free scatter in Places.vue rather than
+// breaking the view.
 //
 // Markers are L.circleMarker, which Leaflet draws as SVG. The default L.marker
 // pulls PNG icons through webpack's asset pipeline, which is the single most
@@ -47,8 +46,7 @@
 // this emits `unavailable` and Places.vue falls back to the scatter — which
 // always works, having no external dependency at all.
 
-const TILE_URL = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-const ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+import { loadLeaflet, TILE_URL, TILE_ATTRIBUTION, TILE_MAX_ZOOM } from '@/js/leaflet.mjs';
 
 // Enough consecutive failures with nothing loaded to call it: a single 404 on
 // one tile at the edge of the world is not an outage.
@@ -83,13 +81,7 @@ export default {
     },
     async mounted() {
         try {
-            // Both are code-split: neither reaches a user who never opens this view.
-            const [leaflet] = await Promise.all([
-                import(/* webpackChunkName: "leaflet" */ 'leaflet'),
-                import(/* webpackChunkName: "leaflet" */ 'leaflet/dist/leaflet.css'),
-            ]);
-            // Interop: the ESM build exposes the namespace, older builds default.
-            this.L = leaflet.default || leaflet;
+            this.L = await loadLeaflet();
         } catch (e) {
             console.warn('Map library could not be loaded', e);
             this.failed = true;
@@ -123,8 +115,8 @@ export default {
             this._tileErrors = 0;
 
             const tiles = L.tileLayer(TILE_URL, {
-                maxZoom: 19,
-                attribution: ATTRIBUTION,
+                maxZoom: TILE_MAX_ZOOM,
+                attribution: TILE_ATTRIBUTION,
             });
             tiles.on('tileload', () => {
                 this._tilesLoaded++;

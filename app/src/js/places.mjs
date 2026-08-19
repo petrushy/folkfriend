@@ -155,9 +155,14 @@ export function groupSightingsByPlace(sightings, places) {
         byPlaceID.get(sighting.placeID).push(sighting);
     }
 
-    const named = placeList
-        .filter(place => byPlaceID.has(place.id))
-        .map(place => ({ place, ...summariseSightings(byPlaceID.get(place.id)) }));
+    // Every named place appears, including ones with no hearings yet. A place
+    // the user created deliberately — for a session they are going to, or to
+    // tag tunes to by hand — must be visible the moment it is saved, or saving
+    // it looks like it failed. Empty ones sort last, having lastSeen 0.
+    const named = placeList.map(place => ({
+        place,
+        ...summariseSightings(byPlaceID.get(place.id) || []),
+    }));
 
     // A sighting whose placeID names a place that no longer exists would
     // otherwise vanish from every view while still occupying storage. Treat it

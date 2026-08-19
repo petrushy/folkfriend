@@ -260,6 +260,28 @@ async function run() {
         assert.deepEqual(again.map(c => c.count), clusters.map(c => c.count));
     });
 
+    await test('a named place with no hearings yet is still listed', () => {
+        // Places can now be created deliberately, before anything is heard
+        // there. If grouping only showed places with sightings, saving a new
+        // place would look like it had failed.
+        const empty = { id: 'p1', name: 'Tuesday session', ...COBBLESTONE };
+        const grouped = places.groupSightingsByPlace([], [empty]);
+        assert.equal(grouped.length, 1);
+        assert.equal(grouped[0].place.name, 'Tuesday session');
+        assert.equal(grouped[0].count, 0);
+        assert.equal(grouped[0].tuneCount, 0);
+    });
+
+    await test('an empty place sorts below places with recent hearings', () => {
+        const empty = { id: 'p1', name: 'Empty', ...COBBLESTONE };
+        const used = { id: 'p2', name: 'Used', ...STOCKHOLM };
+        const grouped = places.groupSightingsByPlace(
+            [{ id: 's', tuneID: '1', timestamp: 5000, placeID: 'p2', ...STOCKHOLM }],
+            [empty, used],
+        );
+        assert.deepEqual(grouped.map(g => g.place.name), ['Used', 'Empty']);
+    });
+
     await test('a sighting pointing at a deleted place resurfaces as unnamed', () => {
         const sightings = [{ id: 'a', tuneID: '1', timestamp: 1, placeID: 'gone', ...COBBLESTONE }];
         const grouped = places.groupSightingsByPlace(sightings, []);

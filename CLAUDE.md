@@ -914,6 +914,50 @@ says so. Dot area (not radius) tracks the count.
 `HistoryRow` still has no capture point: it is passed only
 `name`/`descriptor`/`timestamp` and carries no tune identity.
 
+#### Creating places, not just naming what was recorded
+
+At first a place could only come into existence one way: play somewhere with
+geo-tagging on, then name the cluster that produced. That covers the pub you
+were just in and nothing else — you could not set up the session you are going
+to on Tuesday, or move a pin that landed in the car park.
+
+`PlacePickerDialog.vue` adds an explicit "Add a place", with three ways to
+choose a point, in the order people reach for them:
+
+1. **Tap the map.** The primary route, and the reason Leaflet was worth adding.
+2. **Take a fix** ("Use my location"), via `geoService.requestPermission()` — a
+   deliberate tap is the right moment for the OS prompt, and an earlier refusal
+   must not leave the button permanently inert.
+3. **Type coordinates.** Not a power-user afterthought: the map needs tiles and
+   tiles need a network, so offline with nothing cached the first route is gone.
+   The panel opens itself automatically when the map fails.
+
+The same dialog handles naming an unnamed cluster and editing an existing place,
+so there is one code path for all three. Naming a cluster starts the pin at its
+centre — the picker is there to nudge it, not to make the user find it again.
+
+**The radius is drawn as a live circle on the map**, not just a slider value. It
+is the setting that decides which past hearings the new name adopts, and 150 m
+means nothing until you see it over a street. Other places are drawn faintly for
+context, which is what stops someone unknowingly creating a second pin for a pub
+they already named.
+
+**`groupSightingsByPlace` had to change to list places with no hearings.** It
+previously returned only places that had sightings, which was correct when the
+only way to create one was to record there — and silently wrong the moment
+places could be created deliberately: saving a new place left the Places view
+still saying "Nothing recorded yet", so it looked like the save had failed.
+Empty places sort last, having `lastSeen` 0. Two tests pin this, both verified
+against the old filter.
+
+**Not built: search by place name.** It is the obvious convenience — type "The
+Cobblestone" instead of panning — and it would need a geocoder such as
+Nominatim. That is a *different* privacy question from the reverse geocoding
+this feature has always refused: a forward search sends a string the user typed,
+not their coordinates. It is defensible, but it adds a third-party dependency
+and a usage policy to respect, so it is a deliberate open decision rather than
+an oversight.
+
 #### Correcting the log by hand
 
 Automatic capture has two failure modes no amount of tuning removes: the
@@ -977,7 +1021,7 @@ so restoring an older backup does not wipe sightings recorded since.
 
 #### Tests
 
-`app/test/sightings.test.mjs` (38 cases, in the `npm test` chain) — geometry and
+`app/test/sightings.test.mjs` (40 cases, in the `npm test` chain) — geometry and
 clustering, the store log, and the geo service, with `store.js` and `geo.js`
 loaded from source against in-memory fakes and a scriptable `navigator.geolocation`.
 `places.mjs` is used **for real** rather than faked: it is pure geometry with no
