@@ -86,6 +86,7 @@
 <script>
 import micService from '@/services/mic.js';
 import ffBackend from '@/services/backend.js';
+import geoService from '@/services/geo.js';
 import store from '@/services/store.js';
 import ffConfig from '@/ffConfig.js';
 import eventBus from '@/eventBus.js';
@@ -150,6 +151,13 @@ export default {
         startRecording: async function () {
             // Prevent multiple timers spawning
             clearTimeout(this.recordingTimer);
+
+            // Warm a location fix while the microphone is running, so tapping a
+            // result a few seconds later is tagged with where the recording was
+            // actually made rather than waiting on the radio at tap time. Not
+            // awaited — recording must never wait on location, and this is a
+            // no-op unless the user has switched geo-tagging on.
+            geoService.beginSession();
 
             // Actually start recording
             await micService.startRecording();

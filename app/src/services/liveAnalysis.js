@@ -1,5 +1,7 @@
 import micService from './mic.js';
 import ffBackend from './backend.js';
+import geoService from './geo.js';
+import store from './store.js';
 import { normaliseQueryResults, clusterDetections } from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import eventBus from '@/eventBus.js';
@@ -53,6 +55,8 @@ class LiveAnalysisService {
         // Promise that resolves when an in-flight stop() completes. start() awaits
         // this so a quick stop→start cycle cannot create overlapping AudioContexts.
         this._stopPromise = null;
+        // Last tuneId written to the sightings log — see _recordSighting().
+        this._lastSightingTuneId = null;
     }
 
     async start(windowSeconds, stepSeconds) {
@@ -71,6 +75,13 @@ class LiveAnalysisService {
         this.elapsedSeconds = 0;
         this.isRunning = true;
         this.isPaused = false;
+        this._lastSightingTuneId = null;
+
+        // Warms one location fix for the whole session. Not awaited: the
+        // session must start on the microphone, never on the radio. By the time
+        // the first tune is recognised (a window later, at least) the fix is
+        // normally already there.
+        geoService.beginSession();
 
         try {
             await micService.startContinuous(windowSeconds);
@@ -219,6 +230,7 @@ class LiveAnalysisService {
                         this.detections = collapseConsecutiveSameTune(
                             clusterDetections(this._windowMatches, options)
                         );
+                        this._recordSighting();
                         eventBus.$emit('liveAnalysisUpdate', this.detections);
                     }
                 }
@@ -231,6 +243,38 @@ class LiveAnalysisService {
             const remainingMs = Math.max(0, options.stepSeconds * 1000 - analysisMs);
             await this._sleepCancellable(remainingMs);
         }
+    }
+
+    // Logs "this tune was heard here" when the recognised tune changes.
+    //
+    // The edge, not the state: this loop runs every few seconds for hours, so
+    // recording per cycle would log one reel forty times. collapseConsecutive-
+    // SameTune() has already merged a continuing tune into a single tail entry,
+    // which makes "the tail's tuneId is not the one we last logged" exactly the
+    // musical event wanted — and it correctly logs A, B, A as three sightings
+    // when a set comes back round, which is the case this feature exists for.
+    //
+    // Fire-and-forget. A sighting must never delay or break the analysis loop,
+    // so the promise is not awaited and every failure is swallowed.
+    _recordSighting() {
+        if (!store.userSettings || !store.userSettings.geoTagDetections) return;
+        const latest = this.detections[this.detections.length - 1];
+        if (!latest || latest.tuneId == null) return;
+        if (String(latest.tuneId) === String(this._lastSightingTuneId)) return;
+        this._lastSightingTuneId = latest.tuneId;
+
+        (async () => {
+            // A fix already cached from the start of the session costs nothing
+            // here; only the first tune of an evening can wait on the radio.
+            const fix = await geoService.getFix();
+            await store.addSighting({
+                tuneID: latest.tuneId,
+                settingID: latest.settingId,
+                displayName: latest.title,
+                fix,
+                source: 'live',
+            });
+        })().catch(e => console.warn('Could not record sighting:', e && e.message));
     }
 
     _sleepCancellable(ms) {

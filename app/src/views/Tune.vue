@@ -19,6 +19,24 @@
             <TuneBackgroundButton class="ma-1" :tuneID="tuneID" :displayName="name || displayName" :sourceUrl="folkwikiSourceUrl" />
         </v-container>
 
+        <v-container v-if="heardAt.length" class="heardAt py-1">
+            <span class="heardAtLabel pr-1">
+                <v-icon small class="pb-1">{{ icons.mapMarker }}</v-icon>
+                Heard at
+            </span>
+            <v-chip
+                v-for="entry in heardAt"
+                :key="entry.key"
+                class="ma-1 px-2"
+                small
+                :title="`Last heard ${formatDate(entry.lastSeen)}`"
+                @click="openPlaces"
+            >
+                {{ entry.label }}
+                <span v-if="entry.count > 1" class="heardAtCount pl-1">×{{ entry.count }}</span>
+            </v-chip>
+        </v-container>
+
         <v-alert v-if="offlineFallback" dense text type="info" class="mx-2 my-2">
             Showing your saved offline copy. Connect to the internet to see all
             settings for this tune.
@@ -125,6 +143,7 @@
 <script>
 import utils from '@/js/utils.js';
 import { sourceNameForTuneID, settingSourceUrl, tuneSourceUrl } from '@/js/source.mjs';
+import { placesForTune } from '@/js/places.mjs';
 import AbcDisplay from '@/components/AbcDisplay';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus';
@@ -133,6 +152,7 @@ import {
     mdiOpenInNew,
     mdiStar,
     mdiStarOutline,
+    mdiMapMarker,
     mdiTagPlusOutline,
 } from '@mdi/js';
 import store from '@/services/store.js';
@@ -176,6 +196,11 @@ export default {
             // user's saved (favourite) copy instead — shown as a banner.
             offlineFallback: false,
 
+            // Where this tune has been heard — several places for one tune is
+            // the normal case, which is why sightings are a log rather than a
+            // field on history or favourites.
+            heardAt: [],
+
             expandedIndex: [],
             favouritedSettings: {},
             settingTags: {},
@@ -188,6 +213,7 @@ export default {
                 star: mdiStar,
                 starOutline: mdiStarOutline,
                 tagPlus: mdiTagPlusOutline,
+                mapMarker: mdiMapMarker,
             },
         };
     },
@@ -230,6 +256,12 @@ export default {
         if (this.tuneID === '') {
             return;
         }
+
+        // Independent of the tune index: sightings are local, so this strip
+        // renders even when the tune itself falls back to an offline copy.
+        this._loadHeardAt();
+        this._onSightingsChanged = () => this._loadHeardAt();
+        eventBus.$on('sightingsChanged', this._onSightingsChanged);
 
         try {
             const loaded = await this._loadSettingsAndAliases();
@@ -321,12 +353,38 @@ export default {
     },
     beforeDestroy: function () {
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
+        if (this._onSightingsChanged) eventBus.$off('sightingsChanged', this._onSightingsChanged);
     },
     beforeRouteLeave: function (_to, _from, next) {
         eventBus.$emit('stopSynthPlayback');
         next();
     },
     methods: {
+        async _loadHeardAt() {
+            if (!store.userSettings.geoTagDetections) {
+                this.heardAt = [];
+                return;
+            }
+            const [sightings, places] = await Promise.all([
+                store.getSightings(),
+                store.getPlaces(),
+            ]);
+            this.heardAt = placesForTune(sightings, places, this.tuneID).map(entry => ({
+                key: entry.place ? entry.place.id : 'unnamed',
+                label: entry.place ? entry.place.name : 'an unnamed place',
+                count: entry.count,
+                lastSeen: entry.lastSeen,
+            }));
+        },
+        formatDate(millis) {
+            if (!millis) return 'at an unknown time';
+            return new Date(millis).toLocaleDateString(undefined, {
+                year: 'numeric', month: 'short', day: 'numeric',
+            });
+        },
+        openPlaces() {
+            this.$router.push({ name: 'places' });
+        },
         async _reloadFromIndex() {
             if (!this.tuneID || this._reloading) return;
             this._reloading = true;
@@ -553,6 +611,22 @@ h1 {
 .akaSpan {
     font-size: smaller;
     font-style: italic;
+}
+
+.heardAt {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.heardAtLabel {
+    font-size: 0.85rem;
+    opacity: 0.7;
+}
+
+.heardAtCount {
+    opacity: 0.65;
+    font-size: 0.78rem;
 }
 
 .settingMeta {

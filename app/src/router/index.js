@@ -9,6 +9,7 @@ import Tune from '@/views/Tune.vue';
 import Settings from '@/views/Settings.vue';
 import History from '@/views/History.vue';
 import Favourites from '@/views/Favourites.vue';
+import Places from '@/views/Places.vue';
 import Help from '@/views/Help.vue';
 
 Vue.use(VueRouter);
@@ -46,6 +47,10 @@ const routes = [{
     path: '/favourites',
     name: 'favourites',
     component: Favourites
+}, {
+    path: '/places',
+    name: 'places',
+    component: Places
 }, {
     path: '/settings',
     name: 'settings',

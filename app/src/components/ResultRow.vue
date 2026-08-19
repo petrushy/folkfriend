@@ -62,6 +62,7 @@ import ABCJS from 'abcjs';
 import utils from '@/js/utils.js';
 import store from '@/services/store.js';
 import ffBackend from '@/services/backend.js';
+import geoService from '@/services/geo.js';
 import { HistoryItem } from '@/js/schema';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 
@@ -236,6 +237,28 @@ export default {
                 setting: this.setting,
                 displayName: this.displayName,
             }));
+            this._recordSighting();
+        },
+        // Tapping a result is the user confirming which tune this was, which
+        // makes it the honest moment to log a sighting on the search path — the
+        // query itself produces a ranked list, not an identification.
+        //
+        // The fix was warmed when recording started (RecorderButton), so this
+        // normally reads a cached value. Fire-and-forget: navigation to the
+        // tune view must not wait on it.
+        _recordSighting() {
+            if (!store.userSettings || !store.userSettings.geoTagDetections) return;
+            const tuneID = this.setting && this.setting.tune_id;
+            if (!tuneID) return;
+            geoService.getFix()
+                .then(fix => store.addSighting({
+                    tuneID,
+                    settingID: this.settingID,
+                    displayName: this.displayName,
+                    fix,
+                    source: 'search',
+                }))
+                .catch(e => console.warn('Could not record sighting:', e && e.message));
         },
         async toggleFavourite() {
             if (!store._isValidSettingID(this.settingID)) {
