@@ -835,7 +835,7 @@ Attribution is required by the OSM tile usage policy and is on by default via
 Leaflet's attribution control. If this app ever gets real traffic, that policy
 expects a different tile provider.
 
-#### Filtering favourites by place
+#### Filtering and grouping favourites by place
 
 `Favourites.vue` gains a "Heard at" chip bar, above the tag bar, which only
 appears once geo-tagging has produced places that actually contain favourites —
@@ -855,6 +855,20 @@ Two decisions worth knowing:
 
 A place deleted from the Places view is dropped from `activePlaceIDs` on reload —
 otherwise the list stays filtered against something no chip can clear.
+
+**Grouping** is the fourth mode on the existing group-by button (none → tag →
+date → place), ordered by most recently heard there, so last night's session is
+at the top when someone opens the view after a session. Three details:
+
+- **A tune heard at three sessions appears under all three.** That repetition is
+  the answer to "what do we play here", not a bug — and it matches the tag
+  grouping, where a row already appears under each of its tags.
+- **`place` is skipped in the cycle when there is nothing to group by**, so
+  anyone not using geo-tagging does not tab through a mode that can only show one
+  "Not heard anywhere yet" heading.
+- **Under an active place filter, only the filtered places get headings**, and
+  the "Not heard anywhere yet" group is suppressed entirely — those favourites
+  are precisely what the filter was asked to exclude.
 
 #### No reverse geocoding
 
