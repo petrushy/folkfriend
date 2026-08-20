@@ -103,7 +103,11 @@ try {
                        'onRecordingLimitChanged','saveOfflineCopy','downloadUserData',
                        'restoreUserData','importFromTheSession','onApiKeyChanged',
                        'confirmClearAiSummaries','clearAiSummaries','resetAiUsage',
-                       'formatUsd'];
+                       'formatUsd',
+                       // Dataset selection. saveOfflineCopy keeps its name
+                       // deliberately — renaming it would break this check
+                       // silently for everyone reading the old name.
+                       'onDatasetToggled','confirmRemoveDataset','removeDataset'];
         const missing = names.filter(n => typeof vm[n] !== 'function');
         return { missing, total: names.length, hasStore: !!vm.$data };
     })()`);

@@ -45,7 +45,7 @@
         </v-card>
         <p class="AppInfo">
             Folkfriend app version: {{ frontendVersion }}<br>Folkfriend library version:
-            {{ backendVersion }}<br>Tune dataset: {{ tuneIndexDate }}<br>© {{ year }} Tom Wyllie. All Rights Reserved.
+            {{ backendVersion }}<br>Tune data: {{ tuneDataLabel }}<br>{{ attribution }}<br>© {{ year }} Tom Wyllie. All Rights Reserved.
         </p>
     </v-container>
 </template>
@@ -53,6 +53,7 @@
 <script>
 import store from '@/services/store.js';
 import ffConfig from '@/ffConfig.js';
+import { DATASET_LABELS } from '@/js/source.mjs';
 import eventBus from '@/eventBus';
 import utils from '@/js/utils.js';
 
@@ -88,6 +89,23 @@ export default {
         },
         frontendVersion() {
             return ffConfig.FRONTEND_VERSION;
+        },
+        // "3 databases · 20 August 2026" — the date is the newest loaded
+        // dataset's, which is what _scalarVersion in the worker reports.
+        tuneDataLabel() {
+            const loaded = (store.state.indexDatasets || {}).loaded || [];
+            const date = this.tuneIndexDate;
+            if (!loaded.length) return date;
+            const names = loaded.map(id => DATASET_LABELS[id] || id).join(', ');
+            return `${names} · ${date}`;
+        },
+        // Norbeck's collection is his copyright and its terms require the
+        // notice be kept, so it is shown whenever that dataset is loaded.
+        attribution() {
+            const loaded = (store.state.indexDatasets || {}).loaded || [];
+            if (!loaded.includes('norbeck')) return '';
+            return 'Norbeck tunes © Henrik Norbeck (norbeck.nu), used with '
+                + 'attribution. Not for commercial use.';
         },
         tuneIndexDate() {
             const date = store.state.tuneIndexDate;

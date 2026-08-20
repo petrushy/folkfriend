@@ -25,7 +25,29 @@ const USER_SETTING_DEFAULTS = {
     aiSummariesEnabled: false, // show the (i) tune-background button; needs an API key
     aiSummaryModel: DEFAULT_AI_MODEL, // which Claude model writes the background note
     geoTagDetections: false, // record where each tune was heard; needs location permission
+    // Which tune databases are downloaded, stored offline and searched.
+    // The default MUST equal the app's pre-multi-dataset behaviour, so that an
+    // upgrading user — or an old backup restored through the backfill in
+    // updateUserSettings — neither loses thesession nor silently gains norbeck.
+    tuneDatasets: ['thesession', 'folkwiki'],
 };
+
+// Dataset ids the app knows about. Anything else in a stored selection is
+// dropped: it is either a typo or a dataset a newer build offered and this one
+// does not understand, and either way loading it would just fail.
+export const KNOWN_DATASETS = ['thesession', 'folkwiki', 'norbeck'];
+
+// Substitute the default ONLY when the key is absent or is not an array.
+//
+// An explicit empty array is an honest "I deselected everything" and must be
+// honoured — quietly replacing it with the default would override the user on
+// every launch, and they would have no way to tell why.
+function sanitiseDatasets(value) {
+    if (!Array.isArray(value)) {
+        return [...USER_SETTING_DEFAULTS.tuneDatasets];
+    }
+    return [...new Set(value.filter(id => KNOWN_DATASETS.includes(id)))];
+}
 
 // The Anthropic API key lives under its own localStorage key, NOT in
 // userSettings. exportUserData() serialises userSettings wholesale into a
@@ -92,6 +114,9 @@ class Store {
             // with a timeout.
             indexStatus: 'loading',
             indexStatusDetail: {},
+            // { loaded: [ids], missing: [ids], errors: {id: message},
+            //   migrationPending: bool } — populated by backend._onIndexStatus.
+            indexDatasets: { loaded: [], missing: [], errors: {}, migrationPending: false },
             // { received, total } while downloading, else null.
             indexDownloadProgress: null,
             // Convenience mirrors of indexStatus, kept for existing views.
@@ -127,6 +152,8 @@ class Store {
             ...USER_SETTING_DEFAULTS,
             ...(JSON.parse(localStorage.getItem('userSettings')) || {}),
         };
+        this.userSettings.tuneDatasets =
+            sanitiseDatasets(this.userSettings.tuneDatasets);
         this.searchState = this.searchStates.READY;
 
         this._favouriteIDs = null;
@@ -142,6 +169,11 @@ class Store {
         this.currentUser = null;
         this.auth = null;
         this._unsubscribeSync = null;
+    }
+
+    // The datasets the user wants searched. Always an array of known ids.
+    selectedDatasets() {
+        return sanitiseDatasets(this.userSettings.tuneDatasets);
     }
 
     async _dbSet(key, value) {
@@ -161,6 +193,7 @@ class Store {
         for (const [key, value] of Object.entries(USER_SETTING_DEFAULTS)) {
             if (userSettings[key] === undefined) userSettings[key] = value;
         }
+        userSettings.tuneDatasets = sanitiseDatasets(userSettings.tuneDatasets);
 
         // Usable immediately and synchronously by the entire application.
         this.userSettings = userSettings;

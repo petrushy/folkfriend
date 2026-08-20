@@ -32,6 +32,11 @@ class FFBackend {
         // retried automatically — the user should not have to restart the app.
         if (typeof window !== 'undefined') {
             window.addEventListener('online', () => {
+                const detail = store.state.indexStatusDetail || {};
+                // An empty selection is a legitimate choice, not a failure to
+                // retry. Without this check every network blip re-runs a setup
+                // that cannot possibly succeed.
+                if (detail.reason === 'no-datasets-selected') return;
                 if (store.state.indexStatus === 'unavailable') {
                     console.debug('Back online — retrying tune index setup');
                     this.setupTuneIndex().catch(e =>
@@ -74,6 +79,16 @@ class FFBackend {
             if (detail.v) store.state.tuneIndexVersion = detail.v;
             if (detail.date) store.state.tuneIndexDate = detail.date;
         }
+        // Which datasets are actually searchable right now, and which of the
+        // selected ones are not. Search.vue surfaces the gap: a user whose
+        // norbeck download quietly failed would otherwise search a Swedish
+        // tune, get nothing, and conclude the app does not have it.
+        store.state.indexDatasets = {
+            loaded: detail.datasetsLoaded || [],
+            missing: detail.datasetsMissing || [],
+            errors: detail.datasetErrors || {},
+            migrationPending: !!detail.migrationPending,
+        };
 
         eventBus.$emit('indexStatusChanged', detail);
         // Legacy edge events, kept so existing views keep working.
@@ -87,6 +102,9 @@ class FFBackend {
 
     indexUnavailableMessage(detail) {
         const d = detail || store.state.indexStatusDetail || {};
+        if (d.reason === 'no-datasets-selected') {
+            return 'No tune databases are selected. Choose one in Settings. Your favourites are still available.';
+        }
         if (d.offline || d.reason === 'offline') {
             return 'You are offline and no tune database is saved on this device. Your favourites are still available.';
         }
@@ -122,9 +140,34 @@ class FFBackend {
         });
     }
 
-    async refreshTuneIndex() {
+    // `datasetIds` of null refreshes everything currently selected.
+    async refreshTuneIndex(datasetIds = null) {
         return new Promise(resolve => {
-            this.folkfriendWorker.refreshTuneIndex(Comlink.proxy(resolve));
+            this.folkfriendWorker.refreshTuneIndex(
+                datasetIds, Comlink.proxy(resolve));
+        });
+    }
+
+    // Apply a new dataset selection. Unlike setAutoUpdate this MUST be pushed
+    // on change rather than waiting for the next setupTuneIndex — the user has
+    // just asked for different tunes and expects them now.
+    async setSelectedDatasets(ids) {
+        return new Promise(resolve => {
+            this.folkfriendWorker.setSelectedDatasets(
+                [...ids], Comlink.proxy(resolve));
+        });
+    }
+
+    async removeDataset(id) {
+        return new Promise(resolve => {
+            this.folkfriendWorker.removeDataset(id, Comlink.proxy(resolve));
+        });
+    }
+
+    async getDatasetInventory(ids) {
+        return new Promise(resolve => {
+            this.folkfriendWorker.getDatasetInventory(
+                [...ids], Comlink.proxy(resolve));
         });
     }
 
@@ -151,6 +194,10 @@ class FFBackend {
         // never gets one on the very launch where it matters.
         const auto = store.userSettings.autoUpdateTuneData;
         await this.folkfriendWorker.setAutoUpdate(auto === undefined ? true : !!auto);
+        // Likewise the dataset selection: the worker must know what to load
+        // before it reads anything off disk.
+        await this.folkfriendWorker.setSelectedDatasets(
+            [...store.selectedDatasets()], null);
         const analyticsData = await new Promise(resolve => {
             this.folkfriendWorker.setupTuneIndex(Comlink.proxy(analyticsData => {
                 resolve(analyticsData);

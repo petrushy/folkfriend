@@ -298,34 +298,55 @@
             </h1>
 
             <v-alert v-if="offlineReady === false" dense text type="warning" class="mb-4">
-                No offline copy is saved on this device. Tune search will not
-                work without a connection. Tap <strong>Save offline copy</strong>
-                below while you have Wi-Fi.
+                {{ offlineSummary }}. Tune search will not work without a
+                connection. Tap <strong>Save offline copy</strong> below while
+                you have Wi-Fi.
             </v-alert>
             <v-alert v-else-if="offlineReady === true" dense text type="success" class="mb-4">
-                Ready to use offline{{ offlineSavedLabel }}.
+                Ready to use offline — {{ offlineSummary }}{{ offlineSavedLabel }}.
             </v-alert>
 
-            <v-simple-table dense class="mb-4">
+            <p class="mb-2 text--secondary caption">
+                Choose which tune databases are downloaded and searched. Turning
+                one off does not delete its saved copy.
+            </p>
+
+            <div v-for="row in datasetRows" :key="row.id" class="datasetRow">
+                <v-checkbox
+                    v-model="selectedDatasets"
+                    :value="row.id"
+                    :label="row.label"
+                    :disabled="datasetBusy[row.id]"
+                    dense
+                    hide-details
+                    class="mt-0 pt-0 datasetCheckbox"
+                    @change="onDatasetToggled"
+                />
+                <div class="datasetMeta">
+                    <span :class="row.statusClass">{{ row.statusText }}</span>
+                    <v-btn
+                        v-if="row.canRemove"
+                        x-small
+                        text
+                        class="ml-1"
+                        @click="confirmRemoveDataset(row)"
+                    >
+                        Remove
+                    </v-btn>
+                    <div class="caption text--secondary">{{ row.description }}</div>
+                    <v-progress-linear
+                        v-if="row.downloading"
+                        :indeterminate="downloadPercent === null"
+                        :value="downloadPercent || 0"
+                        class="mt-1"
+                        height="4"
+                        rounded
+                    />
+                </div>
+            </div>
+
+            <v-simple-table dense class="mb-4 mt-3">
                 <tbody>
-                    <tr>
-                        <td class="text--secondary pr-4">Offline copy</td>
-                        <td>
-                            <span v-if="offlineStatus === null">checking…</span>
-                            <span v-else-if="offlineReady" class="success--text">
-                                saved ({{ offlineSizeLabel }})
-                            </span>
-                            <span v-else class="warning--text">not saved</span>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td class="text--secondary pr-4">Saved version</td>
-                        <td>{{ localTuneDataLabel }}</td>
-                    </tr>
-                    <tr>
-                        <td class="text--secondary pr-4">Latest version</td>
-                        <td>{{ remoteTuneDataLabel }}</td>
-                    </tr>
                     <tr>
                         <td class="text--secondary pr-4">Storage</td>
                         <td>
@@ -340,7 +361,9 @@
                     <tr>
                         <td class="text--secondary pr-4">In-memory index</td>
                         <td>
-                            <span v-if="indexStatus === 'ready'" class="success--text">loaded</span>
+                            <span v-if="indexStatus === 'ready'" class="success--text">
+                                {{ inMemoryLabel }}
+                            </span>
                             <span v-else-if="indexStatus === 'downloading'">
                                 downloading{{ downloadPercentLabel }}…
                             </span>
@@ -377,7 +400,7 @@
                 @click="saveOfflineCopy"
             >
                 <v-icon left>{{ icons.download }}</v-icon>
-                {{ offlineReady ? 'Update offline copy' : 'Save offline copy' }}
+                {{ offlineReady ? 'Update offline copies' : 'Save offline copy' }}
             </v-btn>
             <v-progress-linear
                 v-if="refreshingTuneData || indexStatus === 'downloading'"
@@ -390,6 +413,24 @@
             <p v-if="refreshMessage" class="mt-3 mb-0">
                 {{ refreshMessage }}
             </p>
+
+            <v-dialog v-model="removeDialog" max-width="420">
+                <v-card v-if="removeTarget">
+                    <v-card-title class="text-h6">
+                        Remove {{ removeTarget.label }}?
+                    </v-card-title>
+                    <v-card-text>
+                        This deletes its saved copy ({{ removeTarget.sizeLabel }})
+                        from this device. You can download it again later, but
+                        you will need a connection to do so.
+                    </v-card-text>
+                    <v-card-actions>
+                        <v-spacer />
+                        <v-btn text @click="removeDialog = false">Cancel</v-btn>
+                        <v-btn color="error" text @click="removeDataset">Remove</v-btn>
+                    </v-card-actions>
+                </v-card>
+            </v-dialog>
         </v-card>
 
         <v-card
@@ -458,12 +499,13 @@
 </template>
 
 <script>
-import store from '@/services/store.js';
+import store, { KNOWN_DATASETS } from '@/services/store.js';
+import { DATASET_LABELS, DATASET_DESCRIPTIONS } from '@/js/source.mjs';
 import ffBackend from '@/services/backend.js';
 import geoService from '@/services/geo.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
-import { fetchTuneIndexMetadata } from '@/services/tuneIndexNetwork.js';
+import { fetchDatasetsManifest } from '@/services/tuneIndexNetwork.js';
 import {
     MODELS as AI_MODELS,
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
@@ -522,7 +564,16 @@ export default {
         geoStatus: null,
         geoError: false,
         geoChecking: false,
-        remoteMetadata: null,
+        // datasets.json, or null while it is being fetched.
+        datasetsRemote: null,
+        // Bound to the checkbox column; kept in sync with userSettings.
+        selectedDatasets: [...store.selectedDatasets()],
+        // Manifests for EVERY known dataset, including deselected ones, so a
+        // copy that is on disk but not in use can still be shown and removed.
+        datasetInventory: null,
+        datasetBusy: {},
+        removeDialog: false,
+        removeTarget: null,
         storageIsPersistent: null,
         // What is actually on disk (read from IndexedDB, not inferred from
         // in-memory state) plus a storage quota estimate. This is the pre-flight
@@ -581,19 +632,102 @@ export default {
                 `$${spec.outputPerMTok.toFixed(2)} per million output — up to about ` +
                 `${this.formatUsd(estimateCostPerNoteUsd(model))} per note, once per tune.`;
         },
-        offlineReady() {
-            if (this.offlineStatus === null) return null;
-            return !!this.offlineStatus.manifest;
+        // Human labels live in the app, keyed by dataset id — but a dataset
+        // datasets.json lists and this build does not know about is still
+        // rendered, using its id. That makes adding a fourth dataset a
+        // data-repo-only change that existing installs can see and opt into.
+        datasetRows() {
+            const ids = [...KNOWN_DATASETS];
+            for (const entry of (this.datasetsRemote || [])) {
+                if (!ids.includes(entry.id)) ids.push(entry.id);
+            }
+
+            const manifests = (this.datasetInventory && this.datasetInventory.datasets) || {};
+            const detail = this.indexStatusDetail || {};
+            const errors = detail.datasetErrors || {};
+
+            return ids.map(id => {
+                const label = DATASET_LABELS[id] || id;
+                const description = DATASET_DESCRIPTIONS[id] || '';
+                const manifest = manifests[id] || null;
+                const remote = (this.datasetsRemote || []).find(e => e.id === id) || null;
+                const selected = this.selectedDatasets.includes(id);
+                const downloading = this.indexStatus === 'downloading'
+                    && detail.dataset === id;
+                const sizeLabel = manifest && manifest.bytes
+                    ? formatBytes(manifest.bytes)
+                    : (remote && remote.size ? formatBytes(remote.size) : '');
+
+                let statusText;
+                let statusClass = 'text--secondary';
+                if (downloading) {
+                    statusText = `downloading${this.downloadPercentLabel}`;
+                } else if (!selected && manifest) {
+                    statusText = `saved but not in use · ${sizeLabel}`;
+                } else if (!selected) {
+                    statusText = sizeLabel || '';
+                } else if (manifest && remote && remote.v > manifest.v) {
+                    statusText = `saved · v${manifest.v} — v${remote.v} available`;
+                    statusClass = 'warning--text';
+                } else if (manifest) {
+                    statusText = `saved · v${manifest.v}${sizeLabel ? ` · ${sizeLabel}` : ''}`;
+                    statusClass = 'success--text';
+                } else if (errors[id]) {
+                    statusText = `couldn't download: ${errors[id]}`;
+                    statusClass = 'warning--text';
+                } else if (this.datasetInventory === null) {
+                    statusText = 'checking…';
+                } else if (!navigator.onLine) {
+                    statusText = 'not saved — will download when you\u2019re online';
+                } else {
+                    statusText = 'not saved';
+                    statusClass = 'warning--text';
+                }
+
+                return {
+                    id,
+                    label,
+                    description,
+                    selected,
+                    statusText,
+                    statusClass,
+                    sizeLabel,
+                    downloading,
+                    canRemove: !selected && !!manifest,
+                };
+            });
         },
-        offlineSizeLabel() {
-            const m = this.offlineStatus && this.offlineStatus.manifest;
-            if (!m || !m.bytes) return 'size unknown';
-            return formatBytes(m.bytes);
+        // Counts only the SELECTED datasets: a saved copy of something the user
+        // has turned off does not make the app more usable offline.
+        offlineReady() {
+            if (this.datasetInventory === null) return null;
+            const manifests = this.datasetInventory.datasets || {};
+            const selected = this.selectedDatasets;
+            if (selected.length === 0) return false;
+            return selected.every(id => !!manifests[id]);
+        },
+        offlineSummary() {
+            if (this.selectedDatasets.length === 0) {
+                return 'No tune databases are selected';
+            }
+            if (this.datasetInventory === null) return 'checking…';
+            const manifests = this.datasetInventory.datasets || {};
+            const saved = this.selectedDatasets.filter(id => manifests[id]).length;
+            return `${saved} of ${this.selectedDatasets.length} selected `
+                + `database${this.selectedDatasets.length === 1 ? '' : 's'} saved`;
         },
         offlineSavedLabel() {
-            const m = this.offlineStatus && this.offlineStatus.manifest;
-            if (!m || !m.savedAt) return '';
-            return ` — saved ${new Date(m.savedAt).toLocaleString()}`;
+            const manifests = (this.datasetInventory && this.datasetInventory.datasets) || {};
+            const times = this.selectedDatasets
+                .map(id => manifests[id] && manifests[id].savedAt)
+                .filter(Boolean);
+            if (!times.length) return '';
+            return ` — saved ${new Date(Math.max(...times)).toLocaleString()}`;
+        },
+        inMemoryLabel() {
+            const loaded = ((this.indexStatusDetail || {}).datasetsLoaded || []).length;
+            if (!loaded) return 'loaded';
+            return `loaded (${loaded} database${loaded === 1 ? '' : 's'})`;
         },
         storageUsageLabel() {
             const st = this.offlineStatus && this.offlineStatus.storage;
@@ -617,8 +751,14 @@ export default {
             if (d.persistError) {
                 return `Could not save the offline copy: ${d.persistError}. Free up space on your device and try again.`;
             }
-            if (d.legacy) {
-                return 'Saved in an older storage format — tap "Update offline copy" to re-save it in the more robust format.';
+            if (d.migrationPending || d.legacy) {
+                return 'Saved in an older storage format — it still works. '
+                    + 'Tap "Update offline copies" to re-save it per database.';
+            }
+            const missing = (d.datasetsMissing || []).length;
+            if (d.usable && missing) {
+                return `${missing} selected database${missing === 1 ? ' is' : 's are'} `
+                    + 'not saved yet, so some tunes will not be found.';
             }
             if (this.indexStatus === 'unavailable') {
                 return d.offline
@@ -626,22 +766,6 @@ export default {
                     : 'Could not reach the tune database.';
             }
             return null;
-        },
-        localTuneDataLabel() {
-            if (!this.localVersion) return this.offlineReady === false ? 'none' : 'loading…';
-            const dateStr = this.localDate
-                ? new Date(this.localDate).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
-                : `v${this.localVersion}`;
-            return `v${this.localVersion} · ${dateStr}`;
-        },
-        remoteTuneDataLabel() {
-            if (!this.remoteMetadata) return 'checking…';
-            if (this.remoteMetadata.unavailable) return 'unavailable (offline)';
-            const { v, date } = this.remoteMetadata;
-            const dateStr = date
-                ? new Date(date).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })
-                : `v${v}`;
-            return `v${v} · ${dateStr}`;
         },
     },
     created: function() {
@@ -693,14 +817,15 @@ export default {
         async _refreshOfflineStatus() {
             try {
                 this.offlineStatus = await ffBackend.getOfflineStatus();
-                const m = this.offlineStatus.manifest;
-                if (m && m.v && !this.localVersion) {
-                    this.localVersion = m.v;
-                    this.localDate = m.date;
-                }
+                // Read manifests for EVERY known dataset, not just the selected
+                // ones, so a copy that is saved but turned off can still be
+                // shown and removed.
+                this.datasetInventory =
+                    await ffBackend.getDatasetInventory(this._allDatasetIds());
             } catch (e) {
                 console.warn('Could not read offline tune index status', e);
-                this.offlineStatus = { manifest: null, storage: null };
+                this.offlineStatus = { datasets: {}, storage: null };
+                this.datasetInventory = { datasets: {}, storage: null };
             }
         },
         // The permission prompt belongs here, on a deliberate tap in Settings —
@@ -736,13 +861,64 @@ export default {
                 this.geoChecking = false;
             }
         },
+        _allDatasetIds() {
+            const ids = [...KNOWN_DATASETS];
+            for (const entry of (this.datasetsRemote || [])) {
+                if (!ids.includes(entry.id)) ids.push(entry.id);
+            }
+            for (const id of this.selectedDatasets) {
+                if (!ids.includes(id)) ids.push(id);
+            }
+            return ids;
+        },
         async _fetchRemoteMetadata() {
             // Bounded: an unbounded probe here would spin "checking…" forever
             // behind a captive portal.
             try {
-                this.remoteMetadata = await fetchTuneIndexMetadata();
+                const { byId, order } = await fetchDatasetsManifest();
+                this.datasetsRemote = order.map(id => byId.get(id));
             } catch (e) {
-                this.remoteMetadata = { unavailable: true };
+                this.datasetsRemote = [];
+            }
+        },
+        // A dataset toggle must PUSH to the worker, not merely write
+        // localStorage and wait for the next launch — the autoUpdateTuneData
+        // switch does that and the worker only notices on the next setup. The
+        // user has just asked for different tunes and expects them now.
+        async onDatasetToggled() {
+            const ids = [...this.selectedDatasets];
+            this.userSettings.tuneDatasets = ids;
+            await store.updateUserSettings(this.userSettings);
+            this.refreshMessage = null;
+            try {
+                await ffBackend.setSelectedDatasets(ids);
+            } catch (e) {
+                // Deliberately NOT reverting the checkbox: the setting is the
+                // user's intent, and it retries on the next launch or when the
+                // connection comes back.
+                console.warn('Could not apply the dataset selection', e);
+                this.refreshMessage = `Could not load that database: ${e.message}`;
+            }
+            await this._refreshOfflineStatus();
+        },
+        confirmRemoveDataset(row) {
+            this.removeTarget = row;
+            this.removeDialog = true;
+        },
+        async removeDataset() {
+            const row = this.removeTarget;
+            this.removeDialog = false;
+            if (!row) return;
+            this.$set(this.datasetBusy, row.id, true);
+            try {
+                await ffBackend.removeDataset(row.id);
+                this.refreshMessage = `Removed the saved copy of ${row.label}.`;
+            } catch (e) {
+                this.refreshMessage = `Could not remove it: ${e.message}`;
+            } finally {
+                this.$set(this.datasetBusy, row.id, false);
+                this.removeTarget = null;
+                await this._refreshOfflineStatus();
             }
         },
         async saveOfflineCopy() {
@@ -760,8 +936,16 @@ export default {
                     this.refreshMessage =
                         `Downloaded, but could not save it for offline use (${result.persistError}). ` +
                         'Free up space on your device and try again.';
+                } else if (result.partial) {
+                    const failed = Object.keys(result.failed || {}).join(', ');
+                    const saved = Object.keys(result.installed || {}).length;
+                    this.refreshMessage =
+                        `Saved ${saved} database${saved === 1 ? '' : 's'}, but `
+                        + `${failed} could not be downloaded.`;
                 } else {
-                    this.refreshMessage = `Offline copy saved (v${result.v}).`;
+                    const saved = Object.keys(result.installed || {}).length;
+                    this.refreshMessage =
+                        `Offline cop${saved === 1 ? 'y' : 'ies'} saved (${saved}).`;
                 }
                 this.localVersion = result.v;
                 this.localDate = result.date;
@@ -954,4 +1138,29 @@ export default {
 </script>
 
 <style scoped>
+/* One dataset per row: checkbox on the left, status and description stacked
+   beside it. Target is three readable lines, not a wall of table rows — the
+   per-dataset status replaces what used to be separate "Saved version" and
+   "Latest version" rows. */
+.datasetRow {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.25rem;
+    margin-bottom: 0.6rem;
+}
+
+.datasetCheckbox {
+    flex: 0 0 auto;
+    min-width: 10.5rem;
+}
+
+.datasetMeta {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-top: 0.35rem;
+    font-size: 0.85rem;
+    /* Long error strings ("couldn't download: …") must wrap rather than push
+       the row wider than the card. */
+    overflow-wrap: anywhere;
+}
 </style>

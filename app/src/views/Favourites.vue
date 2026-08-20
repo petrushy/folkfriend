@@ -854,6 +854,7 @@ export default {
                     settingID: item.result.settingID,
                     displayName: item.result.displayName,
                     sourceUrl: item.result.setting.source_url,
+                    dataset: item.result.setting.dataset || '',
                 });
                 return `${name} — ${descriptor}\n${url}`;
             }).join('\n\n');
@@ -883,6 +884,7 @@ export default {
                     settingID: item.result.settingID,
                     displayName: item.result.displayName,
                     sourceUrl: item.result.setting.source_url,
+                    dataset: item.result.setting.dataset || '',
                 });
                 const svg = this._renderAbcSvg(item.result.setting);
                 const tagsHtml = (item.tags && item.tags.length > 0)

@@ -30,15 +30,30 @@
 //     with no tunes on a plane.
 //
 //  5. A KNOWN-GOOD COPY IS IMMUTABLE UNTIL A REPLACEMENT HAS PROVED ITSELF.
-//     writeIndex() is the point of no return — once it returns, the previous
-//     copy is gone — so nothing may call it with a payload that has not been
-//     parsed, structurally checked (indexPayloadProblem) and successfully
-//     loaded into WASM. See _downloadAndInstall in worker.js.
+//     writeDataset() is the point of no return — once it returns, that
+//     dataset's previous copy is gone — so nothing may call it with a payload
+//     that has not been parsed, structurally checked (indexPayloadProblem) and
+//     successfully loaded into WASM. See _installDatasets in worker.js.
+//
+//  6. EVERY DELETE IS SCOPED TO ONE DATASET. The index is now stored as one
+//     payload per dataset (thesession / folkwiki / norbeck), and a corrupt or
+//     unreadable folkwiki must never cost the user their thesession copy.
+//     This is the failure mode the multi-dataset split introduces, and the
+//     one the fault-injection tests are aimed at.
 
 import { get, set, del } from 'idb-keyval';
 
 // Bump when the on-disk format changes; a mismatched manifest is discarded.
-export const SCHEMA_VERSION = 2;
+//
+// Schema 3 is the per-dataset layout. Bumping is load-bearing, not cosmetic:
+// the "this payload is not a tune index, discard it" branch in readDataset
+// fires only when the manifest names OUR schema. If the per-dataset reader
+// still called itself schema 2 it would consider the old merged blob's
+// manifest its own and could delete the very thing migration depends on.
+export const SCHEMA_VERSION = 3;
+
+// The pre-multi-dataset single-blob layout. Read-only from here on.
+export const MERGED_SCHEMA_VERSION = 2;
 
 // A real index carries ~62k settings. This floor exists only to reject things
 // that are obviously not the tune index at all — an error document, a captive
@@ -47,8 +62,16 @@ export const SCHEMA_VERSION = 2;
 // again, which is a far worse outcome than accepting a small odd payload.
 export const MIN_PLAUSIBLE_SETTINGS = 100;
 
-const KEY_MANIFEST = 'ffIndexManifest';
-const KEY_RAW = 'ffIndexRaw';
+// Schema 3: one payload and one manifest per dataset.
+const rawKey = (id) => `ffIndexRaw:${id}`;
+const manifestKey = (id) => `ffIndexManifest:${id}`;
+
+// Schema 2: the merged thesession+folkwiki blob. Still read, so an upgrading
+// user keeps working offline while the per-dataset copies download, and only
+// deleted once every selected dataset is committed AND loaded (see
+// clearSupersededMergedCopies).
+const KEY_MERGED_MANIFEST = 'ffIndexManifest';
+const KEY_MERGED_RAW = 'ffIndexRaw';
 
 // Pre-schema-2 layout: a single structured-cloned object under 'tuneIndex'
 // plus its version under 'tuneIndexMetadata'. Still readable so existing
@@ -80,11 +103,18 @@ async function safeDel(key) {
 // every startup and the Rust side never reads it. They are kept worker-side
 // and re-attached to query results.
 //
+// `tuneIDs` is the distinct set of tune ids in this payload. It is collected
+// here rather than in a second pass because this loop already walks all 62k
+// settings; the worker uses it to label every tune with the dataset it came
+// from (datasetByTune), which is what replaced the old "infer the source from
+// the numeric ID range" rule.
+//
 // NOTE: this mutates `parsed` in place (deliberately — cloning 42 MB just to
 // blank a field is not free). Callers pass a freshly parsed object.
 export function splitIndexPayload(parsed) {
     const abcStrings = {};
     const sourceUrls = {};
+    const tuneIDs = new Set();
     const settings = parsed.settings || {};
     for (const settingID in settings) {
         const setting = settings[settingID];
@@ -94,8 +124,9 @@ export function splitIndexPayload(parsed) {
             sourceUrls[settingID] = setting.source_url;
             delete setting.source_url;
         }
+        tuneIDs.add(setting.tune_id);
     }
-    return { indexData: parsed, abcStrings, sourceUrls };
+    return { indexData: parsed, abcStrings, sourceUrls, tuneIDs };
 }
 
 // Structural sanity check on a freshly parsed index payload.
@@ -140,67 +171,51 @@ export function indexPayloadProblem(parsed) {
     return null;
 }
 
-// Read the manifest only — cheap enough to call from the UI for diagnostics.
-// Returns null when there is no usable offline copy.
-export async function readManifest() {
-    const manifest = await safeGet(KEY_MANIFEST);
-    if (manifest && manifest.schema === SCHEMA_VERSION) {
-        return manifest;
-    }
-    const legacy = await safeGet(LEGACY_KEY_INDEX);
-    if (legacy && legacy.indexData && legacy.abcStrings) {
-        const meta = (await safeGet(LEGACY_KEY_META)) || {};
-        return {
-            schema: 1,
-            v: meta.v || 0,
-            date: meta.date || null,
-            savedAt: null,
-            bytes: null,
-            legacy: true,
-        };
-    }
-    return null;
-}
-
-// Load the offline copy, if there is a complete one.
-// Resolves to { index: {indexData, abcStrings, sourceUrls}, manifest } or null.
-export async function readIndex() {
-    const manifest = await safeGet(KEY_MANIFEST);
-
-    const raw = await safeGet(KEY_RAW);
+// Read one dataset's offline copy.
+//
+// Never throws. Applies the whole readIndex ruleset, SCOPED TO ONE DATASET:
+// every delete below touches only this id's two keys, so a corrupt folkwiki
+// cannot cost the user their thesession copy.
+//
+// Resolves to { id, index: {indexData, abcStrings, sourceUrls, tuneIDs},
+// manifest } or null.
+export async function readDataset(id) {
+    const manifest = await safeGet(manifestKey(id));
+    const raw = await safeGet(rawKey(id));
 
     // A payload that parses AND looks like a tune index is usable, full stop.
     // Never discard one because its bookkeeping looks odd — an offline user has
     // no way to get it back. The structural check is not bookkeeping: it is the
-    // difference between "this is the tune index" and "this is some other JSON
+    // difference between "this is a tune index" and "this is some other JSON
     // document", and it is the only thing standing between a payload written by
     // an older build (which committed before validating) and an install that
     // can never load and is never replaced.
     if (typeof raw === 'string' && raw.length > 0) {
         try {
-            console.time('index-parse-from-cache');
+            console.time(`index-parse-from-cache:${id}`);
             const parsed = JSON.parse(raw);
-            console.timeEnd('index-parse-from-cache');
+            console.timeEnd(`index-parse-from-cache:${id}`);
 
             const problem = indexPayloadProblem(parsed);
             if (problem) {
                 // Unusable — but "don't use it" and "destroy it" are separate
                 // decisions, and only one of them is irreversible.
                 //
-                // Delete ONLY when this build's own schema wrote it, which is
-                // exactly the case worth cleaning up: a payload committed by a
-                // pre-validation release of schema 2. A manifest naming another
-                // schema (or no manifest at all) may be a NEWER format that a
-                // later release wrote and this older client simply cannot
-                // recognise — the same "I can't consume it, therefore it must
-                // be junk" reasoning that used to delete a perfectly good copy
-                // whenever WASM failed to load it. Retaining it costs nothing:
-                // writeIndex targets the same key, so the next validated
+                // Delete ONLY when this build's own schema wrote it AND the
+                // manifest claims to be this dataset. A manifest naming another
+                // schema (or no manifest at all) may be a NEWER format a later
+                // release wrote and this older client cannot recognise — the
+                // same "I can't consume it, therefore it must be junk"
+                // reasoning that used to delete a perfectly good copy whenever
+                // WASM failed to load it. Retaining it costs nothing:
+                // writeDataset targets the same keys, so the next validated
                 // download overwrites it either way.
-                const ours = manifest && manifest.schema === SCHEMA_VERSION;
-                console.warn(`Cached tune index is not a tune index (${problem}); `
+                const ours = manifest
+                    && manifest.schema === SCHEMA_VERSION
+                    && manifest.dataset === id;
+                console.warn(`Cached ${id} index is not a tune index (${problem}); `
                     + (ours ? 'discarding' : 'keeping it but not using it'));
-                if (ours) await clearIndex();
+                if (ours) await clearDataset(id);
                 return null;
             }
 
@@ -210,75 +225,183 @@ export async function readIndex() {
                 // good data, we just don't know its version. Report v=0 so an
                 // update is attempted when there is a connection, rather than
                 // throwing away the only copy the user has.
-                console.warn('Tune index payload present without a valid manifest; '
+                console.warn(`${id} payload present without a valid manifest; `
                     + 'using it and treating the version as unknown');
-                effective = { schema: SCHEMA_VERSION, v: 0, date: null,
-                    savedAt: null, bytes: raw.length, versionUnknown: true };
+                effective = { schema: SCHEMA_VERSION, dataset: id, v: 0,
+                    date: null, savedAt: null, bytes: raw.length,
+                    versionUnknown: true };
             } else if (manifest.bytes && manifest.bytes !== raw.length) {
                 // Manifest describes a different payload than the one on disk —
                 // the two writes straddled an interruption. The payload is still
                 // complete; only the version record is untrustworthy.
-                console.warn('Tune index manifest does not match the stored payload; '
+                console.warn(`${id} manifest does not match the stored payload; `
                     + 'using the payload and treating the version as unknown');
                 effective = { ...manifest, v: 0, versionUnknown: true };
             }
-            return { index: splitIndexPayload(parsed), manifest: effective };
+            return { id, index: splitIndexPayload(parsed), manifest: effective };
         } catch (e) {
             // Genuinely unparseable — this is the only state worth clearing.
-            console.warn('Cached tune index failed to parse; discarding', e);
-            await clearIndex();
+            console.warn(`Cached ${id} index failed to parse; discarding`, e);
+            await clearDataset(id);
             return null;
         }
     }
 
     if (manifest) {
         // Manifest with no payload: nothing usable, drop the dangling record.
-        console.warn('Tune index manifest present but payload missing');
-        await safeDel(KEY_MANIFEST);
+        console.warn(`${id} manifest present but payload missing`);
+        await safeDel(manifestKey(id));
     }
 
-    return await readLegacyIndex();
+    return null;
 }
 
-async function readLegacyIndex() {
+// Read several datasets. Resolves to { parts, missing } where `parts` is in
+// `ids` order and `missing` names the ones with no usable copy. One dataset
+// failing never affects the others.
+export async function readDatasets(ids) {
+    const parts = [];
+    const missing = [];
+    for (const id of ids) {
+        const part = await readDataset(id);
+        if (part) {
+            parts.push(part);
+        } else {
+            missing.push(id);
+        }
+    }
+    return { parts, missing };
+}
+
+// Manifests only, no payload reads or parses. This is what Settings renders,
+// and it must stay cheap enough to call on every visit.
+//
+// Returns { datasets: {id: manifest|null}, merged, legacy, storage }.
+export async function readOfflineInventory(ids) {
+    const datasets = {};
+    for (const id of ids) {
+        const manifest = await safeGet(manifestKey(id));
+        datasets[id] = (manifest && manifest.schema === SCHEMA_VERSION)
+            ? manifest
+            : null;
+    }
+    return {
+        datasets,
+        merged: await readMergedManifest(),
+        legacy: await readLegacyManifest(),
+        storage: await estimateStorage(),
+    };
+}
+
+async function readMergedManifest() {
+    const manifest = await safeGet(KEY_MERGED_MANIFEST);
+    if (manifest && manifest.schema === MERGED_SCHEMA_VERSION) {
+        return manifest;
+    }
+    return null;
+}
+
+async function readLegacyManifest() {
+    const legacy = await safeGet(LEGACY_KEY_INDEX);
+    if (legacy && legacy.indexData && legacy.abcStrings) {
+        const meta = (await safeGet(LEGACY_KEY_META)) || {};
+        return {
+            schema: 1, v: meta.v || 0, date: meta.date || null,
+            savedAt: null, bytes: null, legacy: true,
+        };
+    }
+    return null;
+}
+
+// The pre-multi-dataset merged copy: schema 2 first, then schema 1.
+//
+// This is what keeps an upgrading user working. It is loaded at startup so the
+// app is READY immediately, and only deleted once every selected dataset has a
+// committed per-dataset copy that has loaded into WASM.
+//
+// Resolves to { index, manifest, datasets } or null. `datasets` names what the
+// blob is known to contain — always thesession + folkwiki, because no merged
+// blob was ever published with anything else in it.
+export async function readMergedLegacyIndex() {
+    const raw = await safeGet(KEY_MERGED_RAW);
+    const manifest = await safeGet(KEY_MERGED_MANIFEST);
+
+    if (typeof raw === 'string' && raw.length > 0) {
+        try {
+            console.time('index-parse-from-cache:merged');
+            const parsed = JSON.parse(raw);
+            console.timeEnd('index-parse-from-cache:merged');
+            const problem = indexPayloadProblem(parsed);
+            if (problem) {
+                console.warn(`Merged tune index is not a tune index (${problem}); `
+                    + 'keeping it but not using it');
+                return null;
+            }
+            return {
+                index: splitIndexPayload(parsed),
+                manifest: manifest && manifest.schema === MERGED_SCHEMA_VERSION
+                    ? { ...manifest, merged: true }
+                    : { schema: MERGED_SCHEMA_VERSION, v: 0, date: null,
+                        savedAt: null, bytes: raw.length,
+                        versionUnknown: true, merged: true },
+                datasets: ['thesession', 'folkwiki'],
+            };
+        } catch (e) {
+            console.warn('Merged tune index failed to parse; discarding', e);
+            await safeDel(KEY_MERGED_RAW);
+            await safeDel(KEY_MERGED_MANIFEST);
+        }
+    }
+
     const legacy = await safeGet(LEGACY_KEY_INDEX);
     if (!legacy || !legacy.indexData || !legacy.abcStrings) {
         return null;
     }
     const meta = (await safeGet(LEGACY_KEY_META)) || {};
     console.debug('Loaded tune index from legacy (schema 1) cache');
+
+    // Schema 1 stored the split form, so tuneIDs was never persisted. Derive
+    // it, so a legacy blob labels its tunes the same way a fresh one does.
+    const tuneIDs = new Set();
+    const settings = (legacy.indexData && legacy.indexData.settings) || {};
+    for (const settingID in settings) {
+        tuneIDs.add(settings[settingID].tune_id);
+    }
+
     return {
         index: {
             indexData: legacy.indexData,
             abcStrings: legacy.abcStrings,
             sourceUrls: legacy.sourceUrls || {},
+            tuneIDs,
         },
         manifest: {
-            schema: 1,
-            v: meta.v || 0,
-            date: meta.date || null,
-            savedAt: null,
-            bytes: null,
-            legacy: true,
+            schema: 1, v: meta.v || 0, date: meta.date || null,
+            savedAt: null, bytes: null, legacy: true, merged: true,
         },
+        datasets: ['thesession', 'folkwiki'],
     };
 }
 
-// Persist raw index JSON text. Throws on failure (quota, IDB unavailable) so
-// callers can tell the user their offline copy did not save — silently failing
-// here is exactly how people end up with no tunes on a plane.
+// Persist one dataset's raw JSON text. Throws on failure (quota, IDB
+// unavailable) so callers can tell the user their offline copy did not save —
+// silently failing here is exactly how people end up with no tunes on a plane.
 //
-// THIS DESTROYS THE PREVIOUS OFFLINE COPY. Call it only with a payload that has
-// already been parsed, passed indexPayloadProblem() and been loaded into WASM
-// successfully — see rule 5 at the top of this file. The cheap guard below
-// cannot prove that, but it does stop the two most obvious mistakes.
+// THIS DESTROYS THAT DATASET'S PREVIOUS OFFLINE COPY. Call it only with a
+// payload that has already been parsed, passed indexPayloadProblem() and been
+// loaded into WASM successfully — see rule 5 at the top of this file.
 //
-// `metadata` is { v, date } from nud-meta.json.
-export async function writeIndex(rawText, metadata) {
+// It does NOT touch the merged blob. The merged copy covers two datasets and
+// one per-dataset write covers one, so deleting it here would drop data that
+// nothing has replaced yet. That is clearSupersededMergedCopies' job, and it
+// only runs once the whole selection is committed.
+//
+// `metadata` is { v, date } from datasets.json.
+export async function writeDataset(id, rawText, metadata) {
     if (typeof rawText !== 'string' || rawText.length === 0) {
-        throw new Error('refusing to write an empty tune index payload');
+        throw new Error(`refusing to write an empty ${id} payload`);
     }
-    console.time('index-persist');
+    console.time(`index-persist:${id}`);
 
     // ORDERING IS A RELIABILITY PROPERTY. Payload first, manifest second, and
     // NOTHING is ever deleted on a failure path.
@@ -293,7 +416,7 @@ export async function writeIndex(rawText, metadata) {
     //   - Between the delete and the new manifest there was a window with a
     //     payload and no manifest. Anything interrupting there — iOS
     //     suspending the worker, the app being backgrounded, the tab closing,
-    //     a quota error — left readIndex seeing "no offline copy", which then
+    //     a quota error — left the reader seeing "no offline copy", which then
     //     garbage-collected the payload. A failed update thereby deleted the
     //     working copy the user already had, and they discovered it the next
     //     time they were somewhere without a connection.
@@ -303,16 +426,20 @@ export async function writeIndex(rawText, metadata) {
     // the only consequence is one redundant update later. A failed write
     // leaves the previous copy exactly as it was.
     try {
-        await set(KEY_RAW, rawText);
+        await set(rawKey(id), rawText);
     } catch (e) {
         // Do NOT delete anything. The previous payload is still intact and
         // still described by the existing manifest.
-        console.timeEnd('index-persist');
+        console.timeEnd(`index-persist:${id}`);
         throw e;
     }
 
     const manifest = {
         schema: SCHEMA_VERSION,
+        // Provenance. readDataset will only delete a payload whose manifest
+        // agrees it is this dataset, so a future build that means something
+        // else by this key is not ours to destroy.
+        dataset: id,
         v: (metadata && metadata.v) || 0,
         date: (metadata && metadata.date) || null,
         savedAt: Date.now(),
@@ -320,27 +447,54 @@ export async function writeIndex(rawText, metadata) {
     };
 
     try {
-        await set(KEY_MANIFEST, manifest);
+        await set(manifestKey(id), manifest);
     } catch (e) {
         // The payload is on disk and usable; only the version record failed.
         // Leave it — a stale version means a redundant update, not data loss.
-        console.warn('Tune index payload saved but its manifest did not', e);
-        console.timeEnd('index-persist');
+        console.warn(`${id} payload saved but its manifest did not`, e);
+        console.timeEnd(`index-persist:${id}`);
         throw e;
     }
 
-    // The legacy copy is another ~42 MB of the same data. Drop it only once
-    // the new one is fully committed.
-    await safeDel(LEGACY_KEY_INDEX);
-    await safeDel(LEGACY_KEY_META);
-
-    console.timeEnd('index-persist');
+    console.timeEnd(`index-persist:${id}`);
     return manifest;
 }
 
-export async function clearIndex() {
-    await safeDel(KEY_MANIFEST);
-    await safeDel(KEY_RAW);
+// Delete one dataset's copy. Scoped to that id, and never called on a failure
+// path — the only routes here are an explicit confirmed tap in Settings and
+// readDataset finding a payload that is provably not a tune index.
+export async function clearDataset(id) {
+    await safeDel(manifestKey(id));
+    await safeDel(rawKey(id));
+}
+
+// Drop the superseded merged copies (schema 2 and schema 1).
+//
+// `coveredIds` is the set of datasets the caller has PROVED are committed —
+// re-read from disk, not remembered from an install — and loaded into WASM.
+// The merged blob holds thesession and folkwiki, so it is only redundant once
+// both of those are covered.
+//
+// Returns true when something was deleted. A failure to delete is wasted quota,
+// never data loss, so it is a warning rather than a throw.
+export async function clearSupersededMergedCopies(coveredIds) {
+    const covered = new Set(coveredIds || []);
+    const needed = ['thesession', 'folkwiki'];
+    if (!needed.every((id) => covered.has(id))) {
+        return false;
+    }
+    const hadMerged = (await safeGet(KEY_MERGED_RAW)) !== undefined
+        || (await safeGet(KEY_MERGED_MANIFEST)) !== undefined
+        || (await safeGet(LEGACY_KEY_INDEX)) !== undefined;
+    if (!hadMerged) {
+        return false;
+    }
+    console.debug('Per-dataset copies cover the merged blob; reclaiming it');
+    await safeDel(KEY_MERGED_MANIFEST);
+    await safeDel(KEY_MERGED_RAW);
+    await safeDel(LEGACY_KEY_INDEX);
+    await safeDel(LEGACY_KEY_META);
+    return true;
 }
 
 // Best-effort quota diagnostics for the Settings page.

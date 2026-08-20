@@ -25,6 +25,12 @@
 // (allowed_domains) so a single summary cannot turn into an open-ended crawl.
 
 import { isDefinitelyOffline } from './tuneIndexNetwork.js';
+// isThesessionTuneID is called here WITHOUT a dataset label, deliberately.
+// These guards only ask "does this tune have a thesession.org page", and the
+// ID-range fallback answers that correctly for every source: anything at or
+// above the folkwiki base is not a thesession tune, whatever else it is. The
+// label would be wrong for norbeck; the boolean is not, and the boolean is all
+// that is used.
 import { isThesessionTuneID, tuneSourceUrl } from '../js/source.mjs';
 
 const MESSAGES_URL = 'https://api.anthropic.com/v1/messages';

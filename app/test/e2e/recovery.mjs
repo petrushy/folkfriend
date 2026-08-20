@@ -27,7 +27,9 @@ const APP = `http://localhost:${APP_PORT}`;  // CDN URL repointed at the local s
 const DATA_PORT = 8444;
 const APP_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const DIST_DIR = path.join(APP_DIR, 'dist');
-const RES_DIR = path.join(APP_DIR, 'public', 'res');
+// CI moves the tune data out of public/res/ before building, so that it does
+// not bloat the deployed bundle, and points $FF_RES_DIR at where it went.
+const RES_DIR = process.env.FF_RES_DIR || path.join(APP_DIR, 'public', 'res');
 const CDN_ORIGIN = 'https://folkfriend-data.web.app/';
 const work = mkdtempSync(path.join(tmpdir(), 'ff-rec-'));
 const profile = path.join(work, 'profile');
@@ -47,19 +49,56 @@ if (!existsSync(path.join(DIST_DIR, 'index.html'))) {
     process.exit(1);
 }
 
-const indexJson = process.env.FF_INDEX_JSON
-    || path.join(RES_DIR, 'folkfriend-non-user-data.json');
-if (!existsSync(indexJson)) {
-    console.error(`missing ${indexJson} — run app/download_tune_data.sh, `
-        + 'or point $FF_INDEX_JSON at a copy');
-    process.exit(1);
+// The app fetches datasets.json and then one file per dataset. Serve the real
+// per-dataset files when they are on disk; otherwise fall back to the legacy
+// merged file served as a single 'thesession' dataset, so this test still runs
+// against a checkout that has only fetched that.
+function findDataset(id) {
+    for (const dir of [RES_DIR, path.join(DIST_DIR, 'res')]) {
+        const p = path.join(dir, `${id}.json`);
+        if (existsSync(p)) return p;
+    }
+    return null;
 }
-const metaJson = existsSync(path.join(RES_DIR, 'nud-meta.json'))
-    ? path.join(RES_DIR, 'nud-meta.json')
-    : path.join(DIST_DIR, 'res', 'nud-meta.json');
 
-const meta = readFileSync(metaJson);
-const index = readFileSync(indexJson);
+const DATASET_IDS = ['thesession', 'folkwiki', 'norbeck'];
+const bodies = {};          // filename -> Buffer
+const datasetEntries = [];  // datasets.json entries
+
+for (const id of DATASET_IDS) {
+    const file = findDataset(id);
+    if (!file) continue;
+    const body = readFileSync(file);
+    bodies[`${id}.json`] = body;
+    datasetEntries.push({ id, filename: `${id}.json`, v: 1, date: '2026-01-01',
+        size: body.length });
+}
+
+if (datasetEntries.length === 0) {
+    const fallback = process.env.FF_INDEX_JSON
+        || path.join(RES_DIR, 'folkfriend-non-user-data.json');
+    if (!existsSync(fallback)) {
+        console.error(`no dataset files and no ${fallback} — run `
+            + 'app/download_tune_data.sh, or point $FF_INDEX_JSON at a copy');
+        process.exit(1);
+    }
+    const body = readFileSync(fallback);
+    bodies['thesession.json'] = body;
+    datasetEntries.push({ id: 'thesession', filename: 'thesession.json', v: 1,
+        date: '2026-01-01', size: body.length });
+    console.log('   [server] no per-dataset files; serving the merged index '
+        + 'as a single thesession dataset');
+}
+
+// The dataset every assertion is made about — the largest one served, which is
+// the one the app downloads first.
+const PRIMARY = datasetEntries
+    .slice()
+    .sort((a, b) => b.size - a.size)[0].id;
+
+const manifestBody = () => Buffer.from(JSON.stringify({
+    manifestVersion: 1, generated: '2026-01-01', datasets: datasetEntries,
+}));
 
 // --- the app under test: dist with its data origin repointed here ---------
 
@@ -128,18 +167,49 @@ await new Promise(r => appServer.listen(APP_PORT, '127.0.0.1', r));
 //             cold start, offline.
 let mode = 'hang';
 let requests = 0;
-const NEXT_VERSION = (JSON.parse(meta).v || 0) + 1;
-const GARBAGE_META = Buffer.from(JSON.stringify({ v: NEXT_VERSION, date: '2099-01-01' }));
-const GARBAGE_INDEX = index.subarray(0, Math.floor(index.length / 2));
+const NEXT_VERSION = 2;
 const sockets = new Set();
+
+// In 'garbage' mode the manifest announces a newer version of every dataset and
+// the bodies are truncated — valid-looking 200s that are not tune indexes. In
+// 'partial' mode only ONE dataset is poisoned, which is the more realistic and
+// more dangerous case: the install half-succeeds, so the app looks fine.
+const POISONED = datasetEntries.length > 1 ? datasetEntries[1].id : PRIMARY;
+
+function bodyFor(url) {
+    const name = url.split('?')[0].replace(/^\//, '');
+
+    if (name === 'datasets.json') {
+        if (mode === 'garbage' || mode === 'partial') {
+            return Buffer.from(JSON.stringify({
+                manifestVersion: 1,
+                generated: '2099-01-01',
+                datasets: datasetEntries.map(e => ({
+                    ...e, v: NEXT_VERSION, date: '2099-01-01',
+                })),
+            }));
+        }
+        return manifestBody();
+    }
+
+    const real = bodies[name];
+    if (!real) return null;
+
+    const poison = mode === 'garbage'
+        || (mode === 'partial' && name === `${POISONED}.json`);
+    return poison ? real.subarray(0, Math.floor(real.length / 2)) : real;
+}
+
 const dataServer = http.createServer((req, res) => {
     requests++;
     console.log(`   [server] ${mode} <- ${req.url}`);
     if (mode === 'hang') return; // accept, then answer never — captive portal
-    const isMeta = req.url.startsWith('/nud-meta.json');
-    const body = mode === 'garbage'
-        ? (isMeta ? GARBAGE_META : GARBAGE_INDEX)
-        : (isMeta ? meta : index);
+    const body = bodyFor(req.url);
+    if (!body) {
+        res.writeHead(404, { 'access-control-allow-origin': '*' });
+        res.end();
+        return;
+    }
     res.writeHead(200, {
         'content-type': 'application/json',
         'content-length': body.length,
@@ -205,6 +275,20 @@ async function evaluate(expression) {
     return r.result.value;
 }
 
+// waitFor wraps its expression in a SYNCHRONOUS arrow for the try/catch, which
+// does not await a promise the expression returns. Anything async — every
+// IndexedDB probe here — must use this instead.
+async function waitForAsync(expression, timeoutMs, label) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeoutMs) {
+        try {
+            if (await evaluate(expression)) return Date.now() - t0;
+        } catch (e) { /* navigating */ }
+        await sleep(200);
+    }
+    throw new Error(`timed out after ${timeoutMs} ms waiting for ${label}`);
+}
+
 async function waitFor(expression, timeoutMs, label) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeoutMs) {
@@ -225,14 +309,36 @@ async function navigate(url) {
 
 const INDEX_READY = `!!document.querySelector('.tuneProgress .Transparent')`;
 const INDEX_UNAVAILABLE = `!!document.querySelector('.indexErrorMsg')`;
-const IDB_MANIFEST = `
+// The manifest for one dataset. Keys are namespaced per dataset now.
+const idbManifest = id => `
 (async () => {
     const req = indexedDB.open('keyval-store');
     const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
     if (!db.objectStoreNames.contains('keyval')) return null;
     const st = db.transaction('keyval', 'readonly').objectStore('keyval');
-    return await new Promise(res => { const r = st.get('ffIndexManifest'); r.onsuccess = () => res(r.result || null); });
+    return await new Promise(res => {
+        const r = st.get('ffIndexManifest:${id}');
+        r.onsuccess = () => res(r.result || null);
+    });
 })()`;
+const IDB_MANIFEST = idbManifest(PRIMARY);
+
+// INDEX_READY is not "the install finished". The app becomes usable as soon as
+// the FIRST dataset loads into WASM — that is the whole point of partial
+// success — so waiting on it and then reloading would kill the remaining
+// downloads. Wait for the copies to actually be on disk.
+const idbHasDatasets = ids => `
+(async () => {
+    const req = indexedDB.open('keyval-store');
+    const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
+    if (!db.objectStoreNames.contains('keyval')) return false;
+    const st = db.transaction('keyval', 'readonly').objectStore('keyval');
+    const keys = await new Promise(res => { const r = st.getAllKeys(); r.onsuccess = () => res(r.result); });
+    return ${JSON.stringify(ids)}.every(id => keys.includes('ffIndexManifest:' + id));
+})()`;
+const INSTALLED_IDS = datasetEntries
+    .filter(e => e.id === 'thesession' || e.id === 'folkwiki')
+    .map(e => e.id);
 
 try {
     const version = await getJSON('http://localhost:9600/json/version');
@@ -300,6 +406,11 @@ try {
         console.log(`   [server] total requests: ${requests}`);
     }
     check('index installs automatically once the host answers', true, `${(ms / 1000).toFixed(1)} s`);
+    // Let every selected dataset finish before reloading the page.
+    await waitForAsync(idbHasDatasets(INSTALLED_IDS), 120000,
+        `all of ${INSTALLED_IDS.join(', ')} saved`);
+    check('every selected dataset is saved, not just the first', true,
+        INSTALLED_IDS.join(', '));
 
     const manifest = await evaluate(IDB_MANIFEST);
     check('offline copy saved during recovery', !!manifest && manifest.bytes > 1000000,
@@ -327,15 +438,49 @@ try {
         afterBad ? `v${afterBad.v}, ${(afterBad.bytes / 1048576).toFixed(1)} MB` : 'NO OFFLINE COPY');
     check('the app stays usable after the bad update', await evaluate(INDEX_READY));
 
+    // The failure mode the multi-dataset split introduces: an install where
+    // SOME datasets succeed. The ones that failed must keep their previous
+    // copies, and the app must stay usable rather than reporting itself broken.
+    if (datasetEntries.length > 1) {
+        console.log(`\n3b. A partial update: ${PRIMARY} is fine, ${POISONED} is rubbish`);
+        const goodBefore = await evaluate(idbManifest(PRIMARY));
+        const poisonedBefore = await evaluate(idbManifest(POISONED));
+        setMode('partial');
+        const beforeReqs = requests;
+        await navigate(APP);
+        await waitFor(INDEX_READY, 60000, 'index ready from the saved copies');
+        for (let i = 0; i < 100 && requests < beforeReqs + 2; i++) await sleep(200);
+        await sleep(3000);
+
+        const poisonedAfter = await evaluate(idbManifest(POISONED));
+        check(`${POISONED} keeps its previous copy after a bad download`,
+            !!poisonedAfter && !!poisonedBefore
+                && poisonedAfter.bytes === poisonedBefore.bytes,
+            poisonedAfter ? `v${poisonedAfter.v}, ${poisonedAfter.bytes} chars`
+                : 'NO OFFLINE COPY');
+        const goodAfter = await evaluate(idbManifest(PRIMARY));
+        check(`${PRIMARY} is unaffected by its sibling failing`,
+            !!goodAfter && !!goodBefore,
+            goodAfter ? `v${goodAfter.v}` : 'NO OFFLINE COPY');
+        check('the app stays usable through a partial failure',
+            await evaluate(INDEX_READY));
+    }
+
     console.log('\n4. Host goes away entirely; cold start offline');
+    // Whatever survived step 3b is the known-good copy now. Step 3b serves a
+    // GOOD primary at v2, so this is deliberately read here rather than
+    // compared against step 2's version.
+    const expected = await evaluate(IDB_MANIFEST);
     setMode('hang');
     await navigate(APP);
     ms = await waitFor(INDEX_READY, 60000, 'index ready from the saved copy');
     check('saved copy is used, host is never needed', true, `${ms} ms`);
     const finalManifest = await evaluate(IDB_MANIFEST);
-    check('the offline copy is still the known-good one',
-        !!finalManifest && finalManifest.v === savedVersion,
-        finalManifest ? `v${finalManifest.v}` : 'none');
+    check('the offline copy is intact and unchanged by the dead host',
+        !!finalManifest && !!expected
+            && finalManifest.v === expected.v
+            && finalManifest.bytes === expected.bytes,
+        finalManifest ? `v${finalManifest.v}, ${finalManifest.bytes} chars` : 'none');
 } catch (e) {
     console.error('\nFATAL:', e.message);
     results.push({ name: 'harness', ok: false, detail: e.message });

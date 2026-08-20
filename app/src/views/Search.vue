@@ -123,6 +123,13 @@
                     Downloading tune database{{ downloadPercent === null ? '' : ` — ${downloadPercent}%` }}…
                     <br>This happens once; afterwards FolkFriend works offline.
                 </p>
+                <!-- The app is usable but incomplete. This has to be visible
+                     HERE, not only in Settings: a user whose norbeck download
+                     quietly failed would search a Swedish tune, get nothing,
+                     and conclude FolkFriend does not have it. -->
+                <p v-else-if="missingDatasetsMsg" class="indexPartialMsg">
+                    {{ missingDatasetsMsg }}
+                </p>
             </template>
             <p v-else class="indexErrorMsg">
                 {{ indexError }}
@@ -148,6 +155,7 @@ import store from '@/services/store';
 import eventBus from '@/eventBus';
 import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiTimerOutline } from '@mdi/js';
 import micService from '@/services/mic';
+import { DATASET_LABELS } from '@/js/source.mjs';
 
 export default {
     name: 'SearchView',
@@ -169,6 +177,8 @@ export default {
             searchState: store.searchState,
             analyzeScale: 1.0,
 
+            missingDatasets: [],
+
             icons: {
                 magnify: mdiMagnify,
                 microphone: mdiMicrophone,
@@ -179,6 +189,14 @@ export default {
         };
     },
     computed: {
+        missingDatasetsMsg() {
+            if (!this.indexLoaded) return null;
+            const missing = this.missingDatasets;
+            if (!missing.length) return null;
+            const names = missing.map(id => DATASET_LABELS[id] || id).join(', ');
+            return `${names} ${missing.length === 1 ? 'is' : 'are'} not saved on `
+                + 'this device yet, so its tunes will not be found. See Settings.';
+        },
         downloadPercent() {
             // store.state is a plain (non-reactive) object, so progress is
             // pushed in from the indexStatusChanged handler rather than read
@@ -195,6 +213,7 @@ export default {
         this._onIndexError = (msg) => { this.indexError = msg; };
         this._onIndexStatus = (detail) => {
             this.indexStatus = detail.status;
+            this.missingDatasets = detail.datasetsMissing || [];
             this.downloadProgress = detail.status === 'downloading'
                 ? { received: detail.received || 0, total: detail.total || 0 }
                 : null;
@@ -343,6 +362,13 @@ export default {
 
 .Transparent {
     opacity: 0;
+}
+
+.indexPartialMsg {
+    text-align: center;
+    font-size: 0.8rem;
+    opacity: 0.75;
+    margin-top: 0.3rem;
 }
 
 .indexErrorMsg {
