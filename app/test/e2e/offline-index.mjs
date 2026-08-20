@@ -342,9 +342,21 @@ try {
     await waitFor(`!!document.querySelector('.expansionPanel')`, 20000, 'tune rendered');
     check('tunes and their ABC come from the legacy copy', Date.now() - t0 < 3000,
         `${Date.now() - t0} ms`);
+    // P3: never both missing. The legacy blob is either still there, or it has
+    // already been superseded by per-dataset copies — but there is no moment
+    // where the user has neither.
+    //
+    // Note CDP's network emulation does NOT reach Web Workers (see README), so
+    // the worker can migrate here even though the main thread believes it is
+    // offline. Either outcome is correct; having nothing is not.
     const stillLegacy = await evaluate(IDB_STATE);
-    check('legacy copy is not discarded', stillLegacy.keys.includes('tuneIndex'),
-        `keys: ${stillLegacy.keys.join(', ')}`);
+    const legacyPresent = stillLegacy.keys.includes('tuneIndex');
+    const perDataset = Object.keys(stillLegacy.datasets).length;
+    check('the user is never left with no offline copy at all',
+        legacyPresent || perDataset > 0,
+        legacyPresent
+            ? 'legacy blob still present'
+            : `superseded by ${perDataset} per-dataset cop${perDataset === 1 ? 'y' : 'ies'}`);
 
     // ---- 5. Legacy copy is migrated on the next version bump -------------
     console.log('\n5. Legacy copy migrates to the new format when an update lands');

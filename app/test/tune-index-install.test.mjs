@@ -158,6 +158,16 @@ export class FolkFriendWASM {
         return JSON.stringify(Object.keys((__wasm.loaded || {}).aliases || {})
             .slice(0, 3).map(id => ({ tune_id: id })));
     }
+    async run_transcription_query() {
+        const settings = (__wasm.loaded || {}).settings || {};
+        return JSON.stringify(Object.entries(settings).slice(0, 3)
+            .map(([setting_id, setting]) => ({ setting_id, setting })));
+    }
+    async settings_from_tune_id(tuneID) {
+        const settings = (__wasm.loaded || {}).settings || {};
+        return JSON.stringify(Object.entries(settings)
+            .filter(([, s]) => s.tune_id === String(tuneID)));
+    }
 }
 `;
 
@@ -1075,6 +1085,69 @@ async function run() {
             assert.ok(seen[i].received >= seen[i - 1].received,
                 'aggregate progress must never go backwards');
         }
+    });
+
+    // --- the dataset label reaches the UI ---------------------------------
+
+    console.log('\nQuery results carry the dataset they came from');
+
+    // This is what the source chip and the thesession.org guards read. It has
+    // to be asserted at the worker boundary: the label is a sideband, so
+    // dropping it does not throw — every Norbeck tune just quietly claims to be
+    // a folkwiki one, because that is what the legacy ID-range fallback says
+    // about any id above 1e6. Which is exactly what shipped for an afternoon.
+    await test('settingsFromTuneID labels each setting with its dataset', async () => {
+        resetFakes();
+        const wrapper = await newWorker();
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        for (const [id, tuneID] of [['thesession', '0'],
+                                    ['folkwiki', '1000000'],
+                                    ['norbeck', '3000000']]) {
+            const settings = await new Promise(
+                r => wrapper.settingsFromTuneID(tuneID, r));
+            assert.ok(settings.length > 0, `${id}: no settings for tune ${tuneID}`);
+            for (const setting of settings) {
+                assert.equal(setting.dataset, id,
+                    `tune ${tuneID} should be labelled ${id}, got `
+                    + `${JSON.stringify(setting.dataset)}`);
+            }
+        }
+    });
+
+    await test('transcription results carry the dataset too', async () => {
+        resetFakes();
+        const wrapper = await newWorker();
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        const results = await new Promise(
+            r => wrapper.runTranscriptionQuery('vtvtvtvt', r));
+        assert.ok(results.length > 0, 'expected some results');
+        for (const result of results) {
+            assert.ok(['thesession', 'folkwiki', 'norbeck'].includes(result.setting.dataset),
+                `result carries no dataset label: ${JSON.stringify(result.setting.dataset)}`);
+        }
+    });
+
+    await test('a legacy merged blob leaves tunes unlabelled, not mislabelled', async () => {
+        // The merged blob cannot say which tune came from which source, so
+        // source.mjs must fall back to the ID range. An empty label is the
+        // signal for that; a WRONG label would defeat it.
+        resetFakes();
+        const merged = makeMerged('old');
+        idbMod.__db.set('ffIndexRaw', merged);
+        idbMod.__db.set('ffIndexManifest',
+            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
+        netMod.__net.offline = true;
+
+        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        const settings = await new Promise(r => wrapper.settingsFromTuneID('0', r));
+        assert.ok(settings.length > 0);
+        assert.equal(settings[0].dataset, '',
+            'tunes from a merged blob must be unlabelled so the ID-range '
+            + 'fallback applies');
     });
 
     console.log(`\n${passed} passed, ${failed} failed\n`);

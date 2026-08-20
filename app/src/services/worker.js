@@ -1195,6 +1195,11 @@ class FolkFriendWASMWrapper {
                 const settingID = String(result.setting_id);
                 result.setting.abc = this.abcStringBySetting[settingID] || '';
                 result.setting.source_url = this.sourceUrlBySetting[settingID] || '';
+                // Which dataset this tune came from. Keyed by TUNE id, not
+                // setting id, because every consumer (the source chip, the
+                // AI-summary guards) works off the tune id.
+                result.setting.dataset =
+                    this.datasetByTune[String(result.setting.tune_id)] || '';
             }
         }
         return results;
@@ -1237,6 +1242,7 @@ class FolkFriendWASMWrapper {
             setting['setting_id'] = settingID;
             setting['abc'] = this.abcStringBySetting[settingID];
             setting['source_url'] = this.sourceUrlBySetting[settingID] || '';
+            setting['dataset'] = this.datasetByTune[String(tuneID)] || '';
             return setting;
         });
 
