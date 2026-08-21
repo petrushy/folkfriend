@@ -158,6 +158,16 @@ class FFBackend {
         });
     }
 
+    // Add a dataset the app does not host: from a file the user picked, or a
+    // URL they typed. The URL case is fetched inside the worker so a 3 MB body
+    // never crosses the Comlink boundary.
+    async addUserDataset({ text = null, url = null }) {
+        return new Promise(resolve => {
+            this.folkfriendWorker.addUserDataset(
+                { text, url }, Comlink.proxy(resolve));
+        });
+    }
+
     async removeDataset(id) {
         return new Promise(resolve => {
             this.folkfriendWorker.removeDataset(id, Comlink.proxy(resolve));

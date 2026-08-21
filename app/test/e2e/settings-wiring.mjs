@@ -107,7 +107,10 @@ try {
                        // Dataset selection. saveOfflineCopy keeps its name
                        // deliberately — renaming it would break this check
                        // silently for everyone reading the old name.
-                       'onDatasetToggled','confirmRemoveDataset','removeDataset'];
+                       'onDatasetToggled','confirmRemoveDataset','removeDataset',
+                       // Importing a dataset the app does not host.
+                       'closeAddDialog','pickDatasetFile','onDatasetFileChosen',
+                       'addDatasetFromUrl'];
         const missing = names.filter(n => typeof vm[n] !== 'function');
         return { missing, total: names.length, hasStore: !!vm.$data };
     })()`);

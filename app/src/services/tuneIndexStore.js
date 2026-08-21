@@ -256,6 +256,12 @@ export async function readDataset(id) {
     return null;
 }
 
+// One dataset's manifest, with no payload read or parse. Cheap.
+export async function readDatasetManifest(id) {
+    const manifest = await safeGet(manifestKey(id));
+    return (manifest && manifest.schema === SCHEMA_VERSION) ? manifest : null;
+}
+
 // Read several datasets. Resolves to { parts, missing } where `parts` is in
 // `ids` order and `missing` names the ones with no usable copy. One dataset
 // failing never affects the others.
@@ -445,6 +451,14 @@ export async function writeDataset(id, rawText, metadata) {
         savedAt: Date.now(),
         bytes: rawText.length,
     };
+    // A dataset the user added by hand: it has no datasets.json entry, so the
+    // manifest is the only place its name lives, and the update check must not
+    // treat "not in the manifest" as an error for it.
+    if (metadata && metadata.origin === 'user') {
+        manifest.origin = 'user';
+        manifest.label = metadata.label || id;
+        if (metadata.url) manifest.url = metadata.url;
+    }
 
     try {
         await set(manifestKey(id), manifest);

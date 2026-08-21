@@ -106,6 +106,18 @@ export async function fetchDatasetsManifest(bypassCacheVersion = null) {
     }
     return { byId, order };
 }
+export async function fetchUserDatasetText(url, onProgress = null) {
+    __net.requests.push({ filename: url, userSupplied: true });
+    if (__net.offline) throw new NetworkUnavailableError('Device is offline');
+    const body = __net.bodies[url];
+    if (__net.gate) await __net.gate;
+    if (__net.bodyErrors[url]) {
+        throw new NetworkUnavailableError(__net.bodyErrors[url]);
+    }
+    if (body === undefined) throw new NetworkUnavailableError('HTTP 404');
+    if (onProgress) onProgress({ received: body.length, total: body.length });
+    return body;
+}
 export async function fetchDatasetText(filename, bypassCacheVersion = null, onProgress = null) {
     __net.requests.push({ filename, bypassCacheVersion });
     if (__net.offline) throw new NetworkUnavailableError('Device is offline');
@@ -209,6 +221,20 @@ const FILENAME = {
 const RAW = {};
 for (const id of ALL) {
     RAW[id] = { v1: makeIndex(id, 'v1'), v2: makeIndex(id, 'v2'), v3: makeIndex(id, 'v3') };
+}
+
+// A dataset file as the data repo stamps it: self-describing, because an
+// imported file has no datasets.json entry to describe it.
+function makeSelfDescribing(dataset, tag, extra = {}) {
+    const payload = JSON.parse(makeIndex(dataset, tag));
+    return JSON.stringify({
+        ...payload,
+        id: dataset,
+        label: dataset === 'norbeck' ? 'Norbeck' : dataset,
+        v: 42,
+        date: '2026-08-21',
+        ...extra,
+    });
 }
 
 // The pre-multi-dataset merged blob: thesession + folkwiki in one document.
@@ -1214,6 +1240,145 @@ async function run() {
         assert.equal(settings[0].dataset, '',
             'tunes from a merged blob must be unlabelled so the ID-range '
             + 'fallback applies');
+    });
+
+    // --- datasets the user supplies ---------------------------------------
+
+    console.log('\nImporting a dataset the app does not host');
+
+    // FolkFriend does not host every dataset it can search: Norbeck's terms
+    // forbid making the ABC available for download on a web page, so it is
+    // built but never served and the user imports the file themselves.
+
+    await test('a self-describing file is installed and becomes searchable', async () => {
+        resetFakes();
+        await seedGoodCopies(['thesession']);
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        const result = await new Promise(r => wrapper.addUserDataset(
+            { text: makeSelfDescribing('norbeck', 'v1') }, r));
+
+        assert.equal(result.ok, true, result.error);
+        assert.equal(result.id, 'norbeck');
+        assert.equal(result.label, 'Norbeck');
+        assert.ok(wrapper.selectedDatasets.includes('norbeck'),
+            'an imported dataset must be selected, or it is invisible');
+        await assertOfflineCopyIs('norbeck', 'v1', 42, 'imported dataset');
+        // ...and the datasets it was merged with are still there.
+        await assertOfflineCopyIs('thesession', 'v1', 1, 'imported alongside');
+        assert.ok((wasmMod.__wasm.loaded.settings || {})['8000000'],
+            'the imported dataset is not in the loaded index');
+        assert.ok((wasmMod.__wasm.loaded.settings || {})['1000'],
+            'importing dropped the dataset that was already loaded');
+    });
+
+    await test('an imported dataset is labelled with its own id', async () => {
+        resetFakes();
+        const wrapper = await newWorker({ datasets: [] });
+        await new Promise(r => wrapper.addUserDataset(
+            { text: makeSelfDescribing('norbeck', 'v1') }, r));
+        const settings = await new Promise(
+            r => wrapper.settingsFromTuneID('3000000', r));
+        assert.ok(settings.length > 0);
+        assert.equal(settings[0].dataset, 'norbeck');
+    });
+
+    await test('a file that is not a tune database is refused', async () => {
+        resetFakes();
+        await seedGoodCopies();
+        const wrapper = await newWorker();
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        for (const [label, body] of Object.entries(BAD_BODIES)) {
+            const result = await new Promise(
+                r => wrapper.addUserDataset({ text: body }, r));
+            assert.equal(result.ok, false, `${label} was accepted`);
+            assert.ok(result.error, `${label} gave no reason`);
+        }
+        // Nothing was disturbed by any of them.
+        await assertAllIntact('v1', 1, 'after refusing bad imports');
+        assert.equal(wrapper.indexStatus, 'ready');
+    });
+
+    await test('a file that does not say which database it is, is refused', async () => {
+        // Published datasets are described by datasets.json. An imported file
+        // has no entry, so without a self-description there is no id to store
+        // it under and no name to show.
+        resetFakes();
+        const wrapper = await newWorker({ datasets: [] });
+        const anonymous = makeIndex('norbeck', 'v1');   // no id/label/v
+        const result = await new Promise(
+            r => wrapper.addUserDataset({ text: anonymous }, r));
+        assert.equal(result.ok, false);
+        assert.match(result.error, /which database/i);
+    });
+
+    await test('importing from a URL fetches it in the worker', async () => {
+        resetFakes();
+        const url = 'https://example.invalid/private/norbeck.json';
+        netMod.__net.bodies[url] = makeSelfDescribing('norbeck', 'v1');
+
+        const wrapper = await newWorker({ datasets: [] });
+        const result = await new Promise(
+            r => wrapper.addUserDataset({ url }, r));
+
+        assert.equal(result.ok, true, result.error);
+        await assertOfflineCopyIs('norbeck', 'v1', 42, 'imported from a URL');
+        assert.ok(netMod.__net.requests.some(r => r.userSupplied),
+            'the URL should have been fetched by the worker');
+    });
+
+    await test('a URL that fails leaves the previous state intact', async () => {
+        resetFakes();
+        await seedGoodCopies();
+        const wrapper = await newWorker();
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        const url = 'https://example.invalid/gone.json';
+        netMod.__net.bodyErrors[url] = 'connection reset';
+        const result = await new Promise(
+            r => wrapper.addUserDataset({ url }, r));
+
+        assert.equal(result.ok, false);
+        assert.notEqual(wrapper.indexStatus, 'downloading',
+            'a failed import must not leave the status stuck on downloading');
+        assert.equal(wrapper.indexStatus, 'ready');
+        await assertAllIntact('v1', 1, 'after a failed URL import');
+    });
+
+    await test('an imported dataset is never reported as "not published"', async () => {
+        // It is not in datasets.json by definition. Saying so on every update
+        // check would surface a permanent error the user cannot act on.
+        resetFakes();
+        // norbeck is deliberately absent from the published manifest.
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        await new Promise(r => wrapper.addUserDataset(
+            { text: makeSelfDescribing('norbeck', 'v1') }, r));
+
+        const refresh = await new Promise(
+            r => wrapper.refreshTuneIndex(null, r));
+        const why = (refresh.failed || {}).norbeck || '';
+        assert.ok(!/not published/.test(why),
+            `an imported dataset was reported as not published: ${why}`);
+        await assertOfflineCopyIs('norbeck', 'v1', 42, 'after a refresh');
+    });
+
+    await test('an imported dataset remembered its URL and can be refreshed', async () => {
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const url = 'https://example.invalid/private/norbeck.json';
+        netMod.__net.bodies[url] = makeSelfDescribing('norbeck', 'v1');
+        const wrapper = await newWorker({ datasets: [] });
+        await new Promise(r => wrapper.addUserDataset({ url }, r));
+
+        netMod.__net.bodies[url] = makeSelfDescribing('norbeck', 'v2', { v: 43 });
+        const refresh = await new Promise(
+            r => wrapper.refreshTuneIndex(['norbeck'], r));
+        assert.equal(refresh.ok, true, JSON.stringify(refresh.failed));
+        await assertOfflineCopyIs('norbeck', 'v2', 43, 'refreshed from its URL');
     });
 
     console.log(`\n${passed} passed, ${failed} failed\n`);

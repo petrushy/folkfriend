@@ -175,6 +175,43 @@ export async function fetchDatasetText(filename, bypassCacheVersion = null, onPr
         datasetDataUrl(filename, bypassCacheVersion), onProgress);
 }
 
+// Download a dataset the USER pointed us at, rather than one from the CDN
+// manifest. Any http(s) origin is allowed — that is the point — so this is the
+// one fetch here that is not confined to BASE_URL.
+//
+// Bounded exactly like the others: an arbitrary host is if anything more likely
+// to hang than our own CDN.
+export async function fetchUserDatasetText(url, onProgress = null) {
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch (e) {
+        throw new NetworkUnavailableError(`Not a valid URL: ${url}`);
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+        throw new NetworkUnavailableError(
+            `Only http(s) URLs can be loaded, not ${parsed.protocol}`);
+    }
+    try {
+        return await fetchTextStreaming(parsed.toString(), onProgress);
+    } catch (e) {
+        // A cross-origin fetch the other site does not permit fails as a bare
+        // "Failed to fetch", indistinguishable from being offline — and it is
+        // by far the likeliest reason a user-supplied link does not work, since
+        // most hosts send no Access-Control-Allow-Origin at all. Say so, rather
+        // than leaving them to guess.
+        const message = (e && e.message) || String(e);
+        if (/failed to fetch|load failed|networkerror/i.test(message)) {
+            throw new NetworkUnavailableError(
+                `Could not read ${parsed.host}. If the file is on another site, `
+                + 'that site has to allow cross-origin requests (CORS) — many '
+                + 'do not. Downloading the file and adding it from your device '
+                + 'always works.');
+        }
+        throw e;
+    }
+}
+
 // Legacy single-blob download. Kept for the migration path and the recovery
 // e2e test; new installs never call it.
 export async function fetchTuneIndexText(bypassCacheVersion = null, onProgress = null) {

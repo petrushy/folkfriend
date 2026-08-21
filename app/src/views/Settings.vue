@@ -44,7 +44,10 @@
                     @change="onMlTranscriberChanged"
                 />
             </v-row>
-            <v-row align="center" class="pl-2 pr-4 mt-2">
+            <v-row
+                align="center"
+                class="pl-2 pr-4 mt-2"
+            >
                 <v-text-field
                     v-model.number="userSettings.recordingTimeLimitSecs"
                     label="Max recording length (seconds)"
@@ -73,21 +76,42 @@
             </h1>
             <p>Sign in to keep your favourites and history in sync across devices.</p>
             <div v-if="currentUser">
-                <v-row align="center" class="px-2 mb-2">
-                    <v-icon left color="success">{{ icons.account }}</v-icon>
+                <v-row
+                    align="center"
+                    class="px-2 mb-2"
+                >
+                    <v-icon
+                        left
+                        color="success"
+                    >
+                        {{ icons.account }}
+                    </v-icon>
                     <span>Signed in as <strong>{{ currentUser.email }}</strong></span>
                 </v-row>
-                <v-btn :loading="signingOut" @click="signOut">
-                    <v-icon left>{{ icons.logout }}</v-icon>
+                <v-btn
+                    :loading="signingOut"
+                    @click="signOut"
+                >
+                    <v-icon left>
+                        {{ icons.logout }}
+                    </v-icon>
                     Sign out
                 </v-btn>
             </div>
             <div v-else>
-                <v-btn :loading="signingIn" @click="signIn">
-                    <v-icon left>{{ icons.google }}</v-icon>
+                <v-btn
+                    :loading="signingIn"
+                    @click="signIn"
+                >
+                    <v-icon left>
+                        {{ icons.google }}
+                    </v-icon>
                     Sign in with Google
                 </v-btn>
-                <p v-if="authError" class="mt-3 mb-0 error--text">
+                <p
+                    v-if="authError"
+                    class="mt-3 mb-0 error--text"
+                >
                     {{ authError }}
                 </p>
             </div>
@@ -107,11 +131,21 @@
                 hide-details
                 class="mb-3"
             />
-            <v-btn :loading="importing" :disabled="!bookmarkUrl" @click="importFromTheSession">
-                <v-icon left>{{ icons.import }}</v-icon>
+            <v-btn
+                :loading="importing"
+                :disabled="!bookmarkUrl"
+                @click="importFromTheSession"
+            >
+                <v-icon left>
+                    {{ icons.import }}
+                </v-icon>
                 Import bookmarks
             </v-btn>
-            <p v-if="importStatus" class="mt-3 mb-0" :class="importError ? 'error--text' : ''">
+            <p
+                v-if="importStatus"
+                class="mt-3 mb-0"
+                :class="importError ? 'error--text' : ''"
+            >
                 {{ importStatus }}
             </p>
         </v-card>
@@ -143,14 +177,30 @@
                     @change="onGeoTaggingChanged"
                 />
             </v-row>
-            <p v-if="geoStatus" class="mt-3 mb-0" :class="geoError ? 'error--text' : 'text--secondary'">
+            <p
+                v-if="geoStatus"
+                class="mt-3 mb-0"
+                :class="geoError ? 'error--text' : 'text--secondary'"
+            >
                 {{ geoStatus }}
             </p>
-            <v-row v-if="userSettings.geoTagDetections" class="mt-3 pl-2">
-                <v-btn small :loading="geoChecking" @click="checkLocation">
+            <v-row
+                v-if="userSettings.geoTagDetections"
+                class="mt-3 pl-2"
+            >
+                <v-btn
+                    small
+                    :loading="geoChecking"
+                    @click="checkLocation"
+                >
                     Test location
                 </v-btn>
-                <v-btn small text to="/places" class="ml-2">
+                <v-btn
+                    small
+                    text
+                    to="/places"
+                    class="ml-2"
+                >
                     View places
                 </v-btn>
             </v-row>
@@ -206,25 +256,36 @@
                 persistent-hint
                 @change="settingsChanged"
             />
-            <v-simple-table dense class="mt-5 mb-2">
+            <v-simple-table
+                dense
+                class="mt-5 mb-2"
+            >
                 <tbody>
                     <tr>
-                        <td class="text--secondary pr-4">Notes saved</td>
+                        <td class="text--secondary pr-4">
+                            Notes saved
+                        </td>
                         <td>{{ aiSummaryCount === null ? 'checking…' : aiSummaryCount }}</td>
                     </tr>
                     <tr>
-                        <td class="text--secondary pr-4">API calls made</td>
+                        <td class="text--secondary pr-4">
+                            API calls made
+                        </td>
                         <td>{{ aiUsage.calls }}</td>
                     </tr>
                     <tr>
-                        <td class="text--secondary pr-4">Tokens used</td>
+                        <td class="text--secondary pr-4">
+                            Tokens used
+                        </td>
                         <td>
                             {{ aiUsage.inputTokens.toLocaleString() }} in,
                             {{ aiUsage.outputTokens.toLocaleString() }} out
                         </td>
                     </tr>
                     <tr>
-                        <td class="text--secondary pr-4">Approximate spend</td>
+                        <td class="text--secondary pr-4">
+                            Approximate spend
+                        </td>
                         <td>{{ formatUsd(aiUsage.costUsd) }}</td>
                     </tr>
                 </tbody>
@@ -234,19 +295,34 @@
                 guide — your Anthropic console is the real figure.
             </p>
             <v-row class="px-2">
-                <v-btn class="mr-3 mb-2" :disabled="!aiSummaryCount" @click="confirmClearAiSummaries">
+                <v-btn
+                    class="mr-3 mb-2"
+                    :disabled="!aiSummaryCount"
+                    @click="confirmClearAiSummaries"
+                >
                     Clear saved notes
                 </v-btn>
-                <v-btn class="mb-2" text :disabled="!aiUsage.calls" @click="resetAiUsage">
+                <v-btn
+                    class="mb-2"
+                    text
+                    :disabled="!aiUsage.calls"
+                    @click="resetAiUsage"
+                >
                     Reset counters
                 </v-btn>
             </v-row>
-            <p v-if="aiMessage" class="mt-2 mb-0">
+            <p
+                v-if="aiMessage"
+                class="mt-2 mb-0"
+            >
                 {{ aiMessage }}
             </p>
         </v-card>
 
-        <v-dialog v-model="clearAiDialog" max-width="360">
+        <v-dialog
+            v-model="clearAiDialog"
+            max-width="360"
+        >
             <v-card>
                 <v-card-title>Clear saved notes?</v-card-title>
                 <v-card-text>
@@ -256,8 +332,19 @@
                 </v-card-text>
                 <v-card-actions>
                     <v-spacer />
-                    <v-btn text @click="clearAiDialog = false">Cancel</v-btn>
-                    <v-btn text color="red" @click="clearAiSummaries">Delete</v-btn>
+                    <v-btn
+                        text
+                        @click="clearAiDialog = false"
+                    >
+                        Cancel
+                    </v-btn>
+                    <v-btn
+                        text
+                        color="red"
+                        @click="clearAiSummaries"
+                    >
+                        Delete
+                    </v-btn>
                 </v-card-actions>
             </v-card>
         </v-dialog>
@@ -271,12 +358,22 @@
                 restore them on another device.
             </p>
             <v-row class="px-2">
-                <v-btn class="mr-3 mb-2" @click="downloadUserData">
-                    <v-icon left>{{ icons.download }}</v-icon>
+                <v-btn
+                    class="mr-3 mb-2"
+                    @click="downloadUserData"
+                >
+                    <v-icon left>
+                        {{ icons.download }}
+                    </v-icon>
                     Download User Data
                 </v-btn>
-                <v-btn class="mb-2" @click="$refs.restoreInput.click()">
-                    <v-icon left>{{ icons.upload }}</v-icon>
+                <v-btn
+                    class="mb-2"
+                    @click="$refs.restoreInput.click()"
+                >
+                    <v-icon left>
+                        {{ icons.upload }}
+                    </v-icon>
                     Restore User Data
                 </v-btn>
                 <input
@@ -287,7 +384,10 @@
                     @change="restoreUserData"
                 >
             </v-row>
-            <p v-if="restoreMessage" class="mt-2 mb-0">
+            <p
+                v-if="restoreMessage"
+                class="mt-2 mb-0"
+            >
                 {{ restoreMessage }}
             </p>
         </v-card>
@@ -297,12 +397,24 @@
                 Offline Tune Database
             </h1>
 
-            <v-alert v-if="offlineReady === false" dense text type="warning" class="mb-4">
+            <v-alert
+                v-if="offlineReady === false"
+                dense
+                text
+                type="warning"
+                class="mb-4"
+            >
                 {{ offlineSummary }}. Tune search will not work without a
                 connection. Tap <strong>Save offline copy</strong> below while
                 you have Wi-Fi.
             </v-alert>
-            <v-alert v-else-if="offlineReady === true" dense text type="success" class="mb-4">
+            <v-alert
+                v-else-if="offlineReady === true"
+                dense
+                text
+                type="success"
+                class="mb-4"
+            >
                 Ready to use offline — {{ offlineSummary }}{{ offlineSavedLabel }}.
             </v-alert>
 
@@ -311,7 +423,11 @@
                 one off does not delete its saved copy.
             </p>
 
-            <div v-for="row in datasetRows" :key="row.id" class="datasetRow">
+            <div
+                v-for="row in datasetRows"
+                :key="row.id"
+                class="datasetRow"
+            >
                 <v-checkbox
                     v-model="selectedDatasets"
                     :value="row.id"
@@ -333,7 +449,9 @@
                     >
                         Remove
                     </v-btn>
-                    <div class="caption text--secondary">{{ row.description }}</div>
+                    <div class="caption text--secondary">
+                        {{ row.description }}
+                    </div>
                     <v-progress-linear
                         v-if="row.downloading"
                         :indeterminate="downloadPercent === null"
@@ -345,40 +463,88 @@
                 </div>
             </div>
 
-            <v-simple-table dense class="mb-4 mt-3">
+            <div class="mb-3">
+                <v-btn
+                    small
+                    text
+                    @click="addDialog = true"
+                >
+                    <v-icon
+                        left
+                        small
+                    >
+                        {{ icons.plus }}
+                    </v-icon>
+                    Add a database
+                </v-btn>
+                <span class="caption text--secondary">
+                    from a file or a link
+                </span>
+            </div>
+
+            <v-simple-table
+                dense
+                class="mb-4 mt-3"
+            >
                 <tbody>
                     <tr>
-                        <td class="text--secondary pr-4">Storage</td>
+                        <td class="text--secondary pr-4">
+                            Storage
+                        </td>
                         <td>
                             <span v-if="storageIsPersistent === null">checking…</span>
-                            <span v-else-if="storageIsPersistent" class="success--text">protected from clearing</span>
-                            <span v-else class="warning--text">may be cleared by browser</span>
-                            <span v-if="storageUsageLabel" class="text--secondary">
+                            <span
+                                v-else-if="storageIsPersistent"
+                                class="success--text"
+                            >protected from clearing</span>
+                            <span
+                                v-else
+                                class="warning--text"
+                            >may be cleared by browser</span>
+                            <span
+                                v-if="storageUsageLabel"
+                                class="text--secondary"
+                            >
                                 · {{ storageUsageLabel }}
                             </span>
                         </td>
                     </tr>
                     <tr>
-                        <td class="text--secondary pr-4">In-memory index</td>
+                        <td class="text--secondary pr-4">
+                            In-memory index
+                        </td>
                         <td>
-                            <span v-if="indexStatus === 'ready'" class="success--text">
+                            <span
+                                v-if="indexStatus === 'ready'"
+                                class="success--text"
+                            >
                                 {{ inMemoryLabel }}
                             </span>
                             <span v-else-if="indexStatus === 'downloading'">
                                 downloading{{ downloadPercentLabel }}…
                             </span>
-                            <span v-else-if="indexStatus === 'unavailable'" class="warning--text">unavailable</span>
+                            <span
+                                v-else-if="indexStatus === 'unavailable'"
+                                class="warning--text"
+                            >unavailable</span>
                             <span v-else>loading…</span>
                         </td>
                     </tr>
                     <tr v-if="offlineStatusMessage">
-                        <td class="text--secondary pr-4">Note</td>
-                        <td class="warning--text">{{ offlineStatusMessage }}</td>
+                        <td class="text--secondary pr-4">
+                            Note
+                        </td>
+                        <td class="warning--text">
+                            {{ offlineStatusMessage }}
+                        </td>
                     </tr>
                 </tbody>
             </v-simple-table>
 
-            <p v-if="storageIsPersistent === false" class="mt-0 mb-4 caption">
+            <p
+                v-if="storageIsPersistent === false"
+                class="mt-0 mb-4 caption"
+            >
                 The browser may clear tune data under storage pressure.
                 Add FolkFriend to your Home Screen to make offline storage
                 permanent.
@@ -399,7 +565,9 @@
                 color="primary"
                 @click="saveOfflineCopy"
             >
-                <v-icon left>{{ icons.download }}</v-icon>
+                <v-icon left>
+                    {{ icons.download }}
+                </v-icon>
                 {{ offlineReady ? 'Update offline copies' : 'Save offline copy' }}
             </v-btn>
             <v-progress-linear
@@ -410,11 +578,104 @@
                 height="6"
                 rounded
             />
-            <p v-if="refreshMessage" class="mt-3 mb-0">
+            <p
+                v-if="refreshMessage"
+                class="mt-3 mb-0"
+            >
                 {{ refreshMessage }}
             </p>
 
-            <v-dialog v-model="removeDialog" max-width="420">
+            <v-dialog
+                v-model="addDialog"
+                max-width="520"
+            >
+                <v-card>
+                    <v-card-title class="text-h6">
+                        Add a tune database
+                    </v-card-title>
+                    <v-card-text>
+                        <p class="mb-4">
+                            Not every database can be hosted by FolkFriend —
+                            some collections may not be redistributed. If you
+                            have a database file, or a link to one, you can add
+                            it here.
+                        </p>
+
+                        <v-btn
+                            small
+                            outlined
+                            class="mb-2"
+                            @click="pickDatasetFile"
+                        >
+                            <v-icon
+                                left
+                                small
+                            >
+                                {{ icons.upload }}
+                            </v-icon>
+                            Choose a file…
+                        </v-btn>
+                        <input
+                            ref="datasetFileInput"
+                            type="file"
+                            accept="application/json,.json"
+                            class="hiddenFileInput"
+                            @change="onDatasetFileChosen"
+                        >
+
+                        <p class="caption text--secondary mb-4">
+                            A .json database file on this device.
+                        </p>
+
+                        <v-text-field
+                            v-model="addDatasetUrl"
+                            label="…or paste a link"
+                            placeholder="https://example.com/my-tunes.json"
+                            dense
+                            :disabled="addingDataset"
+                            hide-details="auto"
+                        />
+                        <p class="caption text--secondary mt-1 mb-0">
+                            The link is saved so the database can be updated
+                            from it later.
+                        </p>
+
+                        <v-alert
+                            v-if="addDatasetError"
+                            dense
+                            text
+                            type="warning"
+                            class="mt-4 mb-0"
+                        >
+                            {{ addDatasetError }}
+                        </v-alert>
+                    </v-card-text>
+                    <v-card-actions>
+                        <v-spacer />
+                        <v-btn
+                            text
+                            :disabled="addingDataset"
+                            @click="closeAddDialog"
+                        >
+                            Cancel
+                        </v-btn>
+                        <v-btn
+                            color="primary"
+                            text
+                            :loading="addingDataset"
+                            :disabled="addingDataset || !addDatasetUrl"
+                            @click="addDatasetFromUrl"
+                        >
+                            Add from link
+                        </v-btn>
+                    </v-card-actions>
+                </v-card>
+            </v-dialog>
+
+            <v-dialog
+                v-model="removeDialog"
+                max-width="420"
+            >
                 <v-card v-if="removeTarget">
                     <v-card-title class="text-h6">
                         Remove {{ removeTarget.label }}?
@@ -426,8 +687,19 @@
                     </v-card-text>
                     <v-card-actions>
                         <v-spacer />
-                        <v-btn text @click="removeDialog = false">Cancel</v-btn>
-                        <v-btn color="error" text @click="removeDataset">Remove</v-btn>
+                        <v-btn
+                            text
+                            @click="removeDialog = false"
+                        >
+                            Cancel
+                        </v-btn>
+                        <v-btn
+                            color="error"
+                            text
+                            @click="removeDataset"
+                        >
+                            Remove
+                        </v-btn>
                     </v-card-actions>
                 </v-card>
             </v-dialog>
@@ -450,7 +722,9 @@
                 </v-icon>
             </p>
             <div v-else-if="ua.isSafari && ua.isMobile">
-                <p class="mb-1">On iOS Safari,</p>
+                <p class="mb-1">
+                    On iOS Safari,
+                </p>
                 <ul>
                     <li>
                         Tap <v-icon class="pb-2">
@@ -466,7 +740,9 @@
                 </ul>
             </div>
             <div v-else-if="ua.isChrome && ua.isMobile">
-                <p class="mb-1">On Chrome mobile,</p>
+                <p class="mb-1">
+                    On Chrome mobile,
+                </p>
                 <ul>
                     <li>
                         Tap <v-icon class="pb-1">
@@ -481,7 +757,9 @@
                 </ul>
             </div>
             <div v-else-if="ua.isChrome && !ua.isMobile">
-                <p class="mb-1">On Chrome desktop,</p>
+                <p class="mb-1">
+                    On Chrome desktop,
+                </p>
                 <ul>
                     <li>
                         Tap <v-icon class="pb-1">
@@ -525,6 +803,7 @@ import {
     mdiImport,
     mdiLogout,
     // mdiMonitorArrowDownVariant,
+    mdiPlus,
     mdiPlusBoxOutline,
     mdiRefresh,
     mdiUpload,
@@ -604,6 +883,7 @@ export default {
             eyeOff: mdiEyeOff,
             refresh: mdiRefresh,
             upload: mdiUpload,
+            plus: mdiPlus,
         },
         settingsLoaded: false,
         userSettings: store.userSettings,
@@ -639,14 +919,23 @@ export default {
         // provided its settings carry `source_url` (nothing else can derive a
         // link for it). Shipping a release adds the label and description.
         datasetRows() {
+            const manifests = (this.datasetInventory && this.datasetInventory.datasets) || {};
+            const detail = this.indexStatusDetail || {};
+            const errors = detail.datasetErrors || {};
+
             const ids = [...KNOWN_DATASETS];
             for (const entry of (this.datasetsRemote || [])) {
                 if (!ids.includes(entry.id)) ids.push(entry.id);
             }
-
-            const manifests = (this.datasetInventory && this.datasetInventory.datasets) || {};
-            const detail = this.indexStatusDetail || {};
-            const errors = detail.datasetErrors || {};
+            // An imported dataset is in neither list — that is what makes it
+            // imported — so pick it up from what is actually saved and from
+            // what the user has selected.
+            for (const id of Object.keys(manifests)) {
+                if (!ids.includes(id)) ids.push(id);
+            }
+            for (const id of this.selectedDatasets) {
+                if (!ids.includes(id)) ids.push(id);
+            }
 
             return ids.map(id => {
                 const label = DATASET_LABELS[id] || id;
@@ -914,6 +1203,56 @@ export default {
             }
             await this._refreshOfflineStatus();
         },
+        closeAddDialog() {
+            this.addDialog = false;
+            this.addDatasetUrl = '';
+            this.addDatasetError = null;
+        },
+        pickDatasetFile() {
+            this.addDatasetError = null;
+            this.$refs.datasetFileInput.click();
+        },
+        async onDatasetFileChosen(event) {
+            const file = event.target.files && event.target.files[0];
+            // Cleared immediately so picking the same file twice still fires.
+            event.target.value = '';
+            if (!file) return;
+            await this._addDataset({ text: await file.text() },
+                                   `Added ${file.name}`);
+        },
+        async addDatasetFromUrl() {
+            if (!this.addDatasetUrl) return;
+            await this._addDataset({ url: this.addDatasetUrl.trim() },
+                                   'Added from the link');
+        },
+        async _addDataset(source, successPrefix) {
+            this.addingDataset = true;
+            this.addDatasetError = null;
+            try {
+                const result = await ffBackend.addUserDataset(source);
+                if (!result.ok) {
+                    this.addDatasetError = result.error;
+                    return;
+                }
+                // The worker selected it; persist that so it survives a restart.
+                if (!this.selectedDatasets.includes(result.id)) {
+                    this.selectedDatasets = [...this.selectedDatasets, result.id];
+                }
+                this.userSettings.tuneDatasets = [...this.selectedDatasets];
+                await store.updateUserSettings(this.userSettings);
+
+                this.refreshMessage = result.persistError
+                    ? `${successPrefix} (${result.label}), but it could not be `
+                        + `saved for offline use: ${result.persistError}`
+                    : `${successPrefix} — ${result.label} is ready.`;
+                this.closeAddDialog();
+                await this._refreshOfflineStatus();
+            } catch (e) {
+                this.addDatasetError = (e && e.message) || String(e);
+            } finally {
+                this.addingDataset = false;
+            }
+        },
         confirmRemoveDataset(row) {
             this.removeTarget = row;
             this.removeDialog = true;
@@ -1151,6 +1490,16 @@ export default {
 </script>
 
 <style scoped>
+/* The real file input is driven by a styled button, so it must not be
+   `display: none` — Safari will not open the picker for a hidden input. */
+.hiddenFileInput {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
 /* One dataset per row: checkbox on the left, status and description stacked
    beside it. Target is three readable lines, not a wall of table rows — the
    per-dataset status replaces what used to be separate "Saved version" and

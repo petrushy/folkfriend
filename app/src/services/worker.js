@@ -3,6 +3,7 @@ import ffConfig from '@/ffConfig';
 import {
     readDataset,
     readDatasets,
+    readDatasetManifest,
     readOfflineInventory,
     readMergedLegacyIndex,
     writeDataset,
@@ -14,6 +15,7 @@ import {
 import {
     fetchDatasetsManifest,
     fetchDatasetText,
+    fetchUserDatasetText,
     isDefinitelyOffline,
     NetworkUnavailableError,
 } from '@/services/tuneIndexNetwork';
@@ -621,12 +623,30 @@ class FolkFriendWASMWrapper {
         const work = [];
         for (const id of ids) {
             const entry = manifest.byId.get(id);
-            if (!entry) {
-                failed[id] = 'not published';
-                console.warn(`Dataset ${id} is not in datasets.json; skipping`);
+            if (entry) {
+                work.push(entry);
                 continue;
             }
-            work.push(entry);
+            // Not in datasets.json. That is normal for a dataset the user
+            // added by hand: it has no manifest entry by definition. If its
+            // stored manifest remembers a URL we can refresh it from there;
+            // otherwise there is nothing to fetch and saying "not published"
+            // would be both wrong and unactionable.
+            const local = await readDatasetManifest(id);
+            if (local && local.origin === 'user') {
+                if (local.url) {
+                    work.push({
+                        id, url: local.url, v: local.v || 0,
+                        date: local.date || null, size: local.bytes || 0,
+                        origin: 'user', label: local.label || id,
+                    });
+                } else {
+                    failed[id] = 'added from a file — re-import it to update';
+                }
+                continue;
+            }
+            failed[id] = 'not published';
+            console.warn(`Dataset ${id} is not in datasets.json; skipping`);
         }
 
         // Largest first. During a migration the first successful load replaces
@@ -645,27 +665,30 @@ class FolkFriendWASMWrapper {
             const entry = work[i];
             let raw = null;
             try {
-                raw = await fetchDatasetText(
-                    entry.filename, bypassCacheVersion, ({ received }) => {
-                        const now = Date.now();
-                        if (now - lastReport < 250) return;
-                        lastReport = now;
-                        // Clamp to this dataset's published size. `received`
-                        // counts DECODED bytes while `size` is the uncompressed
-                        // length from datasets.json; they agree in production
-                        // (the data repo asserts it) but a stale manifest must
-                        // not make the bar overshoot.
-                        const inFlight = entry.size
-                            ? Math.min(received, entry.size)
-                            : received;
-                        this._setIndexStatus(INDEX_STATUS.DOWNLOADING, {
-                            received: completedBytes + inFlight,
-                            total: plannedTotal,
-                            dataset: entry.id,
-                            datasetIndex: i + 1,
-                            datasetCount: work.length,
-                        });
+                const download = entry.url
+                    ? (onProgress) => fetchUserDatasetText(entry.url, onProgress)
+                    : (onProgress) => fetchDatasetText(
+                        entry.filename, bypassCacheVersion, onProgress);
+                raw = await download(({ received }) => {
+                    const now = Date.now();
+                    if (now - lastReport < 250) return;
+                    lastReport = now;
+                    // Clamp to this dataset's published size. `received`
+                    // counts DECODED bytes while `size` is the uncompressed
+                    // length from datasets.json; they agree in production
+                    // (the data repo asserts it) but a stale manifest must
+                    // not make the bar overshoot.
+                    const inFlight = entry.size
+                        ? Math.min(received, entry.size)
+                        : received;
+                    this._setIndexStatus(INDEX_STATUS.DOWNLOADING, {
+                        received: completedBytes + inFlight,
+                        total: plannedTotal,
+                        dataset: entry.id,
+                        datasetIndex: i + 1,
+                        datasetCount: work.length,
                     });
+                });
 
                 // A parse failure lands here with nothing written: truncated
                 // bodies, HTML error pages and captive-portal interception all
@@ -683,6 +706,18 @@ class FolkFriendWASMWrapper {
                 const problem = indexPayloadProblem(parsed);
                 if (problem) {
                     throw new Error(`not usable (${problem})`);
+                }
+
+                // An imported dataset describes ITSELF — there is no
+                // datasets.json entry to describe it — so its version comes
+                // from the file just fetched, not from the stale local
+                // manifest we used to find the URL.
+                if (entry.origin === 'user') {
+                    entry.v = Number(parsed.v) || entry.v || 0;
+                    entry.date = parsed.date || entry.date || null;
+                    if (typeof parsed.label === 'string' && parsed.label) {
+                        entry.label = parsed.label;
+                    }
                 }
 
                 const part = { id: entry.id, index: splitIndexPayload(parsed) };
@@ -717,8 +752,17 @@ class FolkFriendWASMWrapper {
 
                 // --- Only now may this dataset's previous copy be replaced ---
                 try {
-                    await writeDataset(entry.id, raw,
-                        { v: entry.v || 0, date: entry.date || null });
+                    // Carry the provenance through a refresh. Dropping it would
+                    // turn an imported dataset back into an unknown one: the
+                    // next update check would call it "not published" and its
+                    // name would revert to its raw id.
+                    await writeDataset(entry.id, raw, {
+                        v: entry.v || 0,
+                        date: entry.date || null,
+                        origin: entry.origin || undefined,
+                        label: entry.label,
+                        url: entry.url,
+                    });
                 } catch (e) {
                     // It works for this session; it just will not survive a
                     // restart. Surfaced in Settings rather than swallowed,
@@ -1092,6 +1136,94 @@ class FolkFriendWASMWrapper {
             // downloading forever.
             this._restoreAfterFailedInstall(snapshot, e);
             if (cb) cb({ ok: false, error: (e && e.message) || String(e) });
+        }
+    }
+
+    // Install a dataset the USER supplied, from a file they picked or a URL
+    // they typed, rather than from the published manifest.
+    //
+    // This exists so FolkFriend does not have to host every dataset it can
+    // search. Norbeck's collection may not be made available for download on a
+    // web page, so it is built but never served: you import the file yourself.
+    // The same path lets anyone add a collection of their own.
+    //
+    // Same order as every other install — parse → structural check → load into
+    // WASM → write — because it replaces a copy just as irrecoverably.
+    // `text` and `url` are alternatives; a url is fetched here rather than in
+    // the page so the 3 MB body never crosses the Comlink boundary.
+    async addUserDataset({ text = null, url = null }, cb) {
+        const done = (result) => { if (cb) cb(result); return result; };
+        const snapshot = this._snapshotIndexState();
+
+        let raw = text;
+        try {
+            if (raw === null) {
+                if (!url) throw new Error('No file or URL given');
+                this._setIndexStatus(INDEX_STATUS.DOWNLOADING,
+                    { received: 0, total: 0 });
+                raw = await fetchUserDatasetText(url);
+            }
+
+            let parsed;
+            try {
+                parsed = JSON.parse(raw);
+            } catch (e) {
+                throw new Error('That file is not JSON.');
+            }
+
+            const problem = indexPayloadProblem(parsed);
+            if (problem) {
+                throw new Error(`That file is not a tune database (${problem}).`);
+            }
+
+            // Published datasets are described by their datasets.json entry.
+            // An imported file has none, so it has to describe itself — see
+            // the stamping in the data repo's assemble_datasets.py.
+            const id = typeof parsed.id === 'string' ? parsed.id.trim() : '';
+            if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(id)) {
+                throw new Error(
+                    'That file does not say which database it is (no usable '
+                    + '"id" field), so it cannot be added.');
+            }
+            const label = (typeof parsed.label === 'string' && parsed.label)
+                ? parsed.label
+                : id;
+
+            const part = { id, index: splitIndexPayload(parsed) };
+            const others = await this._partsToKeep(id, []);
+            const base = await this._migrationBase(
+                [id, ...others.map(p => p.id)]);
+            await this.loadMergedIndex([...base, ...others, part]);
+
+            let persistError = null;
+            try {
+                await writeDataset(id, raw, {
+                    v: Number(parsed.v) || 0,
+                    date: parsed.date || null,
+                    origin: 'user',
+                    label,
+                    url: url || null,
+                });
+            } catch (e) {
+                persistError = (e && e.message) || String(e);
+            }
+            raw = null;
+
+            if (!this.selectedDatasets.includes(id)) {
+                this.selectedDatasets = [...this.selectedDatasets, id];
+            }
+            await this._afterInstall(
+                { [id]: { v: Number(parsed.v) || 0, date: parsed.date || null } },
+                {},
+                persistError ? { [id]: persistError } : {});
+
+            return done({ ok: true, id, label, persistError });
+        } catch (e) {
+            // Nothing durable changed: the write is the last step and anything
+            // that threw got there first. Put the status back so the UI does
+            // not sit on 'downloading' forever.
+            this._restoreAfterFailedInstall(snapshot, e);
+            return done({ ok: false, error: (e && e.message) || String(e) });
         }
     }
 

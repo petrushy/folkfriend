@@ -149,6 +149,43 @@ must never cost the user their thesession copy. Every delete in
 `tune-index-cache.test.mjs` seeds all three datasets and asserts all three
 survive an interruption at every storage operation of an update to *one*.
 
+### Datasets the app does not host
+
+**Not every dataset FolkFriend can search is one it may distribute.** Norbeck's
+terms forbid making the ABC files available for download on a web page, so that
+dataset is built by the data repo but never published: it is absent from
+`datasets.json`, absent from `public/`, and `assemble_datasets.py` writes a
+`PUBLISHED_FILES.txt` that `build.sh` obeys so it cannot be deployed by accident.
+
+The way in is **Settings → "Add a database"**, which takes either a file the
+user picks or a URL they supply (`worker.addUserDataset`). Same order as every
+other install — parse → `indexPayloadProblem` → load into WASM → write — because
+it replaces a copy just as irrecoverably. A URL is fetched **inside the worker**
+so a 3 MB body never crosses the Comlink boundary.
+
+Three things this needs that a published dataset does not:
+
+- **The file must be self-describing.** There is no `datasets.json` entry to say
+  what it is, so `assemble_datasets.py` stamps `id`, `label`, `description`, `v`
+  and `date` into every dataset file. An import with no usable `id` is refused —
+  there would be nothing to store it under and nothing to call it.
+- **Its manifest records provenance** (`origin: 'user'`, `label`, and the `url`
+  if there was one). Without it the next update check would call the dataset
+  "not published" — permanently, and unactionably — and its name would revert to
+  its raw id. `_installDatasets` carries these through a refresh for the same
+  reason, and takes the version from the *fetched file* rather than the stale
+  local manifest, because the file is the thing that describes itself.
+- **A cross-origin URL usually will not work**, and the browser reports it as a
+  bare "Failed to fetch" that is indistinguishable from being offline. Most
+  hosts send no `Access-Control-Allow-Origin`. `fetchUserDatasetText` translates
+  that into an explanation naming CORS and pointing at the file route, which
+  always works. This will otherwise be the single most common confusion with the
+  feature.
+
+`KNOWN_DATASETS` in `store.js` is only for labels and defaults — an imported id
+is not in it, which is why `sanitiseDatasets` keeps unknown ids and
+`datasetForTuneID` passes an unrecognised label through untouched.
+
 ### Partial success is READY
 
 With two of three selected datasets loaded, queries work and return real tunes,
