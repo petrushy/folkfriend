@@ -1403,6 +1403,92 @@ async function run() {
         await assertOfflineCopyIs('thesession', 'v1', 1, 'after a refused import');
     });
 
+    await test('an import that reuses another dataset\'s TUNE ids is refused', async () => {
+        // Fresh setting ids but recycled tune ids used to pass every check.
+        // The damage is worse than a setting clash: the later dataset's
+        // aliases overwrite the earlier tune's NAME, datasetByTune relabels
+        // its source, and Rust groups both datasets' settings under one tune.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        const base = JSON.parse(makeIndex('thesession', 'clash'));
+        const settings = {};
+        for (const [sid, setting] of Object.entries(base.settings)) {
+            // Move every setting id well clear of thesession's, but keep the
+            // tune ids exactly as they are.
+            settings[String(9_900_000 + Number(sid))] = setting;
+        }
+        const tuneClash = JSON.stringify({
+            settings, aliases: base.aliases,
+            id: 'tuneclash', label: 'Tune Clash', v: 1, date: '2026-01-01',
+        });
+
+        const result = await new Promise(
+            r => wrapper.addUserDataset({ text: tuneClash }, r));
+        assert.equal(result.ok, false,
+            'a dataset recycling tune ids must be refused');
+        assert.match(result.error, /tune IDs/i);
+
+        // The real dataset is intact and still owns its tunes.
+        const found = await new Promise(r => wrapper.settingsFromTuneID('0', r));
+        assert.ok(found.length > 0);
+        assert.equal(found[0].dataset, 'thesession');
+    });
+
+    await test('a refresh that starts colliding is refused too', async () => {
+        // The URL is remembered and is not under our control: a payload that
+        // was clean when it was added can start colliding later, and the
+        // refresh path used to merely log it and persist anyway.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const url = 'https://example.invalid/mine.json';
+        netMod.__net.bodies[url] = makeSelfDescribing('norbeck', 'v1');
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        await new Promise(r => wrapper.addUserDataset({ url }, r));
+        await assertOfflineCopyIs('norbeck', 'v1', 42, 'imported');
+
+        // Same id, but now it claims thesession's setting ids.
+        netMod.__net.bodies[url] = JSON.stringify({
+            ...JSON.parse(makeIndex('thesession', 'stolen')),
+            id: 'norbeck', label: 'Norbeck', v: 99, date: '2026-09-01',
+        });
+        const refresh = await new Promise(
+            r => wrapper.refreshTuneIndex(['norbeck'], r));
+        const why = (refresh.failed || {}).norbeck || refresh.error || '';
+        assert.match(why, /reuses/i, `expected a collision refusal, got: ${why}`);
+        await assertOfflineCopyIs('norbeck', 'v1', 42,
+            'the previous copy must survive a colliding refresh');
+        await assertOfflineCopyIs('thesession', 'v1', 1, 'the victim dataset');
+
+        // ...and the rejected payload is not left loaded in WASM.
+        const found = await new Promise(r => wrapper.settingsFromTuneID('0', r));
+        assert.ok(found.length > 0);
+        assert.equal(found[0].dataset, 'thesession',
+            'the refused payload is still loaded in WASM');
+    });
+
+    await test('a refresh whose payload has no id at all is refused', async () => {
+        // Imported datasets are REQUIRED to be self-describing, so "says
+        // nothing" is not a lenient case — it is a file that cannot prove it
+        // is still the same collection.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const url = 'https://example.invalid/anon.json';
+        netMod.__net.bodies[url] = makeSelfDescribing('norbeck', 'v1');
+        const wrapper = await newWorker({ datasets: [] });
+        await new Promise(r => wrapper.addUserDataset({ url }, r));
+
+        netMod.__net.bodies[url] = makeIndex('norbeck', 'anonymous'); // no id
+        const refresh = await new Promise(
+            r => wrapper.refreshTuneIndex(['norbeck'], r));
+        const why = (refresh.failed || {}).norbeck || refresh.error || '';
+        assert.match(why, /no id/i, `expected an identity refusal, got: ${why}`);
+        await assertOfflineCopyIs('norbeck', 'v1', 42, 'after an anonymous refresh');
+    });
+
     await test('an import that reuses another dataset\'s IDs is refused', async () => {
         // IDs are global and a collision does not fail loudly — one record
         // shadows the other. Favourites are keyed by setting id alone, so a

@@ -945,9 +945,19 @@ export default {
             }
 
             return ids.map(id => {
-                const label = DATASET_LABELS[id] || id;
-                const description = DATASET_DESCRIPTIONS[id] || '';
                 const manifest = manifests[id] || null;
+                // An imported dataset carries its own name in its manifest —
+                // it has no datasets.json entry and this build may know nothing
+                // about it. Falling straight through to the raw id showed the
+                // user an opaque machine name moments after telling them
+                // "Norbeck is ready".
+                const label = DATASET_LABELS[id]
+                    || (manifest && manifest.label)
+                    || id;
+                const description = DATASET_DESCRIPTIONS[id]
+                    || ((manifest && manifest.origin === 'user')
+                        ? `Added by you from a ${manifest.url ? 'link' : 'file'}`
+                        : '');
                 const remote = (this.datasetsRemote || []).find(e => e.id === id) || null;
                 const selected = this.selectedDatasets.includes(id);
                 const downloading = this.indexStatus === 'downloading'

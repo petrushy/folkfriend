@@ -191,14 +191,29 @@ Three things this needs that a published dataset does not:
 - **It cannot impersonate a published dataset.** Storing under `thesession`
   would put an unvetted file behind a name the app manages, to be overwritten —
   or not — by the next CDN update depending on ordering.
-- **It cannot reuse another dataset's IDs.** IDs are global and a collision does
-  not fail loudly: one record shadows the other, and since favourites are keyed
-  by setting id alone, a colliding import can make a favourite open the wrong
-  tune or appear already-favourited. For a CDN file a collision is a data-repo
-  bug we report and continue past; for an arbitrary import it is a refusal.
-- **A refresh cannot change what the dataset IS.** The remembered URL is not
-  under our control, so a payload whose `id` no longer matches is rejected
-  rather than stored under the original id beneath the user's favourites.
+- **It cannot reuse another dataset's IDs — setting *or* tune.** `mergeIndexParts`
+  counts the two separately, because they fail differently. A setting clash
+  hides one setting; a **tune** clash is worse — the later dataset's aliases
+  overwrite the earlier tune's NAME, its `datasetByTune` entry relabels the
+  source, and Rust groups both datasets' settings under one tune. Counting only
+  setting ids let a dataset with fresh setting ids but recycled tune ids pass
+  every check. Since favourites are keyed by setting id alone, the visible
+  symptom either way is a favourite opening the wrong tune.
+
+  For a CDN file a collision stays a warning — denying the user their whole
+  index over a data-repo bug is not proportionate. For an import it is a
+  refusal, and the previously loaded index is reloaded from disk.
+- **Both checks run on EVERY fetch, not just the first.** The remembered URL is
+  not under our control, so a payload that was clean when it was added can start
+  colliding later; the refresh path used to merely log it and persist anyway.
+- **A refresh cannot change what the dataset IS.** Identity is checked by exact
+  equality (`servedId === entry.id`), not "different if it says anything". An
+  imported dataset is required to be self-describing, so a payload with no `id`
+  is not a lenient case — it is a file that cannot prove it is still the same
+  collection.
+- **A rejected payload is unloaded again.** It has already been merged into WASM
+  by the time it is judged, so the previous selection is reloaded from disk;
+  otherwise the session keeps searching data we just refused to save.
 - **`source_url` is scheme-checked** (`safeSourceUrl`) and escaped where it is
   interpolated. It reaches `href` attributes and the exported favourites HTML,
   which people share — `javascript:` and `data:` are both markup-injection

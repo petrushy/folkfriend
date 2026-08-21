@@ -83,7 +83,8 @@ export function mergeIndexParts(parts) {
                 datasetByTune[tuneID] = part.id;
             }
         }
-        return { ...part.index, datasetByTune, collisions: 0, empty: [] };
+        return { ...part.index, datasetByTune, collisions: 0,
+            tuneCollisions: 0, empty: [] };
     }
 
     const settings = {};
@@ -91,7 +92,14 @@ export function mergeIndexParts(parts) {
     const abcStrings = {};
     const sourceUrls = {};
     const datasetByTune = {};
+    // Counted SEPARATELY. A setting-id clash hides one setting; a tune-id
+    // clash is worse — the later dataset's aliases overwrite the earlier
+    // tune's NAME, its datasetByTune entry relabels the source, and the Rust
+    // side groups both datasets' settings under one tune. Counting only
+    // setting ids let a dataset with fresh setting ids but recycled tune ids
+    // pass every check.
     let collisions = 0;
+    let tuneCollisions = 0;
     const empty = [];
 
     // Dataset files first, the merged base last — it only fills what they left.
@@ -122,7 +130,13 @@ export function mergeIndexParts(parts) {
         // once a base is present, since the base already holds everything.
         if (added === 0 && !base && !hasBase) empty.push(part.id);
 
-        assignMissing(aliases, (part.index.indexData && part.index.indexData.aliases) || {}, base);
+        const partAliases = (part.index.indexData && part.index.indexData.aliases) || {};
+        if (!base) {
+            for (const tuneID in partAliases) {
+                if (aliases[tuneID] !== undefined) tuneCollisions++;
+            }
+        }
+        assignMissing(aliases, partAliases, base);
         assignMissing(abcStrings, part.index.abcStrings || {}, base);
         assignMissing(sourceUrls, part.index.sourceUrls || {}, base);
 
@@ -131,6 +145,10 @@ export function mergeIndexParts(parts) {
         // range, which is exactly what that fallback is for.
         if (!base) {
             for (const tuneID of part.index.tuneIDs || []) {
+                if (datasetByTune[tuneID] !== undefined
+                    && datasetByTune[tuneID] !== part.id) {
+                    tuneCollisions++;
+                }
                 datasetByTune[tuneID] = part.id;
             }
         }
@@ -142,6 +160,7 @@ export function mergeIndexParts(parts) {
         sourceUrls,
         datasetByTune,
         collisions,
+        tuneCollisions,
         empty,
     };
 }
@@ -664,6 +683,7 @@ class FolkFriendWASMWrapper {
         for (let i = 0; i < work.length; i++) {
             const entry = work[i];
             let raw = null;
+            let loadedThisEntry = false;
             try {
                 const download = entry.url
                     ? (onProgress) => fetchUserDatasetText(entry.url, onProgress)
@@ -718,11 +738,16 @@ class FolkFriendWASMWrapper {
                     // storing that under the original id would silently swap
                     // one collection for another beneath the user's
                     // favourites.
+                    // Exact equality, not "different if it says anything".
+                    // An imported dataset is REQUIRED to be self-describing, so
+                    // a payload with no id is not a lenient case — it is a file
+                    // that cannot prove it is still the same collection.
                     const servedId = typeof parsed.id === 'string'
                         ? parsed.id.trim() : '';
-                    if (servedId && servedId !== entry.id) {
+                    if (servedId !== entry.id) {
                         throw new Error(
-                            `that link now serves "${servedId}", not `
+                            `that link now serves ${servedId
+                                ? `"${servedId}"` : 'a file with no id'}, not `
                             + `"${entry.id}"`);
                     }
                     entry.v = Number(parsed.v) || entry.v || 0;
@@ -755,7 +780,13 @@ class FolkFriendWASMWrapper {
                 // the one loaded in WASM (use_tune_index runs only after serde
                 // has deserialised the whole thing) and every offline copy is
                 // still on disk.
+                loadedThisEntry = true;
                 const merged = await this.loadMergedIndex([...base, ...others, part]);
+                // An imported dataset is untrusted on every fetch, not only the
+                // first: the URL is remembered and its contents can change.
+                if (entry.origin === 'user') {
+                    this._assertNoCollisions(merged, entry.id);
+                }
                 if (merged.empty.includes(entry.id)) {
                     throw new Error(
                         'duplicate of an already-loaded dataset — check the '
@@ -789,6 +820,12 @@ class FolkFriendWASMWrapper {
             } catch (e) {
                 console.warn(`Dataset ${entry.id} failed to install`, e);
                 failed[entry.id] = (e && e.message) || String(e);
+                if (loadedThisEntry) {
+                    // A rejected payload is already in WASM. Put back what the
+                    // selection actually says, from disk, or the session keeps
+                    // searching data we just refused to save.
+                    await this._reloadSelected();
+                }
             } finally {
                 raw = null; // release the raw string before the next dataset
             }
@@ -1234,14 +1271,13 @@ class FolkFriendWASMWrapper {
             // open the wrong tune or look already-favourited. For a file from
             // the CDN a collision is a data-repo bug we report and carry on
             // with; for an arbitrary import it is a reason to refuse.
-            if (merged.collisions > 0) {
+            try {
+                this._assertNoCollisions(merged, id);
+            } catch (e) {
                 // Put back what was loaded before, since this merge is not
                 // going to be kept.
                 await this._reloadSelected();
-                throw new Error(
-                    `That database reuses ${merged.collisions} tune IDs that `
-                    + 'another database already uses, so it cannot be added '
-                    + 'without hiding existing tunes.');
+                throw e;
             }
 
             let persistError = null;
@@ -1274,6 +1310,25 @@ class FolkFriendWASMWrapper {
             this._restoreAfterFailedInstall(snapshot, e);
             return done({ ok: false, error: (e && e.message) || String(e) });
         }
+    }
+
+    // Refuse a merge in which an imported dataset has trodden on another's IDs.
+    //
+    // Applied on EVERY import and EVERY refresh, not just the first install: a
+    // remembered URL is not under our control, so a payload that was clean when
+    // it was added can start colliding later. IDs are global and a collision
+    // does not fail loudly — one setting shadows another, one tune's aliases
+    // overwrite another's name — and because favourites are keyed by setting id
+    // alone, the visible symptom is a favourite opening the wrong tune.
+    _assertNoCollisions(merged, id) {
+        const parts = [];
+        if (merged.collisions) parts.push(`${merged.collisions} setting IDs`);
+        if (merged.tuneCollisions) parts.push(`${merged.tuneCollisions} tune IDs`);
+        if (!parts.length) return;
+        throw new Error(
+            `That database reuses ${parts.join(' and ')} that another database `
+            + 'already uses, so it cannot be added without hiding existing '
+            + 'tunes.');
     }
 
     // Is this id one the published manifest manages? Answered from the network
@@ -1367,12 +1422,14 @@ class FolkFriendWASMWrapper {
         console.time('tune-index-to-wasm');
         await this.loadedWASM;
         const merged = mergeIndexParts(parts);
-        if (merged.collisions) {
-            // A colliding ID makes one setting shadow another — a display bug.
-            // Denying the user their whole index over it is not proportionate,
-            // so this is reported, never thrown.
-            console.warn(`${merged.collisions} setting ID collisions while `
-                + 'merging datasets; the data repo should have caught this');
+        if (merged.collisions || merged.tuneCollisions) {
+            // For DATASETS WE PUBLISH a collision is a data-repo bug: report it
+            // and carry on, because denying the user their whole index over it
+            // is not proportionate. An imported dataset is held to a stricter
+            // rule — see assertNoCollisions.
+            console.warn(`${merged.collisions} setting and `
+                + `${merged.tuneCollisions} tune ID collisions while merging `
+                + 'datasets; the data repo should have caught this');
         }
         try {
             await this.folkfriendWASM.load_index_from_json_obj(merged.indexData);
