@@ -1491,6 +1491,74 @@ async function run() {
         assert.ok(found.length > 0, 'thesession tunes are still findable');
     });
 
+    await test('an import cannot collide with a DESELECTED stored dataset', async () => {
+        // The route in from the other end: deselect thesession (keeping its
+        // copy and its favourites), import something reusing its IDs, then
+        // re-enable thesession. The merge that then happens is triggered by
+        // the selection change, not by the import — so checking only at the
+        // import site left the collision reachable.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        await assertOfflineCopyIs('thesession', 'v1', 1, 'before deselecting');
+
+        // Deselect thesession — its copy and its favourites remain.
+        await new Promise(r => wrapper.setSelectedDatasets(['folkwiki'], r));
+        assert.equal(idbMod.__db.has('ffIndexRaw:thesession'), true,
+            'a deselected dataset keeps its offline copy');
+
+        // Import something that reuses thesession's setting and tune IDs.
+        const shadowing = JSON.stringify({
+            ...JSON.parse(makeIndex('thesession', 'shadow')),
+            id: 'shadow', label: 'Shadow', v: 1, date: '2026-01-01',
+        });
+        const result = await new Promise(
+            r => wrapper.addUserDataset({ text: shadowing }, r));
+        assert.equal(result.ok, false,
+            'an import must be vetted against stored datasets, not just '
+            + 'selected ones — a deselected dataset still has favourites '
+            + 'pointing into it');
+        assert.match(result.error, /reuses/i);
+    });
+
+    await test('a colliding import can never be loaded by re-enabling a dataset', async () => {
+        // Belt and braces for the same hole: even if a colliding import got
+        // onto disk somehow (an older build, a hand-edited database), the
+        // merge that would load it alongside its victim must refuse it.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        // Plant a colliding user dataset directly, bypassing the import path.
+        const shadowing = JSON.stringify({
+            ...JSON.parse(makeIndex('thesession', 'shadow')),
+            id: 'shadow', label: 'Shadow', v: 1, date: '2026-01-01',
+        });
+        await storeMod.writeDataset('shadow', shadowing,
+            { v: 1, date: '2026-01-01', origin: 'user', label: 'Shadow' });
+
+        const loadsBefore = wasmMod.__wasm.loadCalls;
+        await new Promise(r => wrapper.setSelectedDatasets(
+            ['thesession', 'folkwiki', 'shadow'], r));
+
+        // thesession survives and still owns its tunes; the impostor is not
+        // loaded and is reported rather than silently dropped.
+        const loaded = wasmMod.__wasm.loaded || { settings: {} };
+        assert.ok(loaded.settings['1000'], 'thesession must still be loaded');
+        const found = await new Promise(r => wrapper.settingsFromTuneID('0', r));
+        assert.ok(found.length > 0);
+        assert.equal(found[0].dataset, 'thesession',
+            'the colliding import shadowed the real dataset');
+        assert.ok(!(wrapper.indexDetail.datasetsLoaded || []).includes('shadow'),
+            'a refused dataset must not be reported as loaded');
+        assert.ok((wrapper.indexDetail.datasetErrors || {}).shadow,
+            'the refusal must be reported, not silent');
+        assert.ok(wasmMod.__wasm.loadCalls > loadsBefore,
+            'this test is meaningless if no merge happened');
+    });
+
     await test('the same tune is not counted twice in the collision total', async () => {
         // A clashing tune arrives once via its alias entry and once via
         // tuneIDs. Counting both reported double the real number — the

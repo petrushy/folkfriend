@@ -204,6 +204,27 @@ Three things this needs that a published dataset does not:
   index over a data-repo bug is not proportionate. For an import it is a
   refusal.
 
+  **The invariant is enforced at EVERY MERGE, not at the import site.**
+  `vetUserParts` runs inside `loadMergedIndex` and drops any user-origin part
+  that would collide with anything else in that merge, whatever triggered it.
+  Checking only where an import is added left the collision reachable from the
+  other end: deselect thesession (keeping its copy and its favourites), import
+  something reusing its IDs — accepted, because thesession is not in the merge
+  — then re-enable thesession. That merge comes from the selection change, so
+  nothing re-checked it.
+
+  The offending part is **dropped, not the whole merge refused**: at startup a
+  refusal would leave the user with no index at all, which is worse than
+  leaving out one imported dataset. Published data always wins; among imports,
+  first in selection order wins. A dropped part is reported in
+  `datasetErrors` and excluded from `datasetsLoaded`, because the status must
+  never claim more than WASM holds.
+
+  **An import is additionally vetted against every STORED dataset**, not just
+  the selected ones — a deselected dataset still has favourites pointing into
+  it, so its IDs are still spoken for. That is what turns a silent
+  refuses-to-load-later into an error at the moment of import.
+
   **The candidate is vetted by `collisionsForPart`, not by the merge's own
   counts.** `mergeIndexParts` exempts the legacy migration base from its
   totals, because the base holds older copies of the very datasets being

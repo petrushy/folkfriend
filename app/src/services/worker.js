@@ -3,6 +3,7 @@ import ffConfig from '@/ffConfig';
 import {
     readDataset,
     readDatasets,
+    listStoredDatasetIds,
     readDatasetManifest,
     readOfflineInventory,
     readMergedLegacyIndex,
@@ -110,6 +111,50 @@ export function collisionsForPart(candidate, otherParts) {
         if (tuneIDs.has(tuneID)) clashedTunes.add(tuneID);
     }
     return { settings, tunes: clashedTunes.size };
+}
+
+// Where a part's data came from. Parts read from disk carry their manifest;
+// parts built inline during an install carry an explicit origin.
+export function partOrigin(part) {
+    if (part.origin) return part.origin;
+    if (part.manifest && part.manifest.origin) return part.manifest.origin;
+    return 'cdn';
+}
+
+// Drop any USER-ORIGIN part that would collide with something else in this
+// merge, and say which.
+//
+// The invariant is "no imported dataset ever shadows another dataset's IDs",
+// and it has to be enforced HERE — at every merge — not only where an import
+// is added. Checking only at the import site left the collision reachable by
+// coming at it from the other end: deselect thesession, import something that
+// reuses its IDs (accepted, because thesession is not in the merge), then
+// re-enable thesession. That merge is triggered by the selection change, not
+// by the import, so nothing re-checked it.
+//
+// The offending part is DROPPED rather than the whole merge refused: at
+// startup, refusing outright would leave the user with no index at all, which
+// is far worse than leaving out one imported dataset. Published data always
+// wins; among imports, the first in selection order wins.
+export function vetUserParts(parts) {
+    const official = parts.filter(p => partOrigin(p) !== 'user');
+    const kept = [...official];
+    const rejected = [];
+
+    for (const part of parts) {
+        if (partOrigin(part) !== 'user') continue;
+        const counts = collisionsForPart(part, kept);
+        if (counts.settings || counts.tunes) {
+            rejected.push({ id: part.id, ...counts });
+        } else {
+            kept.push(part);
+        }
+    }
+
+    return {
+        parts: parts.filter(p => kept.includes(p)),   // original order
+        rejected,
+    };
 }
 
 export function mergeIndexParts(parts) {
@@ -454,8 +499,9 @@ class FolkFriendWASMWrapper {
 
             if (parts.length > 0) {
                 try {
-                    await this.loadMergedIndex(parts);
-                    this._recordLoadedDatasets(parts, 'cache', missing);
+                    const merged = await this.loadMergedIndex(parts);
+                    this._recordLoadedDatasets(
+                        parts, 'cache', missing, merged.rejected);
                     analyticsData['tune_index_metadata_version'] = this._loadedIndexInfo.v;
                     analyticsData['tune_index_metadata_date'] = this._loadedIndexInfo.date || null;
                     analyticsData['days_since_update'] = 0;
@@ -600,9 +646,13 @@ class FolkFriendWASMWrapper {
         await this._checkForUpdatesInBackground(parts);
     }
 
-    _recordLoadedDatasets(parts, source, missing = []) {
+    _recordLoadedDatasets(parts, source, missing = [], rejected = []) {
+        // A part the merge refused is NOT loaded, so it must not be reported
+        // as such — that was the whole class of bug where the status claimed
+        // more than WASM actually held.
+        const refused = new Set(rejected.map(r => r.id));
         this.loadedDatasets = {};
-        for (const part of parts) {
+        for (const part of parts.filter(p => !refused.has(p.id))) {
             this.loadedDatasets[part.id] = {
                 v: part.manifest ? part.manifest.v : 0,
                 date: part.manifest ? part.manifest.date : null,
@@ -617,8 +667,13 @@ class FolkFriendWASMWrapper {
         };
         this._setIndexStatus(INDEX_STATUS.READY, {
             ...this._loadedIndexInfo,
-            datasetsLoaded: parts.map(p => p.id),
-            datasetsMissing: [...missing],
+            datasetsLoaded: Object.keys(this.loadedDatasets),
+            datasetsMissing: [...missing, ...refused],
+            datasetErrors: Object.fromEntries(rejected.map(r => [
+                r.id,
+                `reuses ${r.settings} setting and ${r.tunes} tune IDs that `
+                + 'another database already uses',
+            ])),
         });
     }
 
@@ -801,7 +856,11 @@ class FolkFriendWASMWrapper {
                     }
                 }
 
-                const part = { id: entry.id, index: splitIndexPayload(parsed) };
+                const part = {
+                    id: entry.id,
+                    index: splitIndexPayload(parsed),
+                    origin: entry.origin || 'cdn',
+                };
 
                 // Merge with everything else that should be loaded. The other
                 // datasets are re-read from IndexedDB rather than retained in
@@ -913,6 +972,22 @@ class FolkFriendWASMWrapper {
             .filter(id => id !== excludeId && loadable.has(id));
         if (wanted.length === 0) return [];
         const { parts } = await readDatasets(wanted);
+        return parts;
+    }
+
+    // Of a set of parts, the ones the user actually has selected. The vetting
+    // read is deliberately wider than the merge.
+    _selectedOf(parts) {
+        return parts.filter(p => this.selectedDatasets.includes(p.id));
+    }
+
+    // Every dataset with a usable copy on disk, whatever the selection says.
+    // Used to vet an import: a deselected dataset still has favourites pointing
+    // into it, so its IDs are still spoken for.
+    async _allStoredParts(excludeId) {
+        const ids = (await listStoredDatasetIds()).filter(id => id !== excludeId);
+        if (!ids.length) return [];
+        const { parts } = await readDatasets(ids);
         return parts;
     }
 
@@ -1210,8 +1285,9 @@ class FolkFriendWASMWrapper {
         try {
             const { parts, missing } = await readDatasets(next);
             if (parts.length) {
-                await this.loadMergedIndex(parts);
-                this._recordLoadedDatasets(parts, 'cache', missing);
+                const merged = await this.loadMergedIndex(parts);
+                this._recordLoadedDatasets(
+                    parts, 'cache', missing, merged.rejected);
             }
 
             // Only download what we genuinely do not have.
@@ -1308,13 +1384,19 @@ class FolkFriendWASMWrapper {
                     + 'replaced by an imported file.');
             }
 
-            const part = { id, index: splitIndexPayload(parsed) };
-            const others = await this._partsToKeep(id, []);
+            const part = { id, index: splitIndexPayload(parsed), origin: 'user' };
+            // Vetted against EVERY stored dataset, not merely the selected
+            // ones. Otherwise: deselect thesession, import something reusing
+            // its IDs (accepted, since thesession is not in the merge),
+            // re-enable thesession — and the conflict only surfaces later, as
+            // a dataset that silently refuses to load. Better to say so now.
+            const others = await this._allStoredParts(id);
             const base = await this._migrationBase(
                 [id, ...others.map(p => p.id)]);
             this._assertNoCollisions(
                 collisionsForPart(part, [...base, ...others]), id);
-            const merged = await this.loadMergedIndex([...base, ...others, part]);
+            const merged = await this.loadMergedIndex(
+                [...base, ...this._selectedOf(others), part]);
 
             // IDs are global. A dataset reusing another's setting or tune ids
             // does not fail loudly — one record shadows the other, and because
@@ -1397,8 +1479,9 @@ class FolkFriendWASMWrapper {
         try {
             const { parts, missing } = await readDatasets(this.selectedDatasets);
             if (parts.length) {
-                await this.loadMergedIndex(parts);
-                this._recordLoadedDatasets(parts, 'cache', missing);
+                const merged = await this.loadMergedIndex(parts);
+                this._recordLoadedDatasets(
+                    parts, 'cache', missing, merged.rejected);
             }
         } catch (e) {
             console.warn('Could not restore the previous index', e);
@@ -1468,7 +1551,20 @@ class FolkFriendWASMWrapper {
     // to save, and depended on the undo itself not failing.
     async loadMergedIndex(parts, mergedDatasets = null) {
         await this.loadedWASM;
-        const merged = mergeIndexParts(parts);
+
+        // Enforced on EVERY merge, whatever triggered it — see vetUserParts.
+        const vetted = vetUserParts(parts);
+        for (const bad of vetted.rejected) {
+            console.warn(`Not loading imported dataset ${bad.id}: it reuses `
+                + `${bad.settings} setting and ${bad.tunes} tune IDs that `
+                + 'another database already uses');
+        }
+        if (vetted.parts.length === 0) {
+            throw new Error('No usable datasets to load');
+        }
+
+        const merged = mergeIndexParts(vetted.parts);
+        merged.rejected = vetted.rejected;
 
         console.time('tune-index-to-wasm');
         if (merged.collisions || merged.tuneCollisions) {

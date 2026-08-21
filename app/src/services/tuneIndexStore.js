@@ -238,7 +238,14 @@ export async function readDataset(id) {
                     + 'using the payload and treating the version as unknown');
                 effective = { ...manifest, v: 0, versionUnknown: true };
             }
-            return { id, index: splitIndexPayload(parsed), manifest: effective };
+            return {
+                id,
+                index: splitIndexPayload(parsed),
+                manifest: effective,
+                // Carried on the part so a merge can tell imported data from
+                // published data without re-reading the manifest.
+                origin: effective.origin || 'cdn',
+            };
         } catch (e) {
             // Genuinely unparseable — this is the only state worth clearing.
             console.warn(`Cached ${id} index failed to parse; discarding`, e);
