@@ -182,6 +182,28 @@ Three things this needs that a published dataset does not:
   always works. This will otherwise be the single most common confusion with the
   feature.
 
+**An import is untrusted input, and is guarded accordingly:**
+
+- **It runs under the install lock.** Without it an import merges from its own
+  view of what is loaded and can interleave with a startup update or a manual
+  refresh, leaving WASM holding one operation's merge while `loadedDatasets`
+  claims both.
+- **It cannot impersonate a published dataset.** Storing under `thesession`
+  would put an unvetted file behind a name the app manages, to be overwritten —
+  or not — by the next CDN update depending on ordering.
+- **It cannot reuse another dataset's IDs.** IDs are global and a collision does
+  not fail loudly: one record shadows the other, and since favourites are keyed
+  by setting id alone, a colliding import can make a favourite open the wrong
+  tune or appear already-favourited. For a CDN file a collision is a data-repo
+  bug we report and continue past; for an arbitrary import it is a refusal.
+- **A refresh cannot change what the dataset IS.** The remembered URL is not
+  under our control, so a payload whose `id` no longer matches is rejected
+  rather than stored under the original id beneath the user's favourites.
+- **`source_url` is scheme-checked** (`safeSourceUrl`) and escaped where it is
+  interpolated. It reaches `href` attributes and the exported favourites HTML,
+  which people share — `javascript:` and `data:` are both markup-injection
+  routes, and the export previously interpolated it unescaped.
+
 `KNOWN_DATASETS` in `store.js` is only for labels and defaults — an imported id
 is not in it, which is why `sanitiseDatasets` keeps unknown ids and
 `datasetForTuneID` passes an unrecognised label through untouched.

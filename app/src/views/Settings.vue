@@ -853,6 +853,13 @@ export default {
         datasetBusy: {},
         removeDialog: false,
         removeTarget: null,
+        // Vue 2 only makes properties declared HERE reactive. Assigning them
+        // for the first time in a method leaves the template bound to nothing,
+        // so the dialog silently never opens.
+        addDialog: false,
+        addDatasetUrl: '',
+        addDatasetError: null,
+        addingDataset: false,
         storageIsPersistent: null,
         // What is actually on disk (read from IndexedDB, not inferred from
         // in-memory state) plus a storage quota estimate. This is the pre-flight
@@ -1153,11 +1160,19 @@ export default {
             }
         },
         _allDatasetIds() {
+            // The inventory ALSO reports anything else it finds stored, so a
+            // dataset the user imported and then deselected still appears here
+            // and can be re-enabled or removed. Without that it would vanish
+            // from the UI while its 3 MB stayed on disk.
             const ids = [...KNOWN_DATASETS];
             for (const entry of (this.datasetsRemote || [])) {
                 if (!ids.includes(entry.id)) ids.push(entry.id);
             }
             for (const id of this.selectedDatasets) {
+                if (!ids.includes(id)) ids.push(id);
+            }
+            for (const id of Object.keys(
+                (this.datasetInventory && this.datasetInventory.datasets) || {})) {
                 if (!ids.includes(id)) ids.push(id);
             }
             return ids;

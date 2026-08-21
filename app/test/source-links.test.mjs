@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 
 import {
     datasetForTuneID,
+    safeSourceUrl,
     isThesessionTuneID,
     settingSourceUrl,
     sourceNameForTuneID,
@@ -141,5 +142,34 @@ assert.equal(
     }),
     'https://www.norbeck.nu/abc/display.asp?rhythm=reel&ref=1'
 );
+
+// --- source_url is untrusted input --------------------------------------
+// A dataset file can be one the user imported from anywhere, and its
+// source_url ends up in href attributes and in exported HTML documents that
+// get shared with other people.
+
+assert.equal(
+    tuneSourceUrl({
+        tuneID: '1000001', dataset: 'folkwiki',
+        sourceUrl: 'javascript:alert(1)',
+    }),
+    'http://www.folkwiki.se/',
+    'a javascript: URL must never be handed back as a link'
+);
+assert.equal(
+    tuneSourceUrl({
+        tuneID: '3001472672', dataset: 'norbeck',
+        sourceUrl: 'data:text/html,<script>alert(1)</script>',
+    }),
+    'https://www.norbeck.nu/abc/',
+    'a data: URL is just as good for smuggling markup'
+);
+assert.equal(safeSourceUrl('javascript:alert(1)'), '');
+assert.equal(safeSourceUrl('data:text/html,x'), '');
+assert.equal(safeSourceUrl('  '), '');
+assert.equal(safeSourceUrl(null), '');
+assert.equal(safeSourceUrl('not a url'), '');
+assert.equal(safeSourceUrl('https://ok.example/x'), 'https://ok.example/x');
+assert.equal(safeSourceUrl('http://ok.example/x'), 'http://ok.example/x');
 
 console.log('source-links.test.mjs passed');

@@ -59,6 +59,26 @@ function safeString(value) {
     return typeof value === 'string' ? value : '';
 }
 
+// A source_url comes from a dataset file, and a dataset file can now be one the
+// user imported from anywhere. It is put into href attributes and into exported
+// HTML, so anything but a plain http(s) URL is dropped: `javascript:` is the
+// obvious one, but `data:` is just as good for smuggling markup into a shared
+// document. Returns '' for anything it will not vouch for, which every caller
+// already handles as "no link".
+export function safeSourceUrl(value) {
+    const url = safeString(value).trim();
+    if (!url) return '';
+    let parsed;
+    try {
+        parsed = new URL(url);
+    } catch (e) {
+        return '';
+    }
+    return (parsed.protocol === 'http:' || parsed.protocol === 'https:')
+        ? parsed.toString()
+        : '';
+}
+
 function encodeFolkwikiTitle(displayName) {
     const title = safeString(displayName).trim().replace(/ /g, '_').replace(/[?#]/g, '');
     return encodeURIComponent(title).replace(/%2F/g, '/');
@@ -102,8 +122,9 @@ export function tuneSourceUrl({ tuneID, displayName = '', sourceUrl = '', datase
     // folkwiki and norbeck both carry a source_url built at index time. For
     // norbeck it is the ONLY way to reach the tune — nothing about the URL is
     // derivable from the tune id — so it is always present in the data.
-    if (sourceUrl) {
-        return sourceUrl;
+    const safe = safeSourceUrl(sourceUrl);
+    if (safe) {
+        return safe;
     }
 
     if (id === DATASET_NORBECK) {

@@ -41,7 +41,7 @@
 //     This is the failure mode the multi-dataset split introduces, and the
 //     one the fault-injection tests are aimed at.
 
-import { get, set, del } from 'idb-keyval';
+import { get, set, del, keys } from 'idb-keyval';
 
 // Bump when the on-disk format changes; a mismatched manifest is discarded.
 //
@@ -256,6 +256,26 @@ export async function readDataset(id) {
     return null;
 }
 
+// Every dataset with something stored, whether or not this build knows about
+// it and whether or not it is currently selected.
+//
+// Settings needs this to offer a deselected dataset back: an imported one is in
+// no manifest and no default list, so without enumerating storage it vanishes
+// from the UI the moment it is turned off — leaving 3 MB on disk that cannot be
+// re-enabled or removed.
+export async function listStoredDatasetIds() {
+    try {
+        const all = await keys();
+        const prefix = 'ffIndexManifest:';
+        return all
+            .filter(k => typeof k === 'string' && k.startsWith(prefix))
+            .map(k => k.slice(prefix.length));
+    } catch (e) {
+        console.warn('Could not enumerate stored datasets', e);
+        return [];
+    }
+}
+
 // One dataset's manifest, with no payload read or parse. Cheap.
 export async function readDatasetManifest(id) {
     const manifest = await safeGet(manifestKey(id));
@@ -285,7 +305,10 @@ export async function readDatasets(ids) {
 // Returns { datasets: {id: manifest|null}, merged, legacy, storage }.
 export async function readOfflineInventory(ids) {
     const datasets = {};
-    for (const id of ids) {
+    // Anything stored counts, not just what was asked for — see
+    // listStoredDatasetIds.
+    const wanted = [...new Set([...(ids || []), ...await listStoredDatasetIds()])];
+    for (const id of wanted) {
         const manifest = await safeGet(manifestKey(id));
         datasets[id] = (manifest && manifest.schema === SCHEMA_VERSION)
             ? manifest

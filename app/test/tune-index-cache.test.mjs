@@ -84,6 +84,7 @@ export async function set(key, value) {
     __db.set(key, value);
 }
 export async function del(key) { tick(); __db.delete(key); }
+export async function keys() { return [...__db.keys()]; }
 `;
 
 async function loadModule(filename, replacements) {

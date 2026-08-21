@@ -63,6 +63,7 @@ export const __db = new Map();
 export async function get(key) { await yieldTick(); return __db.get(key); }
 export async function set(key, value) { await yieldTick(); __db.set(key, value); }
 export async function del(key) { await yieldTick(); __db.delete(key); }
+export async function keys() { return [...__db.keys()]; }
 `;
 
 const FAKE_COMLINK = `
@@ -1252,6 +1253,8 @@ async function run() {
 
     await test('a self-describing file is installed and becomes searchable', async () => {
         resetFakes();
+        // An imported dataset is by definition not in the published manifest.
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
         await seedGoodCopies(['thesession']);
         const wrapper = await newWorker({ datasets: ['thesession'] });
         await new Promise(r => wrapper.setupTuneIndex(r));
@@ -1275,6 +1278,7 @@ async function run() {
 
     await test('an imported dataset is labelled with its own id', async () => {
         resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
         const wrapper = await newWorker({ datasets: [] });
         await new Promise(r => wrapper.addUserDataset(
             { text: makeSelfDescribing('norbeck', 'v1') }, r));
@@ -1286,6 +1290,7 @@ async function run() {
 
     await test('a file that is not a tune database is refused', async () => {
         resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
         await seedGoodCopies();
         const wrapper = await newWorker();
         await new Promise(r => wrapper.setupTuneIndex(r));
@@ -1302,6 +1307,7 @@ async function run() {
     });
 
     await test('a file that does not say which database it is, is refused', async () => {
+        // (manifest left as-is; the id check fires before any manifest lookup)
         // Published datasets are described by datasets.json. An imported file
         // has no entry, so without a self-description there is no id to store
         // it under and no name to show.
@@ -1316,6 +1322,7 @@ async function run() {
 
     await test('importing from a URL fetches it in the worker', async () => {
         resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
         const url = 'https://example.invalid/private/norbeck.json';
         netMod.__net.bodies[url] = makeSelfDescribing('norbeck', 'v1');
 
@@ -1379,6 +1386,127 @@ async function run() {
             r => wrapper.refreshTuneIndex(['norbeck'], r));
         assert.equal(refresh.ok, true, JSON.stringify(refresh.failed));
         await assertOfflineCopyIs('norbeck', 'v2', 43, 'refreshed from its URL');
+    });
+
+    await test('an import cannot impersonate a published dataset', async () => {
+        // Storing under `thesession` would put an unvetted file behind a name
+        // the app manages, and the next CDN update would overwrite it — or
+        // not, depending on ordering.
+        resetFakes();
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        const result = await new Promise(r => wrapper.addUserDataset(
+            { text: makeSelfDescribing('thesession', 'evil') }, r));
+        assert.equal(result.ok, false);
+        assert.match(result.error, /own databases/i);
+        await assertOfflineCopyIs('thesession', 'v1', 1, 'after a refused import');
+    });
+
+    await test('an import that reuses another dataset\'s IDs is refused', async () => {
+        // IDs are global and a collision does not fail loudly — one record
+        // shadows the other. Favourites are keyed by setting id alone, so a
+        // colliding import can make a favourite open the wrong tune.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        // Same setting IDs as thesession, but calling itself something else.
+        const clashing = JSON.stringify({
+            ...JSON.parse(makeIndex('thesession', 'clash')),
+            id: 'impostor', label: 'Impostor', v: 1, date: '2026-01-01',
+        });
+        const result = await new Promise(
+            r => wrapper.addUserDataset({ text: clashing }, r));
+
+        assert.equal(result.ok, false, 'a colliding import must be refused');
+        assert.match(result.error, /reuses/i);
+        // The index the user had is back, intact.
+        assert.equal(wrapper.indexUsable, true);
+        const settings = await new Promise(
+            r => wrapper.settingsFromTuneID('0', r));
+        assert.ok(settings.length > 0);
+        assert.equal(settings[0].dataset, 'thesession',
+            'the rejected import must not have shadowed the real dataset');
+    });
+
+    await test('a URL that starts serving a different dataset is refused', async () => {
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const url = 'https://example.invalid/mine.json';
+        netMod.__net.bodies[url] = makeSelfDescribing('norbeck', 'v1');
+        const wrapper = await newWorker({ datasets: [] });
+        await new Promise(r => wrapper.addUserDataset({ url }, r));
+        await assertOfflineCopyIs('norbeck', 'v1', 42, 'imported');
+
+        // The link now serves something else entirely.
+        netMod.__net.bodies[url] = JSON.stringify({
+            ...JSON.parse(makeIndex('folkwiki', 'swapped')),
+            id: 'somethingelse', label: 'Something Else', v: 99,
+        });
+        const refresh = await new Promise(
+            r => wrapper.refreshTuneIndex(['norbeck'], r));
+        // When the only requested dataset fails, the install throws and the
+        // reason surfaces as `error` rather than in `failed`.
+        const why = (refresh.failed || {}).norbeck || refresh.error || '';
+        assert.match(why, /now serves/i,
+            `a swapped dataset should be refused, got: ${why}`);
+        await assertOfflineCopyIs('norbeck', 'v1', 42,
+            'the original must survive a swapped link');
+    });
+
+    await test('an import is serialised with other installs', async () => {
+        // Without the install lock an import merges from its own view of what
+        // is loaded, so WASM can end up holding one operation's merge while
+        // loadedDatasets claims both.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
+
+        const gate = parkDownloads();
+        const install = wrapper._installExclusively({ ids: ['thesession'] });
+        await waitForDownloadsToStart(1);
+
+        const importing = new Promise(r => wrapper.addUserDataset(
+            { text: makeSelfDescribing('norbeck', 'v1') }, r));
+        await new Promise(r => setImmediate(r));
+
+        gate.release();
+        await install;
+        const result = await importing;
+        assert.equal(result.ok, true, result.error);
+
+        // Everything that should be loaded, is.
+        const loaded = wasmMod.__wasm.loaded || { settings: {} };
+        for (const [id, probe] of [['thesession', '1000'], ['norbeck', '8000000']]) {
+            assert.ok(loaded.settings[probe],
+                `${id} is missing from the loaded index after a raced import`);
+        }
+        for (const id of wrapper.indexDetail.datasetsLoaded || []) {
+            const probe = { thesession: '1000', folkwiki: '2000000',
+                norbeck: '8000000' }[id];
+            assert.ok(loaded.settings[probe],
+                `${id} is reported loaded but is not in the index`);
+        }
+    });
+
+    await test('a stored dataset is discoverable even when deselected', async () => {
+        // Settings has to be able to offer it back, or 3 MB sits on disk that
+        // cannot be re-enabled or removed.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        await new Promise(r => wrapper.addUserDataset(
+            { text: makeSelfDescribing('norbeck', 'v1') }, r));
+
+        await new Promise(r => wrapper.setSelectedDatasets(['thesession'], r));
+        const inventory = await new Promise(
+            r => wrapper.getDatasetInventory(['thesession'], r));
+        assert.ok(inventory.datasets.norbeck,
+            'a deselected imported dataset vanished from the inventory');
+        assert.equal(inventory.datasets.norbeck.label, 'Norbeck');
     });
 
     console.log(`\n${passed} passed, ${failed} failed\n`);

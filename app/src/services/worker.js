@@ -713,6 +713,18 @@ class FolkFriendWASMWrapper {
                 // from the file just fetched, not from the stale local
                 // manifest we used to find the URL.
                 if (entry.origin === 'user') {
+                    // The URL is remembered across releases and is not under
+                    // our control. If it starts serving a different dataset,
+                    // storing that under the original id would silently swap
+                    // one collection for another beneath the user's
+                    // favourites.
+                    const servedId = typeof parsed.id === 'string'
+                        ? parsed.id.trim() : '';
+                    if (servedId && servedId !== entry.id) {
+                        throw new Error(
+                            `that link now serves "${servedId}", not `
+                            + `"${entry.id}"`);
+                    }
                     entry.v = Number(parsed.v) || entry.v || 0;
                     entry.date = parsed.date || entry.date || null;
                     if (typeof parsed.label === 'string' && parsed.label) {
@@ -1152,7 +1164,18 @@ class FolkFriendWASMWrapper {
     // `text` and `url` are alternatives; a url is fetched here rather than in
     // the page so the 3 MB body never crosses the Comlink boundary.
     async addUserDataset({ text = null, url = null }, cb) {
-        const done = (result) => { if (cb) cb(result); return result; };
+        // Serialised with every other install. Without the lock an import can
+        // interleave with a startup update or a manual refresh: each merges
+        // from its own view of what is loaded, so WASM ends up holding one
+        // operation's merge while loadedDatasets claims both.
+        const result = await this._withInstallLock(
+            () => this._addUserDatasetLocked({ text, url }));
+        if (cb) cb(result);
+        return result;
+    }
+
+    async _addUserDatasetLocked({ text = null, url = null }) {
+        const done = (result) => result;
         const snapshot = this._snapshotIndexState();
 
         let raw = text;
@@ -1189,11 +1212,37 @@ class FolkFriendWASMWrapper {
                 ? parsed.label
                 : id;
 
+            // An import must not be able to impersonate a published dataset.
+            // Storing under `thesession` would put a file nobody vetted behind
+            // a name the app manages, and the next CDN update would silently
+            // overwrite it — or not, depending on ordering.
+            if (await this._isPublishedDataset(id)) {
+                throw new Error(
+                    `"${id}" is one of FolkFriend's own databases and cannot be `
+                    + 'replaced by an imported file.');
+            }
+
             const part = { id, index: splitIndexPayload(parsed) };
             const others = await this._partsToKeep(id, []);
             const base = await this._migrationBase(
                 [id, ...others.map(p => p.id)]);
-            await this.loadMergedIndex([...base, ...others, part]);
+            const merged = await this.loadMergedIndex([...base, ...others, part]);
+
+            // IDs are global. A dataset reusing another's setting or tune ids
+            // does not fail loudly — one record shadows the other, and because
+            // favourites are keyed by setting id alone, a favourite can then
+            // open the wrong tune or look already-favourited. For a file from
+            // the CDN a collision is a data-repo bug we report and carry on
+            // with; for an arbitrary import it is a reason to refuse.
+            if (merged.collisions > 0) {
+                // Put back what was loaded before, since this merge is not
+                // going to be kept.
+                await this._reloadSelected();
+                throw new Error(
+                    `That database reuses ${merged.collisions} tune IDs that `
+                    + 'another database already uses, so it cannot be added '
+                    + 'without hiding existing tunes.');
+            }
 
             let persistError = null;
             try {
@@ -1224,6 +1273,37 @@ class FolkFriendWASMWrapper {
             // not sit on 'downloading' forever.
             this._restoreAfterFailedInstall(snapshot, e);
             return done({ ok: false, error: (e && e.message) || String(e) });
+        }
+    }
+
+    // Is this id one the published manifest manages? Answered from the network
+    // when we can, and from what is loaded when we cannot — offline, an import
+    // must still not be able to claim a name the app already uses.
+    async _isPublishedDataset(id) {
+        if (DEFAULT_DATASETS.includes(id)) return true;
+        const local = await readDatasetManifest(id);
+        if (local && local.origin === 'user') return false;
+        if (local) return true;
+        if (isDefinitelyOffline()) return false;
+        try {
+            const manifest = await fetchDatasetsManifest();
+            return manifest.byId.has(id);
+        } catch (e) {
+            return false;
+        }
+    }
+
+    // Re-load exactly what the selection says, from disk. Used to undo a merge
+    // that was performed to validate something we then decided to reject.
+    async _reloadSelected() {
+        try {
+            const { parts, missing } = await readDatasets(this.selectedDatasets);
+            if (parts.length) {
+                await this.loadMergedIndex(parts);
+                this._recordLoadedDatasets(parts, 'cache', missing);
+            }
+        } catch (e) {
+            console.warn('Could not restore the previous index', e);
         }
     }
 
