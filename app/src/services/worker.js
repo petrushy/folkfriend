@@ -73,6 +73,45 @@ function isBasePart(part) {
     return part.id === null || part.id === undefined;
 }
 
+// Collisions between ONE candidate part and everything it would be merged
+// with — including the legacy migration base.
+//
+// mergeIndexParts deliberately exempts the base from its collision counts: it
+// holds older copies of the very datasets being migrated, so overlap there is
+// expected. That exemption is right for a published dataset replacing itself
+// and WRONG for an import, which has no business overlapping anything. And
+// because the base is processed last, a candidate processed before it never
+// sees the overlap either — so an import made while migration is deferred
+// (auto-update off, or a migration that failed) could shadow thesession or
+// folkwiki IDs that currently live only in the merged blob.
+//
+// This is deliberately independent of merge order.
+export function collisionsForPart(candidate, otherParts) {
+    const settingIDs = new Set();
+    const tuneIDs = new Set();
+    for (const part of otherParts) {
+        const data = part.index.indexData || {};
+        for (const settingID in (data.settings || {})) settingIDs.add(settingID);
+        for (const tuneID in (data.aliases || {})) tuneIDs.add(tuneID);
+        for (const tuneID of part.index.tuneIDs || []) tuneIDs.add(tuneID);
+    }
+
+    const data = candidate.index.indexData || {};
+    let settings = 0;
+    for (const settingID in (data.settings || {})) {
+        if (settingIDs.has(settingID)) settings++;
+    }
+    // A set, so a tune that clashes both by alias and by tuneIDs counts once.
+    const clashedTunes = new Set();
+    for (const tuneID in (data.aliases || {})) {
+        if (tuneIDs.has(tuneID)) clashedTunes.add(tuneID);
+    }
+    for (const tuneID of candidate.index.tuneIDs || []) {
+        if (tuneIDs.has(tuneID)) clashedTunes.add(tuneID);
+    }
+    return { settings, tunes: clashedTunes.size };
+}
+
 export function mergeIndexParts(parts) {
     if (parts.length === 1) {
         // Overwhelmingly the common case; skip copying 62k keys.
@@ -130,10 +169,14 @@ export function mergeIndexParts(parts) {
         // once a base is present, since the base already holds everything.
         if (added === 0 && !base && !hasBase) empty.push(part.id);
 
+        // Counted through a set: the same tune arrives twice, once via its
+        // alias entry and once via tuneIDs, and counting both reported double
+        // the real number.
+        const clashedTunes = new Set();
         const partAliases = (part.index.indexData && part.index.indexData.aliases) || {};
         if (!base) {
             for (const tuneID in partAliases) {
-                if (aliases[tuneID] !== undefined) tuneCollisions++;
+                if (aliases[tuneID] !== undefined) clashedTunes.add(tuneID);
             }
         }
         assignMissing(aliases, partAliases, base);
@@ -147,10 +190,11 @@ export function mergeIndexParts(parts) {
             for (const tuneID of part.index.tuneIDs || []) {
                 if (datasetByTune[tuneID] !== undefined
                     && datasetByTune[tuneID] !== part.id) {
-                    tuneCollisions++;
+                    clashedTunes.add(tuneID);
                 }
                 datasetByTune[tuneID] = part.id;
             }
+            tuneCollisions += clashedTunes.size;
         }
     }
 
@@ -782,13 +826,15 @@ class FolkFriendWASMWrapper {
                 // still on disk.
                 // An imported dataset is untrusted on every fetch, not only
                 // the first: the URL is remembered and its contents can change.
-                // Vetted BEFORE the WASM load, so a rejected payload is never
-                // loaded and there is nothing to undo.
+                // Vetted BEFORE anything is merged or loaded, and against every
+                // other part INCLUDING the legacy migration base — see
+                // collisionsForPart.
+                if (entry.origin === 'user') {
+                    this._assertNoCollisions(
+                        collisionsForPart(part, [...base, ...others]), entry.id);
+                }
                 const merged = await this.loadMergedIndex(
-                    [...base, ...others, part], null,
-                    entry.origin === 'user'
-                        ? (m) => this._assertNoCollisions(m, entry.id)
-                        : null);
+                    [...base, ...others, part]);
                 loadedThisEntry = true;
                 if (merged.empty.includes(entry.id)) {
                     throw new Error(
@@ -1266,9 +1312,9 @@ class FolkFriendWASMWrapper {
             const others = await this._partsToKeep(id, []);
             const base = await this._migrationBase(
                 [id, ...others.map(p => p.id)]);
-            const merged = await this.loadMergedIndex(
-                [...base, ...others, part], null,
-                (m) => this._assertNoCollisions(m, id));
+            this._assertNoCollisions(
+                collisionsForPart(part, [...base, ...others]), id);
+            const merged = await this.loadMergedIndex([...base, ...others, part]);
 
             // IDs are global. A dataset reusing another's setting or tune ids
             // does not fail loudly — one record shadows the other, and because
@@ -1317,10 +1363,10 @@ class FolkFriendWASMWrapper {
     // does not fail loudly — one setting shadows another, one tune's aliases
     // overwrite another's name — and because favourites are keyed by setting id
     // alone, the visible symptom is a favourite opening the wrong tune.
-    _assertNoCollisions(merged, id) {
+    _assertNoCollisions(counts, id) {
         const parts = [];
-        if (merged.collisions) parts.push(`${merged.collisions} setting IDs`);
-        if (merged.tuneCollisions) parts.push(`${merged.tuneCollisions} tune IDs`);
+        if (counts.settings) parts.push(`${counts.settings} setting IDs`);
+        if (counts.tunes) parts.push(`${counts.tunes} tune IDs`);
         if (!parts.length) return;
         throw new Error(
             `That database reuses ${parts.join(' and ')} that another database `
@@ -1415,15 +1461,14 @@ class FolkFriendWASMWrapper {
     // merged blob, which contains thesession and folkwiki but cannot say which
     // tune came from which. Those tunes fall back to the ID-range rule in
     // source.mjs, which is exactly what that fallback exists for.
-    // Merge, optionally VET, then load. `validate` is called with the merged
-    // result before anything reaches WASM, so a payload it rejects is never
-    // loaded at all — rather than being loaded and then undone, which left a
-    // window where the app was searching data it had just refused to save, and
-    // depended on the undo itself not failing.
-    async loadMergedIndex(parts, mergedDatasets = null, validate = null) {
+    // Merge and load. Anything that could REFUSE a part is checked by the
+    // caller before getting here (collisionsForPart), so a rejected payload is
+    // never merged or loaded at all — rather than being loaded and then undone,
+    // which left a window where the app was searching data it had just refused
+    // to save, and depended on the undo itself not failing.
+    async loadMergedIndex(parts, mergedDatasets = null) {
         await this.loadedWASM;
         const merged = mergeIndexParts(parts);
-        if (validate) validate(merged);
 
         console.time('tune-index-to-wasm');
         if (merged.collisions || merged.tuneCollisions) {

@@ -202,7 +202,19 @@ Three things this needs that a published dataset does not:
 
   For a CDN file a collision stays a warning — denying the user their whole
   index over a data-repo bug is not proportionate. For an import it is a
-  refusal, and the previously loaded index is reloaded from disk.
+  refusal.
+
+  **The candidate is vetted by `collisionsForPart`, not by the merge's own
+  counts.** `mergeIndexParts` exempts the legacy migration base from its
+  totals, because the base holds older copies of the very datasets being
+  migrated and overlap there is expected. That exemption is right for a
+  published dataset replacing itself and wrong for an import — and since the
+  base is processed *last*, a candidate processed before it never saw the
+  overlap either. So an import made while migration is deferred (auto-update
+  off, or a migration that failed) could shadow thesession or folkwiki IDs that
+  currently live only inside the merged blob. `collisionsForPart` compares the
+  candidate against every other part, base included, independently of merge
+  order.
 - **Both checks run on EVERY fetch, not just the first.** The remembered URL is
   not under our control, so a payload that was clean when it was added can start
   colliding later; the refresh path used to merely log it and persist anyway.

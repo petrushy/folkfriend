@@ -1443,6 +1443,68 @@ async function run() {
         assert.equal(found[0].dataset, 'thesession');
     });
 
+    await test('an import cannot shadow IDs that live only in the merged blob', async () => {
+        // The base exemption is right for a published dataset replacing itself
+        // and wrong for an import. And because the base is processed LAST, a
+        // candidate processed before it never saw the overlap either — so an
+        // import made while migration is deferred could shadow thesession or
+        // folkwiki IDs that currently exist only inside the merged blob.
+        //
+        // Reachable on a real upgrade: auto-update off (or a migration that
+        // failed) leaves _migrationPending true indefinitely.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const merged = makeMerged('old');
+        idbMod.__db.set('ffIndexRaw', merged);
+        idbMod.__db.set('ffIndexManifest',
+            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
+
+        // autoUpdate off: migration is deferred, so the blob stays the base.
+        const wrapper = await newWorker({
+            autoUpdate: false, datasets: ['thesession', 'folkwiki'],
+        });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        assert.equal(wrapper.indexDetail.migrationPending, true,
+            'this test is meaningless unless migration is actually deferred');
+        assert.equal(idbMod.__db.has('ffIndexRaw:thesession'), false,
+            'thesession must exist ONLY in the merged blob here');
+
+        // An import claiming thesession's setting and tune ids.
+        const shadowing = JSON.stringify({
+            ...JSON.parse(makeIndex('thesession', 'shadow')),
+            id: 'shadow', label: 'Shadow', v: 1, date: '2026-01-01',
+        });
+        const loadsBefore = wasmMod.__wasm.loadCalls;
+        const result = await new Promise(
+            r => wrapper.addUserDataset({ text: shadowing }, r));
+
+        assert.equal(result.ok, false,
+            'an import overlapping the merged blob must be refused');
+        assert.match(result.error, /reuses/i);
+        assert.equal(wasmMod.__wasm.loadCalls, loadsBefore,
+            'the refused import must never be loaded into WASM');
+
+        // The legacy data is untouched and still owns its tunes.
+        assert.equal(idbMod.__db.has('ffIndexRaw'), true,
+            'the merged blob must survive a refused import');
+        const found = await new Promise(r => wrapper.settingsFromTuneID('0', r));
+        assert.ok(found.length > 0, 'thesession tunes are still findable');
+    });
+
+    await test('the same tune is not counted twice in the collision total', async () => {
+        // A clashing tune arrives once via its alias entry and once via
+        // tuneIDs. Counting both reported double the real number — the
+        // rejection was right, the diagnostic was not.
+        const mod = await import(`${path.join(tmpDir, 'worker.mjs')}?v=${Math.random()}`);
+        const a = { id: 'a', index: storeMod.splitIndexPayload(JSON.parse(makeIndex('thesession', 'a'))) };
+        const b = { id: 'b', index: storeMod.splitIndexPayload(JSON.parse(makeIndex('thesession', 'b'))) };
+        const merged = mod.mergeIndexParts([a, b]);
+        // makeIndex builds 150 tunes; a full overlap is 150 clashes, not 300.
+        assert.equal(merged.tuneCollisions, 150,
+            `expected 150 tune collisions, got ${merged.tuneCollisions}`);
+        assert.equal(mod.collisionsForPart(b, [a]).tunes, 150);
+    });
+
     await test('a refresh that starts colliding is refused too', async () => {
         // The URL is remembered and is not under our control: a payload that
         // was clean when it was added can start colliding later, and the
