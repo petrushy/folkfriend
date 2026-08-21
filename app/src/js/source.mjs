@@ -5,13 +5,16 @@
 // That label is authoritative. Everything here takes an optional `dataset` and
 // prefers it.
 //
-// The ID-range fallback below is ONLY for tunes that came from a legacy merged
-// blob — the pre-multi-dataset `folkfriend-non-user-data.json`, or a schema-1/2
-// copy still in a user's IndexedDB. Those contain thesession and folkwiki and
-// nothing else, by construction, which is why the fallback is a single
-// threshold and why NORBECK IS DELIBERATELY NOT IN IT: adding a third range
-// would create another place that has to agree with the data repo's ID bases,
-// for a case that cannot arise.
+// The ID-range fallback below applies when a tune carries no label: a legacy
+// merged blob, or a favourite saved before labelling existed.
+//
+// It originally covered only thesession and folkwiki, on the argument that a
+// merged blob contains nothing else by construction so a norbeck range would be
+// a third place to keep in sync for a case that could not arise. That argument
+// was wrong: a favourite is a self-contained snapshot, so one saved without a
+// label reaches this code with a norbeck tune id and gets called folkwiki —
+// which is exactly the mislabelling this fallback is supposed to prevent.
+// Norbeck's range is included.
 
 export const DATASET_THESESSION = 'thesession';
 export const DATASET_FOLKWIKI = 'folkwiki';
@@ -23,8 +26,12 @@ const KNOWN_DATASETS = new Set([
     DATASET_NORBECK,
 ]);
 
-// Legacy-blob fallback only. See the note above.
+// Unlabelled-tune fallback. These MUST match the ID bases in the data repo's
+// builders (build_folkwiki_data.py, build_norbeck_data.py). Folkwiki is not the
+// small block its base suggests — its hash term carries it to ~1.68e9 — which
+// is why norbeck starts three billion up rather than at 3,000,000.
 const FOLKWIKI_TUNE_ID_BASE = 1000000;
+const NORBECK_TUNE_ID_BASE = 3000000000;
 
 // Human names for the datasets, shared by every view that names one. Kept
 // here rather than in a component so Settings and Search cannot drift apart.
@@ -57,15 +64,23 @@ function encodeFolkwikiTitle(displayName) {
     return encodeURIComponent(title).replace(/%2F/g, '/');
 }
 
-// Which dataset a tune belongs to. `dataset` wins when it is a known id.
+// Which dataset a tune belongs to. An explicit label always wins — INCLUDING
+// one this build does not recognise, so a dataset added to the manifest after
+// this release is passed through rather than being silently relabelled as
+// folkwiki by the range fallback below.
 export function datasetForTuneID(tuneID, dataset = '') {
-    if (KNOWN_DATASETS.has(dataset)) {
+    if (typeof dataset === 'string' && dataset !== '') {
         return dataset;
     }
     const n = parseInt(tuneID, 10);
-    return (!Number.isNaN(n) && n < FOLKWIKI_TUNE_ID_BASE)
-        ? DATASET_THESESSION
-        : DATASET_FOLKWIKI;
+    if (Number.isNaN(n)) return DATASET_FOLKWIKI;
+    if (n < FOLKWIKI_TUNE_ID_BASE) return DATASET_THESESSION;
+    if (n >= NORBECK_TUNE_ID_BASE) return DATASET_NORBECK;
+    return DATASET_FOLKWIKI;
+}
+
+export function isKnownDataset(id) {
+    return KNOWN_DATASETS.has(id);
 }
 
 export function isThesessionTuneID(tuneID, dataset = '') {
@@ -93,6 +108,13 @@ export function tuneSourceUrl({ tuneID, displayName = '', sourceUrl = '', datase
 
     if (id === DATASET_NORBECK) {
         return 'https://www.norbeck.nu/abc/';
+    }
+
+    // A dataset this build does not know about has no derivable URL at all.
+    // Guessing a folkwiki one would send the user somewhere actively wrong;
+    // '' lets the caller hide the link instead.
+    if (!KNOWN_DATASETS.has(id)) {
+        return '';
     }
 
     const encodedTitle = encodeFolkwikiTitle(displayName);

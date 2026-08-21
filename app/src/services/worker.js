@@ -61,13 +61,25 @@ export const DEFAULT_DATASETS = ['thesession', 'folkwiki'];
 // datasetByTune is REBUILT WHOLESALE on every merge and never updated
 // incrementally. That is what keeps it from drifting out of agreement with
 // what is actually loaded in WASM — the same hazard class as abcStringBySetting.
+// A part with `id === null` is a BASE: the pre-multi-dataset merged blob, used
+// to fill gaps for datasets that have not been migrated to their own file yet.
+// It never overwrites a real dataset file, and it is processed last so the
+// dataset files always win. Without it, the first per-dataset load during a
+// migration would replace WASM with only that dataset and silently drop every
+// source still living in the blob.
+function isBasePart(part) {
+    return part.id === null || part.id === undefined;
+}
+
 export function mergeIndexParts(parts) {
     if (parts.length === 1) {
         // Overwhelmingly the common case; skip copying 62k keys.
         const part = parts[0];
         const datasetByTune = {};
-        for (const tuneID of part.index.tuneIDs || []) {
-            datasetByTune[tuneID] = part.id;
+        if (!isBasePart(part)) {
+            for (const tuneID of part.index.tuneIDs || []) {
+                datasetByTune[tuneID] = part.id;
+            }
         }
         return { ...part.index, datasetByTune, collisions: 0, empty: [] };
     }
@@ -80,25 +92,45 @@ export function mergeIndexParts(parts) {
     let collisions = 0;
     const empty = [];
 
-    for (const part of parts) {
+    // Dataset files first, the merged base last — it only fills what they left.
+    const ordered = [...parts.filter(p => !isBasePart(p)),
+                     ...parts.filter(isBasePart)];
+    const hasBase = ordered.length !== parts.filter(p => !isBasePart(p)).length;
+
+    for (const part of ordered) {
+        const base = isBasePart(part);
         const partSettings = (part.index.indexData && part.index.indexData.settings) || {};
         let added = 0;
         for (const settingID in partSettings) {
-            if (settings[settingID] !== undefined) collisions++;
-            else added++;
+            if (settings[settingID] !== undefined) {
+                // The base is EXPECTED to overlap — it holds older copies of
+                // the very datasets being migrated. Only a collision between
+                // two dataset files is a data bug worth counting.
+                if (!base) collisions++;
+                continue;
+            }
+            added++;
             settings[settingID] = partSettings[settingID];
         }
-        // A part contributing NO new setting IDs is a duplicate of something
-        // already merged — which happens if datasets.json points two entries at
-        // the same file. Both documents pass indexPayloadProblem perfectly, and
-        // without this the failure presents as "folkwiki is missing" with no
-        // error reported anywhere.
-        if (added === 0) empty.push(part.id);
-        Object.assign(aliases, (part.index.indexData && part.index.indexData.aliases) || {});
-        Object.assign(abcStrings, part.index.abcStrings || {});
-        Object.assign(sourceUrls, part.index.sourceUrls || {});
-        for (const tuneID of part.index.tuneIDs || []) {
-            datasetByTune[tuneID] = part.id;
+        // A dataset file contributing NO new setting IDs is a duplicate of
+        // something already merged — which happens if datasets.json points two
+        // entries at the same file. Both documents pass indexPayloadProblem
+        // perfectly, and without this the failure presents as "folkwiki is
+        // missing" with no error reported anywhere. The check is meaningless
+        // once a base is present, since the base already holds everything.
+        if (added === 0 && !base && !hasBase) empty.push(part.id);
+
+        assignMissing(aliases, (part.index.indexData && part.index.indexData.aliases) || {}, base);
+        assignMissing(abcStrings, part.index.abcStrings || {}, base);
+        assignMissing(sourceUrls, part.index.sourceUrls || {}, base);
+
+        // Base tunes are deliberately left UNLABELLED: the merged blob cannot
+        // say which source a tune came from, so source.mjs falls back to the ID
+        // range, which is exactly what that fallback is for.
+        if (!base) {
+            for (const tuneID of part.index.tuneIDs || []) {
+                datasetByTune[tuneID] = part.id;
+            }
         }
     }
 
@@ -110,6 +142,16 @@ export function mergeIndexParts(parts) {
         collisions,
         empty,
     };
+}
+
+function assignMissing(target, source, gapFillOnly) {
+    if (!gapFillOnly) {
+        Object.assign(target, source);
+        return;
+    }
+    for (const key in source) {
+        if (target[key] === undefined) target[key] = source[key];
+    }
 }
 
 
@@ -653,12 +695,20 @@ class FolkFriendWASMWrapper {
                 const others = await this._partsToKeep(
                     entry.id, [...Object.keys(installed)]);
 
+                // Mid-migration, the datasets that have not moved to their own
+                // file yet exist ONLY in the merged blob, so `others` cannot
+                // include them. Loading without a base would replace WASM with
+                // just this dataset and silently drop the rest from search for
+                // the whole session — while still reporting them loaded.
+                const base = await this._migrationBase(
+                    [entry.id, ...others.map(p => p.id)]);
+
                 // The final proof, and the only one that covers a payload the
                 // Rust side rejects: if this throws, the previous index is still
                 // the one loaded in WASM (use_tune_index runs only after serde
                 // has deserialised the whole thing) and every offline copy is
                 // still on disk.
-                const merged = await this.loadMergedIndex([...others, part]);
+                const merged = await this.loadMergedIndex([...base, ...others, part]);
                 if (merged.empty.includes(entry.id)) {
                     throw new Error(
                         'duplicate of an already-loaded dataset — check the '
@@ -724,18 +774,38 @@ class FolkFriendWASMWrapper {
         return parts;
     }
 
+    // The merged blob, as a gap-filling base, when some selected dataset is not
+    // yet covered by a per-dataset file. Returns [] once migration is complete,
+    // which is the steady state — this costs nothing outside a migration.
+    async _migrationBase(coveredIds) {
+        if (!this._migrationPending) return [];
+        const covered = new Set(coveredIds.filter(Boolean));
+        if (this.selectedDatasets.every(id => covered.has(id))) return [];
+        const merged = await readMergedLegacyIndex();
+        if (!merged) return [];
+        return [{ id: null, index: merged.index }];
+    }
+
     async _afterInstall(installed, failed, persistErrors) {
         const loaded = { ...this.loadedDatasets };
         for (const [id, info] of Object.entries(installed)) {
             loaded[id] = { ...info, source: 'network' };
         }
-        // Anything selected that we could not install, and have no cached copy
-        // of, is genuinely missing.
+        // Report only what is genuinely searchable. A dataset inherited from
+        // the merged blob stays loaded ONLY while that blob is still the base
+        // of what is in WASM; once migration completes it must have its own
+        // file or it is missing. Claiming otherwise is how a half-finished
+        // migration used to look perfectly healthy while half the tunes had
+        // quietly stopped being findable.
         this.loadedDatasets = {};
         for (const id of Object.keys(loaded)) {
-            if (this.selectedDatasets.includes(id)) {
-                this.loadedDatasets[id] = loaded[id];
+            if (!this.selectedDatasets.includes(id)) continue;
+            if (loaded[id].source === 'merged') {
+                const stillBacked = this._migrationPending
+                    && !!(await readMergedLegacyIndex());
+                if (!stillBacked) continue;
             }
+            this.loadedDatasets[id] = loaded[id];
         }
 
         const datasetsLoaded = Object.keys(this.loadedDatasets);
@@ -990,6 +1060,11 @@ class FolkFriendWASMWrapper {
             return;
         }
 
+        // Taken BEFORE anything can set DOWNLOADING, for the same reason
+        // refreshTuneIndex takes one: a failure here used to leave the status
+        // stuck on 'downloading' forever, with no terminal state and no way for
+        // the UI to tell busy from broken.
+        const snapshot = this._snapshotIndexState();
         try {
             const { parts, missing } = await readDatasets(next);
             if (parts.length) {
@@ -1011,7 +1086,11 @@ class FolkFriendWASMWrapper {
             if (cb) cb({ ok: true, datasetsLoaded: Object.keys(this.loadedDatasets) });
         } catch (e) {
             console.warn('Could not apply the new dataset selection', e);
-            // The setting stands; it retries next launch or when back online.
+            // The SETTING stands — it is the user's intent and it retries next
+            // launch or when the connection returns — but the STATUS must be
+            // put back to a terminal one, or the UI shows a database that is
+            // downloading forever.
+            this._restoreAfterFailedInstall(snapshot, e);
             if (cb) cb({ ok: false, error: (e && e.message) || String(e) });
         }
     }

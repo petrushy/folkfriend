@@ -634,8 +634,10 @@ export default {
         },
         // Human labels live in the app, keyed by dataset id — but a dataset
         // datasets.json lists and this build does not know about is still
-        // rendered, using its id. That makes adding a fourth dataset a
-        // data-repo-only change that existing installs can see and opt into.
+        // rendered, selectable and installable, shown under its raw id with no
+        // description. So a fourth source can be added without an app release,
+        // provided its settings carry `source_url` (nothing else can derive a
+        // link for it). Shipping a release adds the label and description.
         datasetRows() {
             const ids = [...KNOWN_DATASETS];
             for (const entry of (this.datasetsRemote || [])) {
@@ -890,14 +892,25 @@ export default {
             this.userSettings.tuneDatasets = ids;
             await store.updateUserSettings(this.userSettings);
             this.refreshMessage = null;
+            this.$set(this.datasetBusy, 'any', true);
             try {
-                await ffBackend.setSelectedDatasets(ids);
+                // The worker RESOLVES with {ok:false} rather than throwing, so
+                // a bare try/catch here reported success on every failure and
+                // the user got no message at all.
+                const result = await ffBackend.setSelectedDatasets(ids);
+                if (result && result.ok === false) {
+                    this.refreshMessage =
+                        `Could not load that database: ${result.error}. `
+                        + 'It stays selected and will be retried.';
+                }
             } catch (e) {
                 // Deliberately NOT reverting the checkbox: the setting is the
                 // user's intent, and it retries on the next launch or when the
                 // connection comes back.
                 console.warn('Could not apply the dataset selection', e);
                 this.refreshMessage = `Could not load that database: ${e.message}`;
+            } finally {
+                this.$set(this.datasetBusy, 'any', false);
             }
             await this._refreshOfflineStatus();
         },

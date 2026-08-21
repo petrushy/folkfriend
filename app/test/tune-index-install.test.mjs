@@ -768,6 +768,45 @@ async function run() {
         assert.equal(wrapper.indexUsable, true);
     });
 
+    // The review finding: during migration the first per-dataset load replaces
+    // WASM with ONLY that dataset, because the others still live in the merged
+    // blob and _partsToKeep reads per-dataset copies from disk. If a later
+    // download then fails, the un-migrated source silently vanishes from search
+    // for the rest of the session — while _afterInstall still reports it loaded,
+    // because it inherits the 'merged' entry. Nothing is lost on disk, but the
+    // app quietly stops finding half its tunes and says everything is fine.
+    await test('a half-finished migration never drops a source from search', async () => {
+        resetFakes();
+        const merged = makeMerged('old');
+        idbMod.__db.set('ffIndexRaw', merged);
+        idbMod.__db.set('ffIndexManifest',
+            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
+        // thesession migrates cleanly; folkwiki dies mid-transfer.
+        netMod.__net.bodyErrors[FILENAME.folkwiki] = 'connection reset';
+
+        const wrapper = await newWorker({
+            autoUpdate: true, datasets: ['thesession', 'folkwiki'],
+        });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        for (let i = 0; i < 300; i++) await new Promise(r => setImmediate(r));
+
+        // Whatever the pipeline did, folkwiki tunes must still be findable —
+        // they are on disk in the merged blob, so there is no excuse.
+        const loaded = wasmMod.__wasm.loaded || { settings: {} };
+        assert.ok(loaded.settings['2000000'],
+            'folkwiki disappeared from the loaded index mid-migration');
+        assert.ok(loaded.settings['1000'],
+            'thesession disappeared from the loaded index mid-migration');
+
+        // ...and the reported state must match what is actually searchable.
+        const reported = wrapper.indexDetail.datasetsLoaded || [];
+        for (const id of reported) {
+            const probe = id === 'folkwiki' ? '2000000' : '1000';
+            assert.ok(loaded.settings[probe],
+                `${id} is reported loaded but is not in the index`);
+        }
+    });
+
     await test('migration is deferred when automatic updates are off', async () => {
         // ~42 MB for zero new content is exactly the download a user who turned
         // auto-update off has asked not to be given.
@@ -854,6 +893,33 @@ async function run() {
         assert.equal(wrapper.indexDetail.reason, 'no-datasets-selected');
         assert.equal(netMod.__net.manifestRequests, 0,
             'nothing should be fetched when nothing is selected');
+    });
+
+    await test('a failed toggle-on lands in a terminal state, not stuck downloading', async () => {
+        // The status used to be left on 'downloading' forever, and the worker
+        // resolved {ok:false} rather than throwing — so the UI showed a
+        // database downloading indefinitely and never told the user why.
+        resetFakes();
+        await seedGoodCopies(['thesession', 'folkwiki']);
+        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        assert.equal(wrapper.indexStatus, 'ready');
+
+        // norbeck has no saved copy and the download will fail.
+        netMod.__net.bodyErrors[FILENAME.norbeck] = 'connection reset';
+        const result = await new Promise(r => wrapper.setSelectedDatasets(ALL, r));
+
+        assert.equal(result.ok, false, 'the caller must be told it failed');
+        assert.ok(result.error, 'and given a reason to show');
+        assert.notEqual(wrapper.indexStatus, 'downloading',
+            'a failed toggle must not leave the status stuck on downloading');
+        assert.equal(wrapper.indexStatus, 'ready',
+            'the previously loaded index is still answering queries');
+        assert.equal(wrapper.indexUsable, true);
+        // The selection stands — it is the user's intent and retries later.
+        assert.deepEqual(wrapper.selectedDatasets, ALL);
+        await assertAllIntact('v1', 1, 'after a failed toggle-on',
+            ['thesession', 'folkwiki']);
     });
 
     await test('removeDataset is the only path that deletes a copy', async () => {

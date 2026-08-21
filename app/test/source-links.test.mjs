@@ -80,10 +80,34 @@ assert.equal(sourceNameForTuneID('1000000', 'norbeck'), 'norbeck');
 assert.equal(isThesessionTuneID('1000000', 'thesession'), true);
 assert.equal(isThesessionTuneID('15326', 'folkwiki'), false);
 
-// An unknown dataset id falls back rather than propagating nonsense into the
-// UI — a stale label from an older build must not break the source chip.
-assert.equal(datasetForTuneID('15326', 'not-a-dataset'), 'thesession');
+// An id this build does not recognise is PASSED THROUGH, not relabelled. A
+// dataset added to the published manifest after this release must not be
+// silently reported as folkwiki by the range fallback — that is precisely the
+// mislabelling the explicit label exists to prevent.
+assert.equal(datasetForTuneID('15326', 'a-later-dataset'), 'a-later-dataset');
+assert.equal(sourceNameForTuneID('15326', 'a-later-dataset'), 'a-later-dataset');
 assert.equal(datasetForTuneID('1000000', ''), 'folkwiki');
+
+// ...and an unknown dataset has no derivable URL, so the caller gets '' and can
+// hide the link rather than sending the user to a folkwiki page that has
+// nothing to do with the tune.
+assert.equal(tuneSourceUrl({ tuneID: '999', dataset: 'a-later-dataset' }), '');
+assert.equal(
+    tuneSourceUrl({
+        tuneID: '999', dataset: 'a-later-dataset', sourceUrl: 'https://x/1',
+    }),
+    'https://x/1'
+);
+
+// An UNLABELLED norbeck tune — a favourite saved before labelling existed —
+// must still be identified correctly. Without a norbeck range here it fell
+// through to folkwiki, which is the bug this fallback is meant to prevent.
+assert.equal(datasetForTuneID('3001472672'), 'norbeck');
+assert.equal(datasetForTuneID('7292804357'), 'norbeck');
+assert.equal(sourceNameForTuneID('3001472672'), 'norbeck');
+// ...without swallowing folkwiki, whose hash term reaches ~1.68e9.
+assert.equal(datasetForTuneID('1678715901'), 'folkwiki');
+assert.equal(datasetForTuneID('1398101'), 'folkwiki');
 
 // Norbeck URLs are never derivable from the tune id, so source_url is
 // mandatory in the data and is used verbatim.

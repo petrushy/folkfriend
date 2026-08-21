@@ -46,7 +46,14 @@ function sanitiseDatasets(value) {
     if (!Array.isArray(value)) {
         return [...USER_SETTING_DEFAULTS.tuneDatasets];
     }
-    return [...new Set(value.filter(id => KNOWN_DATASETS.includes(id)))];
+    // Any non-empty string id is kept, not just the ones this build knows.
+    // Filtering to KNOWN_DATASETS meant a dataset added to the published
+    // manifest after this release could be selected but would be dropped from
+    // the saved preferences on the next launch — so it silently un-selected
+    // itself. An id the manifest does not offer simply fails to install and is
+    // dropped from the effective selection there instead.
+    return [...new Set(value.filter(
+        id => typeof id === 'string' && id !== ''))];
 }
 
 // The Anthropic API key lives under its own localStorage key, NOT in

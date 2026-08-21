@@ -187,23 +187,32 @@ every network blip re-runs a setup that cannot succeed.
 4. **Turning off the last one unloads** rather than loading an empty index —
    `indexPayloadProblem` would reject one anyway, and Rust would happily return
    nothing with no explanation.
-5. **Only datasets known to load are merged back in.** `_partsToKeep` reads
+5. **A half-finished migration never reduces what is searchable.** The merged
+   blob is passed to `mergeIndexParts` as a **base part** (`id: null`) that
+   fills gaps and never overwrites a dataset file. Without it, the first
+   per-dataset load during a migration replaced WASM with only that dataset,
+   so a later failure silently dropped every un-migrated source from search for
+   the rest of the session — while `_afterInstall` still reported them loaded,
+   having inherited their `source: 'merged'` entries. Nothing was lost on disk;
+   the app just quietly stopped finding half its tunes and said it was fine.
+   `loadedDatasets` now reports only what is genuinely in WASM.
+6. **Only datasets known to load are merged back in.** `_partsToKeep` reads
    `loadedDatasets` ∪ just-installed, **not** everything on disk. Merging back a
    cached copy the Rust side refuses (a real schema change) poisons every
    subsequent install, so the incompatible copy can never be replaced and the
    app stays unavailable forever. Keeping such a copy is right; feeding it back
    into WASM is not. *Found by a test, not by reasoning.*
-6. **Joining an in-flight install is narrowed to a subset test.** Joining
+7. **Joining an in-flight install is narrowed to a subset test.** Joining
    unconditionally is wrong once requests can be disjoint: an install of
    `['thesession']` would hand a caller asking for `['norbeck']` a result with
    no norbeck in it. Anything not covered is serialised behind it on
    `_installChain`. A plain `while (inFlight) await inFlight` is also wrong —
    two waiters both wake, both see null, both start.
-7. **A part contributing zero new setting IDs is a failed dataset.** If
+8. **A part contributing zero new setting IDs is a failed dataset.** If
    `datasets.json` points two entries at the same file, both documents pass
    `indexPayloadProblem` perfectly and the failure would present as "folkwiki is
    missing" with no error anywhere.
-8. **Progress is aggregated and clamped.** `received` counts decoded bytes while
+9. **Progress is aggregated and clamped.** `received` counts decoded bytes while
    `size` from `datasets.json` is the uncompressed length; they agree in
    production but a stale manifest must not push the bar past 100%. Preferring
    `size` over `Content-Length` also fixes a pre-existing bug — Firebase gzips
@@ -241,10 +250,23 @@ The worker now labels every tune with the dataset file it came from
 merge, never incrementally** — the same hazard class as `abcStringBySetting`).
 Every `source.mjs` function takes an optional explicit `dataset` and prefers it.
 
-The ID-range rule survives **only as the fallback for legacy merged blobs**,
-which contain thesession and folkwiki and nothing else by construction. Norbeck
-is deliberately *not* in it — a third range would be another place that has to
-agree with the data repo's ID bases, for a case that cannot arise.
+The ID-range rule survives as the fallback for **any tune with no label** — a
+legacy merged blob, or a favourite saved before labelling existed. It covers all
+three sources.
+
+It originally excluded Norbeck, on the argument that a merged blob contains
+nothing else by construction so a third range would be a place to keep in sync
+for a case that could not arise. **That argument was wrong**: a favourite is a
+self-contained snapshot, so one saved without a label reaches the fallback
+carrying a Norbeck tune id and was reported as folkwiki. The ranges here must
+match the ID bases in the data repo's builders.
+
+An explicit label **always wins, including one this build does not recognise**.
+Passing an unknown id through rather than relabelling it is what makes a fourth
+dataset addable from the data repo alone; `sanitiseDatasets` keeps unknown ids
+in the saved selection for the same reason. Such a dataset appears under its raw
+id with no description, and must carry `source_url` — nothing can derive a link
+for it — and `tuneSourceUrl` returns `''` rather than guessing a folkwiki page.
 
 `aiSummary.js` calls `isThesessionTuneID` without a label on purpose: it only
 asks "does this tune have a thesession.org page", and the fallback answers that
