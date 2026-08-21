@@ -216,9 +216,17 @@ Three things this needs that a published dataset does not:
   The offending part is **dropped, not the whole merge refused**: at startup a
   refusal would leave the user with no index at all, which is worse than
   leaving out one imported dataset. Published data always wins; among imports,
-  first in selection order wins. A dropped part is reported in
-  `datasetErrors` and excluded from `datasetsLoaded`, because the status must
-  never claim more than WASM holds.
+  first in selection order wins.
+
+  **Every path that merges must carry `merged.rejected` into its bookkeeping**
+  — cache, selection AND install. The install path missed it at first, so a
+  download that displaced an already-loaded import left `_afterInstall`
+  starting from the previous `loadedDatasets` and still reporting the import as
+  loaded, with no reason given, while its tunes had silently stopped being
+  findable. A dropped part is excluded from `datasetsLoaded`, appears in
+  `datasetsMissing`, and gets its reason in `datasetErrors`, because the status
+  must never claim more than WASM holds. Startup analytics reports the vetted
+  set for the same reason.
 
   **An import is additionally vetted against every STORED dataset**, not just
   the selected ones — a deselected dataset still has favourites pointing into

@@ -505,9 +505,14 @@ class FolkFriendWASMWrapper {
                     analyticsData['tune_index_metadata_version'] = this._loadedIndexInfo.v;
                     analyticsData['tune_index_metadata_date'] = this._loadedIndexInfo.date || null;
                     analyticsData['days_since_update'] = 0;
-                    analyticsData['datasets_loaded'] = parts.map(p => p.id).join(',');
-                    if (missing.length) {
-                        analyticsData['datasets_missing'] = missing.join(',');
+                    // The VETTED set, not the parts we set out to load — a
+                    // part the merge dropped is not loaded.
+                    analyticsData['datasets_loaded'] =
+                        Object.keys(this.loadedDatasets).join(',');
+                    const notLoaded = [...missing, ...this.selectedDatasets.filter(
+                        id => !this.loadedDatasets[id] && !missing.includes(id))];
+                    if (notLoaded.length) {
+                        analyticsData['datasets_missing'] = notLoaded.join(',');
                     }
 
                     // Deliberately NOT awaited: the app is already usable, and
@@ -737,6 +742,11 @@ class FolkFriendWASMWrapper {
         const installed = {};
         const failed = {};
         const persistErrors = {};
+        // A merge can DROP a user-origin part that collides with what is being
+        // installed — safety is preserved, but the drop has to be carried into
+        // the bookkeeping or the status keeps claiming a dataset that is no
+        // longer in WASM and whose tunes have silently stopped being findable.
+        const rejected = {};
 
         const work = [];
         for (const id of ids) {
@@ -895,6 +905,11 @@ class FolkFriendWASMWrapper {
                 const merged = await this.loadMergedIndex(
                     [...base, ...others, part]);
                 loadedThisEntry = true;
+                for (const bad of merged.rejected || []) {
+                    rejected[bad.id] =
+                        `reuses ${bad.settings} setting and ${bad.tunes} tune `
+                        + 'IDs that another database already uses';
+                }
                 if (merged.empty.includes(entry.id)) {
                     throw new Error(
                         'duplicate of an already-loaded dataset — check the '
@@ -945,8 +960,13 @@ class FolkFriendWASMWrapper {
             throw new Error(reasons || 'No datasets could be installed');
         }
 
-        await this._afterInstall(installed, failed, persistErrors);
-        return { ...this._scalarVersion(), installed, failed, persistErrors };
+        await this._afterInstall(installed, failed, persistErrors, rejected);
+        return {
+            ...this._scalarVersion(),
+            installed,
+            failed: { ...failed, ...rejected },
+            persistErrors,
+        };
     }
 
     // Which already-stored datasets should be merged alongside the one being
@@ -1003,10 +1023,14 @@ class FolkFriendWASMWrapper {
         return [{ id: null, index: merged.index }];
     }
 
-    async _afterInstall(installed, failed, persistErrors) {
+    async _afterInstall(installed, failed, persistErrors, rejected = {}) {
         const loaded = { ...this.loadedDatasets };
         for (const [id, info] of Object.entries(installed)) {
             loaded[id] = { ...info, source: 'network' };
+        }
+        // A part a merge dropped is no longer in WASM, whatever it was before.
+        for (const id of Object.keys(rejected)) {
+            delete loaded[id];
         }
         // Report only what is genuinely searchable. A dataset inherited from
         // the merged blob stays loaded ONLY while that blob is still the base
@@ -1026,6 +1050,10 @@ class FolkFriendWASMWrapper {
         }
 
         const datasetsLoaded = Object.keys(this.loadedDatasets);
+        // `datasetsMissing` is derived from what is actually loaded, so a
+        // rejected dataset lands here automatically — but its REASON only
+        // exists in `rejected`, and without it the UI would show a dataset
+        // missing with nothing to say about why.
         const datasetsMissing = this.selectedDatasets.filter(
             id => !this.loadedDatasets[id]);
 
@@ -1058,7 +1086,7 @@ class FolkFriendWASMWrapper {
             ...this._loadedIndexInfo,
             datasetsLoaded,
             datasetsMissing,
-            datasetErrors: { ...failed },
+            datasetErrors: { ...failed, ...rejected },
             persistError: firstPersistError,
             migrationPending: this._migrationPending,
         });

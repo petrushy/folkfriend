@@ -1559,6 +1559,50 @@ async function run() {
             'this test is meaningless if no merge happened');
     });
 
+    await test('a DOWNLOAD that displaces an import updates the bookkeeping', async () => {
+        // The install path, not the cache/selection path. A newly published
+        // dataset arrives, collides with an already-loaded import, and the
+        // merge correctly drops the import — but _afterInstall used to start
+        // from the previous loadedDatasets and so kept reporting it as loaded,
+        // with no reason given. Its tunes had silently stopped being findable.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['folkwiki'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        // An import that occupies thesession's ID space, added while
+        // thesession is neither selected nor stored.
+        const shadowing = JSON.stringify({
+            ...JSON.parse(makeIndex('thesession', 'shadow')),
+            id: 'shadow', label: 'Shadow', v: 1, date: '2026-01-01',
+        });
+        const added = await new Promise(
+            r => wrapper.addUserDataset({ text: shadowing }, r));
+        assert.equal(added.ok, true, added.error);
+        assert.ok((wrapper.indexDetail.datasetsLoaded || []).includes('shadow'));
+
+        // Now thesession is published and selected, and downloads.
+        netMod.__net.manifest = manifestFor(
+            { thesession: 1, folkwiki: 1 });
+        await new Promise(r => wrapper.setSelectedDatasets(
+            ['thesession', 'folkwiki', 'shadow'], r));
+
+        // The published dataset wins and is searchable.
+        const found = await new Promise(r => wrapper.settingsFromTuneID('0', r));
+        assert.ok(found.length > 0, 'thesession must be searchable');
+        assert.equal(found[0].dataset, 'thesession');
+
+        // ...and the displaced import is reported honestly.
+        const detail = wrapper.indexDetail;
+        assert.ok(!(detail.datasetsLoaded || []).includes('shadow'),
+            'a displaced import must not still be reported as loaded');
+        assert.ok((detail.datasetsMissing || []).includes('shadow'),
+            'it should be listed as missing');
+        assert.ok((detail.datasetErrors || {}).shadow,
+            'and the reason must be given, not left blank');
+        assert.match(detail.datasetErrors.shadow, /reuses/i);
+    });
+
     await test('the same tune is not counted twice in the collision total', async () => {
         // A clashing tune arrives once via its alias entry and once via
         // tuneIDs. Counting both reported double the real number — the
