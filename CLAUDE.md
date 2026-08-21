@@ -211,9 +211,12 @@ Three things this needs that a published dataset does not:
   imported dataset is required to be self-describing, so a payload with no `id`
   is not a lenient case — it is a file that cannot prove it is still the same
   collection.
-- **A rejected payload is unloaded again.** It has already been merged into WASM
-  by the time it is judged, so the previous selection is reloaded from disk;
-  otherwise the session keeps searching data we just refused to save.
+- **A rejected payload never reaches WASM.** `loadMergedIndex` takes a
+  `validate` callback that runs on the merged result *before* the load, so a
+  refusal costs nothing and there is nothing to undo. It previously loaded
+  first and reloaded the old selection on rejection, which left a window where
+  the app was searching data it had just refused to save — and depended on the
+  undo itself not failing. The tests assert `loadCalls` does not move.
 - **`source_url` is scheme-checked** (`safeSourceUrl`) and escaped where it is
   interpolated. It reaches `href` attributes and the exported favourites HTML,
   which people share — `javascript:` and `data:` are both markup-injection

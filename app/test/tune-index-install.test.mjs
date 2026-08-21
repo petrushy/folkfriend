@@ -1425,11 +1425,17 @@ async function run() {
             id: 'tuneclash', label: 'Tune Clash', v: 1, date: '2026-01-01',
         });
 
+        const loadsBefore = wasmMod.__wasm.loadCalls;
         const result = await new Promise(
             r => wrapper.addUserDataset({ text: tuneClash }, r));
         assert.equal(result.ok, false,
             'a dataset recycling tune ids must be refused');
         assert.match(result.error, /tune IDs/i);
+        // Vetted BEFORE the load, so it never reaches WASM at all — rather
+        // than being loaded and then undone, which left a window where the app
+        // searched data it had just refused to save.
+        assert.equal(wasmMod.__wasm.loadCalls, loadsBefore,
+            'a rejected payload must never be loaded into WASM');
 
         // The real dataset is intact and still owns its tunes.
         const found = await new Promise(r => wrapper.settingsFromTuneID('0', r));
@@ -1455,10 +1461,13 @@ async function run() {
             ...JSON.parse(makeIndex('thesession', 'stolen')),
             id: 'norbeck', label: 'Norbeck', v: 99, date: '2026-09-01',
         });
+        const loadsBefore = wasmMod.__wasm.loadCalls;
         const refresh = await new Promise(
             r => wrapper.refreshTuneIndex(['norbeck'], r));
         const why = (refresh.failed || {}).norbeck || refresh.error || '';
         assert.match(why, /reuses/i, `expected a collision refusal, got: ${why}`);
+        assert.equal(wasmMod.__wasm.loadCalls, loadsBefore,
+            'a rejected refresh must never be loaded into WASM');
         await assertOfflineCopyIs('norbeck', 'v1', 42,
             'the previous copy must survive a colliding refresh');
         await assertOfflineCopyIs('thesession', 'v1', 1, 'the victim dataset');

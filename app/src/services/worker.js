@@ -780,13 +780,16 @@ class FolkFriendWASMWrapper {
                 // the one loaded in WASM (use_tune_index runs only after serde
                 // has deserialised the whole thing) and every offline copy is
                 // still on disk.
+                // An imported dataset is untrusted on every fetch, not only
+                // the first: the URL is remembered and its contents can change.
+                // Vetted BEFORE the WASM load, so a rejected payload is never
+                // loaded and there is nothing to undo.
+                const merged = await this.loadMergedIndex(
+                    [...base, ...others, part], null,
+                    entry.origin === 'user'
+                        ? (m) => this._assertNoCollisions(m, entry.id)
+                        : null);
                 loadedThisEntry = true;
-                const merged = await this.loadMergedIndex([...base, ...others, part]);
-                // An imported dataset is untrusted on every fetch, not only the
-                // first: the URL is remembered and its contents can change.
-                if (entry.origin === 'user') {
-                    this._assertNoCollisions(merged, entry.id);
-                }
                 if (merged.empty.includes(entry.id)) {
                     throw new Error(
                         'duplicate of an already-loaded dataset — check the '
@@ -1263,7 +1266,9 @@ class FolkFriendWASMWrapper {
             const others = await this._partsToKeep(id, []);
             const base = await this._migrationBase(
                 [id, ...others.map(p => p.id)]);
-            const merged = await this.loadMergedIndex([...base, ...others, part]);
+            const merged = await this.loadMergedIndex(
+                [...base, ...others, part], null,
+                (m) => this._assertNoCollisions(m, id));
 
             // IDs are global. A dataset reusing another's setting or tune ids
             // does not fail loudly — one record shadows the other, and because
@@ -1271,14 +1276,6 @@ class FolkFriendWASMWrapper {
             // open the wrong tune or look already-favourited. For a file from
             // the CDN a collision is a data-repo bug we report and carry on
             // with; for an arbitrary import it is a reason to refuse.
-            try {
-                this._assertNoCollisions(merged, id);
-            } catch (e) {
-                // Put back what was loaded before, since this merge is not
-                // going to be kept.
-                await this._reloadSelected();
-                throw e;
-            }
 
             let persistError = null;
             try {
@@ -1418,10 +1415,17 @@ class FolkFriendWASMWrapper {
     // merged blob, which contains thesession and folkwiki but cannot say which
     // tune came from which. Those tunes fall back to the ID-range rule in
     // source.mjs, which is exactly what that fallback exists for.
-    async loadMergedIndex(parts, mergedDatasets = null) {
-        console.time('tune-index-to-wasm');
+    // Merge, optionally VET, then load. `validate` is called with the merged
+    // result before anything reaches WASM, so a payload it rejects is never
+    // loaded at all — rather than being loaded and then undone, which left a
+    // window where the app was searching data it had just refused to save, and
+    // depended on the undo itself not failing.
+    async loadMergedIndex(parts, mergedDatasets = null, validate = null) {
         await this.loadedWASM;
         const merged = mergeIndexParts(parts);
+        if (validate) validate(merged);
+
+        console.time('tune-index-to-wasm');
         if (merged.collisions || merged.tuneCollisions) {
             // For DATASETS WE PUBLISH a collision is a data-repo bug: report it
             // and carry on, because denying the user their whole index over it
