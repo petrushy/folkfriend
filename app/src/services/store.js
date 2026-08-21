@@ -32,10 +32,17 @@ const USER_SETTING_DEFAULTS = {
     tuneDatasets: ['thesession', 'folkwiki'],
 };
 
-// Dataset ids the app knows about. Anything else in a stored selection is
-// dropped: it is either a typo or a dataset a newer build offered and this one
-// does not understand, and either way loading it would just fail.
-export const KNOWN_DATASETS = ['thesession', 'folkwiki', 'norbeck'];
+// The datasets the app OFFERS by default — the ones it can fetch for you.
+//
+// Norbeck is deliberately absent: it is built but not published (his terms
+// forbid making the ABC files available for download), so offering a checkbox
+// for it would be offering something that cannot be fetched. It reaches the
+// app through Settings → "Add a database" instead, and appears in the list
+// once it is stored, under the name in DATASET_LABELS.
+//
+// This is NOT the list of ids the app understands — an imported dataset can
+// have any id. See sanitiseDatasets and datasetForTuneID.
+export const KNOWN_DATASETS = ['thesession', 'folkwiki'];
 
 // Substitute the default ONLY when the key is absent or is not an array.
 //

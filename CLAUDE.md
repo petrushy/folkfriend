@@ -263,9 +263,21 @@ Three things this needs that a published dataset does not:
   which people share — `javascript:` and `data:` are both markup-injection
   routes, and the export previously interpolated it unescaped.
 
-`KNOWN_DATASETS` in `store.js` is only for labels and defaults — an imported id
-is not in it, which is why `sanitiseDatasets` keeps unknown ids and
+**`KNOWN_DATASETS` in `store.js` is the list the app OFFERS, and Norbeck is
+deliberately not in it.** Leaving it there rendered a built-in checkbox for a
+dataset nothing serves — ticking it would simply fail. It reaches the app
+through "Add a database" and appears in the list once stored. Its name still
+lives in `DATASET_LABELS` (`source.mjs`), which is a different question: the app
+does not offer to fetch it, but it must still be named properly once someone
+imports it.
+
+`KNOWN_DATASETS` is not the list of ids the app *understands* — an imported
+dataset can have any id, which is why `sanitiseDatasets` keeps unknown ids and
 `datasetForTuneID` passes an unrecognised label through untouched.
+
+**The importable file is `build/data/norbeck.json` from the data repo**, i.e.
+the one `assemble_datasets.py` has stamped — not the raw output of
+`build_norbeck_data.py`, which has no `id` and is refused on import.
 
 ### Partial success is READY
 

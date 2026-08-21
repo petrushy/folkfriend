@@ -35,6 +35,9 @@ const NORBECK_TUNE_ID_BASE = 3000000000;
 
 // Human names for the datasets, shared by every view that names one. Kept
 // here rather than in a component so Settings and Search cannot drift apart.
+//
+// Norbeck is here but NOT in store.js's KNOWN_DATASETS: the app does not offer
+// to fetch it, but it must still be named properly once someone imports it.
 export const DATASET_LABELS = {
     [DATASET_THESESSION]: 'The Session',
     [DATASET_FOLKWIKI]: 'Folkwiki',
