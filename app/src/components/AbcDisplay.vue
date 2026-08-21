@@ -142,11 +142,28 @@ export default {
             if (!/^L:/m.test(this.abc)) {
                 abcLines.push('L:1/8');
             }
-            // For polkas (M:2/4), ABCJS's default of 180 BPM is too fast.
-            // Inject 120 BPM only when no tempo is specified and the meter is 2/4.
-            const isPolka = this.meter === '2/4' || /^M:2\/4/m.test(this.abc);
-            if (isPolka && !/^Q:/m.test(this.abc)) {
-                abcLines.push('Q:1/4=120');
+            // PIN THE PULSE TO THE QUARTER NOTE.
+            //
+            // ABCJS's default tempo is counted in the METER'S OWN beat unit, so
+            // identical notes play at different speeds depending only on how
+            // the meter is written. Cut time is the case that bites: C| counts
+            // half notes, so a reel written M:C| plays at exactly double the
+            // speed of the same reel written M:4/4 — 667 ms/bar against 1333.
+            //
+            // thesession writes reels as 4/4 and Norbeck writes 1,487 of them
+            // as C|, which is why Norbeck tunes sounded frantic while the same
+            // tune from thesession sounded right.
+            //
+            // Naming an absolute note value takes the meter out of it. 180 is
+            // chosen to reproduce exactly what 4/4 already does, so every meter
+            // that sounded right before is untouched (4/4, C, 6/8, 9/8, 12/8,
+            // 3/4, 2/4); only C|, 2/2, 6/4, 3/8 and the additive Balkan meters
+            // move, and all of those were wrong.
+            if (!/^Q:/m.test(this.abc)) {
+                // Polkas are the one meter that needs a slower pulse than the
+                // default; ABCJS's own is too fast for them.
+                const isPolka = this.meter === '2/4' || /^M:2\/4/m.test(this.abc);
+                abcLines.push(`Q:1/4=${isPolka ? 120 : 180}`);
             }
             abcLines.push(this.abc);
             return abcLines.join('\n');
