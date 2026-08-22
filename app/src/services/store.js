@@ -25,7 +25,43 @@ const USER_SETTING_DEFAULTS = {
     aiSummariesEnabled: false, // show the (i) tune-background button; needs an API key
     aiSummaryModel: DEFAULT_AI_MODEL, // which Claude model writes the background note
     geoTagDetections: false, // record where each tune was heard; needs location permission
+    // Which tune databases are downloaded, stored offline and searched.
+    // The default MUST equal the app's pre-multi-dataset behaviour, so that an
+    // upgrading user — or an old backup restored through the backfill in
+    // updateUserSettings — neither loses thesession nor silently gains norbeck.
+    tuneDatasets: ['thesession', 'folkwiki'],
 };
+
+// The datasets the app OFFERS by default — the ones it can fetch for you.
+//
+// Norbeck is deliberately absent: it is built but not published (his terms
+// forbid making the ABC files available for download), so offering a checkbox
+// for it would be offering something that cannot be fetched. It reaches the
+// app through Settings → "Add a database" instead, and appears in the list
+// once it is stored, under the name in DATASET_LABELS.
+//
+// This is NOT the list of ids the app understands — an imported dataset can
+// have any id. See sanitiseDatasets and datasetForTuneID.
+export const KNOWN_DATASETS = ['thesession', 'folkwiki'];
+
+// Substitute the default ONLY when the key is absent or is not an array.
+//
+// An explicit empty array is an honest "I deselected everything" and must be
+// honoured — quietly replacing it with the default would override the user on
+// every launch, and they would have no way to tell why.
+function sanitiseDatasets(value) {
+    if (!Array.isArray(value)) {
+        return [...USER_SETTING_DEFAULTS.tuneDatasets];
+    }
+    // Any non-empty string id is kept, not just the ones this build knows.
+    // Filtering to KNOWN_DATASETS meant a dataset added to the published
+    // manifest after this release could be selected but would be dropped from
+    // the saved preferences on the next launch — so it silently un-selected
+    // itself. An id the manifest does not offer simply fails to install and is
+    // dropped from the effective selection there instead.
+    return [...new Set(value.filter(
+        id => typeof id === 'string' && id !== ''))];
+}
 
 // The Anthropic API key lives under its own localStorage key, NOT in
 // userSettings. exportUserData() serialises userSettings wholesale into a
@@ -92,6 +128,9 @@ class Store {
             // with a timeout.
             indexStatus: 'loading',
             indexStatusDetail: {},
+            // { loaded: [ids], missing: [ids], errors: {id: message},
+            //   migrationPending: bool } — populated by backend._onIndexStatus.
+            indexDatasets: { loaded: [], missing: [], errors: {}, migrationPending: false },
             // { received, total } while downloading, else null.
             indexDownloadProgress: null,
             // Convenience mirrors of indexStatus, kept for existing views.
@@ -127,6 +166,8 @@ class Store {
             ...USER_SETTING_DEFAULTS,
             ...(JSON.parse(localStorage.getItem('userSettings')) || {}),
         };
+        this.userSettings.tuneDatasets =
+            sanitiseDatasets(this.userSettings.tuneDatasets);
         this.searchState = this.searchStates.READY;
 
         this._favouriteIDs = null;
@@ -142,6 +183,11 @@ class Store {
         this.currentUser = null;
         this.auth = null;
         this._unsubscribeSync = null;
+    }
+
+    // The datasets the user wants searched. Always an array of known ids.
+    selectedDatasets() {
+        return sanitiseDatasets(this.userSettings.tuneDatasets);
     }
 
     async _dbSet(key, value) {
@@ -161,6 +207,7 @@ class Store {
         for (const [key, value] of Object.entries(USER_SETTING_DEFAULTS)) {
             if (userSettings[key] === undefined) userSettings[key] = value;
         }
+        userSettings.tuneDatasets = sanitiseDatasets(userSettings.tuneDatasets);
 
         // Usable immediately and synchronously by the entire application.
         this.userSettings = userSettings;

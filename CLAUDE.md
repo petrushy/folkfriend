@@ -121,6 +121,300 @@ After installing, the service worker caches all assets (including WASM) so the a
   re-recorded clip comes out of ffmpeg: that header layout is legal but unusual,
   and some readers mis-handle it.
 
+## Multi-dataset tune index (August 2026 — v3.11.0)
+
+The index is no longer one blob. It is published and stored as **one file per
+source** — `thesession` (34.8 MB), `folkwiki` (7.3 MB), `norbeck` (3.1 MB) —
+plus a `datasets.json` manifest, and the user chooses which are downloaded,
+stored offline and searched (Settings → Offline Tune Database). Default is
+`['thesession', 'folkwiki']`, i.e. exactly the old behaviour; norbeck is opt-in.
+
+Everything in "Offline architecture" below still holds; it is now applied **per
+dataset**. The three invariants the tests pin:
+
+> **P1 — per dataset.** If a usable offline copy of dataset D existed before an
+> operation, one exists after it, wherever the operation died and whatever the
+> operation was *about*. An operation concerning E must not touch D at all.
+>
+> **P2 — coverage.** `indexUsable` is false only when *every* selected dataset
+> genuinely has no usable copy, or the selection is empty.
+>
+> **P3 — migration.** The pre-multi-dataset merged blob is present until every
+> dataset it covers has a committed per-dataset copy that has loaded into WASM,
+> and absent afterwards. There is no state in which both are missing.
+
+**The unscoped delete is the bug class this introduces.** A corrupt folkwiki
+must never cost the user their thesession copy. Every delete in
+`tuneIndexStore.js` is scoped to one id, and the fault-injection walk in
+`tune-index-cache.test.mjs` seeds all three datasets and asserts all three
+survive an interruption at every storage operation of an update to *one*.
+
+### Datasets the app does not host
+
+**Not every dataset FolkFriend can search is one it may distribute.** Norbeck's
+terms forbid making the ABC files available for download on a web page, so that
+dataset is built by the data repo but never published: it is absent from
+`datasets.json`, absent from `public/`, and `assemble_datasets.py` writes a
+`PUBLISHED_FILES.txt` that `build.sh` obeys so it cannot be deployed by accident.
+
+The way in is **Settings → "Add a database"**, which takes either a file the
+user picks or a URL they supply (`worker.addUserDataset`). Same order as every
+other install — parse → `indexPayloadProblem` → load into WASM → write — because
+it replaces a copy just as irrecoverably. A URL is fetched **inside the worker**
+so a 3 MB body never crosses the Comlink boundary.
+
+Three things this needs that a published dataset does not:
+
+- **The file must be self-describing.** There is no `datasets.json` entry to say
+  what it is, so `assemble_datasets.py` stamps `id`, `label`, `description`, `v`
+  and `date` into every dataset file. An import with no usable `id` is refused —
+  there would be nothing to store it under and nothing to call it.
+- **Its manifest records provenance** (`origin: 'user'`, `label`, and the `url`
+  if there was one). Without it the next update check would call the dataset
+  "not published" — permanently, and unactionably — and its name would revert to
+  its raw id. `_installDatasets` carries these through a refresh for the same
+  reason, and takes the version from the *fetched file* rather than the stale
+  local manifest, because the file is the thing that describes itself.
+- **A cross-origin URL usually will not work**, and the browser reports it as a
+  bare "Failed to fetch" that is indistinguishable from being offline. Most
+  hosts send no `Access-Control-Allow-Origin`. `fetchUserDatasetText` translates
+  that into an explanation naming CORS and pointing at the file route, which
+  always works. This will otherwise be the single most common confusion with the
+  feature.
+
+**An import is untrusted input, and is guarded accordingly:**
+
+- **It runs under the install lock.** Without it an import merges from its own
+  view of what is loaded and can interleave with a startup update or a manual
+  refresh, leaving WASM holding one operation's merge while `loadedDatasets`
+  claims both.
+- **It cannot impersonate a published dataset.** Storing under `thesession`
+  would put an unvetted file behind a name the app manages, to be overwritten —
+  or not — by the next CDN update depending on ordering.
+- **It cannot reuse another dataset's IDs — setting *or* tune.** `mergeIndexParts`
+  counts the two separately, because they fail differently. A setting clash
+  hides one setting; a **tune** clash is worse — the later dataset's aliases
+  overwrite the earlier tune's NAME, its `datasetByTune` entry relabels the
+  source, and Rust groups both datasets' settings under one tune. Counting only
+  setting ids let a dataset with fresh setting ids but recycled tune ids pass
+  every check. Since favourites are keyed by setting id alone, the visible
+  symptom either way is a favourite opening the wrong tune.
+
+  For a CDN file a collision stays a warning — denying the user their whole
+  index over a data-repo bug is not proportionate. For an import it is a
+  refusal.
+
+  **The invariant is enforced at EVERY MERGE, not at the import site.**
+  `vetUserParts` runs inside `loadMergedIndex` and drops any user-origin part
+  that would collide with anything else in that merge, whatever triggered it.
+  Checking only where an import is added left the collision reachable from the
+  other end: deselect thesession (keeping its copy and its favourites), import
+  something reusing its IDs — accepted, because thesession is not in the merge
+  — then re-enable thesession. That merge comes from the selection change, so
+  nothing re-checked it.
+
+  The offending part is **dropped, not the whole merge refused**: at startup a
+  refusal would leave the user with no index at all, which is worse than
+  leaving out one imported dataset. Published data always wins; among imports,
+  first in selection order wins.
+
+  **Every path that merges must carry `merged.rejected` into its bookkeeping**
+  — cache, selection AND install. The install path missed it at first, so a
+  download that displaced an already-loaded import left `_afterInstall`
+  starting from the previous `loadedDatasets` and still reporting the import as
+  loaded, with no reason given, while its tunes had silently stopped being
+  findable. A dropped part is excluded from `datasetsLoaded`, appears in
+  `datasetsMissing`, and gets its reason in `datasetErrors`, because the status
+  must never claim more than WASM holds. Startup analytics reports the vetted
+  set for the same reason.
+
+  **An import is additionally vetted against every STORED dataset**, not just
+  the selected ones — a deselected dataset still has favourites pointing into
+  it, so its IDs are still spoken for. That is what turns a silent
+  refuses-to-load-later into an error at the moment of import.
+
+  **The candidate is vetted by `collisionsForPart`, not by the merge's own
+  counts.** `mergeIndexParts` exempts the legacy migration base from its
+  totals, because the base holds older copies of the very datasets being
+  migrated and overlap there is expected. That exemption is right for a
+  published dataset replacing itself and wrong for an import — and since the
+  base is processed *last*, a candidate processed before it never saw the
+  overlap either. So an import made while migration is deferred (auto-update
+  off, or a migration that failed) could shadow thesession or folkwiki IDs that
+  currently live only inside the merged blob. `collisionsForPart` compares the
+  candidate against every other part, base included, independently of merge
+  order.
+- **Both checks run on EVERY fetch, not just the first.** The remembered URL is
+  not under our control, so a payload that was clean when it was added can start
+  colliding later; the refresh path used to merely log it and persist anyway.
+- **A refresh cannot change what the dataset IS.** Identity is checked by exact
+  equality (`servedId === entry.id`), not "different if it says anything". An
+  imported dataset is required to be self-describing, so a payload with no `id`
+  is not a lenient case — it is a file that cannot prove it is still the same
+  collection.
+- **A rejected payload never reaches WASM.** `loadMergedIndex` takes a
+  `validate` callback that runs on the merged result *before* the load, so a
+  refusal costs nothing and there is nothing to undo. It previously loaded
+  first and reloaded the old selection on rejection, which left a window where
+  the app was searching data it had just refused to save — and depended on the
+  undo itself not failing. The tests assert `loadCalls` does not move.
+- **`source_url` is scheme-checked** (`safeSourceUrl`) and escaped where it is
+  interpolated. It reaches `href` attributes and the exported favourites HTML,
+  which people share — `javascript:` and `data:` are both markup-injection
+  routes, and the export previously interpolated it unescaped.
+
+**`KNOWN_DATASETS` in `store.js` is the list the app OFFERS, and Norbeck is
+deliberately not in it.** Leaving it there rendered a built-in checkbox for a
+dataset nothing serves — ticking it would simply fail. It reaches the app
+through "Add a database" and appears in the list once stored. Its name still
+lives in `DATASET_LABELS` (`source.mjs`), which is a different question: the app
+does not offer to fetch it, but it must still be named properly once someone
+imports it.
+
+`KNOWN_DATASETS` is not the list of ids the app *understands* — an imported
+dataset can have any id, which is why `sanitiseDatasets` keeps unknown ids and
+`datasetForTuneID` passes an unrecognised label through untouched.
+
+**The importable file is `build/data/norbeck.json` from the data repo**, i.e.
+the one `assemble_datasets.py` has stamped — not the raw output of
+`build_norbeck_data.py`, which has no `id` and is refused on import.
+
+### Partial success is READY
+
+With two of three selected datasets loaded, queries work and return real tunes,
+so the app is `READY`. Reporting `UNAVAILABLE` would make
+`backend.indexReady()` resolve false and push Tune and Search into
+favourites-only mode — strictly worse than searching the 62k tunes the user
+does have, and it would take the whole app down whenever one small file 404s.
+Same usability-vs-status distinction the state machine already drew for
+background updates.
+
+There is deliberately **no `'partial'` status**: a dozen `status === 'ready'`
+comparisons across the app would silently stop matching. The detail carries
+`datasetsLoaded` / `datasetsMissing` / `datasetErrors`, and **Search.vue
+surfaces a note when something is missing** — that part is required work, not
+polish. A user whose norbeck download quietly failed would otherwise search a
+Swedish tune, get nothing, and conclude FolkFriend does not have it. This
+codebase has three separate scars from failures that were invisible for a
+session.
+
+One new terminal reason, `'no-datasets-selected'`. It is a legitimate choice,
+not a failure, so `backend`'s `'online'` retry handler skips it — otherwise
+every network blip re-runs a setup that cannot succeed.
+
+### Rules the tests pin, each verified by reinstating the bug
+
+1. **A per-dataset write does NOT reclaim the merged blob.** This *inverts* the
+   old schema-2 rule. The merged blob covers two datasets and one write covers
+   one; dropping it on the first write deletes data nothing has replaced.
+   `clearSupersededMergedCopies` does it, and only once re-reading disk confirms
+   every covered dataset is committed and loaded.
+2. **A toggle never deletes a payload.** Worse than deleting on failure: the
+   user may flip it back in thirty seconds and now needs 35 MB of signal they
+   may not have. Deselected copies are kept and shown as "saved but not in use";
+   `removeDataset`, behind a confirm, is the only path that deletes one.
+3. **Turning a dataset back on needs no network** when its copy is on disk.
+4. **Turning off the last one unloads** rather than loading an empty index —
+   `indexPayloadProblem` would reject one anyway, and Rust would happily return
+   nothing with no explanation.
+5. **A half-finished migration never reduces what is searchable.** The merged
+   blob is passed to `mergeIndexParts` as a **base part** (`id: null`) that
+   fills gaps and never overwrites a dataset file. Without it, the first
+   per-dataset load during a migration replaced WASM with only that dataset,
+   so a later failure silently dropped every un-migrated source from search for
+   the rest of the session — while `_afterInstall` still reported them loaded,
+   having inherited their `source: 'merged'` entries. Nothing was lost on disk;
+   the app just quietly stopped finding half its tunes and said it was fine.
+   `loadedDatasets` now reports only what is genuinely in WASM.
+6. **Only datasets known to load are merged back in.** `_partsToKeep` reads
+   `loadedDatasets` ∪ just-installed, **not** everything on disk. Merging back a
+   cached copy the Rust side refuses (a real schema change) poisons every
+   subsequent install, so the incompatible copy can never be replaced and the
+   app stays unavailable forever. Keeping such a copy is right; feeding it back
+   into WASM is not. *Found by a test, not by reasoning.*
+7. **Joining an in-flight install is narrowed to a subset test.** Joining
+   unconditionally is wrong once requests can be disjoint: an install of
+   `['thesession']` would hand a caller asking for `['norbeck']` a result with
+   no norbeck in it. Anything not covered is serialised behind it on
+   `_installChain`. A plain `while (inFlight) await inFlight` is also wrong —
+   two waiters both wake, both see null, both start.
+8. **A part contributing zero new setting IDs is a failed dataset.** If
+   `datasets.json` points two entries at the same file, both documents pass
+   `indexPayloadProblem` perfectly and the failure would present as "folkwiki is
+   missing" with no error anywhere.
+9. **Progress is aggregated and clamped.** `received` counts decoded bytes while
+   `size` from `datasets.json` is the uncompressed length; they agree in
+   production but a stale manifest must not push the bar past 100%. Preferring
+   `size` over `Content-Length` also fixes a pre-existing bug — Firebase gzips
+   JSON, so `Content-Length` was the compressed length and the bar always
+   overshot, saved only by `Math.min`.
+
+### Migration from the merged blob
+
+An upgrading install loads the schema-2 blob at startup, so the app is READY
+immediately and nothing changes for the user, then installs the per-dataset
+files in the background (largest first, to keep the window where it searches
+fewer tunes short), and deletes the blob only once disk confirms full coverage.
+
+**Gated on `autoUpdateTuneData`.** A user who turned that off has explicitly
+asked not to be given downloads they did not request, and this is ~42 MB for
+zero new content. They keep the merged blob and migrate on their next explicit
+tap in Settings.
+
+> ⚠️ **Transient quota doubling.** Holding both copies means ~84 MB during
+> migration — the exact condition the plane incident is blamed on. On a device
+> near quota this fails with `QuotaExceededError` *forever*, and the user sits
+> on the merged blob indefinitely. **A "replace the combined copy" action that
+> deletes the blob first — offered only after repeated failures and only while
+> online — is not built yet.** Without it, "never leave a user with nothing"
+> quietly becomes "never let some users migrate".
+
+### Source labelling replaced the ID-range hack
+
+`source.mjs` used to decide the source with `tuneID < 1000000 ? thesession :
+folkwiki`. That cannot survive a third source: folkwiki's hash-derived IDs run
+to ~1.68e9, so there is no clean range to add.
+
+The worker now labels every tune with the dataset file it came from
+(`datasetByTune`, built by `mergeIndexParts` and **rebuilt wholesale on every
+merge, never incrementally** — the same hazard class as `abcStringBySetting`).
+Every `source.mjs` function takes an optional explicit `dataset` and prefers it.
+
+The ID-range rule survives as the fallback for **any tune with no label** — a
+legacy merged blob, or a favourite saved before labelling existed. It covers all
+three sources.
+
+It originally excluded Norbeck, on the argument that a merged blob contains
+nothing else by construction so a third range would be a place to keep in sync
+for a case that could not arise. **That argument was wrong**: a favourite is a
+self-contained snapshot, so one saved without a label reaches the fallback
+carrying a Norbeck tune id and was reported as folkwiki. The ranges here must
+match the ID bases in the data repo's builders.
+
+An explicit label **always wins, including one this build does not recognise**.
+Passing an unknown id through rather than relabelling it is what makes a fourth
+dataset addable from the data repo alone; `sanitiseDatasets` keeps unknown ids
+in the saved selection for the same reason. Such a dataset appears under its raw
+id with no description, and must carry `source_url` — nothing can derive a link
+for it — and `tuneSourceUrl` returns `''` rather than guessing a folkwiki page.
+
+`aiSummary.js` calls `isThesessionTuneID` without a label on purpose: it only
+asks "does this tune have a thesession.org page", and the fallback answers that
+correctly for every source.
+
+### The service worker guard that this broke
+
+`maximumFileSizeToCacheInBytes: 20 MB` used to double as the guard keeping the
+tune index out of the precache. That reasoning was never "20 MB is a sensible
+cap" — it was **"smaller than the smallest dataset"** — and the smallest is now
+~3 MB, well under the limit. A local build leaves the dataset files in
+`public/res/`, so `norbeck.json` would have been **silently precached**,
+reintroducing exactly the double-storage failure `sw-cleanup.js` exists to undo.
+
+They are excluded **by name** in `vue.config.js` now, and CI asserts none of the
+five data filenames appear in the emitted service worker. Do not go back to
+relying on a size threshold.
+
 ## Offline architecture (rewritten July 2026 — v3.6.0)
 
 The app is an offline-first PWA. If it has been opened once with a connection,
@@ -434,10 +728,18 @@ modes it was: never saved, or saved-then-evicted.
 
 ### Tests
 
-- `app/test/tune-index-cache.test.mjs` (21 cases) — the store and network layers
+- `app/test/tune-index-cache.test.mjs` (30 cases) — the store and network layers
   with in-memory fakes. Quota failure, partial writes, corrupt payloads, legacy
-  reads, stall aborts, and the interruption walk described in rule 5.
-- `app/test/tune-index-install.test.mjs` (38 cases) — the *install* path, i.e.
+  reads, stall aborts, the datasets manifest, filename validation, and the
+  interruption walk described in rule 5 — which now seeds all three datasets and
+  asserts **all three** survive an interruption at every storage operation of an
+  update to *one* (P1).
+
+  Its fake IndexedDB counts how often an injected fault actually **fired**
+  (`failOnHits`). Fault injection here targets keys by name and the keys are
+  namespaced per dataset now, so a test naming a key that no longer exists would
+  inject nothing and then pass while testing nothing — worse than failing.
+- `app/test/tune-index-install.test.mjs` (56 cases) — the *install* path, i.e.
   rules 7–10. It drives the real `worker.js` with its imports rewritten to fakes
   (in-memory IndexedDB, a scriptable network, a WASM stand-in that can refuse a
   payload), deliberately rather than a reimplementation: the bug was entirely in
@@ -452,6 +754,14 @@ modes it was: never saved, or saved-then-evicted.
   snapshotting from `indexDetail` fails 1, and an unconditional read-side delete
   fails 2.
 
+  It also covers the multi-dataset rules above: partial success, the duplicate
+  -content guard, disjoint installs being serialised rather than joined,
+  migration from the merged blob (including a migration that dies part-way and
+  one deferred because auto-update is off), toggling a dataset off and back on,
+  and aggregated download progress. **Three of those tests found real bugs
+  during development** — the `_partsToKeep` poisoning, the unclamped progress
+  bar, and a fake that could not inject a mid-transfer failure.
+
   Its fake IndexedDB yields before committing each write, as a real transaction
   does — without that gap two overlapping installs interleave in lockstep and
   the concurrency test passes against racy code. Its fake network captures the
@@ -462,6 +772,14 @@ modes it was: never saved, or saved-then-evicted.
   `app/test/e2e/README.md`, which also documents the traps (CDP network
   emulation does not reach Web Workers; Chrome's HTTP cache masks the failure;
   `.app` is HSTS-preloaded).
+
+  `recovery.mjs` now also walks a **partial** update — one dataset served good,
+  another served truncated — and asserts the failed one keeps its previous copy
+  while its sibling updates. Note `INDEX_READY` is *not* "the install finished":
+  the app becomes usable as soon as the first dataset loads, which is the whole
+  point of partial success, so anything that reloads the page must wait on the
+  IndexedDB keys instead. `waitForAsync` exists because `waitFor` wraps its
+  expression in a synchronous arrow and does not await a promise.
 
   `recovery.mjs` **existed but was never in the `test:e2e` script**, so the one
   scenario closest to the field failure was not being run. It is now, and it
@@ -480,8 +798,11 @@ modes it was: never saved, or saved-then-evicted.
 - `'favouriteItems'` — array of `FavouriteItem` objects (optionally carrying
   `aiSummary` and `aiSummaryDeletedAt`; both are synced)
 - `'historyItems'` — array of `HistoryItem` objects (capped at 100)
-- `'ffIndexRaw'` / `'ffIndexManifest'` — tune index and its commit marker
-- `'tuneIndex'` / `'tuneIndexMetadata'` — legacy tune index (read-only, migrated away)
+- `'ffIndexRaw:<id>'` / `'ffIndexManifest:<id>'` — one tune dataset and its
+  commit marker, per dataset (`thesession` / `folkwiki` / `norbeck`). Schema 3.
+- `'ffIndexRaw'` / `'ffIndexManifest'` — the pre-multi-dataset merged blob
+  (schema 2, read-only, migrated away)
+- `'tuneIndex'` / `'tuneIndexMetadata'` — schema-1 tune index (read-only, migrated away)
 - `'aiTuneSummaries'` — AI background notes, `{ tuneID: { text, model, generatedAt, sourceUrl } }`
 - `'tuneSightings'` — where tunes were heard, append-only, capped at 5000. **Local-only, never synced**
 - `'places'` — user-named locations, `{ id, name, lat, lon, radiusM, createdAt }`

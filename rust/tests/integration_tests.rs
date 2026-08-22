@@ -3,13 +3,49 @@ use std::fs;
 use std::fs::File;
 use std::path::Path;
 
+const RES_DIR: &str = "../app/public/res";
+
 fn load_tune_index() -> FolkFriend {
-    let index_path = "../app/public/res/folkfriend-non-user-data.json";
-    let json = fs::read_to_string(index_path)
+    let index_path = format!("{}/folkfriend-non-user-data.json", RES_DIR);
+    let json = fs::read_to_string(&index_path)
         .expect("Could not read tune index — run `bash app/download_tune_data.sh` first");
     let mut ff = FolkFriend::new();
     ff.load_index_from_json_string(json);
     ff
+}
+
+// Read one per-dataset file, or None when it is not on disk.
+//
+// The published index is one file per source (thesession / folkwiki / norbeck)
+// plus the legacy merged bundle, which deliberately excludes norbeck — clients
+// reading the merged file cannot opt a dataset out. So a norbeck test cannot
+// use load_tune_index(); it needs the dataset file, and skips when absent, the
+// same way the audio fixtures do.
+fn read_dataset(id: &str) -> Option<serde_json::Value> {
+    let path = format!("{}/{}.json", RES_DIR, id);
+    let json = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+// Merge the named datasets into one index. Setting and tune IDs are disjoint
+// by construction (each builder owns a numeric range), which assemble_datasets
+// verifies at build time — so a plain merge is correct here.
+fn load_datasets(ids: &[&str]) -> Option<FolkFriend> {
+    let mut settings = serde_json::Map::new();
+    let mut aliases = serde_json::Map::new();
+    for id in ids {
+        let payload = read_dataset(id)?;
+        for (k, v) in payload["settings"].as_object()? {
+            settings.insert(k.clone(), v.clone());
+        }
+        for (k, v) in payload["aliases"].as_object()? {
+            aliases.insert(k.clone(), v.clone());
+        }
+    }
+    let merged = serde_json::json!({ "settings": settings, "aliases": aliases });
+    let mut ff = FolkFriend::new();
+    ff.load_index_from_json_string(merged.to_string());
+    Some(ff)
 }
 
 fn pcm_from_wav(path: &str) -> (Vec<f32>, u32) {
@@ -422,5 +458,108 @@ fn audio_windbroke_detected() {
         "Windbroke",
         5,
         0.750, // 90% of measured 0.8333
+    );
+}
+
+// Norbeck tunes must be findable from their own contour once the dataset is
+// loaded. This is the end-to-end gate on the norbeck build: ABC parsing, the
+// unit-note-length rule (45% of the collection has no L: field and relies on
+// abc2midi's default), the P: variation trim, and the ID ranges all have to be
+// right for a self-match to land.
+//
+// Skips when norbeck.json is absent rather than failing, so a checkout that
+// has only fetched the legacy bundle still runs the rest of the suite.
+#[test]
+fn norbeck_self_match_ranks_first() {
+    let payload = match read_dataset("norbeck") {
+        Some(p) => p,
+        None => {
+            eprintln!("SKIP norbeck_self_match_ranks_first (no norbeck.json)");
+            return;
+        }
+    };
+    let ff = load_datasets(&["thesession", "folkwiki", "norbeck"])
+        .expect("norbeck.json present but the full dataset set did not load");
+
+    let settings = payload["settings"].as_object().unwrap();
+
+    // Spread across rhythms and both ID paths (Z:id-derived and fallback), and
+    // deliberately including Swedish tunes, whose titles and dance names come
+    // through the ABC escape decoder.
+    let mut sample: Vec<(&String, &serde_json::Value)> = settings
+        .iter()
+        .filter(|(_, s)| s["contour"].as_str().map(|c| c.len() > 60).unwrap_or(false))
+        .collect();
+    sample.sort_by_key(|(k, _)| k.parse::<u64>().unwrap_or(0));
+
+    let step = sample.len() / 25;
+    let mut checked = 0;
+    let mut top3 = 0;
+    for (sid, setting) in sample.iter().step_by(step.max(1)).take(25) {
+        let tune_id = setting["tune_id"].as_str().unwrap();
+        let contour = setting["contour"].as_str().unwrap().to_string();
+        let results = ff.run_transcription_query(&contour).unwrap();
+        let rank = results.iter().position(|r| r.setting.tune_id == tune_id);
+        checked += 1;
+        if rank.map(|p| p < 3).unwrap_or(false) {
+            top3 += 1;
+        } else {
+            eprintln!("  norbeck setting {} ranked {:?}", sid, rank.map(|p| p + 1));
+        }
+    }
+
+    eprintln!("  norbeck self-match: {}/{} in top 3", top3, checked);
+    // Not 100%: a handful of Norbeck tunes are also in thesession or folkwiki
+    // under a near-identical transcription, and either copy may legitimately
+    // outrank the other. The bar is that self-match works as a rule.
+    assert!(
+        top3 * 10 >= checked * 9,
+        "only {}/{} norbeck tunes self-matched into the top 3",
+        top3, checked
+    );
+}
+
+// The three datasets must not share setting or tune IDs. assemble_datasets.py
+// checks this at build time; this is the consuming side of the same contract,
+// because a collision here does not error — one setting silently shadows the
+// other and the tune simply stops being findable.
+#[test]
+fn datasets_have_disjoint_ids() {
+    let ids = ["thesession", "folkwiki", "norbeck"];
+    let mut owner_of_setting: std::collections::HashMap<String, &str> = Default::default();
+    let mut owner_of_tune: std::collections::HashMap<String, &str> = Default::default();
+    let mut loaded = 0;
+
+    for id in &ids {
+        let payload = match read_dataset(id) {
+            Some(p) => p,
+            None => continue,
+        };
+        loaded += 1;
+        for (setting_id, setting) in payload["settings"].as_object().unwrap() {
+            if let Some(prev) = owner_of_setting.insert(setting_id.clone(), id) {
+                panic!("setting_id {} is in both {} and {}", setting_id, prev, id);
+            }
+            let tune_id = setting["tune_id"].as_str().unwrap().to_string();
+            if let Some(prev) = owner_of_tune.get(&tune_id) {
+                assert_eq!(*prev, *id, "tune_id {} is in both {} and {}", tune_id, prev, id);
+            }
+            owner_of_tune.insert(tune_id, id);
+        }
+        for tune_id in payload["aliases"].as_object().unwrap().keys() {
+            if let Some(prev) = owner_of_tune.get(tune_id) {
+                assert_eq!(*prev, *id, "tune_id {} is in both {} and {}", tune_id, prev, id);
+            }
+            owner_of_tune.insert(tune_id.clone(), id);
+        }
+    }
+
+    if loaded < 2 {
+        eprintln!("SKIP datasets_have_disjoint_ids (only {} dataset files)", loaded);
+        return;
+    }
+    eprintln!(
+        "  {} datasets, {} setting IDs, {} tune IDs, all disjoint",
+        loaded, owner_of_setting.len(), owner_of_tune.len()
     );
 }

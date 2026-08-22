@@ -20,6 +20,7 @@ function collapseConsecutiveSameTune(detections) {
                 prev.bestScore = det.bestScore;
                 prev.settingId = det.settingId;
                 prev.sourceUrl = det.sourceUrl;
+                prev.dataset = det.dataset;
                 prev.title = det.title;
                 prev.alternatives = det.alternatives;
             }
@@ -223,6 +224,7 @@ class LiveAnalysisService {
                             tuneId: normalized.tuneId,
                             settingId: normalized.settingId,
                             sourceUrl: normalized.sourceUrl,
+                            dataset: normalized.dataset,
                             displayName: normalized.displayName,
                             score: normalized.score,
                             alternatives: normalized.alternatives,

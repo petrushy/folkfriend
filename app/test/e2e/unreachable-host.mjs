@@ -124,7 +124,13 @@ const WIPE_INDEX = `
     const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
     const tx = db.transaction('keyval', 'readwrite');
     const st = tx.objectStore('keyval');
-    st.delete('ffIndexManifest'); st.delete('ffIndexRaw'); st.delete('tuneIndex');
+    const all = await new Promise(res => { const r = st.getAllKeys(); r.onsuccess = () => res(r.result); });
+    for (const key of all) {
+        if (String(key).startsWith('ffIndexRaw') || String(key).startsWith('ffIndexManifest')) {
+            st.delete(key);
+        }
+    }
+    st.delete('tuneIndex'); st.delete('tuneIndexMetadata');
     await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
     const t2 = db.transaction('keyval', 'readonly').objectStore('keyval');
     return await new Promise(res => { const r = t2.getAllKeys(); r.onsuccess = () => res(r.result); });
@@ -142,7 +148,8 @@ try {
         await navigate(APP);
         await waitFor(`navigator.serviceWorker.controller !== null`, 30000, 'sw controlling');
         const keys = await evaluate(WIPE_INDEX);
-        check('primed: app cached, offline copy evicted', !keys.includes('ffIndexManifest'),
+        check('primed: app cached, offline copy evicted',
+            !keys.some(k => String(k).startsWith('ffIndexManifest')),
             `keys: ${keys.join(', ') || '(none)'}`);
     });
 

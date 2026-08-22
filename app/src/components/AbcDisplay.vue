@@ -142,17 +142,26 @@ export default {
             if (!/^L:/m.test(this.abc)) {
                 abcLines.push('L:1/8');
             }
-            // For polkas (M:2/4), ABCJS's default of 180 BPM is too fast.
-            // Inject 120 BPM only when no tempo is specified and the meter is 2/4.
-            const isPolka = this.meter === '2/4' || /^M:2\/4/m.test(this.abc);
-            if (isPolka && !/^Q:/m.test(this.abc)) {
-                abcLines.push('Q:1/4=120');
-            }
+            // NOTE: the playback pulse is deliberately NOT written in here as a
+            // Q: line. It is applied to the synth instead — see _msPerMeasure().
+            // A Q: would be drawn above the stave and would show up in the raw
+            // ABC text view, presenting an editorial tempo the source never
+            // stated as though it came from the tune.
             abcLines.push(this.abc);
             return abcLines.join('\n');
         },
         showAbcText: function () {
             return store.userSettings.showAbcText;
+        },
+        // Quarter notes per minute — an absolute note value, NOT musical beats.
+        // A reel bar holds four quarters, so 180 here is 45 bars/min; a 6/8 jig
+        // bar holds three, so it is 60 bars/min. 180 is chosen to reproduce
+        // exactly what a 4/4 tune already did before playback stopped depending
+        // on meter spelling, so every meter that sounded right is untouched.
+        defaultQpm: function () {
+            // Polkas are the one meter needing a slower pulse than that.
+            const isPolka = this.meter === '2/4' || /^M:2\/4/m.test(this.abc);
+            return isPolka ? 120 : 180;
         },
     },
     mounted: async function () {
@@ -190,6 +199,34 @@ export default {
         }
     },
     methods: {
+        // PIN THE PULSE TO THE QUARTER NOTE.
+        //
+        // ABCJS's default tempo is counted in the METER'S OWN beat unit, so
+        // identical notes play at different speeds depending only on how the
+        // meter is written. Cut time is the case that bites: C| counts half
+        // notes, so a reel written M:C| plays at exactly double the speed of
+        // the same reel written M:4/4 — 667 ms/bar against 1333.
+        //
+        // thesession writes reels as 4/4 and Norbeck writes 1,487 of them as
+        // C|, which is why Norbeck tunes sounded frantic while the same tune
+        // from thesession sounded right.
+        //
+        // getBarLength() is in whole notes and is meter-spelling independent
+        // (4/4, C, C| and 2/2 all report 1), so deriving the duration from it
+        // takes the meter out of playback entirely.
+        //
+        // Applied here rather than as a Q: line in the ABC so that no tempo
+        // marking is drawn on a score whose source never stated one.
+        _msPerMeasure() {
+            if (!this.abcVisual) return null;
+            // A tune that states its own tempo keeps it — that is the
+            // composer's or transcriber's instruction, not our default.
+            const stated = /^Q:/m.test(this.abc);
+            const base = stated
+                ? this.abcVisual.millisecondsPerMeasure()
+                : this.abcVisual.getBarLength() * 4 / this.defaultQpm * 60000;
+            return base * (100 / this.tempoPercent);
+        },
         _msPerMeasureToQpm(millisecondsPerMeasure) {
             if (!this.abcVisual || !millisecondsPerMeasure) return null;
             return this.abcVisual.getBeatsPerMeasure() / millisecondsPerMeasure * 60000;
@@ -355,7 +392,7 @@ export default {
 
             this.audioContext.resume().then(() => {
                 this.midiBuffer = new ABCJS.synth.CreateSynth();
-                const millisecondsPerMeasure = this.abcVisual.millisecondsPerMeasure() * (100 / this.tempoPercent);
+                const millisecondsPerMeasure = this._msPerMeasure();
 
                 return this.midiBuffer.init({
                     visualObj: this.abcVisual,
@@ -393,7 +430,7 @@ export default {
             // Prime a NEW synth instance in the background while the current one
             // keeps playing. When ready, get the current position, stop the old
             // one, seek the new one to that position, and start it.
-            const msPerMeasure = this.abcVisual.millisecondsPerMeasure() * (100 / this.tempoPercent);
+            const msPerMeasure = this._msPerMeasure();
             const onEnded = () => this._handlePlaybackEnded();
             const newBuffer = new ABCJS.synth.CreateSynth();
             newBuffer.init({

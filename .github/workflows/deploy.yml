@@ -72,18 +72,26 @@ jobs:
         working-directory: app
         run: npm test
 
-      # In production the app fetches the index from folkfriend-data.web.app,
-      # so the copy in public/res/ is dead weight in the deployed bundle — it
-      # was adding ~42 MB to every deploy. nud-meta.json MUST stay: it is in the
-      # service worker's precache manifest, and a 404 there fails the service
-      # worker install and takes offline support down with it.
+      # In production the app fetches tune data from folkfriend-data.web.app,
+      # so the copies in public/res/ are dead weight in the deployed bundle —
+      # they were adding ~42 MB to every deploy, and are now ~87 MB across the
+      # per-dataset files and the legacy bundle.
       #
-      # Moved aside rather than deleted: test/e2e/recovery.mjs serves it from a
-      # local stand-in for the CDN, so the e2e step below still needs a copy.
-      - name: Drop the tune index from the deployed bundle
+      # nud-meta.json and datasets.json MUST stay: both are small and
+      # datasets.json is what the app reads to find the datasets at all. Never
+      # exclude res/ wholesale.
+      #
+      # Moved aside rather than deleted: test/e2e/recovery.mjs serves them from
+      # a local stand-in for the CDN, so the e2e step below still needs copies.
+      - name: Drop the tune data from the deployed bundle
         run: |
-          mkdir -p /tmp/ff-index
-          mv app/public/res/folkfriend-non-user-data.json /tmp/ff-index/ || true
+          mkdir -p /tmp/ff-index/res
+          for f in folkfriend-non-user-data.json thesession.json \
+                   folkwiki.json norbeck.json; do
+            mv "app/public/res/$f" /tmp/ff-index/res/ || true
+          done
+          mv /tmp/ff-index/res/folkfriend-non-user-data.json /tmp/ff-index/ || true
+          ls -la /tmp/ff-index /tmp/ff-index/res || true
 
       # Only the build needs wasm-pack (via the prebuild hook), so install it
       # here rather than up front — a flake fetching it then blocked the tests
@@ -188,11 +196,33 @@ jobs:
             exit 1
           fi
           echo "precache OK: $name ($(du -h "$wasm" | cut -f1)) in$manifests"
-          # The 42 MB dataset must NOT be in there (it lives in IndexedDB).
-          if grep -qF 'folkfriend-non-user-data.json' $manifests; then
-            echo "the tune index is in the precache manifest — it must not be"
-            exit 1
-          fi
+
+          # No tune data may be precached — it lives in IndexedDB, and a second
+          # copy in CacheStorage roughly doubles the chance the browser evicts
+          # the one that makes the app work offline.
+          #
+          # This used to check only folkfriend-non-user-data.json, and relied on
+          # maximumFileSizeToCacheInBytes to keep it out. That reasoning was
+          # "smaller than the smallest dataset", and the smallest is now ~3 MB —
+          # well under the 20 MB limit. vue.config.js excludes them by name;
+          # this is the assertion that it worked.
+          for data in datasets.json thesession.json folkwiki.json \
+                      norbeck.json folkfriend-non-user-data.json; do
+            if grep -qF "$data" $manifests; then
+              echo "$data is in the precache manifest — it must not be"
+              exit 1
+            fi
+          done
+          echo "precache OK: no tune data is precached"
+
+          # ...but datasets.json and nud-meta.json must still be SERVED. A 404
+          # on nud-meta.json fails the service worker install outright.
+          for required in res/nud-meta.json; do
+            if [ ! -f "dist/$required" ]; then
+              echo "dist/$required is missing — never exclude res/ wholesale"
+              exit 1
+            fi
+          done
 
       - name: Report bundle size
         working-directory: app
@@ -218,9 +248,11 @@ jobs:
         working-directory: app
         env:
           CHROME_PATH: ${{ steps.setup-chrome.outputs.chrome-path }}
-          # recovery.mjs stands in for the tune-data CDN, so it needs the index
-          # that the build step moved out of public/res/.
+          # recovery.mjs stands in for the tune-data CDN, so it needs the data
+          # the build step moved out of public/res/. It prefers the per-dataset
+          # files and falls back to the merged one.
           FF_INDEX_JSON: /tmp/ff-index/folkfriend-non-user-data.json
+          FF_RES_DIR: /tmp/ff-index/res
         run: npm run test:e2e
 
       # Preview channel for PRs: a temporary URL that expires after 7 days.

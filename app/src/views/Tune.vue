@@ -137,7 +137,7 @@
                         </v-icon>
                         <v-chip v-if="expandedIndex.includes(i)" small class="sourceChip settingSourceChip px-2"
                             @click.stop="$openUrl(settingSourceUrl(settingData))">
-                            {{ sourceName }}&nbsp;<v-icon small>{{ icons.openInNew }}</v-icon>
+                            {{ settingSourceName(settingData) }}&nbsp;<v-icon small>{{ icons.openInNew }}</v-icon>
                         </v-chip>
                     </div>
                 </v-expansion-panel-header>
@@ -261,8 +261,14 @@ export default {
         };
     },
     computed: {
+        // Which dataset this tune came from, as labelled by the worker. Falls
+        // back to the ID range only for tunes loaded from a legacy merged blob.
+        dataset() {
+            const selectedSetting = this.currentSettingForSource;
+            return (selectedSetting && selectedSetting.dataset) || '';
+        },
         sourceName() {
-            return sourceNameForTuneID(this.tuneID);
+            return sourceNameForTuneID(this.tuneID, this.dataset);
         },
         sourceUrl() {
             const selectedSetting = this.currentSettingForSource;
@@ -270,12 +276,13 @@ export default {
                 tuneID: this.tuneID,
                 displayName: this.name || this.displayName,
                 sourceUrl: selectedSetting ? selectedSetting.source_url : '',
+                dataset: this.dataset,
             });
         },
         // The raw `source_url` off the index, not the derived link. Folkwiki
-        // tunes are the only ones that carry it, and it is the only way to
-        // reconstruct their page URL — thesession tunes derive theirs from the
-        // tune ID, so passing '' for them is correct rather than lossy.
+        // and norbeck tunes carry it, and it is the only way to reconstruct
+        // their page URL — thesession tunes derive theirs from the tune ID, so
+        // passing '' for them is correct rather than lossy.
         folkwikiSourceUrl() {
             const selectedSetting = this.currentSettingForSource;
             return (selectedSetting && selectedSetting.source_url) || '';
@@ -605,12 +612,16 @@ export default {
         sourceClicked: function () {
             window.open(this.sourceUrl);
         },
+        settingSourceName: function (settingData) {
+            return sourceNameForTuneID(this.tuneID, settingData.dataset || '');
+        },
         settingSourceUrl: function (settingData) {
             return settingSourceUrl({
                 tuneID: this.tuneID,
                 settingID: settingData.setting_id,
                 displayName: this.name || this.displayName,
                 sourceUrl: settingData.source_url,
+                dataset: settingData.dataset || '',
             });
         },
         $openUrl: function (url) {

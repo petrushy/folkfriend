@@ -167,6 +167,7 @@ export function buildTuneListText(detections) {
                 settingID: detection.settingId,
                 displayName: detection.title,
                 sourceUrl: detection.sourceUrl || '',
+                dataset: detection.dataset || '',
             });
             const safe = Math.max(0, Math.round(detection.durationSeconds));
             const duration = `${Math.floor(safe / 60)}:${String(safe % 60).padStart(2, '0')}`;
@@ -189,6 +190,7 @@ export function buildTuneOptions(detection) {
             tuneId: detection.tuneId,
             settingId: detection.settingId,
             sourceUrl: detection.sourceUrl || '',
+            dataset: detection.dataset || '',
             title: detection.title,
             score: detection.bestScore,
         },
@@ -204,6 +206,7 @@ export function buildTuneOptions(detection) {
             tuneId: candidate.tuneId,
             settingId: candidate.settingId ? String(candidate.settingId) : '',
             sourceUrl: candidate.sourceUrl || '',
+            dataset: candidate.dataset || '',
             title: candidate.title,
             score: candidate.score,
             text: `${candidate.title} (${candidate.score.toFixed(2)})`,
@@ -290,6 +293,7 @@ export function clusterDetections(windowMatches, options) {
                 tuneId: cluster.tuneId,
                 settingId: bestHit.settingId,
                 sourceUrl: bestHit.sourceUrl || '',
+                dataset: bestHit.dataset || '',
                 title: bestHit.displayName,
                 startSeconds: cluster.firstWindowStart,
                 endSeconds: cluster.lastWindowStart + options.windowSeconds,
@@ -321,6 +325,7 @@ export function normaliseQueryResults(results, options) {
             tuneId: result.setting ? result.setting.tune_id : null,
             settingId: result.setting_id != null ? String(result.setting_id) : '',
             sourceUrl: result.setting ? (result.setting.source_url || '') : '',
+            dataset: result.setting ? (result.setting.dataset || '') : '',
             title: utils.parseDisplayableName(result.display_name || 'Unknown tune'),
             score: result.score || 0,
         }));
@@ -329,6 +334,7 @@ export function normaliseQueryResults(results, options) {
         tuneId: best.setting.tune_id,
         settingId: best.setting_id != null ? String(best.setting_id) : '',
         sourceUrl: best.setting ? (best.setting.source_url || '') : '',
+        dataset: best.setting ? (best.setting.dataset || '') : '',
         displayName: utils.parseDisplayableName(best.display_name),
         score: best.score,
         alternatives,

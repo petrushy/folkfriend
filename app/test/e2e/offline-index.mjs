@@ -149,16 +149,32 @@ function check(name, ok, detail = '') {
     console.log(`  ${ok ? '✓' : '✗'} ${name}${detail ? ` — ${detail}` : ''}`);
 }
 
+// The index is stored one payload per dataset: 'ffIndexRaw:<id>' plus
+// 'ffIndexManifest:<id>'. 'ffIndexRaw' with no suffix is the superseded
+// schema-2 merged blob, and 'tuneIndex' the schema-1 one.
 const IDB_STATE = `
 (async () => {
     const req = indexedDB.open('keyval-store');
     const db = await new Promise((res, rej) => { req.onsuccess = () => res(req.result); req.onerror = () => rej(req.error); });
-    if (!db.objectStoreNames.contains('keyval')) return { keys: [] };
+    if (!db.objectStoreNames.contains('keyval')) return { keys: [], datasets: {} };
     const tx = db.transaction('keyval', 'readonly').objectStore('keyval');
     const keys = await new Promise(res => { const r = tx.getAllKeys(); r.onsuccess = () => res(r.result); });
-    const manifest = await new Promise(res => { const r = tx.get('ffIndexManifest'); r.onsuccess = () => res(r.result); });
-    const rawLength = await new Promise(res => { const r = tx.get('ffIndexRaw'); r.onsuccess = () => res(r.result ? r.result.length : 0); });
-    return { keys, manifest, rawLength };
+    const datasets = {};
+    let rawLength = 0;
+    for (const key of keys) {
+        if (!String(key).startsWith('ffIndexManifest:')) continue;
+        const id = String(key).slice('ffIndexManifest:'.length);
+        const manifest = await new Promise(res => { const r = tx.get(key); r.onsuccess = () => res(r.result); });
+        const len = await new Promise(res => {
+            const r = tx.get('ffIndexRaw:' + id);
+            r.onsuccess = () => res(r.result ? r.result.length : 0);
+        });
+        datasets[id] = { manifest, rawLength: len };
+        rawLength += len;
+    }
+    const mergedLength = await new Promise(res => { const r = tx.get('ffIndexRaw'); r.onsuccess = () => res(r.result ? r.result.length : 0); });
+    const manifest = Object.values(datasets)[0] ? Object.values(datasets)[0].manifest : undefined;
+    return { keys, datasets, manifest, rawLength, mergedLength };
 })()`;
 
 const WIPE_INDEX = `
@@ -167,7 +183,13 @@ const WIPE_INDEX = `
     const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
     const tx = db.transaction('keyval', 'readwrite');
     const st = tx.objectStore('keyval');
-    st.delete('ffIndexManifest'); st.delete('ffIndexRaw'); st.delete('tuneIndex');
+    const all = await new Promise(res => { const r = st.getAllKeys(); r.onsuccess = () => res(r.result); });
+    for (const key of all) {
+        if (String(key).startsWith('ffIndexRaw') || String(key).startsWith('ffIndexManifest')) {
+            st.delete(key);
+        }
+    }
+    st.delete('tuneIndex'); st.delete('tuneIndexMetadata');
     await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
     const t2 = db.transaction('keyval', 'readonly').objectStore('keyval');
     return await new Promise(res => { const r = t2.getAllKeys(); r.onsuccess = () => res(r.result); });
@@ -265,11 +287,24 @@ try {
     (async () => {
         const req = indexedDB.open('keyval-store');
         const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
-        const raw = await new Promise(res => {
-            const r = db.transaction('keyval', 'readonly').objectStore('keyval').get('ffIndexRaw');
-            r.onsuccess = () => res(r.result);
-        });
-        if (!raw) return 'no raw payload to convert';
+        const store0 = db.transaction('keyval', 'readonly').objectStore('keyval');
+        const keys = await new Promise(res => { const r = store0.getAllKeys(); r.onsuccess = () => res(r.result); });
+        const rawKeys = keys.filter(k => String(k).startsWith('ffIndexRaw'));
+        if (!rawKeys.length) return 'no raw payload to convert';
+        // Fold every per-dataset payload back into one blob, which is exactly
+        // the shape a pre-multi-dataset install holds.
+        const parsedAll = { settings: {}, aliases: {} };
+        for (const key of rawKeys) {
+            const body = await new Promise(res => {
+                const r = db.transaction('keyval', 'readonly').objectStore('keyval').get(key);
+                r.onsuccess = () => res(r.result);
+            });
+            if (typeof body !== 'string') continue;
+            const part = JSON.parse(body);
+            Object.assign(parsedAll.settings, part.settings || {});
+            Object.assign(parsedAll.aliases, part.aliases || {});
+        }
+        const raw = JSON.stringify(parsedAll);
         const parsed = JSON.parse(raw);
         const abcStrings = {}, sourceUrls = {};
         for (const id in parsed.settings) {
@@ -281,8 +316,11 @@ try {
         const store = tx.objectStore('keyval');
         store.put({ indexData: parsed, abcStrings, sourceUrls }, 'tuneIndex');
         store.put({ v: ${v}, date: '2020-01-01' }, 'tuneIndexMetadata');
-        store.delete('ffIndexManifest');
-        store.delete('ffIndexRaw');
+        for (const key of keys) {
+            if (String(key).startsWith('ffIndexRaw') || String(key).startsWith('ffIndexManifest')) {
+                store.delete(key);
+            }
+        }
         await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
         return 'ok';
     })()`;
@@ -304,9 +342,21 @@ try {
     await waitFor(`!!document.querySelector('.expansionPanel')`, 20000, 'tune rendered');
     check('tunes and their ABC come from the legacy copy', Date.now() - t0 < 3000,
         `${Date.now() - t0} ms`);
+    // P3: never both missing. The legacy blob is either still there, or it has
+    // already been superseded by per-dataset copies — but there is no moment
+    // where the user has neither.
+    //
+    // Note CDP's network emulation does NOT reach Web Workers (see README), so
+    // the worker can migrate here even though the main thread believes it is
+    // offline. Either outcome is correct; having nothing is not.
     const stillLegacy = await evaluate(IDB_STATE);
-    check('legacy copy is not discarded', stillLegacy.keys.includes('tuneIndex'),
-        `keys: ${stillLegacy.keys.join(', ')}`);
+    const legacyPresent = stillLegacy.keys.includes('tuneIndex');
+    const perDataset = Object.keys(stillLegacy.datasets).length;
+    check('the user is never left with no offline copy at all',
+        legacyPresent || perDataset > 0,
+        legacyPresent
+            ? 'legacy blob still present'
+            : `superseded by ${perDataset} per-dataset cop${perDataset === 1 ? 'y' : 'ies'}`);
 
     // ---- 5. Legacy copy is migrated on the next version bump -------------
     console.log('\n5. Legacy copy migrates to the new format when an update lands');
@@ -328,9 +378,27 @@ try {
         const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
         const st = db.transaction('keyval', 'readonly').objectStore('keyval');
         const keys = await new Promise(res => { const r = st.getAllKeys(); r.onsuccess = () => res(r.result); });
-        return keys.includes('ffIndexManifest') && !keys.includes('tuneIndex');
+        return keys.some(k => String(k).startsWith('ffIndexManifest:'))
+            && !keys.includes('tuneIndex');
     })()`, 300000, 'migration to schema 2');
-    check('40 MB legacy duplicate is reclaimed after the update', true, `${(ms / 1000).toFixed(1)} s`);
+    check('40 MB legacy duplicate is reclaimed after migrating', true, `${(ms / 1000).toFixed(1)} s`);
+
+    // ---- 6. The merged blob survives until per-dataset copies exist -------
+    // P3: there is no state in which both the merged blob and the per-dataset
+    // copies are missing. An upgrading user must never be stranded.
+    console.log('\n6. Migration never leaves the user with nothing');
+    const migrated = await evaluate(IDB_STATE);
+    check('per-dataset copies exist after migration',
+        Object.keys(migrated.datasets).length >= 1,
+        `datasets: ${Object.keys(migrated.datasets).join(', ') || 'none'}`);
+    check('the superseded merged blob is gone', migrated.mergedLength === 0,
+        `merged blob is ${migrated.mergedLength} chars`);
+    check('the schema-1 blob is gone too', !migrated.keys.includes('tuneIndex'));
+
+    await setOffline(true);
+    await navigate(APP);
+    ms = await waitFor(INDEX_READY, 60000, 'index ready from per-dataset copies');
+    check('the migrated copies work offline', true, `${ms} ms`);
 
 } catch (e) {
     console.error('\nFATAL:', e.message);

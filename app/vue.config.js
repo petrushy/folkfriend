@@ -59,12 +59,37 @@ module.exports = {
             // read. Exactly the failure the offline work exists to prevent,
             // hiding behind the layer below it.
             //
-            // 20 MB leaves headroom for the WASM to grow while still sitting
-            // well below the 42 MB tune index, which must NOT be precached (see
-            // runtimeCaching below) and which a local build does leave in
-            // public/res/. So this limit doubles as the guard that keeps the
-            // dataset out of the service worker.
+            // 20 MB leaves headroom for the WASM to grow.
+            //
+            // It used to double as the guard keeping the tune index out of the
+            // precache, on the reasoning "20 MB is well below the 42 MB
+            // dataset". That reasoning was never "20 MB is a sensible cap" —
+            // it was "smaller than the smallest dataset" — and the index is now
+            // published one file per source, the smallest of which is ~3 MB.
+            // A local build leaves those in public/res/, so norbeck.json would
+            // be silently precached, reintroducing exactly the double-storage
+            // failure sw-cleanup.js exists to undo.
+            //
+            // The datasets are therefore excluded BY NAME below. Do not go back
+            // to relying on a size threshold.
             maximumFileSizeToCacheInBytes: 20 * 1024 * 1024,
+
+            // Never precache tune data. These are fetched at runtime from
+            // folkfriend-data.web.app and stored in IndexedDB; a second copy in
+            // CacheStorage is what roughly doubled the chance of the browser
+            // evicting the one that makes the app work offline.
+            //
+            // CI asserts none of these appear in the emitted service worker.
+            exclude: [
+                /^res\/datasets\.json$/,
+                /^res\/thesession\.json$/,
+                /^res\/folkwiki\.json$/,
+                /^res\/norbeck\.json$/,
+                /^res\/folkfriend-non-user-data\.json$/,
+                // Default workbox exclusions, which naming `exclude` replaces.
+                /\.map$/,
+                /^manifest.*\.js$/,
+            ],
 
             // The ~42 MB tune index is deliberately NOT cached by the service
             // worker. It used to be (StaleWhileRevalidate, cache
