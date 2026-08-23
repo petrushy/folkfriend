@@ -98,7 +98,11 @@
                 {{ frozen ? 'Frozen' : 'Auto-switching' }} · {{ formatSecondsAsClock(elapsedSeconds) }}
             </div>
             <span v-if="target && target.tuneOptions.length > 1" class="footerClock">
-                {{ formatSecondsAsClock(elapsedSeconds) }}
+                <!-- The clock is the only footer text in this branch, so the
+                     frozen state has to be carried here too — otherwise it is
+                     announced everywhere except the one layout where the
+                     override dropdown is on screen. -->
+                {{ frozen ? 'Frozen · ' : '' }}{{ formatSecondsAsClock(elapsedSeconds) }}
             </span>
         </div>
     </div>

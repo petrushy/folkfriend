@@ -1059,8 +1059,24 @@ so on unfreeze the component calls `_resolveFromDetections()` itself — otherwi
 the view sits on the frozen tune until the next tune change and unfreeze looks
 broken. That method is the watcher's body, extracted so both callers share it.
 
-Six cases in `liveScoreFollow.test.mjs`, verified by removing the `frozen`
-early-return (1 fails).
+**The frozen state is announced in both footer layouts.** The footer has two
+branches — the override dropdown plus a bare clock when the tune has
+alternatives, a hint line otherwise — and the first one carries the only footer
+text in that layout, so it needs the `Frozen · ` prefix too. Putting it only in
+the hint line announced the freeze everywhere except the one layout where the
+override dropdown is on screen.
+
+Six cases in `liveScoreFollow.test.mjs` for the resolver (removing the `frozen`
+early-return fails 5 of them; the sixth deliberately pins the *old* following
+behaviour when the flag is omitted), and six in
+`liveScoreFollowComponent.test.mjs` for the wiring the resolver tests cannot
+reach: that `frozen` is passed on every tick, and that `toggleFrozen` re-resolves
+on the way out. The latter follows `tuneBackgroundDialog.test.mjs` — lift the
+SFC's `<script>` block, rewrite its imports to fakes, drive `data()`/`methods`
+against a fake `this` with no Vue runtime — but keeps `liveScoreFollow.mjs`
+real, since it is the far side of the wiring under test. Verified by mutation:
+dropping the `this.frozen` argument fails 3, and making unfreeze skip the
+re-resolve fails 2.
 
 ### Geo-tagged tune sightings (August 2026 — v3.10.0)
 
