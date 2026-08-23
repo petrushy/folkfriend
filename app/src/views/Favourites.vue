@@ -215,7 +215,7 @@
                 class="resultsTable"
             >
                 <FavouriteRow
-                    v-for="row in allRows"
+                    v-for="row in visibleRows"
                     :key="row.settingID"
                     :name="row.name"
                     :descriptor="row.descriptor"
@@ -245,7 +245,7 @@
         <!-- Grouped by tag -->
         <template v-else-if="groupBy === 'tag'">
             <div
-                v-for="group in tagGroups"
+                v-for="group in visibleGroups"
                 :key="group.tag || '__untagged__'"
                 class="mb-2"
             >
@@ -299,7 +299,7 @@
         <!-- Grouped by date -->
         <template v-else-if="groupBy === 'date'">
             <div
-                v-for="group in dateGroups"
+                v-for="group in visibleGroups"
                 :key="group.label"
                 class="mb-2"
             >
@@ -356,7 +356,7 @@
              each of its tags. -->
         <template v-else-if="groupBy === 'place'">
             <div
-                v-for="group in placeGroups"
+                v-for="group in visibleGroups"
                 :key="group.key"
                 class="mb-2"
             >
@@ -406,6 +406,20 @@
                 </v-list>
             </div>
         </template>
+
+        <!-- Growth sentinel. Rendering every favourite in one pass is what made
+             this view take seconds to appear on an older iPad, so only a budget
+             of rows is rendered and this element — sitting directly below the
+             last one — grows the budget whenever it scrolls into view. It keeps
+             firing until the viewport is full, so a short list still fills in
+             immediately. -->
+        <div
+            v-if="hasMoreRows"
+            ref="rowSentinel"
+            class="row-sentinel d-flex justify-center py-3 grey--text caption"
+        >
+            Loading more…
+        </div>
 
         <p
             v-if="favouriteItems.length === 0"
@@ -555,9 +569,14 @@ import store from '@/services/store';
 import FavouriteRow from '@/components/FavouriteRow';
 import utils from '@/js/utils';
 import { settingSourceUrl } from '@/js/source.mjs';
+import { windowRows, windowGroups, INITIAL_ROW_BUDGET, ROW_BUDGET_STEP } from '@/js/rowWindow.mjs';
 import router from '@/router/index.js';
 
 const FILTER_STATE_KEY = 'favouritesFilterState';
+
+// How far below the fold the sentinel counts as reached. One screen of
+// lookahead, so rows are built before the user scrolls onto them.
+const SENTINEL_MARGIN_PX = 600;
 
 function loadPersistedFilterState() {
     try {
@@ -599,6 +618,9 @@ export default {
             snackbar: false,
             snackbarText: '',
             sortBy: typeof persisted.sortBy === 'string' ? persisted.sortBy : 'date',
+            // How many rows are actually rendered. Grown as the sentinel below
+            // the list scrolls into view; see rowWindow.mjs for why.
+            rowBudget: INITIAL_ROW_BUDGET,
             sortOptions: [
                 { text: 'Date', value: 'date' },
                 { text: 'Name', value: 'name' },
@@ -723,6 +745,31 @@ export default {
         allRows() {
             return this.filteredItems.map(item => this._toRow(item));
         },
+        // Only a budget of rows is actually rendered; the budget grows as the
+        // sentinel below the list scrolls into view. Everything else in this
+        // view — selection, select-all, sharing, export — still runs off the
+        // full lists above, so an unrendered row is never an excluded one.
+        visibleWindow() {
+            if (!this.groupBy) return windowRows(this.allRows, this.rowBudget);
+            let source;
+            if (this.groupBy === 'tag') {
+                source = this.tagGroups.map(g => ({ ...g, collapsed: this.collapsedTagGroups.has(g.tag) }));
+            } else if (this.groupBy === 'date') {
+                source = this.dateGroups.map(g => ({ ...g, collapsed: this.collapsedDateGroups.has(g.label) }));
+            } else {
+                source = this.placeGroups.map(g => ({ ...g, collapsed: this.collapsedPlaceGroups.has(g.key) }));
+            }
+            return windowGroups(source, this.rowBudget);
+        },
+        visibleRows() {
+            return this.visibleWindow.rows || [];
+        },
+        visibleGroups() {
+            return this.visibleWindow.groups || [];
+        },
+        hasMoreRows() {
+            return this.visibleWindow.hasMore;
+        },
         allVisibleSelected() {
             return this.allRows.length > 0 && this.allRows.every(r => this.selectedIDs.has(r.settingID));
         },
@@ -812,11 +859,15 @@ export default {
         },
     },
     watch: {
-        activeTags: { handler() { this._persistFilterState(); }, deep: true },
-        activePlaceIDs: { handler() { this._persistFilterState(); }, deep: true },
-        nameFilter() { this._persistFilterState(); },
-        groupBy() { this._persistFilterState(); },
-        sortBy() { this._persistFilterState(); },
+        // Changing the filter, grouping or sort changes what is at the TOP of
+        // the list, so the render budget starts again — otherwise a user who
+        // had scrolled to row 200 and then typed a name filter would keep
+        // paying to render 200 rows of a list that now has three.
+        activeTags: { handler() { this._persistFilterState(); this._resetRowBudget(); }, deep: true },
+        activePlaceIDs: { handler() { this._persistFilterState(); this._resetRowBudget(); }, deep: true },
+        nameFilter() { this._persistFilterState(); this._resetRowBudget(); },
+        groupBy() { this._persistFilterState(); this._resetRowBudget(); },
+        sortBy() { this._persistFilterState(); this._resetRowBudget(); },
         collapsedTagGroups() { this._persistFilterState(); },
         collapsedDateGroups() { this._persistFilterState(); },
         collapsedPlaceGroups() { this._persistFilterState(); },
@@ -828,11 +879,71 @@ export default {
         eventBus.$on('syncComplete', this.loadFavourites);
         eventBus.$on('sightingsChanged', this.loadPlaces);
     },
+    mounted() {
+        // No IntersectionObserver (a genuinely old browser) means no way to
+        // know when the sentinel is reached, so render everything as before —
+        // slow, but never a list the user cannot scroll to the end of.
+        if (typeof IntersectionObserver === 'undefined') {
+            this.rowBudget = Infinity;
+            return;
+        }
+        this._rowObserver = new IntersectionObserver(entries => {
+            if (entries.some(e => e.isIntersecting)) this._growRowBudget();
+        }, { rootMargin: `${SENTINEL_MARGIN_PX}px 0px` });
+        this.$nextTick(() => {
+            this._observeSentinel();
+            this._fillViewport();
+        });
+    },
+    updated() {
+        // v-if recreates the sentinel as the budget grows, and the observer
+        // only fires on a threshold crossing — a sentinel that stays on screen
+        // never crosses anything — so re-observe and top the viewport up.
+        this._observeSentinel();
+        this._fillViewport();
+    },
     beforeDestroy() {
         eventBus.$off('syncComplete', this.loadFavourites);
         eventBus.$off('sightingsChanged', this.loadPlaces);
+        if (this._rowObserver) this._rowObserver.disconnect();
+        this._rowObserver = null;
+        this._observedSentinel = null;
     },
     methods: {
+        _resetRowBudget() {
+            if (Number.isFinite(this.rowBudget)) this.rowBudget = INITIAL_ROW_BUDGET;
+        },
+        _observeSentinel() {
+            if (!this._rowObserver) return;
+            const el = this.$refs.rowSentinel || null;
+            if (el === this._observedSentinel) return;
+            if (this._observedSentinel) this._rowObserver.unobserve(this._observedSentinel);
+            this._observedSentinel = el;
+            if (el) this._rowObserver.observe(el);
+        },
+        // One step per animation frame, so the rows already rendered get painted
+        // before the next batch is built. Growing in a tight loop would just
+        // reproduce the freeze this exists to remove.
+        _growRowBudget() {
+            if (this._growScheduled || !this.hasMoreRows || !Number.isFinite(this.rowBudget)) return;
+            this._growScheduled = true;
+            const raf = (typeof window !== 'undefined' && window.requestAnimationFrame)
+                ? window.requestAnimationFrame.bind(window)
+                : (cb => setTimeout(cb, 16));
+            raf(() => {
+                this._growScheduled = false;
+                this.rowBudget += ROW_BUDGET_STEP;
+            });
+        },
+        _fillViewport() {
+            if (!this.hasMoreRows) return;
+            const el = this.$refs.rowSentinel;
+            if (!el || !el.getBoundingClientRect) return;
+            const viewportHeight = (typeof window !== 'undefined' && window.innerHeight) || 0;
+            if (el.getBoundingClientRect().top < viewportHeight + SENTINEL_MARGIN_PX) {
+                this._growRowBudget();
+            }
+        },
         _persistFilterState() {
             try {
                 sessionStorage.setItem(FILTER_STATE_KEY, JSON.stringify({

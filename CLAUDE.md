@@ -1037,6 +1037,91 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Favourites view took seconds to populate (August 2026)
+
+On an older iPad the Favourites view sat blank for several seconds before
+anything appeared. Nothing was slow about *loading* the data — `getFavourites`
+is a single `idb-keyval` read of one array — it was all rendering, in one
+synchronous pass, before the first paint.
+
+**The dominant cost was engraving every ABC preview.** `FavouriteRow.abcSvg` is
+a computed that calls `ABCJS.renderAbc` and hands the result to `v-html`, so it
+ran inside the render that was supposed to put the view on screen. Measured in
+headless Chromium on a desktop-class machine, one preview is ~3.8 ms and
+produces several hundred SVG nodes; an older iPad is several times slower again,
+so a few hundred favourites is seconds of blocked main thread before a single
+row is visible — for scores that are almost all below the fold.
+
+Two fixes, and they compose: the first cuts what each row costs, the second cuts
+how many rows there are.
+
+1. **A row only engraves once it is near the viewport.** `FavouriteRow` observes
+   itself with an `IntersectionObserver` (400 px of lookahead) and
+   `showAbcPreview` now requires `inView`. The gate is one-way — a row that has
+   been engraved keeps its score rather than re-rendering every time it scrolls
+   past.
+
+   The gate has to be on `showAbcPreview`, which is what the `v-if` reads,
+   *because* the engraving is a computed: a computed costs nothing until
+   something reads it, and `v-if` short-circuits the `v-html`. Anything that
+   reads `abcSvg` from outside that `v-if` puts the whole cost straight back,
+   which is why `favouriteRow.test.mjs` counts calls into a faked ABCJS rather
+   than asserting on the shape of `showAbcPreview`.
+
+2. **The list renders a budget of rows and grows it on scroll**
+   (`app/src/js/rowWindow.mjs`, `INITIAL_ROW_BUDGET` 24, `ROW_BUDGET_STEP` 24).
+   Even with no preview a row is a `v-checkbox`, a `v-menu`, two `v-btn`s and a
+   `TuneBackgroundButton`; a few hundred of those is its own delay.
+
+   A sentinel element below the last row grows the budget when it scrolls into
+   view. **The observer alone is not enough**: it only fires on a threshold
+   crossing, and a sentinel that is already on screen and stays there never
+   crosses anything, so growth would stall with the viewport half empty. Hence
+   `_fillViewport()` in `updated()`, which re-checks the sentinel's position and
+   grows again — one step per animation frame, so what is already rendered gets
+   painted before the next batch is built. Growing in a tight loop would just
+   reproduce the freeze.
+
+Rules the tests pin, each verified by reinstating the bug:
+
+- **Windowing never loses a row.** Growing the budget far enough must reproduce
+  the unwindowed list exactly, and `hasMore` is true for exactly as long as
+  something is held back. A window that silently dropped the last group would
+  look identical on screen to a short list.
+- **A collapsed group costs no budget.** It renders nothing, so charging it
+  would leave every group below it stuck empty — collapse the top group and the
+  rest of the list disappears. Its rows are still carried through, because the
+  header shows their count and the group checkbox selects them. Removing the
+  exemption fails 1 test.
+- **Only *rendering* is windowed.** Selection, select-all, the tag/place chip
+  counts, sharing and export all still run off `allRows` / `filteredItems`, so a
+  row that has not been rendered yet is never an excluded one. This is the
+  property that makes the whole thing safe to do.
+- **Changing the filter, grouping or sort resets the budget**, since it changes
+  what is at the top; otherwise a user who had scrolled to row 200 and then
+  typed a name filter keeps paying to render 200 rows of a three-row list.
+- **No `IntersectionObserver` means the old behaviour, not a broken list.** The
+  row starts `inView` and `rowBudget` goes to `Infinity`. Slow, but never a list
+  the user cannot scroll to the end of.
+
+Also removed a wasted render pass: `FavouriteRow` measured its own width in
+`$nextTick` + `requestAnimationFrame`, so every row rendered once knowing
+nothing about its width and again a frame later. It is measured synchronously in
+`mounted()` now (the element is already in the DOM), with the deferred read kept
+as a safety net for a row that is not laid out yet.
+
+**Not done: virtualising the list** (rendering only the visible window and
+recycling rows). It would cap the cost rather than defer it, but it fights the
+four grouping modes, the collapsible headers and the variable row height, and
+progressive rendering plus the visibility gate already moves the expensive work
+off the critical path. Worth revisiting if someone reports slowness while
+*scrolling* rather than while opening the view.
+
+Tests: `app/test/rowWindow.test.mjs` (13 cases, the pure budget arithmetic) and
+`app/test/favouriteRow.test.mjs` (6 cases, the visibility gate — same
+lift-the-SFC harness as `tuneBackgroundDialog.test.mjs`, with ABCJS faked so
+engraving calls can be counted).
+
 ### Freeze in the follow score view (August 2026)
 
 A pin button in the `LiveScoreFollow` header, to the right of the (i), holds the
