@@ -32,10 +32,22 @@ function targetFromDetection(detection) {
 /**
  * @param {Array} detections - clustered detection rows, oldest first
  * @param {Object|null} previous - the target currently on screen
+ * @param {boolean} [frozen] - when true the user has pinned the current tune,
+ *        so nothing the analysis says may move the display.
  * @returns {{target: Object|null, changed: boolean}} `changed` is true only when
  *          the displayed score needs reloading.
  */
-export function resolveFollowTarget(detections, previous) {
+export function resolveFollowTarget(detections, previous, frozen = false) {
+    // Freeze is deliberately total: not just "don't switch tune", but don't
+    // touch the readouts either. The point of freezing is to stop the view
+    // moving while you read the dots off it — a score number ticking under a
+    // frozen heading, or the override dropdown re-populating from whatever is
+    // being played now, is exactly the movement the user asked us to stop.
+    // Note this also holds a target on screen after the detections list is
+    // cleared, which is wanted: a tune you froze does not vanish because the
+    // room went quiet.
+    if (frozen) return { target: previous, changed: false };
+
     const latest = detections && detections.length
         ? detections[detections.length - 1]
         : null;

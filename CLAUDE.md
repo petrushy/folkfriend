@@ -1037,6 +1037,31 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Freeze in the follow score view (August 2026)
+
+A pin button in the `LiveScoreFollow` header, to the right of the (i), holds the
+current tune on screen. It lasts until unfrozen or until the overlay is closed —
+it is not carried across a reopen via `setLastShown`, because a view silently
+pinned to a tune that stopped being played some time ago has nothing on screen to
+explain itself.
+
+**The freeze is total, not just "don't switch tune".** `resolveFollowTarget` takes
+a `frozen` flag and, when set, returns the previous target untouched: the match
+score does not tick, and the override dropdown does not re-populate from what is
+being played now. The point of freezing is to stop the view moving while you read
+the dots off it, and those readouts move for the same reason the score does. It
+also means a frozen tune survives the detections list clearing — the tune you
+pinned does not vanish because the room went quiet.
+
+**Unfreezing has to re-resolve explicitly.** The `detections` watcher only fires
+when the array changes, and while frozen every one of those ticks was discarded,
+so on unfreeze the component calls `_resolveFromDetections()` itself — otherwise
+the view sits on the frozen tune until the next tune change and unfreeze looks
+broken. That method is the watcher's body, extracted so both callers share it.
+
+Six cases in `liveScoreFollow.test.mjs`, verified by removing the `frozen`
+early-return (1 fails).
+
 ### Geo-tagged tune sightings (August 2026 — v3.10.0)
 
 Records roughly **where** each tune was recognised, so the app can answer "which

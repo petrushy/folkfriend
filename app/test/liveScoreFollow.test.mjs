@@ -271,4 +271,66 @@ function det(tuneId, settingId, title, bestScore, alternatives = []) {
     clearLastShown();
 }
 
+// --- Freeze -----------------------------------------------------------------
+
+// Frozen: a different tune being detected must not move the display, and the
+// readouts (score, options) must not move either.
+{
+    const shown = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
+    const { target, changed } = resolveFollowTarget(
+        [det(2, 20, 'The Butterfly', 0.88, [opt(2, 21, 'The Butterfly (alt)', 0.8)])],
+        shown,
+        true,
+    );
+    assert.equal(changed, false);
+    assert.equal(target, shown, 'frozen target is returned untouched, not rebuilt');
+    assert.equal(target.tuneId, 1);
+    assert.equal(target.score, 0.71, 'the match readout is frozen too');
+    assert.equal(target.tuneOptions.length, 1, 'the override options do not re-populate while frozen');
+}
+
+// Frozen: the same tune continuing must not refresh the score readout either.
+{
+    const shown = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
+    const { target } = resolveFollowTarget([det(1, 10, 'The Kesh', 0.93)], shown, true);
+    assert.equal(target.score, 0.71);
+}
+
+// Frozen: detections clearing (the room goes quiet) must not blank the view.
+{
+    const shown = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
+    const { target, changed } = resolveFollowTarget([], shown, true);
+    assert.equal(changed, false);
+    assert.equal(target, shown);
+}
+
+// Frozen never asks for a reload — the on-screen score is already the right one.
+{
+    const shown = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
+    const key = targetScoreKey(shown);
+    const { target } = resolveFollowTarget([det(2, 20, 'The Butterfly', 0.88)], shown, true);
+    assert.equal(needsScoreLoad(target, key, null), false);
+}
+
+// Unfreezing rejoins whatever is being played now, and that is a real change
+// needing a reload.
+{
+    const shown = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
+    const key = targetScoreKey(shown);
+    const frozen = resolveFollowTarget([det(2, 20, 'The Butterfly', 0.88)], shown, true).target;
+    const { target, changed } = resolveFollowTarget([det(2, 20, 'The Butterfly', 0.88)], frozen, false);
+    assert.equal(changed, true);
+    assert.equal(target.tuneId, 2);
+    assert.equal(target.detectedTuneId, 2);
+    assert.equal(needsScoreLoad(target, key, null), true);
+}
+
+// Omitting the flag entirely keeps the old following behaviour.
+{
+    const shown = resolveFollowTarget([det(1, 10, 'The Kesh', 0.71)], null).target;
+    const { target, changed } = resolveFollowTarget([det(2, 20, 'The Butterfly', 0.88)], shown);
+    assert.equal(changed, true);
+    assert.equal(target.tuneId, 2);
+}
+
 console.log('liveScoreFollow.test.mjs passed');

@@ -15,12 +15,26 @@
                         </v-icon>
                     </button>
                     <TuneBackgroundButton v-if="target" class="backgroundBtn" :tuneID="target.tuneId" :displayName="target.title" :sourceUrl="abcSetting ? abcSetting.source_url || '' : ''" />
+                    <button
+                        v-if="target"
+                        class="freezeBtn"
+                        :title="frozen ? 'Unfreeze — follow the tune being played' : 'Freeze on this tune'"
+                        :aria-pressed="String(frozen)"
+                        @click="toggleFrozen"
+                    >
+                        <v-icon :color="frozen ? 'blue darken-2' : 'grey lighten-1'">
+                            {{ frozen ? frozenIcon : unfrozenIcon }}
+                        </v-icon>
+                    </button>
                 </h2>
                 <div class="tuneMeta">
                     <span v-if="target" class="scoreReadout">
                         match {{ target.score.toFixed(2) }}
                     </span>
-                    <span v-if="target && target.overridden" class="overrideFlag">
+                    <span v-if="target && frozen" class="frozenFlag">
+                        frozen
+                    </span>
+                    <span v-else-if="target && target.overridden" class="overrideFlag">
                         manual pick
                     </span>
                     <span v-else-if="target" class="followingFlag">
@@ -81,7 +95,7 @@
                 @change="onOverrideChange"
             />
             <div v-else class="footerHint">
-                Auto-switching · {{ formatSecondsAsClock(elapsedSeconds) }}
+                {{ frozen ? 'Frozen' : 'Auto-switching' }} · {{ formatSecondsAsClock(elapsedSeconds) }}
             </div>
             <span v-if="target && target.tuneOptions.length > 1" class="footerClock">
                 {{ formatSecondsAsClock(elapsedSeconds) }}
@@ -91,7 +105,7 @@
 </template>
 
 <script>
-import { mdiStar, mdiStarOutline } from '@mdi/js';
+import { mdiStar, mdiStarOutline, mdiPin, mdiPinOutline } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
@@ -128,8 +142,16 @@ export default {
             loadError: '',
             elapsedSeconds: liveAnalysisService.elapsedSeconds,
             favourited: lastShown.favourited,
+            // Deliberately not seeded from lastShown: freezing lasts "until
+            // unfrozen or closed", so closing the overlay ends it. Carrying it
+            // across a reopen would leave the view silently pinned to a tune
+            // that stopped being played some time ago, with nothing on the
+            // previous screen to explain why.
+            frozen: false,
             starIcon: mdiStar,
             starOutlineIcon: mdiStarOutline,
+            frozenIcon: mdiPin,
+            unfrozenIcon: mdiPinOutline,
         };
     },
     computed: {
@@ -141,25 +163,7 @@ export default {
         detections: {
             immediate: true,
             handler(detections) {
-                const { target, changed } = resolveFollowTarget(detections, this.target);
-                this.target = target;
-                this.selectedTuneKey = target ? this._optionKeyFor(target) : null;
-                // detections updates continuously while listening (many times a
-                // second) but the displayed settingId only actually moves when
-                // `changed` is true — see resolveFollowTarget(). Re-checking
-                // isFavourite() on every tick raced store.addFavourite()/
-                // removeFavourite(), whose in-memory cache only reflects a
-                // write after its IndexedDB write resolves: a tick landing in
-                // that window read the stale cache and snapped the star back,
-                // making it look like the tap hadn't registered.
-                if (changed) this._syncFavourited();
-                // needsScoreLoad() covers a real tune change (this.abcTargetKey
-                // stops matching) and also a stale-on-reopen cache (same idea,
-                // caught by the key rather than by `changed`) — while also
-                // deduping against an in-flight load for this same target, so
-                // the many detections ticks that land while one fetch is
-                // outstanding don't each restart it. See its comment.
-                if (needsScoreLoad(target, this._abcTargetKey, this._loadingTargetKey)) this.loadScore();
+                this._resolveFromDetections(detections);
             },
         },
     },
@@ -227,6 +231,37 @@ export default {
                     String(option.settingId || '') === String(target.settingId || '')
             );
             return match ? match.value : null;
+        },
+        toggleFrozen() {
+            this.frozen = !this.frozen;
+            if (this.frozen) return;
+            // Unfreezing must re-join whatever is being played *now*. The
+            // detections watcher only fires when the array changes, and while
+            // frozen every one of those ticks was discarded, so without this
+            // the view would sit on the frozen tune until the next tune change
+            // — looking as though unfreeze hadn't worked.
+            this._resolveFromDetections();
+        },
+        _resolveFromDetections(detections = this.detections) {
+            const { target, changed } = resolveFollowTarget(detections, this.target, this.frozen);
+            this.target = target;
+            this.selectedTuneKey = target ? this._optionKeyFor(target) : null;
+            // detections updates continuously while listening (many times a
+            // second) but the displayed settingId only actually moves when
+            // `changed` is true — see resolveFollowTarget(). Re-checking
+            // isFavourite() on every tick raced store.addFavourite()/
+            // removeFavourite(), whose in-memory cache only reflects a
+            // write after its IndexedDB write resolves: a tick landing in
+            // that window read the stale cache and snapped the star back,
+            // making it look like the tap hadn't registered.
+            if (changed) this._syncFavourited();
+            // needsScoreLoad() covers a real tune change (this._abcTargetKey
+            // stops matching) and also a stale-on-reopen cache (same idea,
+            // caught by the key rather than by `changed`) — while also
+            // deduping against an in-flight load for this same target, so
+            // the many detections ticks that land while one fetch is
+            // outstanding don't each restart it. See its comment.
+            if (needsScoreLoad(target, this._abcTargetKey, this._loadingTargetKey)) this.loadScore();
         },
         onOverrideChange(value) {
             const option = this.target.tuneOptions.find(o => o.value === value);
@@ -391,6 +426,22 @@ export default {
     margin: -10px 0 -10px 2px;
 }
 
+.freezeBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: none;
+    /* Same 44px touch target as .starBtn, with the same negative margin so it
+       doesn't stretch the title's line height. */
+    padding: 10px;
+    margin: -10px 0 -10px 2px;
+    cursor: pointer;
+    vertical-align: middle;
+    line-height: 1;
+    -webkit-tap-highlight-color: transparent;
+}
+
 .tuneMeta {
     display: flex;
     flex-wrap: wrap;
@@ -408,6 +459,15 @@ export default {
 
 .overrideFlag {
     color: #b26500;
+}
+
+.frozenFlag {
+    color: #1565c0;
+}
+
+.frozenFlag::before {
+    content: '●';
+    margin-right: 4px;
 }
 
 .exitFollowBtn {
