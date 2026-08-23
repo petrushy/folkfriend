@@ -1037,6 +1037,47 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Freeze in the follow score view (August 2026)
+
+A pin button in the `LiveScoreFollow` header, to the right of the (i), holds the
+current tune on screen. It lasts until unfrozen or until the overlay is closed —
+it is not carried across a reopen via `setLastShown`, because a view silently
+pinned to a tune that stopped being played some time ago has nothing on screen to
+explain itself.
+
+**The freeze is total, not just "don't switch tune".** `resolveFollowTarget` takes
+a `frozen` flag and, when set, returns the previous target untouched: the match
+score does not tick, and the override dropdown does not re-populate from what is
+being played now. The point of freezing is to stop the view moving while you read
+the dots off it, and those readouts move for the same reason the score does. It
+also means a frozen tune survives the detections list clearing — the tune you
+pinned does not vanish because the room went quiet.
+
+**Unfreezing has to re-resolve explicitly.** The `detections` watcher only fires
+when the array changes, and while frozen every one of those ticks was discarded,
+so on unfreeze the component calls `_resolveFromDetections()` itself — otherwise
+the view sits on the frozen tune until the next tune change and unfreeze looks
+broken. That method is the watcher's body, extracted so both callers share it.
+
+**The frozen state is announced in both footer layouts.** The footer has two
+branches — the override dropdown plus a bare clock when the tune has
+alternatives, a hint line otherwise — and the first one carries the only footer
+text in that layout, so it needs the `Frozen · ` prefix too. Putting it only in
+the hint line announced the freeze everywhere except the one layout where the
+override dropdown is on screen.
+
+Six cases in `liveScoreFollow.test.mjs` for the resolver (removing the `frozen`
+early-return fails 5 of them; the sixth deliberately pins the *old* following
+behaviour when the flag is omitted), and six in
+`liveScoreFollowComponent.test.mjs` for the wiring the resolver tests cannot
+reach: that `frozen` is passed on every tick, and that `toggleFrozen` re-resolves
+on the way out. The latter follows `tuneBackgroundDialog.test.mjs` — lift the
+SFC's `<script>` block, rewrite its imports to fakes, drive `data()`/`methods`
+against a fake `this` with no Vue runtime — but keeps `liveScoreFollow.mjs`
+real, since it is the far side of the wiring under test. Verified by mutation:
+dropping the `this.frozen` argument fails 3, and making unfreeze skip the
+re-resolve fails 2.
+
 ### Geo-tagged tune sightings (August 2026 — v3.10.0)
 
 Records roughly **where** each tune was recognised, so the app can answer "which
