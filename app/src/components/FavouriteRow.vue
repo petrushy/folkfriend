@@ -87,6 +87,15 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 // Preview itself needs at least ~200px → total ~508; use 540 to give a little breathing room.
 const ABC_PREVIEW_MIN_ROW_WIDTH = 540;
 
+// Engraving the preview is by far the most expensive thing a row does — a full
+// ABCJS layout pass producing several hundred SVG nodes, a few milliseconds on
+// a desktop and several times that on an older iPad. Doing it for every row in
+// a long list, synchronously, during the render that is supposed to put the
+// view on screen, is what made Favourites take seconds to appear. So a row only
+// engraves once it is actually near the viewport. One screen of lookahead, so
+// the score is there by the time the row is scrolled onto.
+const PREVIEW_LOOKAHEAD_PX = 400;
+
 export default {
     name: 'FavouriteRow',
     components: { TuneBackgroundButton },
@@ -108,6 +117,9 @@ export default {
     data() {
         return {
             rowWidth: 0,
+            // Set by the IntersectionObserver below. Without an observer
+            // (a genuinely old browser) it starts true and behaves as before.
+            inView: typeof IntersectionObserver === 'undefined',
             addTagMenu: false,
             tagInputValue: null,
             icons: {
@@ -130,7 +142,9 @@ export default {
             return Math.min(480, Math.max(220, Math.floor(available * 0.7)));
         },
         showAbcPreview() {
-            return this.rowWidth >= ABC_PREVIEW_MIN_ROW_WIDTH && !!this.setting && !!this.setting.abc;
+            return this.inView
+                && this.rowWidth >= ABC_PREVIEW_MIN_ROW_WIDTH
+                && !!this.setting && !!this.setting.abc;
         },
         abcSvg() {
             if (!this.setting || !this.setting.abc) return '';
@@ -199,13 +213,38 @@ export default {
             });
         };
         window.addEventListener('resize', this._queueRowWidthSync, { passive: true });
+        // Measured here rather than a frame later: the element is already in the
+        // DOM, and deferring only bought the row a second render pass before it
+        // could know whether it had room for a preview at all.
+        this._syncRowWidth();
+        // Kept as a safety net: if the row was not laid out yet (a hidden
+        // parent, a font still loading) the synchronous read above is 0.
         this.$nextTick(() => this._queueRowWidthSync());
+
+        if (typeof IntersectionObserver !== 'undefined' && this.$refs.rowEl) {
+            this._visibilityObserver = new IntersectionObserver(entries => {
+                if (!entries.some(e => e.isIntersecting)) return;
+                this.inView = true;
+                // One-way: a row that has been engraved keeps its score rather
+                // than re-rendering it every time it scrolls past.
+                this._disconnectVisibilityObserver();
+            }, { rootMargin: `${PREVIEW_LOOKAHEAD_PX}px 0px` });
+            this._visibilityObserver.observe(this.$refs.rowEl);
+        } else {
+            this.inView = true;
+        }
     },
     beforeDestroy() {
         window.removeEventListener('resize', this._queueRowWidthSync);
         if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
+        this._disconnectVisibilityObserver();
     },
     methods: {
+        _disconnectVisibilityObserver() {
+            if (!this._visibilityObserver) return;
+            this._visibilityObserver.disconnect();
+            this._visibilityObserver = null;
+        },
         favouriteItemClicked() {
             this.$emit('favouriteItemClicked', this.settingID);
         },
