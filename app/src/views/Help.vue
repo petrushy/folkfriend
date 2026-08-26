@@ -20,6 +20,15 @@
                 device, or upload an existing audio file. FolkFriend runs
                 entirely in browser and works without an internet connection.
             </p>
+            <p>
+                FolkFriend was created by Tom Wyllie. This is a fork
+                maintained by Petrus Hyvönen, which adds offline
+                multi-database tune search, session and place logging, live
+                session follow, and AI-written tune background notes. The
+                source is on <a
+                    href="https://github.com/petrushy/folkfriend"
+                >GitHub</a>.
+            </p>
         </v-card>
         <v-card
             class="pa-5 my-2"
@@ -36,16 +45,27 @@
         </v-card>
         <v-card class="pa-5 my-2">
             <h1>Feedback</h1>
-            FolkFriend has been a five-year project by a single developer. 
-            Please send any bugs reports, feature requests, or general feedback, 
-            to <a
-                class="feedbackEmail"
-                href="mailto:feedback@folkfriend.app"
-            >feedback@folkfriend.app</a>.
+            <p>
+                Bug reports and feature requests for this version belong on
+                the <a
+                    class="feedbackEmail"
+                    href="https://github.com/petrushy/folkfriend/issues"
+                >GitHub issues page</a>. Many of the features here do not
+                exist in the original app, so reporting them anywhere else is
+                unlikely to reach anyone who can fix them.
+            </p>
+            <p class="mb-0">
+                Feedback about the original FolkFriend, at <a
+                    href="https://folkfriend.app"
+                >folkfriend.app</a>, goes to <a
+                    class="feedbackEmail"
+                    href="mailto:feedback@folkfriend.app"
+                >feedback@folkfriend.app</a>.
+            </p>
         </v-card>
         <p class="AppInfo">
             Folkfriend app version: {{ frontendVersion }}<br>Folkfriend library version:
-            {{ backendVersion }}<br>Tune data: {{ tuneDataLabel }}<br>{{ attribution }}<br>© {{ year }} Tom Wyllie. All Rights Reserved.
+            {{ backendVersion }}<br>Tune data: {{ tuneDataLabel }}<br>{{ attribution }}<br>© {{ year }} Tom Wyllie and contributors. Licensed under GPL-3.0.
         </p>
     </v-container>
 </template>
