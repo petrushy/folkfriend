@@ -336,9 +336,22 @@ const idbHasDatasets = ids => `
     const keys = await new Promise(res => { const r = st.getAllKeys(); r.onsuccess = () => res(r.result); });
     return ${JSON.stringify(ids)}.every(id => keys.includes('ffIndexManifest:' + id));
 })()`;
+// What this test asks the app to install. A fresh install selects thesession
+// only — folkwiki is opt-in (see USER_SETTING_DEFAULTS in store.js) — but this
+// test exists to exercise the MULTI-dataset install, partial-failure and
+// recovery paths, so it selects both explicitly rather than inheriting whatever
+// the default happens to be. Stating the intent also means a future change to
+// that default cannot silently reduce what this covers.
 const INSTALLED_IDS = datasetEntries
     .filter(e => e.id === 'thesession' || e.id === 'folkwiki')
     .map(e => e.id);
+
+// store.js reads userSettings in its constructor, so this has to be in place
+// before any page script runs — writing it after boot would not reach the
+// instance already running, and every navigation in this test needs it.
+const SEED_SELECTION = `try {
+    localStorage.setItem('userSettings', ${JSON.stringify(JSON.stringify({ tuneDatasets: INSTALLED_IDS }))});
+} catch (e) {}`;
 
 try {
     const version = await getJSON('http://localhost:9600/json/version');
@@ -385,6 +398,8 @@ try {
     await send('Runtime.enable', {}, pageSession);
     await send('Target.setAutoAttach',
         { autoAttach: true, waitForDebuggerOnStart: true, flatten: true }, pageSession);
+    await send('Page.addScriptToEvaluateOnNewDocument',
+        { source: SEED_SELECTION }, pageSession);
 
     console.log('1. Start with the tune-data host hanging (captive portal)');
     await send('Page.navigate', { url: APP }, pageSession);
