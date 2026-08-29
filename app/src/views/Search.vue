@@ -63,15 +63,18 @@
                 <v-icon left small>{{ searchState === 'listening' || searchState === 'working' ? icons.microphoneOff : icons.microphone }}</v-icon>
                 {{ searchState === 'listening' || searchState === 'working' ? 'Stop monitoring' : 'Monitor' }}
             </v-btn>
+            <!-- One tap from here to "show me what is playing": follow=1 makes
+                 Session Analysis start listening and open the score itself,
+                 rather than landing on a screen needing two more taps. -->
             <v-btn
                 small
                 text
                 color="grey darken-1"
                 :disabled="searchState === 'recording' || searchState === 'listening' || searchState === 'working'"
-                :to="{ name: 'session-analysis', query: { live: '1' } }"
+                :to="{ name: 'session-analysis', query: { live: '1', follow: '1' } }"
             >
-                <v-icon left small>{{ icons.timer }}</v-icon>
-                Continuous
+                <v-icon left small>{{ icons.clef }}</v-icon>
+                Follow session
             </v-btn>
         </v-row>
         <input
@@ -153,7 +156,7 @@ import ffBackend from '@/services/backend';
 import audioService from '@/services/audio';
 import store from '@/services/store';
 import eventBus from '@/eventBus';
-import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiTimerOutline } from '@mdi/js';
+import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiMusicClefTreble } from '@mdi/js';
 import micService from '@/services/mic';
 import { DATASET_LABELS } from '@/js/source.mjs';
 
@@ -184,7 +187,7 @@ export default {
                 microphone: mdiMicrophone,
                 microphoneOff: mdiMicrophoneOff,
                 waveform: mdiWaveform,
-                timer: mdiTimerOutline,
+                clef: mdiMusicClefTreble,
             },
         };
     },

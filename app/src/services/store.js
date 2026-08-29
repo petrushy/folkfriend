@@ -26,11 +26,28 @@ const USER_SETTING_DEFAULTS = {
     aiSummaryModel: DEFAULT_AI_MODEL, // which Claude model writes the background note
     geoTagDetections: false, // record where each tune was heard; needs location permission
     // Which tune databases are downloaded, stored offline and searched.
-    // The default MUST equal the app's pre-multi-dataset behaviour, so that an
-    // upgrading user — or an old backup restored through the backfill in
-    // updateUserSettings — neither loses thesession nor silently gains norbeck.
-    tuneDatasets: ['thesession', 'folkwiki'],
+    //
+    // A FRESH install gets thesession only. folkwiki's detections are still
+    // unreliable enough that having it on out of the box makes the app look
+    // worse than it is to someone trying it for the first time; it is one tap
+    // away in Settings → Offline Tune Database, exactly as before.
+    //
+    // This default must never reach a user who was already searching folkwiki
+    // — see LEGACY_TUNE_DATASETS.
+    tuneDatasets: ['thesession'],
 };
+
+// What someone was searching BEFORE this setting existed: the app fetched both
+// files unconditionally. An install that has saved settings but no
+// `tuneDatasets` key is exactly that user, and narrowing what they can find
+// without asking is a regression, not a default change — they would search for
+// a Swedish tune they have found before, get nothing, and have no way to tell
+// why. So they keep both, and the new default applies only to installs that
+// have never saved anything.
+//
+// Also used for a backup restored from before the setting existed, for the
+// same reason.
+const LEGACY_TUNE_DATASETS = ['thesession', 'folkwiki'];
 
 // The datasets the app OFFERS by default — the ones it can fetch for you.
 //
@@ -43,6 +60,20 @@ const USER_SETTING_DEFAULTS = {
 // This is NOT the list of ids the app understands — an imported dataset can
 // have any id. See sanitiseDatasets and datasetForTuneID.
 export const KNOWN_DATASETS = ['thesession', 'folkwiki'];
+
+// Which selection a settings object implies, before sanitising.
+//
+// `stored` is what was actually on disk (or in a backup), NOT the object already
+// merged over the defaults — the whole question is whether the key was there.
+// Present (even as an empty array) means the user has answered; absent from an
+// otherwise-populated object means they predate the question and were searching
+// both. A completely absent settings object is a fresh install and takes
+// `fallback`, which is the current default.
+function _datasetsFor(stored, fallback) {
+    if (!stored || typeof stored !== 'object') return fallback;
+    if (stored.tuneDatasets !== undefined) return stored.tuneDatasets;
+    return [...LEGACY_TUNE_DATASETS];
+}
 
 // Substitute the default ONLY when the key is absent or is not an array.
 //
@@ -162,12 +193,13 @@ class Store {
         // not contain it — which is why so many call sites coalesce with
         // `|| false`. Merging means a new default actually reaches existing
         // installs.
+        const storedSettings = JSON.parse(localStorage.getItem('userSettings'));
         this.userSettings = {
             ...USER_SETTING_DEFAULTS,
-            ...(JSON.parse(localStorage.getItem('userSettings')) || {}),
+            ...(storedSettings || {}),
         };
-        this.userSettings.tuneDatasets =
-            sanitiseDatasets(this.userSettings.tuneDatasets);
+        this.userSettings.tuneDatasets = sanitiseDatasets(
+            _datasetsFor(storedSettings, this.userSettings.tuneDatasets));
         this.searchState = this.searchStates.READY;
 
         this._favouriteIDs = null;
@@ -204,10 +236,12 @@ class Store {
         // added since, and without this every consumer would read undefined.
         // Mutated in place rather than merged into a copy, because several views
         // hold a reference to this object and rely on it staying the same one.
+        const incomingDatasets = _datasetsFor(userSettings, undefined);
         for (const [key, value] of Object.entries(USER_SETTING_DEFAULTS)) {
             if (userSettings[key] === undefined) userSettings[key] = value;
         }
-        userSettings.tuneDatasets = sanitiseDatasets(userSettings.tuneDatasets);
+        userSettings.tuneDatasets = sanitiseDatasets(
+            incomingDatasets === undefined ? userSettings.tuneDatasets : incomingDatasets);
 
         // Usable immediately and synchronously by the entire application.
         this.userSettings = userSettings;

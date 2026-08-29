@@ -33,11 +33,20 @@ export const INDEX_STATUS = {
     UNAVAILABLE: 'unavailable', // no offline copy and no usable network
 };
 
-// What a fresh install searches. Must equal the app's pre-multi-dataset
-// behaviour, so that an existing user upgrading — or an old backup restored
-// through updateUserSettings' backfill — neither loses thesession nor silently
-// gains norbeck.
-export const DEFAULT_DATASETS = ['thesession', 'folkwiki'];
+// What a fresh install searches. thesession only: folkwiki's detections are
+// still unreliable enough that shipping them on by default makes the app look
+// worse than it is to someone trying it for the first time. It stays a
+// one-tap opt-in in Settings, is still published, and an existing user's
+// selection is never narrowed by this — see LEGACY_TUNE_DATASETS in store.js.
+export const DEFAULT_DATASETS = ['thesession'];
+
+// The ids the published manifest manages, which is a DIFFERENT question from
+// what a fresh install selects. It is the list an import may not claim: storing
+// under one of these names would put an unvetted file behind a name the app
+// manages, to be overwritten — or not — by the next CDN update depending on
+// ordering. Deselecting folkwiki must not make that name available, so this
+// cannot be derived from DEFAULT_DATASETS.
+export const PUBLISHED_DATASETS = ['thesession', 'folkwiki'];
 
 // PARTIAL SUCCESS IS READY.
 //
@@ -1488,7 +1497,7 @@ class FolkFriendWASMWrapper {
     // when we can, and from what is loaded when we cannot — offline, an import
     // must still not be able to claim a name the app already uses.
     async _isPublishedDataset(id) {
-        if (DEFAULT_DATASETS.includes(id)) return true;
+        if (PUBLISHED_DATASETS.includes(id)) return true;
         const local = await readDatasetManifest(id);
         if (local && local.origin === 'user') return false;
         if (local) return true;

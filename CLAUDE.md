@@ -126,8 +126,31 @@ After installing, the service worker caches all assets (including WASM) so the a
 The index is no longer one blob. It is published and stored as **one file per
 source** — `thesession` (34.8 MB), `folkwiki` (7.3 MB), `norbeck` (3.1 MB) —
 plus a `datasets.json` manifest, and the user chooses which are downloaded,
-stored offline and searched (Settings → Offline Tune Database). Default is
-`['thesession', 'folkwiki']`, i.e. exactly the old behaviour; norbeck is opt-in.
+stored offline and searched (Settings → Offline Tune Database).
+
+**A fresh install selects `['thesession']` only** (August 2026). folkwiki is
+published and offered, but off out of the box: its detections are unreliable
+enough that having it on makes the app look worse than it is to someone trying
+it for the first time. It is one tap away in Settings. norbeck is opt-in as
+before, and additionally not published — see below.
+
+**That default must never reach a user who was already searching folkwiki.**
+Before this setting existed the app fetched both files unconditionally, so an
+install with saved settings but no `tuneDatasets` key is exactly such a user;
+`_datasetsFor` (`store.js`) gives them `LEGACY_TUNE_DATASETS` — both — and the
+new default applies only to installs that have never saved anything. The same
+rule covers a backup written before the setting existed. Narrowing what someone
+can find without asking is a regression, not a default change: they would search
+for a Swedish tune they have found before, get nothing, and have no way to tell
+why. A key that is *present*, empty array included, is an answer and is honoured.
+
+**`DEFAULT_DATASETS` and `PUBLISHED_DATASETS` (`worker.js`) are different
+questions and were one constant until this change.** The first is what a fresh
+install selects; the second is the set of ids the published manifest manages,
+which is what an import may not claim (storing under a managed name would put an
+unvetted file behind a name the app overwrites). Deselecting folkwiki — or
+defaulting it off — must not make `folkwiki` an available name to import under,
+so `_isPublishedDataset` reads the second.
 
 Everything in "Offline architecture" below still holds; it is now applied **per
 dataset**. The three invariants the tests pin:
@@ -1103,14 +1126,50 @@ Four things this needs that are not obvious:
    on the next render — so a rejection made while frozen, or resolved from the
    stale prop, would not move the view.
 
+**One tap from the home screen to "what is being played".** Starting a session
+and getting the score on screen took three taps (Follow session → Start Live
+Analysis → Follow Score), which is two too many when the tune has already
+started. The Search screen's button now links to
+`{ live: '1', follow: '1' }`, and `?follow=1` makes the view start listening and
+open the score itself. The same action is on the view as the primary
+**Listen & Follow** button, with "Listen without score" kept beside it.
+
+Four things the auto-start needs:
+
+- **It is retried from `indexLoaded`, not dropped.** Arriving from a cold start
+  the tune index is usually still loading, so `canAnalyze` is false and a
+  fire-once auto-start would silently do nothing — the single worst outcome for
+  a one-tap entry point. `_autoFollowPending` holds the request.
+- **It is deferred one `$nextTick`** so the view is painted before the
+  microphone is opened; a permission refusal has to land on a rendered page.
+  `beforeDestroy` clears the pending flag, because the eventBus unsubscribe does
+  not cover a callback already queued on that tick.
+- **The score only opens on success.** A full-screen overlay over a microphone
+  that never opened hides the error explaining why.
+- **An already-running session just opens the score**, having nothing to start.
+
+⚠️ Auto-starting `getUserMedia` after a route change is not a user gesture. Once
+permission has been granted it resolves without a prompt, which is the normal
+case for an installed PWA, but a first-ever run on iOS may be refused — it
+degrades to the error alert plus the manual button, i.e. the previous behaviour.
+
 Tests: `filterShortPastDetections` in `sessionAnalysis.test.mjs` (loaded via
 `test/helpers/loadSessionAnalysis.mjs`, which rewrites the module's two aliased
 imports so node can load it), `liveAnalysisReject.test.mjs` (10 cases driving
 the real service with its browser imports faked), and four cases in
-`liveScoreFollowComponent.test.mjs` for the button wiring. Verified by
-reinstating each bug: removing the filter fails 2, removing the cooldown fails
-3, rejecting only the latest cluster fails 1, and dropping the unfreeze /
-re-resolve fails 2.
+`liveScoreFollowComponent.test.mjs` for the button wiring, and
+`sessionAnalysisView.test.mjs` (14 cases) for the view's whole startup path —
+default mode, the saved-file restore surviving the `liveMode` watcher, and every
+branch of the `?follow=1` auto-start. Verified by reinstating each bug: removing
+the filter fails 2, removing the cooldown fails 3, rejecting only the latest
+cluster fails 1, dropping the unfreeze / re-resolve fails 2, defaulting to file
+mode fails 8, dropping the `indexLoaded` retry fails 2, restoring synchronously
+fails 1, opening the score on a refused microphone fails 2, and leaving the
+pending flag set on destroy fails 1.
+
+The folkwiki default change above is covered in `aiSummaryStore.test.mjs`
+(the file that already owns the `userSettings` load path): reverting the default
+fails 1, dropping the legacy preservation fails 2.
 
 ### Favourites view took seconds to populate (August 2026)
 
