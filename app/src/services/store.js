@@ -49,6 +49,13 @@ const USER_SETTING_DEFAULTS = {
 // same reason.
 const LEGACY_TUNE_DATASETS = ['thesession', 'folkwiki'];
 
+// The pre-multi-dataset offline copies, read only to detect an upgrading
+// install — see resolveDatasetSelection(). Owned by tuneIndexStore.js, which is
+// worker-side; duplicated as literals rather than imported so that this
+// main-thread module does not pull in the whole index-storage layer.
+const LEGACY_INDEX_KEY = 'tuneIndex';    // schema 1
+const MERGED_INDEX_KEY = 'ffIndexRaw';   // schema 2, both datasets in one blob
+
 // The datasets the app OFFERS by default — the ones it can fetch for you.
 //
 // Norbeck is deliberately absent: it is built but not published (his terms
@@ -198,6 +205,10 @@ class Store {
             ...USER_SETTING_DEFAULTS,
             ...(storedSettings || {}),
         };
+        // Whether the user has ever answered the question. Only an unanswered
+        // one may be revised by resolveDatasetSelection() below.
+        this._datasetSelectionIsExplicit =
+            !!storedSettings && storedSettings.tuneDatasets !== undefined;
         this.userSettings.tuneDatasets = sanitiseDatasets(
             _datasetsFor(storedSettings, this.userSettings.tuneDatasets));
         this.searchState = this.searchStates.READY;
@@ -222,6 +233,43 @@ class Store {
         return sanitiseDatasets(this.userSettings.tuneDatasets);
     }
 
+    // Settles what an install that never answered the dataset question should
+    // search. Awaited once, before the worker reads anything off disk.
+    //
+    // The presence of a pre-multi-dataset offline copy is the evidence, and it
+    // is better evidence than the localStorage heuristic above: userSettings is
+    // written only when a setting is CHANGED, so a long-standing install whose
+    // owner never opened Settings has no stored blob at all and would otherwise
+    // be mistaken for a fresh one. Those copies cover thesession and folkwiki
+    // by construction, so what they hold is exactly what this install was
+    // searching.
+    //
+    // Getting this wrong costs twice over: the user silently stops finding
+    // Swedish tunes, AND clearSupersededMergedCopies never reclaims the ~42 MB
+    // blob, because it will not drop a copy until every dataset it covers has
+    // a committed per-dataset replacement. That combination is permanent.
+    //
+    // The answer is persisted, so it is derived once and Settings shows what is
+    // actually being searched rather than disagreeing with it.
+    async resolveDatasetSelection() {
+        if (this._datasetSelectionIsExplicit) return this.selectedDatasets();
+        let hasMergedCopy = false;
+        try {
+            hasMergedCopy = (await get(LEGACY_INDEX_KEY)) !== undefined
+                || (await get(MERGED_INDEX_KEY)) !== undefined;
+        } catch (e) {
+            // A read failure is not evidence of a fresh install, but it is not
+            // evidence of an upgrade either. Leave the default alone rather
+            // than guessing; the user can still turn folkwiki on.
+            console.warn('Could not check for a pre-multi-dataset tune index', e);
+            return this.selectedDatasets();
+        }
+        if (!hasMergedCopy) return this.selectedDatasets();
+        this.userSettings.tuneDatasets = [...LEGACY_TUNE_DATASETS];
+        await this.updateUserSettings(this.userSettings);
+        return this.selectedDatasets();
+    }
+
     async _dbSet(key, value) {
         try {
             await set(key, value);
@@ -242,6 +290,9 @@ class Store {
         }
         userSettings.tuneDatasets = sanitiseDatasets(
             incomingDatasets === undefined ? userSettings.tuneDatasets : incomingDatasets);
+        // Saving settings answers the question, whether or not the user was
+        // thinking about datasets at the time.
+        this._datasetSelectionIsExplicit = true;
 
         // Usable immediately and synchronously by the entire application.
         this.userSettings = userSettings;

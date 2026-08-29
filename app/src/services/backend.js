@@ -205,9 +205,13 @@ class FFBackend {
         const auto = store.userSettings.autoUpdateTuneData;
         await this.folkfriendWorker.setAutoUpdate(auto === undefined ? true : !!auto);
         // Likewise the dataset selection: the worker must know what to load
-        // before it reads anything off disk.
-        await this.folkfriendWorker.setSelectedDatasets(
-            [...store.selectedDatasets()], null);
+        // before it reads anything off disk. resolveDatasetSelection() settles
+        // the case of an install that never answered the question — a
+        // pre-multi-dataset offline copy means folkwiki was being searched, and
+        // the new thesession-only default must not narrow that. It is awaited
+        // rather than fired off because the worker reads disk immediately after.
+        const datasets = await store.resolveDatasetSelection();
+        await this.folkfriendWorker.setSelectedDatasets([...datasets], null);
         const analyticsData = await new Promise(resolve => {
             this.folkfriendWorker.setupTuneIndex(Comlink.proxy(analyticsData => {
                 resolve(analyticsData);

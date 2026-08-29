@@ -135,14 +135,40 @@ it for the first time. It is one tap away in Settings. norbeck is opt-in as
 before, and additionally not published — see below.
 
 **That default must never reach a user who was already searching folkwiki.**
-Before this setting existed the app fetched both files unconditionally, so an
-install with saved settings but no `tuneDatasets` key is exactly such a user;
-`_datasetsFor` (`store.js`) gives them `LEGACY_TUNE_DATASETS` — both — and the
-new default applies only to installs that have never saved anything. The same
-rule covers a backup written before the setting existed. Narrowing what someone
-can find without asking is a regression, not a default change: they would search
-for a Swedish tune they have found before, get nothing, and have no way to tell
-why. A key that is *present*, empty array included, is an answer and is honoured.
+Before this setting existed the app fetched both files unconditionally, so
+`LEGACY_TUNE_DATASETS` — both — is what an upgrading install keeps. A key that is
+*present*, empty array included, is an answer and is honoured; only an
+unanswered question may be revised.
+
+**The evidence is the offline copy on disk, not `localStorage`.** The first
+version of this used "has a saved `userSettings` blob but no `tuneDatasets`
+key", and that is wrong: `userSettings` is written only when a setting is
+*changed*, so a long-standing install whose owner never opened Settings has no
+stored blob at all and is indistinguishable from a fresh one by localStorage
+alone. `store.resolveDatasetSelection()` therefore checks IndexedDB for a
+pre-multi-dataset copy (`tuneIndex`, schema 1, or `ffIndexRaw`, schema 2) — those
+cover thesession and folkwiki by construction, so what they hold *is* what this
+install was searching. It is awaited in `backend.setupTuneIndex()` before
+`setSelectedDatasets`, because the worker reads disk immediately after, and the
+answer is persisted so Settings shows what is actually being searched.
+
+⚠️ **Getting that signal wrong costs twice over, and permanently.** The user
+silently stops finding Swedish tunes, AND
+`clearSupersededMergedCopies` never reclaims the ~42 MB blob — it will not drop
+a copy until *every* dataset it covers has a committed per-dataset replacement,
+and folkwiki now never gets one. So the install sits on the merged blob plus a
+per-dataset thesession copy for ever. **The offline e2e caught this**
+(`offline-index.mjs` step 5, "migration to schema 2" timing out after 300 s);
+no unit test did, because the whole failure lives in the interaction between a
+default, a localStorage heuristic and a reclamation rule in three different
+files. The `_datasetsFor` localStorage heuristic is kept as a second, weaker
+signal — it can only err toward *more* datasets, which is the old behaviour.
+
+`test/e2e/recovery.mjs` seeds `userSettings.tuneDatasets` with
+`Page.addScriptToEvaluateOnNewDocument` rather than inheriting the default: it
+exists to exercise the multi-dataset install and partial-failure paths, so it
+states that intent, and a future default change cannot silently reduce what it
+covers.
 
 **`DEFAULT_DATASETS` and `PUBLISHED_DATASETS` (`worker.js`) are different
 questions and were one constant until this change.** The first is what a fresh
@@ -1168,8 +1194,10 @@ fails 1, opening the score on a refused microphone fails 2, and leaving the
 pending flag set on destroy fails 1.
 
 The folkwiki default change above is covered in `aiSummaryStore.test.mjs`
-(the file that already owns the `userSettings` load path): reverting the default
-fails 1, dropping the legacy preservation fails 2.
+(the file that already owns the `userSettings` load path), 11 cases: reverting
+the default fails 1, dropping the legacy preservation fails 2, neutering
+`resolveDatasetSelection` fails 3, letting it override an explicit selection
+fails 2, and not persisting its answer fails 1.
 
 ### Favourites view took seconds to populate (August 2026)
 
