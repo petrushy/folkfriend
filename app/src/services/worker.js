@@ -1284,6 +1284,21 @@ class FolkFriendWASMWrapper {
     //  3. The loaded index is never cleared before its replacement has loaded.
     //  4. A failed toggle-on must not revert the setting. It is the user's
     //     intent and it retries next launch or on the next 'online' event.
+    // Seeds the selection at startup, WITHOUT the change-driven install that
+    // setSelectedDatasets performs.
+    //
+    // setupTuneIndex() reads disk and installs whatever is missing immediately
+    // afterwards, so running that here as well is a redundant second pass over
+    // the same work. It is not merely wasteful: behind a captive portal each
+    // pass spends the full 8 s metadata deadline, so the app takes 16 s rather
+    // than 8 s to say "unavailable" — and the whole point of that deadline is
+    // to fail fast. It went unnoticed while the default selection happened to
+    // equal what the app pushed (setSelectedDatasets early-returns when the
+    // selection is unchanged); changing the default made it the common case.
+    async primeSelectedDatasets(ids) {
+        this.selectedDatasets = Array.isArray(ids) ? [...new Set(ids)] : [];
+    }
+
     async setSelectedDatasets(ids, cb) {
         const next = Array.isArray(ids) ? [...new Set(ids)] : [];
         const previous = [...this.selectedDatasets];

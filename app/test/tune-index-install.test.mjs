@@ -859,6 +859,42 @@ async function run() {
 
     console.log('\nChanging the dataset selection');
 
+    await test('priming the selection at startup does not run an install', async () => {
+        // backend.setupTuneIndex() pushes the user's selection into the worker
+        // before setup reads disk. That push must SET the value, not act on it:
+        // setupTuneIndex installs whatever is missing straight afterwards, so
+        // treating the push as a user toggle does the same work twice — and
+        // behind a captive portal each pass burns the full metadata deadline,
+        // so the app takes twice as long to report itself unavailable.
+        //
+        // This hid for as long as the default selection equalled what the app
+        // pushed, because setSelectedDatasets early-returns when the selection
+        // is unchanged.
+        resetFakes();
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+
+        await wrapper.primeSelectedDatasets(ALL);
+
+        assert.deepEqual(wrapper.selectedDatasets, ALL, 'the value is set');
+        assert.equal(netMod.__net.manifestRequests, 0,
+            'priming must not touch the network');
+        assert.equal(netMod.__net.requests.length, 0);
+    });
+
+    await test('setup still installs everything the primed selection names', async () => {
+        // The other half: priming does less, so setup must still do all of it.
+        resetFakes();
+        const wrapper = await newWorker({ datasets: [] });
+        await wrapper.primeSelectedDatasets(ALL);
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        assert.equal(wrapper.indexStatus, 'ready');
+        assert.deepEqual(
+            Object.keys(wrapper.loadedDatasets).sort(), [...ALL].sort());
+        assert.equal(netMod.__net.manifestRequests, 1,
+            'and it costs exactly one metadata fetch, not two');
+    });
+
     await test('turning a dataset off keeps its payload on disk', async () => {
         // A toggle must NEVER delete a payload — worse than deleting on
         // failure, because the user may flip it back in thirty seconds and now

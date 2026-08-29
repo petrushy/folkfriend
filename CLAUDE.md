@@ -164,6 +164,20 @@ default, a localStorage heuristic and a reclamation rule in three different
 files. The `_datasetsFor` localStorage heuristic is kept as a second, weaker
 signal — it can only err toward *more* datasets, which is the old behaviour.
 
+**Pushing the selection at startup must not act on it.**
+`backend.setupTuneIndex()` seeds the worker with the user's selection before
+setup reads disk, and that push uses `primeSelectedDatasets` — which only
+assigns. `setSelectedDatasets` treats a *changed* selection as a user toggle and
+installs what is missing, which `setupTuneIndex` is about to do anyway: two
+passes over the same work, and behind a captive portal two full 8 s metadata
+deadlines, so the app takes 16 s rather than 8 s to report itself unavailable —
+defeating the point of that deadline. This was invisible for as long as
+`DEFAULT_DATASETS` happened to equal what the app pushed, because
+`setSelectedDatasets` early-returns on an unchanged selection; changing the
+default made it the common case. Caught by `recovery.mjs` step 1 ("app gives up
+on the stalled host quickly"), which counts the requests the stand-in host
+receives — 1 before, 2 after.
+
 `test/e2e/recovery.mjs` seeds `userSettings.tuneDatasets` with
 `Page.addScriptToEvaluateOnNewDocument` rather than inheriting the default: it
 exists to exercise the multi-dataset install and partial-failure paths, so it
