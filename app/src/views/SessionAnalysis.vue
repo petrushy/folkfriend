@@ -127,6 +127,11 @@
                 Analyses a rolling window of audio from your microphone every {{ analysisSettings.stepSeconds }}s.
                 Detected tune starts appear in the table below as they are found.
             </p>
+            <p class="mb-0 mt-2 text--secondary">
+                A tune heard for less than {{ minPastDetectionSeconds }}s drops off the list once the next
+                tune starts — brief mis-matches aren't kept. In Follow Score, the thumbs-down button
+                removes the tune on screen and goes back to the previous detection.
+            </p>
         </v-card>
 
         <v-card class="pa-5 my-3">
@@ -382,6 +387,7 @@ import {
     parseClockTime,
     parseXscMetadata,
     tuneOptionValue,
+    MIN_PAST_DETECTION_SECONDS,
 } from '@/js/sessionAnalysis.js';
 
 const SESSION_ANALYSIS_STATE_VERSION = 3;
@@ -419,7 +425,11 @@ export default {
                 total: 0,
                 currentTimeSeconds: 0,
             },
-            liveMode: false,
+            // Live microphone is the default: the overwhelmingly common use is
+            // pointing the phone at a session that is happening now. Importing a
+            // file is the deliberate, occasional case, and restoreSavedState()
+            // below switches back to it when there are saved file results.
+            liveMode: true,
             liveMicActive: false,
             liveIsPaused: false,
             liveMicError: '',
@@ -442,6 +452,9 @@ export default {
         },
     },
     computed: {
+        minPastDetectionSeconds() {
+            return MIN_PAST_DETECTION_SECONDS;
+        },
         canAnalyze() {
             if (this.liveMode) return !this.isAnalyzing && this.indexLoaded;
             return !!this.audioFile && !this.isAnalyzing && this.indexLoaded;
@@ -547,10 +560,18 @@ export default {
                 this.detections = liveAnalysisService.detections.map(d => this._buildDetectionRow(d));
                 this.analysisSummary.acceptedWindows = liveAnalysisService._windowMatches.length;
             });
-        } else if (this.$route && this.$route.query.live === '1') {
-            this.liveMode = true;
-        } else {
-            this.restoreSavedState();
+        } else if (!(this.$route && this.$route.query.live === '1')) {
+            // Saved file results outrank the live default — landing on an empty
+            // microphone panel having previously analysed a recording reads as
+            // the results having been lost.
+            const saved = store.state.sessionAnalysis;
+            if (saved && (saved.audioFile || (saved.detections && saved.detections.length))) {
+                this.liveMode = false;
+                // The liveMode watcher is queued now and calls resetResults();
+                // restoring synchronously here would be wiped by it. $nextTick
+                // callbacks run after the scheduler flush, so this lands after.
+                this.$nextTick(() => { this.restoreSavedState(); });
+            }
         }
 
         eventBus.$emit('parentViewActivated');

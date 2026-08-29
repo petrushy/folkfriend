@@ -2,7 +2,7 @@ import micService from './mic.js';
 import ffBackend from './backend.js';
 import geoService from './geo.js';
 import store from './store.js';
-import { normaliseQueryResults, clusterDetections } from '@/js/sessionAnalysis.js';
+import { normaliseQueryResults, clusterDetections, filterShortPastDetections } from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import eventBus from '@/eventBus.js';
 
@@ -31,6 +31,14 @@ function collapseConsecutiveSameTune(detections) {
     return result;
 }
 
+// How long a tune the user has rejected stays suppressed. Without a cooldown
+// the button is useless: the same seconds of audio are still in the ring buffer
+// and still match, so the rejected tune reappears on the very next cycle. It is
+// deliberately not permanent — a tune genuinely played later in the evening must
+// still be findable — and not refreshed on each suppressed match either, so the
+// rule stays "two minutes", which is something a user can predict.
+const REJECT_COOLDOWN_SECONDS = 120;
+
 const DEFAULT_OPTIONS = {
     minTopScore: 0.4,
     minClusterHits: 2,
@@ -58,6 +66,8 @@ class LiveAnalysisService {
         this._stopPromise = null;
         // Last tuneId written to the sightings log — see _recordSighting().
         this._lastSightingTuneId = null;
+        // tuneId (as a string) -> elapsedSeconds at which the user rejected it.
+        this._rejectedTunes = new Map();
     }
 
     async start(windowSeconds, stepSeconds) {
@@ -77,6 +87,7 @@ class LiveAnalysisService {
         this.isRunning = true;
         this.isPaused = false;
         this._lastSightingTuneId = null;
+        this._rejectedTunes.clear();
 
         // Warms one location fix for the whole session. Not awaited: the
         // session must start on the microphone, never on the radio. By the time
@@ -134,10 +145,77 @@ class LiveAnalysisService {
             match.startSeconds >= target.startSeconds - epsilon &&
             match.startSeconds <= target.endSeconds + epsilon
         ));
-        this.detections = collapseConsecutiveSameTune(
-            clusterDetections(this._windowMatches, this.options)
-        );
+        this._recluster();
         eventBus.$emit('liveAnalysisUpdate', this.detections);
+    }
+
+    // "That is not the tune I am playing." Drops the detection currently on
+    // screen and stops it coming straight back, so the display falls back to
+    // whatever was detected before it.
+    //
+    // Rejection targets the LATEST cluster of that tune, not every appearance
+    // of it: an earlier, correct hearing of the same tune is a different claim
+    // and must survive. removeDetection() already has exactly that semantics,
+    // because a collapsed row's startSeconds/endSeconds span only its most
+    // recent cluster.
+    rejectTune(tuneId) {
+        if (tuneId == null) return;
+        const key = String(tuneId);
+        this._rejectedTunes.set(key, this.elapsedSeconds);
+
+        // Removing one cluster is not enough on its own. A tune heard earlier
+        // and then again now is two clusters that collapseConsecutiveSameTune
+        // has *not* merged (there was another tune between them, or a gap), so
+        // dropping the latest can leave the one before it as the new tail — and
+        // the overlay would sit on the same wrong tune, looking as though the
+        // button did nothing. Keep going while the tail is still this tune.
+        // Anything further back stays: an earlier hearing is a separate claim.
+        let removedAny = false;
+        while (this.detections.length) {
+            const tail = this.detections[this.detections.length - 1];
+            if (String(tail.tuneId) !== key) break;
+            const before = this._windowMatches.length;
+            this.removeDetection(tail.id);
+            removedAny = true;
+            // Defensive: if a removal ever failed to drop a match the loop
+            // would not terminate. Better a stuck row than a hung session.
+            if (this._windowMatches.length === before) break;
+        }
+
+        // Nothing was on the list for a tune that never became a detection, but
+        // the suppression above is still wanted, so tell the view either way.
+        if (!removedAny) eventBus.$emit('liveAnalysisUpdate', this.detections);
+    }
+
+    // Results for tunes the user has rejected, while the rejection still holds.
+    // Filtering at the *results* level rather than after normalisation means the
+    // next-best candidate is promoted to the top instead of the whole window
+    // being thrown away — a window that only matched the rejected tune still
+    // yields nothing, which is the same as before.
+    _withoutRejectedTunes(results) {
+        if (!this._rejectedTunes.size) return results;
+        return results.filter(result => {
+            const tuneId = result.setting ? result.setting.tune_id : null;
+            if (tuneId == null) return true;
+            const rejectedAt = this._rejectedTunes.get(String(tuneId));
+            if (rejectedAt == null) return true;
+            if (this.elapsedSeconds - rejectedAt >= REJECT_COOLDOWN_SECONDS) {
+                this._rejectedTunes.delete(String(tuneId));
+                return true;
+            }
+            return false;
+        });
+    }
+
+    // Clustering, the short-detection filter and the same-tune collapse always
+    // run together and always in this order. The filter goes BEFORE the collapse
+    // so that a dropped one-window blip in the middle of a tune lets the two
+    // halves either side of it merge into one row rather than reading as the
+    // same tune twice.
+    _recluster() {
+        this.detections = collapseConsecutiveSameTune(
+            filterShortPastDetections(clusterDetections(this._windowMatches, this.options))
+        );
     }
 
     async stop() {
@@ -208,12 +286,16 @@ class LiveAnalysisService {
                     response = { error: e && e.message, results: [] };
                 }
 
-                if (this.isRunning && !this.isPaused && !response.error && response.results && response.results.length > 0) {
+                const usableResults = response.results
+                    ? this._withoutRejectedTunes(response.results)
+                    : [];
+
+                if (this.isRunning && !this.isPaused && !response.error && usableResults.length > 0) {
                     const previousTuneId = this.detections.length > 0
                         ? this.detections[this.detections.length - 1].tuneId
                         : null;
                     const biasedResults = biasResultsTowardPrevious(
-                        response.results,
+                        usableResults,
                         previousTuneId,
                         options.previousTuneBiasDelta,
                     );
@@ -229,9 +311,7 @@ class LiveAnalysisService {
                             score: normalized.score,
                             alternatives: normalized.alternatives,
                         });
-                        this.detections = collapseConsecutiveSameTune(
-                            clusterDetections(this._windowMatches, options)
-                        );
+                        this._recluster();
                         this._recordSighting();
                         eventBus.$emit('liveAnalysisUpdate', this.detections);
                     }

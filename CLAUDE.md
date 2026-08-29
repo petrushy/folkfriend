@@ -1037,6 +1037,81 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Session Analysis: live by default, short blips dropped, wrong tunes rejectable (August 2026 — v3.12.0)
+
+Three changes to the Session Analysis view and the live pipeline behind it.
+
+**Live microphone is the default mode.** The view opened on the file-import
+panel, which is the rarer case — the common one is pointing the phone at a
+session that is happening now, and that took a tap every time. `liveMode`
+defaults to `true`.
+
+Saved file results still win: `created()` switches back to file mode when
+`store.state.sessionAnalysis` holds an audio file or detections, because landing
+on an empty microphone panel having just analysed a recording reads as the
+results having been lost. That restore has to run in `$nextTick` — setting
+`liveMode` queues the watcher that calls `resetResults()`, so a synchronous
+restore would be wiped by it. `?live=1` still forces live regardless.
+
+**A tune only ever heard for a few seconds leaves the list.**
+`filterShortPastDetections` (`sessionAnalysis.js`, `MIN_PAST_DETECTION_SECONDS`
+= 15) drops detections shorter than the threshold. Two properties matter and
+both are pinned by tests:
+
+- **The last entry is exempt, always.** It is the tune being played right now
+  and every tune necessarily starts short — and the follow overlay reads exactly
+  that entry to decide what to display, so filtering it would blank the score
+  for the first fifteen seconds of every tune.
+- **It runs BEFORE `collapseConsecutiveSameTune`, not after.** A dropped blip in
+  the middle of a tune then lets the two halves either side of it merge into one
+  row; filtering afterwards leaves the same tune listed twice with a gap where
+  the blip used to be. `_recluster()` exists so the three steps cannot drift
+  apart across the two call sites (the analysis loop and `removeDetection`).
+
+It is display-only — the window matches are untouched, so a detection dropped
+here reappears on its own once it has accumulated enough span. 15 s is chosen
+against the live defaults (10 s window, 5 s step): one spurious match spans 10 s
+and two consecutive ones span exactly 15 s, so the threshold separates a
+one-window fluke from something that was actually played.
+
+**A wrong tune can be rejected from the follow view.** A thumbs-down button in
+the `LiveScoreFollow` header calls `liveAnalysisService.rejectTune(tuneId)`,
+which drops the detection (so it leaves the session's tune list too) and reverts
+the display to the previous detection.
+
+Four things this needs that are not obvious:
+
+1. **A cooldown, or the button does nothing.** The same seconds of audio are
+   still in the ring buffer and still match, so without suppression the rejected
+   tune is back on the next cycle. `REJECT_COOLDOWN_SECONDS` is 120, applied by
+   `_withoutRejectedTunes` at the *results* level so the next-best candidate is
+   promoted rather than the whole window being discarded. Deliberately not
+   permanent (a tune genuinely played later must still be findable) and
+   deliberately not refreshed on each suppressed match, so the rule stays "two
+   minutes" — something a user can predict.
+2. **Rejection loops over the trailing clusters of that tune, not just one.**
+   Two clusters of the same tune too far apart to merge are shown by
+   `collapseConsecutiveSameTune` as *one* row spanning only the later one, so
+   `removeDetection` drops only the later cluster's matches and the earlier one
+   becomes the new tail — leaving the overlay on the same wrong tune, looking as
+   though the button did nothing. Anything with a different tune after it is a
+   separate hearing and stays.
+3. **It rejects `detectedTuneId`, not `tuneId`.** After a manual override those
+   differ, and what the user is disagreeing with is what the *analysis* said.
+4. **It unfreezes and re-resolves from the service's own list.** The resolver
+   discards everything while frozen, and the `detections` prop only catches up
+   on the next render — so a rejection made while frozen, or resolved from the
+   stale prop, would not move the view.
+
+Tests: `filterShortPastDetections` in `sessionAnalysis.test.mjs` (loaded via
+`test/helpers/loadSessionAnalysis.mjs`, which rewrites the module's two aliased
+imports so node can load it), `liveAnalysisReject.test.mjs` (10 cases driving
+the real service with its browser imports faked), and four cases in
+`liveScoreFollowComponent.test.mjs` for the button wiring. Verified by
+reinstating each bug: removing the filter fails 2, removing the cooldown fails
+3, rejecting only the latest cluster fails 1, and dropping the unfreeze /
+re-resolve fails 2.
+
 ### Favourites view took seconds to populate (August 2026)
 
 On an older iPad the Favourites view sat blank for several seconds before

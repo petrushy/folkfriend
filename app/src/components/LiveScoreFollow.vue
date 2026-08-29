@@ -17,6 +17,16 @@
                     <TuneBackgroundButton v-if="target" class="backgroundBtn" :tuneID="target.tuneId" :displayName="target.title" :sourceUrl="abcSetting ? abcSetting.source_url || '' : ''" />
                     <button
                         v-if="target"
+                        class="rejectBtn"
+                        title="Not this tune — drop it and go back to the previous detection"
+                        @click="rejectTune"
+                    >
+                        <v-icon color="grey lighten-1">
+                            {{ rejectIcon }}
+                        </v-icon>
+                    </button>
+                    <button
+                        v-if="target"
                         class="freezeBtn"
                         :title="frozen ? 'Unfreeze — follow the tune being played' : 'Freeze on this tune'"
                         :aria-pressed="String(frozen)"
@@ -109,7 +119,7 @@
 </template>
 
 <script>
-import { mdiStar, mdiStarOutline, mdiPin, mdiPinOutline } from '@mdi/js';
+import { mdiStar, mdiStarOutline, mdiPin, mdiPinOutline, mdiThumbDownOutline } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
@@ -156,6 +166,7 @@ export default {
             starOutlineIcon: mdiStarOutline,
             frozenIcon: mdiPin,
             unfrozenIcon: mdiPinOutline,
+            rejectIcon: mdiThumbDownOutline,
         };
     },
     computed: {
@@ -235,6 +246,21 @@ export default {
                     String(option.settingId || '') === String(target.settingId || '')
             );
             return match ? match.value : null;
+        },
+        // "That is not what I am playing." Drops the detection from the live
+        // analysis — so it leaves the session's tune list too, and does not come
+        // straight back on the next cycle — and falls back to whatever was
+        // detected before it.
+        rejectTune() {
+            const target = this.target;
+            if (!target || target.detectedTuneId == null) return;
+            liveAnalysisService.rejectTune(target.detectedTuneId);
+            // The `detections` prop only catches up on the next render, and the
+            // resolver ignores everything while frozen — but a rejection is the
+            // user telling us the pinned tune is wrong, so it has to move. Read
+            // the service's own list directly and resolve from that.
+            this.frozen = false;
+            this._resolveFromDetections(liveAnalysisService.detections);
         },
         toggleFrozen() {
             this.frozen = !this.frozen;
@@ -430,6 +456,7 @@ export default {
     margin: -10px 0 -10px 2px;
 }
 
+.rejectBtn,
 .freezeBtn {
     display: inline-flex;
     align-items: center;
