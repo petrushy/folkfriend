@@ -33,11 +33,20 @@ export const INDEX_STATUS = {
     UNAVAILABLE: 'unavailable', // no offline copy and no usable network
 };
 
-// What a fresh install searches. Must equal the app's pre-multi-dataset
-// behaviour, so that an existing user upgrading — or an old backup restored
-// through updateUserSettings' backfill — neither loses thesession nor silently
-// gains norbeck.
-export const DEFAULT_DATASETS = ['thesession', 'folkwiki'];
+// What a fresh install searches. thesession only: folkwiki's detections are
+// still unreliable enough that shipping them on by default makes the app look
+// worse than it is to someone trying it for the first time. It stays a
+// one-tap opt-in in Settings, is still published, and an existing user's
+// selection is never narrowed by this — see LEGACY_TUNE_DATASETS in store.js.
+export const DEFAULT_DATASETS = ['thesession'];
+
+// The ids the published manifest manages, which is a DIFFERENT question from
+// what a fresh install selects. It is the list an import may not claim: storing
+// under one of these names would put an unvetted file behind a name the app
+// manages, to be overwritten — or not — by the next CDN update depending on
+// ordering. Deselecting folkwiki must not make that name available, so this
+// cannot be derived from DEFAULT_DATASETS.
+export const PUBLISHED_DATASETS = ['thesession', 'folkwiki'];
 
 // PARTIAL SUCCESS IS READY.
 //
@@ -1275,6 +1284,21 @@ class FolkFriendWASMWrapper {
     //  3. The loaded index is never cleared before its replacement has loaded.
     //  4. A failed toggle-on must not revert the setting. It is the user's
     //     intent and it retries next launch or on the next 'online' event.
+    // Seeds the selection at startup, WITHOUT the change-driven install that
+    // setSelectedDatasets performs.
+    //
+    // setupTuneIndex() reads disk and installs whatever is missing immediately
+    // afterwards, so running that here as well is a redundant second pass over
+    // the same work. It is not merely wasteful: behind a captive portal each
+    // pass spends the full 8 s metadata deadline, so the app takes 16 s rather
+    // than 8 s to say "unavailable" — and the whole point of that deadline is
+    // to fail fast. It went unnoticed while the default selection happened to
+    // equal what the app pushed (setSelectedDatasets early-returns when the
+    // selection is unchanged); changing the default made it the common case.
+    async primeSelectedDatasets(ids) {
+        this.selectedDatasets = Array.isArray(ids) ? [...new Set(ids)] : [];
+    }
+
     async setSelectedDatasets(ids, cb) {
         const next = Array.isArray(ids) ? [...new Set(ids)] : [];
         const previous = [...this.selectedDatasets];
@@ -1488,7 +1512,7 @@ class FolkFriendWASMWrapper {
     // when we can, and from what is loaded when we cannot — offline, an import
     // must still not be able to claim a name the app already uses.
     async _isPublishedDataset(id) {
-        if (DEFAULT_DATASETS.includes(id)) return true;
+        if (PUBLISHED_DATASETS.includes(id)) return true;
         const local = await readDatasetManifest(id);
         if (local && local.origin === 'user') return false;
         if (local) return true;

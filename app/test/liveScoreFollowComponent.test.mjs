@@ -66,12 +66,24 @@ export default {
 `;
 
 const FAKE_EVENTBUS = `export default { $emit() {}, $on() {}, $off() {} };`;
-const FAKE_LIVE_ANALYSIS = `export default { elapsedSeconds: 0 };`;
+// Records rejections and lets a test script what the service's own detections
+// list looks like afterwards — rejectTune() reads it directly, because the
+// `detections` prop only catches up on the next render.
+const FAKE_LIVE_ANALYSIS = `
+export const __rejected = [];
+const service = {
+    elapsedSeconds: 0,
+    detections: [],
+    rejectTune(tuneId) { __rejected.push(tuneId); },
+};
+export default service;
+`;
 const FAKE_MDI = `
 export const mdiStar = 'star';
 export const mdiStarOutline = 'star-outline';
 export const mdiPin = 'pin';
 export const mdiPinOutline = 'pin-outline';
+export const mdiThumbDownOutline = 'thumb-down-outline';
 `;
 const FAKE_SESSION_ANALYSIS = `export function formatSecondsAsClock(s) { return String(s); }`;
 // The overlay renders these; nothing here touches them.
@@ -117,7 +129,10 @@ async function loadOverlay() {
 
     const backend = await import(path.join(tmpDir, 'fake-backend.mjs'));
     const follow = await import(followModule);
+    const live = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
     backend.__reset();
+    live.__rejected.length = 0;
+    live.default.detections = [];
     follow.clearLastShown();
 
     const mod = await import(`${path.join(tmpDir, 'overlay.mjs')}?v=${Math.random()}`);
@@ -145,7 +160,7 @@ async function loadOverlay() {
         await Promise.resolve();
     };
 
-    return { vm, push, backend, follow, component };
+    return { vm, push, backend, follow, live, component };
 }
 
 function opt(tuneId, settingId, title, score) {
@@ -252,6 +267,65 @@ await test('a manual override while frozen holds until unfrozen', async () => {
     await push([det(1, 10, 'The Kesh', 0.75)]);
     assert.equal(vm.target.tuneId, 3);
     assert.deepEqual(backend.__calls, [1, 3]);
+});
+
+console.log('\nrejecting the tune on screen');
+
+await test('rejecting hands the tune to the service and falls back to the previous one', async () => {
+    const { vm, push, live, backend } = await loadOverlay();
+
+    await push([det(1, 10, 'The Kesh', 0.71)]);
+    await push([det(1, 10, 'The Kesh', 0.71), det(2, 20, 'The Butterfly', 0.93)]);
+    assert.equal(vm.target.tuneId, 2);
+
+    // What the real service leaves behind once the rejected tune is dropped.
+    live.default.detections = [det(1, 10, 'The Kesh', 0.71)];
+    vm.rejectTune();
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.deepEqual(live.__rejected, [2], 'the rejection has to reach the service, or the row stays');
+    assert.equal(vm.target.tuneId, 1, 'and the view reverts to the previous detection at once');
+    assert.equal(vm.abcSetting.setting_id, 10, 'with that tune\'s score reloaded');
+    assert.deepEqual(backend.__calls, [1, 2, 1]);
+});
+
+await test('rejecting rejects what the ANALYSIS said, not a manual override', async () => {
+    const { vm, push, live } = await loadOverlay();
+
+    const alternative = opt(3, 30, 'Cooley\'s', 0.66);
+    await push([det(1, 10, 'The Kesh', 0.71, [alternative])]);
+    vm.onOverrideChange(alternative.value);
+    await Promise.resolve();
+    assert.equal(vm.target.tuneId, 3);
+
+    vm.rejectTune();
+    assert.deepEqual(live.__rejected, [1],
+        'the detection to drop is the one the analysis made, whatever the user then picked');
+});
+
+await test('rejecting a frozen tune unfreezes, or nothing could move', async () => {
+    const { vm, push, live } = await loadOverlay();
+
+    await push([det(1, 10, 'The Kesh', 0.71)]);
+    await push([det(1, 10, 'The Kesh', 0.71), det(2, 20, 'The Butterfly', 0.93)]);
+    vm.toggleFrozen();
+    assert.equal(vm.frozen, true);
+
+    live.default.detections = [det(1, 10, 'The Kesh', 0.71)];
+    vm.rejectTune();
+    await Promise.resolve();
+
+    assert.equal(vm.frozen, false);
+    assert.equal(vm.target.tuneId, 1, 'the resolver ignores everything while frozen');
+});
+
+await test('rejecting with nothing on screen does nothing', async () => {
+    const { vm, live } = await loadOverlay();
+    assert.equal(vm.target, null);
+    vm.rejectTune();
+    assert.deepEqual(live.__rejected, []);
 });
 
 await test('freeze is not carried across a close and reopen', async () => {

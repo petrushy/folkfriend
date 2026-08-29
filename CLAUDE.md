@@ -126,8 +126,71 @@ After installing, the service worker caches all assets (including WASM) so the a
 The index is no longer one blob. It is published and stored as **one file per
 source** — `thesession` (34.8 MB), `folkwiki` (7.3 MB), `norbeck` (3.1 MB) —
 plus a `datasets.json` manifest, and the user chooses which are downloaded,
-stored offline and searched (Settings → Offline Tune Database). Default is
-`['thesession', 'folkwiki']`, i.e. exactly the old behaviour; norbeck is opt-in.
+stored offline and searched (Settings → Offline Tune Database).
+
+**A fresh install selects `['thesession']` only** (August 2026). folkwiki is
+published and offered, but off out of the box: its detections are unreliable
+enough that having it on makes the app look worse than it is to someone trying
+it for the first time. It is one tap away in Settings. norbeck is opt-in as
+before, and additionally not published — see below.
+
+**That default must never reach a user who was already searching folkwiki.**
+Before this setting existed the app fetched both files unconditionally, so
+`LEGACY_TUNE_DATASETS` — both — is what an upgrading install keeps. A key that is
+*present*, empty array included, is an answer and is honoured; only an
+unanswered question may be revised.
+
+**The evidence is the offline copy on disk, not `localStorage`.** The first
+version of this used "has a saved `userSettings` blob but no `tuneDatasets`
+key", and that is wrong: `userSettings` is written only when a setting is
+*changed*, so a long-standing install whose owner never opened Settings has no
+stored blob at all and is indistinguishable from a fresh one by localStorage
+alone. `store.resolveDatasetSelection()` therefore checks IndexedDB for a
+pre-multi-dataset copy (`tuneIndex`, schema 1, or `ffIndexRaw`, schema 2) — those
+cover thesession and folkwiki by construction, so what they hold *is* what this
+install was searching. It is awaited in `backend.setupTuneIndex()` before
+`setSelectedDatasets`, because the worker reads disk immediately after, and the
+answer is persisted so Settings shows what is actually being searched.
+
+⚠️ **Getting that signal wrong costs twice over, and permanently.** The user
+silently stops finding Swedish tunes, AND
+`clearSupersededMergedCopies` never reclaims the ~42 MB blob — it will not drop
+a copy until *every* dataset it covers has a committed per-dataset replacement,
+and folkwiki now never gets one. So the install sits on the merged blob plus a
+per-dataset thesession copy for ever. **The offline e2e caught this**
+(`offline-index.mjs` step 5, "migration to schema 2" timing out after 300 s);
+no unit test did, because the whole failure lives in the interaction between a
+default, a localStorage heuristic and a reclamation rule in three different
+files. The `_datasetsFor` localStorage heuristic is kept as a second, weaker
+signal — it can only err toward *more* datasets, which is the old behaviour.
+
+**Pushing the selection at startup must not act on it.**
+`backend.setupTuneIndex()` seeds the worker with the user's selection before
+setup reads disk, and that push uses `primeSelectedDatasets` — which only
+assigns. `setSelectedDatasets` treats a *changed* selection as a user toggle and
+installs what is missing, which `setupTuneIndex` is about to do anyway: two
+passes over the same work, and behind a captive portal two full 8 s metadata
+deadlines, so the app takes 16 s rather than 8 s to report itself unavailable —
+defeating the point of that deadline. This was invisible for as long as
+`DEFAULT_DATASETS` happened to equal what the app pushed, because
+`setSelectedDatasets` early-returns on an unchanged selection; changing the
+default made it the common case. Caught by `recovery.mjs` step 1 ("app gives up
+on the stalled host quickly"), which counts the requests the stand-in host
+receives — 1 before, 2 after.
+
+`test/e2e/recovery.mjs` seeds `userSettings.tuneDatasets` with
+`Page.addScriptToEvaluateOnNewDocument` rather than inheriting the default: it
+exists to exercise the multi-dataset install and partial-failure paths, so it
+states that intent, and a future default change cannot silently reduce what it
+covers.
+
+**`DEFAULT_DATASETS` and `PUBLISHED_DATASETS` (`worker.js`) are different
+questions and were one constant until this change.** The first is what a fresh
+install selects; the second is the set of ids the published manifest manages,
+which is what an import may not claim (storing under a managed name would put an
+unvetted file behind a name the app overwrites). Deselecting folkwiki — or
+defaulting it off — must not make `folkwiki` an available name to import under,
+so `_isPublishedDataset` reads the second.
 
 Everything in "Offline architecture" below still holds; it is now applied **per
 dataset**. The three invariants the tests pin:
@@ -1036,6 +1099,119 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 - The Results page shows a small debug line: transcriber (ML/DSP) + the contour string — compare against the CLI's `transcribe` output for the same clip.
 
 ## Recent changes
+
+### Session Analysis: live by default, short blips dropped, wrong tunes rejectable (August 2026 — v3.12.0)
+
+Three changes to the Session Analysis view and the live pipeline behind it.
+
+**Live microphone is the default mode.** The view opened on the file-import
+panel, which is the rarer case — the common one is pointing the phone at a
+session that is happening now, and that took a tap every time. `liveMode`
+defaults to `true`.
+
+Saved file results still win: `created()` switches back to file mode when
+`store.state.sessionAnalysis` holds an audio file or detections, because landing
+on an empty microphone panel having just analysed a recording reads as the
+results having been lost. That restore has to run in `$nextTick` — setting
+`liveMode` queues the watcher that calls `resetResults()`, so a synchronous
+restore would be wiped by it. `?live=1` still forces live regardless.
+
+**A tune only ever heard for a few seconds leaves the list.**
+`filterShortPastDetections` (`sessionAnalysis.js`, `MIN_PAST_DETECTION_SECONDS`
+= 15) drops detections shorter than the threshold. Two properties matter and
+both are pinned by tests:
+
+- **The last entry is exempt, always.** It is the tune being played right now
+  and every tune necessarily starts short — and the follow overlay reads exactly
+  that entry to decide what to display, so filtering it would blank the score
+  for the first fifteen seconds of every tune.
+- **It runs BEFORE `collapseConsecutiveSameTune`, not after.** A dropped blip in
+  the middle of a tune then lets the two halves either side of it merge into one
+  row; filtering afterwards leaves the same tune listed twice with a gap where
+  the blip used to be. `_recluster()` exists so the three steps cannot drift
+  apart across the two call sites (the analysis loop and `removeDetection`).
+
+It is display-only — the window matches are untouched, so a detection dropped
+here reappears on its own once it has accumulated enough span. 15 s is chosen
+against the live defaults (10 s window, 5 s step): one spurious match spans 10 s
+and two consecutive ones span exactly 15 s, so the threshold separates a
+one-window fluke from something that was actually played.
+
+**A wrong tune can be rejected from the follow view.** A thumbs-down button in
+the `LiveScoreFollow` header calls `liveAnalysisService.rejectTune(tuneId)`,
+which drops the detection (so it leaves the session's tune list too) and reverts
+the display to the previous detection.
+
+Four things this needs that are not obvious:
+
+1. **A cooldown, or the button does nothing.** The same seconds of audio are
+   still in the ring buffer and still match, so without suppression the rejected
+   tune is back on the next cycle. `REJECT_COOLDOWN_SECONDS` is 120, applied by
+   `_withoutRejectedTunes` at the *results* level so the next-best candidate is
+   promoted rather than the whole window being discarded. Deliberately not
+   permanent (a tune genuinely played later must still be findable) and
+   deliberately not refreshed on each suppressed match, so the rule stays "two
+   minutes" — something a user can predict.
+2. **Rejection loops over the trailing clusters of that tune, not just one.**
+   Two clusters of the same tune too far apart to merge are shown by
+   `collapseConsecutiveSameTune` as *one* row spanning only the later one, so
+   `removeDetection` drops only the later cluster's matches and the earlier one
+   becomes the new tail — leaving the overlay on the same wrong tune, looking as
+   though the button did nothing. Anything with a different tune after it is a
+   separate hearing and stays.
+3. **It rejects `detectedTuneId`, not `tuneId`.** After a manual override those
+   differ, and what the user is disagreeing with is what the *analysis* said.
+4. **It unfreezes and re-resolves from the service's own list.** The resolver
+   discards everything while frozen, and the `detections` prop only catches up
+   on the next render — so a rejection made while frozen, or resolved from the
+   stale prop, would not move the view.
+
+**One tap from the home screen to "what is being played".** Starting a session
+and getting the score on screen took three taps (Follow session → Start Live
+Analysis → Follow Score), which is two too many when the tune has already
+started. The Search screen's button now links to
+`{ live: '1', follow: '1' }`, and `?follow=1` makes the view start listening and
+open the score itself. The same action is on the view as the primary
+**Listen & Follow** button, with "Listen without score" kept beside it.
+
+Four things the auto-start needs:
+
+- **It is retried from `indexLoaded`, not dropped.** Arriving from a cold start
+  the tune index is usually still loading, so `canAnalyze` is false and a
+  fire-once auto-start would silently do nothing — the single worst outcome for
+  a one-tap entry point. `_autoFollowPending` holds the request.
+- **It is deferred one `$nextTick`** so the view is painted before the
+  microphone is opened; a permission refusal has to land on a rendered page.
+  `beforeDestroy` clears the pending flag, because the eventBus unsubscribe does
+  not cover a callback already queued on that tick.
+- **The score only opens on success.** A full-screen overlay over a microphone
+  that never opened hides the error explaining why.
+- **An already-running session just opens the score**, having nothing to start.
+
+⚠️ Auto-starting `getUserMedia` after a route change is not a user gesture. Once
+permission has been granted it resolves without a prompt, which is the normal
+case for an installed PWA, but a first-ever run on iOS may be refused — it
+degrades to the error alert plus the manual button, i.e. the previous behaviour.
+
+Tests: `filterShortPastDetections` in `sessionAnalysis.test.mjs` (loaded via
+`test/helpers/loadSessionAnalysis.mjs`, which rewrites the module's two aliased
+imports so node can load it), `liveAnalysisReject.test.mjs` (10 cases driving
+the real service with its browser imports faked), and four cases in
+`liveScoreFollowComponent.test.mjs` for the button wiring, and
+`sessionAnalysisView.test.mjs` (14 cases) for the view's whole startup path —
+default mode, the saved-file restore surviving the `liveMode` watcher, and every
+branch of the `?follow=1` auto-start. Verified by reinstating each bug: removing
+the filter fails 2, removing the cooldown fails 3, rejecting only the latest
+cluster fails 1, dropping the unfreeze / re-resolve fails 2, defaulting to file
+mode fails 8, dropping the `indexLoaded` retry fails 2, restoring synchronously
+fails 1, opening the score on a refused microphone fails 2, and leaving the
+pending flag set on destroy fails 1.
+
+The folkwiki default change above is covered in `aiSummaryStore.test.mjs`
+(the file that already owns the `userSettings` load path), 11 cases: reverting
+the default fails 1, dropping the legacy preservation fails 2, neutering
+`resolveDatasetSelection` fails 3, letting it override an explicit selection
+fails 2, and not persisting its answer fails 1.
 
 ### Favourites view took seconds to populate (August 2026)
 

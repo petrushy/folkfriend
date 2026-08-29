@@ -32,6 +32,36 @@ export function getAnalysisOptions(durationSeconds) {
     return options;
 }
 
+// A tune that was only ever heard for a few seconds is almost always a
+// one-window fluke rather than something that was played: at the live defaults
+// (10 s window, 5 s step) a single spurious match spans 10 s and two
+// consecutive ones span 15 s, so this threshold is what separates "the room
+// briefly sounded like this" from "this was played".
+export const MIN_PAST_DETECTION_SECONDS = 15;
+
+/**
+ * Drops short-lived detections from the *past* part of the list.
+ *
+ * The last entry is always kept, whatever its duration: it is the tune being
+ * played right now, and it necessarily starts short. Dropping it would make a
+ * newly started tune invisible for its first fifteen seconds — and the live
+ * follow overlay reads exactly that entry to decide what to display.
+ *
+ * Display-only: the underlying window matches are untouched, so a detection
+ * dropped here reappears on its own once it has accumulated enough span.
+ *
+ * @param {Array} detections - clustered detections, oldest first
+ * @param {number} [minSeconds]
+ */
+export function filterShortPastDetections(detections, minSeconds = MIN_PAST_DETECTION_SECONDS) {
+    if (!detections || detections.length <= 1) return detections || [];
+    const lastIndex = detections.length - 1;
+    return detections.filter((detection, index) =>
+        index === lastIndex ||
+        (detection.endSeconds - detection.startSeconds) >= minSeconds
+    );
+}
+
 export function rmsOfSignal(signal) {
     if (!signal || signal.length === 0) return 0;
     let sum = 0;

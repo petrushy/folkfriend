@@ -184,6 +184,125 @@ await test('a restored backup written before a setting existed still gets it', a
         'an old backup must not leave new settings undefined');
 });
 
+console.log('\nwhich tune databases are selected');
+
+await test('a fresh install searches thesession only', async () => {
+    // folkwiki's detections are unreliable enough that having it on out of the
+    // box makes the app look worse than it is to a first-time user.
+    const { store } = await loadStore();
+    assert.deepEqual(store.selectedDatasets(), ['thesession']);
+});
+
+await test('an install from before the setting existed keeps folkwiki', async () => {
+    // It fetched both files unconditionally, so this user has been searching
+    // folkwiki all along. Narrowing that silently is a regression, not a
+    // default change: they would search for a Swedish tune they have found
+    // before, get nothing, and have no way to tell why.
+    const { store } = await loadStore({ storedSettings: { advancedMode: true } });
+    assert.deepEqual(store.selectedDatasets(), ['thesession', 'folkwiki']);
+});
+
+await test('an explicit selection always wins, in both directions', async () => {
+    const off = await loadStore({ storedSettings: { tuneDatasets: ['thesession'] } });
+    assert.deepEqual(off.store.selectedDatasets(), ['thesession'],
+        'a user who turned folkwiki off must not have it handed back');
+
+    const on = await loadStore({ storedSettings: { tuneDatasets: ['thesession', 'folkwiki'] } });
+    assert.deepEqual(on.store.selectedDatasets(), ['thesession', 'folkwiki']);
+
+    const none = await loadStore({ storedSettings: { tuneDatasets: [] } });
+    assert.deepEqual(none.store.selectedDatasets(), [],
+        'an explicit empty selection is an honest answer and is honoured');
+});
+
+await test('turning folkwiki back on sticks across a reload', async () => {
+    const { store } = await loadStore();
+    store.userSettings.tuneDatasets = ['thesession', 'folkwiki'];
+    await store.updateUserSettings(store.userSettings);
+
+    const reloaded = await loadStore({
+        storedSettings: JSON.parse(globalThis.localStorage.getItem('userSettings')),
+    });
+    assert.deepEqual(reloaded.store.selectedDatasets(), ['thesession', 'folkwiki']);
+});
+
+await test('a backup from before the setting existed restores both', async () => {
+    const { store } = await loadStore();
+    await store.importUserData(JSON.stringify({
+        version: 1,
+        userSettings: { advancedMode: true },
+        favouriteItems: [],
+        historyItems: [],
+    }));
+    assert.deepEqual(store.selectedDatasets(), ['thesession', 'folkwiki'],
+        'restoring a backup must not narrow what its owner could find');
+});
+
+await test('an upgrading install that never opened Settings keeps folkwiki', async () => {
+    // The case the offline e2e caught. userSettings is written only when a
+    // setting is CHANGED, so a long-standing install whose owner never opened
+    // Settings has no stored blob — indistinguishable from a fresh install by
+    // localStorage alone. Its pre-multi-dataset offline copy is the evidence.
+    const { store, idb } = await loadStore();
+    idb.__db.set('tuneIndex', { indexData: {}, abcStrings: {} });
+
+    assert.deepEqual(await store.resolveDatasetSelection(), ['thesession', 'folkwiki']);
+    assert.deepEqual(store.selectedDatasets(), ['thesession', 'folkwiki']);
+});
+
+await test('the schema-2 merged blob counts as the same evidence', async () => {
+    const { store, idb } = await loadStore();
+    idb.__db.set('ffIndexRaw', '{"settings":{}}');
+    assert.deepEqual(await store.resolveDatasetSelection(), ['thesession', 'folkwiki']);
+});
+
+await test('the resolved selection is persisted, not re-derived every launch', async () => {
+    // Otherwise Settings shows folkwiki unticked while it is being searched,
+    // and clearSupersededMergedCopies gets a moving target.
+    const { store, idb } = await loadStore();
+    idb.__db.set('tuneIndex', { indexData: {}, abcStrings: {} });
+    await store.resolveDatasetSelection();
+
+    const saved = JSON.parse(globalThis.localStorage.getItem('userSettings'));
+    assert.deepEqual(saved.tuneDatasets, ['thesession', 'folkwiki']);
+});
+
+await test('a fresh install with no offline copy is left on thesession', async () => {
+    const { store } = await loadStore();
+    assert.deepEqual(await store.resolveDatasetSelection(), ['thesession']);
+});
+
+await test('an explicit selection is never revised by the blob check', async () => {
+    // A user who deliberately turned folkwiki off, on a device that still holds
+    // the old blob, must not have it turned back on under them.
+    const { store, idb } = await loadStore({
+        storedSettings: { tuneDatasets: ['thesession'] },
+    });
+    idb.__db.set('tuneIndex', { indexData: {}, abcStrings: {} });
+    assert.deepEqual(await store.resolveDatasetSelection(), ['thesession']);
+});
+
+await test('saving any setting counts as answering the dataset question', async () => {
+    const { store, idb } = await loadStore();
+    idb.__db.set('tuneIndex', { indexData: {}, abcStrings: {} });
+    store.userSettings.advancedMode = true;
+    await store.updateUserSettings(store.userSettings);
+
+    assert.deepEqual(await store.resolveDatasetSelection(), ['thesession'],
+        'a selection saved as thesession-only is an answer, blob or not');
+});
+
+await test('a backup that names a selection restores exactly that', async () => {
+    const { store } = await loadStore();
+    await store.importUserData(JSON.stringify({
+        version: 4,
+        userSettings: { tuneDatasets: ['thesession'] },
+        favouriteItems: [],
+        historyItems: [],
+    }));
+    assert.deepEqual(store.selectedDatasets(), ['thesession']);
+});
+
 console.log('\nAPI key storage');
 
 await test('the API key is never included in an exported backup', async () => {

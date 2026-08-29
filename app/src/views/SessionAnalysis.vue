@@ -124,19 +124,35 @@
                 Live Microphone
             </h2>
             <p class="mb-0">
-                Analyses a rolling window of audio from your microphone every {{ analysisSettings.stepSeconds }}s.
-                Detected tune starts appear in the table below as they are found.
+                <strong>Listen &amp; Follow</strong> starts listening and puts the score of whatever is being
+                played on screen, switching as the session moves from tune to tune.
+                Detected tunes are also listed in the table below as they are found.
+            </p>
+            <p class="mb-0 mt-2 text--secondary">
+                A tune heard for less than {{ minPastDetectionSeconds }}s drops off the list once the next
+                tune starts — brief mis-matches aren't kept. In Follow Score, the thumbs-down button
+                removes the tune on screen and goes back to the previous detection.
             </p>
         </v-card>
 
         <v-card class="pa-5 my-3">
             <div class="d-flex flex-wrap align-center" style="gap: 12px;">
                 <v-btn
-                    color="secondary"
+                    v-if="liveMode && !liveMicActive"
+                    color="primary"
+                    :disabled="!canAnalyze"
+                    @click="startListeningAndFollow"
+                >
+                    <v-icon left small>{{ icons.clef }}</v-icon>
+                    Listen &amp; Follow
+                </v-btn>
+                <v-btn
+                    :color="liveMode && !liveMicActive ? 'grey darken-1' : 'secondary'"
+                    :text="liveMode && !liveMicActive"
                     :disabled="!canAnalyze"
                     @click="runAnalysis"
                 >
-                    {{ liveMode ? 'Start Live Analysis' : 'Analyze Recording' }}
+                    {{ liveMode ? 'Listen without score' : 'Analyze Recording' }}
                 </v-btn>
                 <v-btn
                     v-if="liveMode && liveMicActive"
@@ -382,6 +398,7 @@ import {
     parseClockTime,
     parseXscMetadata,
     tuneOptionValue,
+    MIN_PAST_DETECTION_SECONDS,
 } from '@/js/sessionAnalysis.js';
 
 const SESSION_ANALYSIS_STATE_VERSION = 3;
@@ -419,7 +436,11 @@ export default {
                 total: 0,
                 currentTimeSeconds: 0,
             },
-            liveMode: false,
+            // Live microphone is the default: the overwhelmingly common use is
+            // pointing the phone at a session that is happening now. Importing a
+            // file is the deliberate, occasional case, and restoreSavedState()
+            // below switches back to it when there are saved file results.
+            liveMode: true,
             liveMicActive: false,
             liveIsPaused: false,
             liveMicError: '',
@@ -442,6 +463,9 @@ export default {
         },
     },
     computed: {
+        minPastDetectionSeconds() {
+            return MIN_PAST_DETECTION_SECONDS;
+        },
         canAnalyze() {
             if (this.liveMode) return !this.isAnalyzing && this.indexLoaded;
             return !!this.audioFile && !this.isAnalyzing && this.indexLoaded;
@@ -483,9 +507,19 @@ export default {
     },
     created() {
         this._pcm = null;
+        // Set when ?follow=1 asked for a session that could not be started yet
+        // because the tune index was still loading. Non-reactive: nothing
+        // renders it.
+        this._autoFollowPending = false;
 
         // Index
-        this._onIndexLoaded = () => { this.indexLoaded = true; };
+        // The auto-start below cannot run before the tune index is usable
+        // (canAnalyze is false), and arriving from a cold start it usually is
+        // not — so this is also the retry point, not just a flag flip.
+        this._onIndexLoaded = () => {
+            this.indexLoaded = true;
+            this._runPendingAutoFollow();
+        };
 
         // Live analysis events
         this._onLiveUpdate = (detections) => {
@@ -546,17 +580,45 @@ export default {
                 this.liveElapsedSeconds = liveAnalysisService.elapsedSeconds;
                 this.detections = liveAnalysisService.detections.map(d => this._buildDetectionRow(d));
                 this.analysisSummary.acceptedWindows = liveAnalysisService._windowMatches.length;
+                // Already listening — the one-tap entry point has nothing to
+                // start, so it just opens the score.
+                if (this._routeWantsFollow()) this.followMode = true;
             });
-        } else if (this.$route && this.$route.query.live === '1') {
-            this.liveMode = true;
+        } else if (this._routeWantsLive()) {
+            // ?follow=1 is the one-tap "show me what is playing" entry point:
+            // start listening and open the score, with no further taps. It is
+            // deliberately not merely a deep link to this screen — the whole
+            // point is that the two actions it replaces are the two taps.
+            // Deferred one tick so the view is on screen before the microphone
+            // is opened — a permission refusal has to land on a rendered page,
+            // not on one that has not mounted yet.
+            if (this._routeWantsFollow()) {
+                this._autoFollowPending = true;
+                this.$nextTick(() => this._runPendingAutoFollow());
+            }
         } else {
-            this.restoreSavedState();
+            // Saved file results outrank the live default — landing on an empty
+            // microphone panel having previously analysed a recording reads as
+            // the results having been lost.
+            const saved = store.state.sessionAnalysis;
+            if (saved && (saved.audioFile || (saved.detections && saved.detections.length))) {
+                this.liveMode = false;
+                // The liveMode watcher is queued now and calls resetResults();
+                // restoring synchronously here would be wiped by it. $nextTick
+                // callbacks run after the scheduler flush, so this lands after.
+                this.$nextTick(() => { this.restoreSavedState(); });
+            }
         }
 
         eventBus.$emit('parentViewActivated');
     },
     beforeDestroy() {
         this._pcm = null;
+        // Withdraws a ?follow=1 auto-start that has not fired yet. The
+        // eventBus unsubscribe below covers a late indexLoaded, but not the
+        // $nextTick callback created() already queued — that one holds its own
+        // reference and would open a microphone for a view that is gone.
+        this._autoFollowPending = false;
         // File analysis is cancelled on navigation (unlike live, which continues in background)
         if (fileSessionAnalysisService.isRunning) {
             fileSessionAnalysisService.cancel();
@@ -754,6 +816,28 @@ export default {
                 selectedSourceUrl: selected ? (selected.sourceUrl || '') : (detection.sourceUrl || ''),
                 selectedTitle: selected ? selected.title : (detection.title || ''),
             };
+        },
+        _routeWantsLive() {
+            if (!this.$route) return false;
+            return this.$route.query.live === '1' || this.$route.query.follow === '1';
+        },
+        _routeWantsFollow() {
+            return !!this.$route && this.$route.query.follow === '1';
+        },
+        // Start listening and put the score on screen in one action.
+        async startListeningAndFollow() {
+            await this.startLiveAnalysis();
+            // Only on success: opening a full-screen overlay over a microphone
+            // that never opened would hide the error explaining why.
+            if (this.liveMicActive) this.followMode = true;
+        },
+        // Runs the ?follow=1 auto-start, or remembers it for the moment the
+        // index becomes usable. Called again from the indexLoaded handler.
+        _runPendingAutoFollow() {
+            if (!this._autoFollowPending) return;
+            if (!this.canAnalyze) return;
+            this._autoFollowPending = false;
+            this.startListeningAndFollow();
         },
         async startLiveAnalysis() {
             this.liveMicError = '';
