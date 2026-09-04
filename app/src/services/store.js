@@ -156,6 +156,22 @@ const MAX_SIGHTINGS = 5000;
 // still record two sightings of A.
 const SIGHTING_DEDUP_MS = 60 * 1000;
 
+// Saved live-listening sessions ("Past Sessions"). Recorded unconditionally —
+// unlike tuneSightings, this is NOT gated by geoTagDetections; that setting
+// only controls whether lat/lon get attached to the record (see
+// liveAnalysis.js _recordSighting / _sessionFix). Kept as its own key rather
+// than folded into tuneSightings because the shapes are different: sightings
+// are one flat row per hearing, a live session is one record per evening
+// holding an ORDERED tune list with durations.
+const KEY_LIVE_SESSIONS = 'liveSessions';
+
+// A live session is a much heavier object than a sighting — up to ~30 tune
+// entries, each carrying a title/ids/score. The cap is far lower than
+// sightings' 5000 for that reason. At roughly one evening per record, 300 is
+// several years of regular playing — the same order of magnitude MAX_SIGHTINGS
+// represents at its own (per-hearing) granularity.
+const MAX_LIVE_SESSIONS = 300;
+
 class Store {
     constructor() {
         this.state = {
@@ -1073,9 +1089,47 @@ class Store {
         eventBus.$emit('sightingsChanged');
     }
 
+    // ---- Live listening sessions (Past Sessions) ---------------------------
+
+    async getLiveSessions() {
+        try {
+            return await get(KEY_LIVE_SESSIONS) || [];
+        } catch (e) {
+            console.error(`IndexedDB read error (${KEY_LIVE_SESSIONS})`, e);
+            return [];
+        }
+    }
+
+    // Creates or updates a session record by id. liveAnalysis.js calls this
+    // repeatedly while a session is open (on each tune change, on Stop, and on
+    // Clear), so lookup is always by id rather than by list position.
+    async upsertLiveSession(session) {
+        if (!session || !session.id) return null;
+        const sessions = await this.getLiveSessions();
+        const index = sessions.findIndex(s => s.id === session.id);
+        const record = { ...session };
+        if (index === -1) sessions.unshift(record);
+        else sessions[index] = record;
+        sessions.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+        await this._dbSet(KEY_LIVE_SESSIONS, sessions.slice(0, MAX_LIVE_SESSIONS));
+        eventBus.$emit('liveSessionsChanged');
+        return record;
+    }
+
+    async deleteLiveSession(sessionID) {
+        const sessions = (await this.getLiveSessions()).filter(s => s.id !== sessionID);
+        await this._dbSet(KEY_LIVE_SESSIONS, sessions);
+        eventBus.$emit('liveSessionsChanged');
+    }
+
+    async clearLiveSessions() {
+        await this._dbSet(KEY_LIVE_SESSIONS, []);
+        eventBus.$emit('liveSessionsChanged');
+    }
+
     async exportUserData() {
         const payload = {
-            version: 4,
+            version: 5,
             exportedAt: Date.now(),
             userSettings: this.userSettings,
             historyItems: await this.getHistoryItems(),
@@ -1087,6 +1141,9 @@ class Store {
             // The Settings panel warns before the file is written.
             tuneSightings: await this.getSightings(),
             places: await this.getPlaces(),
+            // Same reasoning as tuneSightings — the sole copy, never synced, and
+            // may carry coordinates when geoTagDetections is on.
+            liveSessions: await this.getLiveSessions(),
         };
         return JSON.stringify(payload, null, 2);
     }
@@ -1098,14 +1155,15 @@ class Store {
         } catch (e) {
             throw new Error('Could not parse import file: invalid JSON.');
         }
-        if (![1, 2, 3, 4].includes(payload.version)) {
+        if (![1, 2, 3, 4, 5].includes(payload.version)) {
             throw new Error(`Unsupported data version: ${payload.version}`);
         }
         await this._dbSet('historyItems', payload.historyItems || []);
-        // Absent in v1-v3 backups. Only written when the key is present, so
-        // restoring an older backup does not wipe sightings recorded since.
+        // Absent in older backups. Only written when the key is present, so
+        // restoring an older backup does not wipe data recorded since.
         if (payload.tuneSightings) await this._dbSet(KEY_SIGHTINGS, payload.tuneSightings);
         if (payload.places) await this._dbSet(KEY_PLACES, payload.places);
+        if (payload.liveSessions) await this._dbSet(KEY_LIVE_SESSIONS, payload.liveSessions);
         // v1/v2 exports may have folderId on items; getFavourites() will migrate them on next load
         await this._dbSet('favouriteItems', payload.favouriteItems || []);
         // Backups made after 3.9.0 carry AI summaries on favourited settings.

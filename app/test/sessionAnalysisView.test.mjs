@@ -41,10 +41,16 @@ async function test(name, fn) {
 
 const FAKE_STORE = `
 export const state = { indexLoaded: false, sessionAnalysis: null };
+export const __liveSessions = [];
 export default {
     state,
     setSessionAnalysisState(s) { state.sessionAnalysis = s; },
     clearSessionAnalysisState() { state.sessionAnalysis = null; },
+    async getLiveSessions() { return __liveSessions.slice(); },
+    async deleteLiveSession(id) {
+        const i = __liveSessions.findIndex(s => s.id === id);
+        if (i !== -1) __liveSessions.splice(i, 1);
+    },
 };
 `;
 
@@ -73,18 +79,35 @@ export function __setFailNextStart(v) { __failNextStart = v; }
 const service = {
     isRunning: false,
     isPaused: false,
+    sessionId: null,
     detections: [],
     elapsedSeconds: 0,
     _windowMatches: [],
     async start(windowSeconds, stepSeconds) {
         __starts.push({ windowSeconds, stepSeconds });
         if (__failNextStart) { __failNextStart = false; throw new Error('denied'); }
+        if (!this.sessionId) this.sessionId = 'session-' + __starts.length;
         this.isRunning = true;
     },
     async stop() { this.isRunning = false; },
+    async clear() {
+        this.isRunning = false;
+        this.sessionId = null;
+        this.detections = [];
+        this._windowMatches = [];
+        this.elapsedSeconds = 0;
+    },
     pause() {}, resume() {}, removeDetection() {}, rejectTune() {},
 };
-export function __reset() { __starts.length = 0; __failNextStart = false; service.isRunning = false; service.detections = []; }
+export function __reset() {
+    __starts.length = 0;
+    __failNextStart = false;
+    service.isRunning = false;
+    service.sessionId = null;
+    service.detections = [];
+    service._windowMatches = [];
+    service.elapsedSeconds = 0;
+}
 export default service;
 `;
 
@@ -110,7 +133,11 @@ export function tuneOptionValue() { return ''; }
 export const MIN_PAST_DETECTION_SECONDS = 15;
 `;
 
-const FAKE_FOLLOW = `export function clearLastShown() {}`;
+const FAKE_FOLLOW = `
+export let __clearLastShownCalls = 0;
+export function clearLastShown() { __clearLastShownCalls++; }
+export function __reset() { __clearLastShownCalls = 0; }
+`;
 const FAKE_VUE_COMPONENT = `export default { name: 'stub' };`;
 
 async function writeFakes() {
@@ -150,7 +177,14 @@ async function writeFakes() {
 
 // Builds a vm and runs created(). `query` is the route query; `indexLoaded` and
 // `saved` set the store state the view reads on the way in.
-async function mountView({ query = {}, indexLoaded = false, saved = null, running = false } = {}) {
+async function mountView({
+    query = {}, indexLoaded = false, saved = null, running = false,
+    // sessionId defaults to a stand-in whenever running is true (mirroring the
+    // real service, which always has one while isRunning) — pass explicitly to
+    // model a Stopped-but-not-Cleared (resumable) session, i.e. sessionId set
+    // but running false.
+    sessionId = undefined, detections = [],
+} = {}) {
     const store = await import(path.join(tmpDir, 'fake-store.mjs'));
     const bus = await import(path.join(tmpDir, 'fake-eventbus.mjs'));
     const live = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
@@ -159,7 +193,10 @@ async function mountView({ query = {}, indexLoaded = false, saved = null, runnin
     live.__reset();
     store.state.indexLoaded = indexLoaded;
     store.state.sessionAnalysis = saved;
+    store.__liveSessions.length = 0;
     live.default.isRunning = running;
+    live.default.sessionId = sessionId !== undefined ? sessionId : (running ? 'session-preexisting' : null);
+    live.default.detections = detections;
 
     const mod = await import(`${path.join(tmpDir, 'view.mjs')}?v=${Math.random()}`);
     const component = mod.default;
@@ -179,12 +216,12 @@ async function mountView({ query = {}, indexLoaded = false, saved = null, runnin
     }
     component.created.call(vm);
 
-    // Runs the queued $nextTick callbacks, then the liveMode watcher if the
-    // test says liveMode changed — Vue flushes watchers before nextTick
+    // Runs the queued $nextTick callbacks, then the viewMode watcher if the
+    // test says viewMode changed — Vue flushes watchers before nextTick
     // callbacks registered after them, which is what created() relies on.
-    const flush = async (watcherRan = null) => {
-        if (watcherRan !== null) {
-            component.watch.liveMode.call(vm, watcherRan);
+    const flush = async (newVal = null, oldVal = 'live') => {
+        if (newVal !== null) {
+            component.watch.viewMode.call(vm, newVal, oldVal);
         }
         const queued = ticks.splice(0, ticks.length);
         for (const fn of queued) await fn();
@@ -214,9 +251,9 @@ await test('saved file results switch it back to file mode, and survive the watc
     const { vm, flush } = await mountView({ saved });
 
     assert.equal(vm.liveMode, false, 'saved file work outranks the live default');
-    // The watcher Vue would run for that liveMode change wipes the results;
+    // The watcher Vue would run for that viewMode change wipes the results;
     // the restore is queued after it precisely so it lands on top.
-    await flush(false);
+    await flush('file', 'live');
     assert.equal(vm.detections.length, 1, 'the restore must outlive resetResults()');
     assert.equal(vm.audioFile.name, 'session.mp3');
 });
@@ -357,6 +394,88 @@ await test('does not open the score when the microphone is refused', async () =>
     await vm.startListeningAndFollow();
     assert.equal(vm.followMode, false);
     assert.ok(vm.liveMicError);
+});
+
+console.log('\nResume, Clear and the tab-switch restore');
+
+await test('a stopped-but-open session restores on mount without opening the mic', async () => {
+    const detections = [{ id: 'a', tuneId: 1, settingId: 2, sourceUrl: '', dataset: '', title: 'Tune A', startSeconds: 0, endSeconds: 5, bestScore: 0.9 }];
+    const { vm, flush, live } = await mountView({
+        indexLoaded: true, running: false, sessionId: 'session-open', detections,
+    });
+    await flush();
+    assert.equal(live.__starts.length, 0, 'no microphone opened for a restore');
+    assert.equal(vm.liveMicActive, false);
+    assert.equal(vm.detections.length, 1, 'the previous list is restored');
+    assert.equal(vm.analysisStage, 'done');
+    assert.equal(vm.isResumable, true);
+});
+
+await test('switching to history and back to live preserves the detections list', async () => {
+    const detections = [{ id: 'a', tuneId: 1, settingId: 2, sourceUrl: '', dataset: '', title: 'Tune A', startSeconds: 0, endSeconds: 5, bestScore: 0.9 }];
+    const { vm, flush, component } = await mountView({
+        indexLoaded: true, running: true, detections,
+    });
+    await flush();
+    assert.equal(vm.detections.length, 1);
+
+    vm.viewMode = 'history';
+    component.watch.viewMode.call(vm, 'history', 'live');
+    assert.equal(vm.detections.length, 1, 'switching away does not wipe the list');
+
+    vm.viewMode = 'live';
+    component.watch.viewMode.call(vm, 'live', 'history');
+    assert.equal(vm.detections.length, 1, 'switching back restores it (the tab-switch bug fix)');
+});
+
+await test('resuming an open session does not clear the follow overlay or reset elapsed time', async () => {
+    const follow = await import(path.join(tmpDir, 'fake-follow.mjs'));
+    const detections = [{ id: 'a', tuneId: 1, settingId: 2, sourceUrl: '', dataset: '', title: 'Tune A', startSeconds: 0, endSeconds: 5, bestScore: 0.9 }];
+    const { vm, live } = await mountView({
+        indexLoaded: true, running: false, sessionId: 'session-open', detections,
+    });
+    live.default.elapsedSeconds = 42;
+    follow.__reset();
+
+    await vm.startLiveAnalysis();
+
+    assert.equal(follow.__clearLastShownCalls, 0, 'a resumed session must not reset the follow overlay cache');
+    assert.equal(vm.liveElapsedSeconds, 42, 'elapsed time keeps counting rather than resetting to 0');
+    assert.equal(vm.detections.length, 1, 'resuming must not wipe the existing list');
+    assert.equal(vm.liveMicActive, true);
+});
+
+await test('starting a brand new session does clear the follow overlay and reset elapsed time', async () => {
+    const follow = await import(path.join(tmpDir, 'fake-follow.mjs'));
+    const { vm } = await mountView({ indexLoaded: true });
+    follow.__reset();
+
+    await vm.startLiveAnalysis();
+
+    assert.equal(follow.__clearLastShownCalls, 1);
+    assert.equal(vm.liveElapsedSeconds, 0);
+});
+
+await test('firing liveAnalysisCleared resets the local list and stage', async () => {
+    const detections = [{ id: 'a', tuneId: 1, settingId: 2, sourceUrl: '', dataset: '', title: 'Tune A', startSeconds: 0, endSeconds: 5, bestScore: 0.9 }];
+    const { vm, bus, flush } = await mountView({
+        indexLoaded: true, running: false, sessionId: 'session-open', detections,
+    });
+    await flush();
+    assert.equal(vm.detections.length, 1);
+
+    bus.__fire('liveAnalysisCleared');
+    assert.equal(vm.detections.length, 0);
+    assert.equal(vm.analysisStage, 'idle');
+});
+
+await test('clearLiveSession() calls through to the service', async () => {
+    const { vm, live } = await mountView({
+        indexLoaded: true, running: false, sessionId: 'session-open',
+        detections: [{ id: 'a', tuneId: 1 }],
+    });
+    await vm.clearLiveSession();
+    assert.equal(live.default.sessionId, null, 'the service session is finalized and cleared');
 });
 
 await rm(tmpDir, { recursive: true, force: true });

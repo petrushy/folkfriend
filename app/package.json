@@ -7,7 +7,7 @@
         "build:wasm": "bash build-wasm.sh",
         "prebuild": "bash build-wasm.sh",
         "build": "vue-cli-service build",
-        "test": "node test/tune-index-cache.test.mjs && node test/tune-index-install.test.mjs && node test/source-links.test.mjs && node test/abcTempo.test.mjs && node test/sessionAnalysis.test.mjs && node test/liveScoreFollow.test.mjs && node test/liveScoreFollowComponent.test.mjs && node test/liveAnalysisReject.test.mjs && node test/sessionAnalysisView.test.mjs && node test/mic.test.mjs && node test/aiSummary.test.mjs && node test/aiSummaryStore.test.mjs && node test/tuneBackgroundDialog.test.mjs && node test/sightings.test.mjs && node test/rowWindow.test.mjs && node test/favouriteRow.test.mjs",
+        "test": "node test/tune-index-cache.test.mjs && node test/tune-index-install.test.mjs && node test/source-links.test.mjs && node test/abcTempo.test.mjs && node test/sessionAnalysis.test.mjs && node test/liveScoreFollow.test.mjs && node test/liveScoreFollowComponent.test.mjs && node test/liveAnalysisReject.test.mjs && node test/sessionAnalysisView.test.mjs && node test/liveSessions.test.mjs && node test/mic.test.mjs && node test/aiSummary.test.mjs && node test/aiSummaryStore.test.mjs && node test/tuneBackgroundDialog.test.mjs && node test/sightings.test.mjs && node test/rowWindow.test.mjs && node test/favouriteRow.test.mjs",
         "test:e2e": "node test/e2e/settings-wiring.mjs && node test/e2e/offline-index.mjs && node test/e2e/unreachable-host.mjs && node test/e2e/recovery.mjs"
     },
     "dependencies": {

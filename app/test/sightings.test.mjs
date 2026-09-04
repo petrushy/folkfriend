@@ -424,7 +424,7 @@ async function run() {
         await store.addSighting({ tuneID: '42', fix: COBBLESTONE });
 
         const exported = JSON.parse(await store.exportUserData());
-        assert.equal(exported.version, 4);
+        assert.equal(exported.version, 5);
         assert.equal(exported.tuneSightings.length, 1);
         assert.equal(exported.places.length, 1);
 

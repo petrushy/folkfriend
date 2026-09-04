@@ -68,6 +68,23 @@ class LiveAnalysisService {
         this._lastSightingTuneId = null;
         // tuneId (as a string) -> elapsedSeconds at which the user rejected it.
         this._rejectedTunes = new Map();
+
+        // Non-null while a session is open — i.e. resumable, whether currently
+        // running or stopped-but-not-cleared. The single source of truth for
+        // whether start() means "begin fresh" or "resume", and for whether the
+        // UI should offer Resume/Clear. See start()/stop()/clear().
+        this.sessionId = null;
+        this._sessionStartedAt = null;
+        // First location fix obtained during the session, reused by
+        // _persistSession() so a session records where it happened without a
+        // second fix per save. Stays null when geoTagDetections is off — see
+        // _recordSighting().
+        this._sessionFix = null;
+        // Edge-tracker for saving the session to IndexedDB, deliberately
+        // SEPARATE from _lastSightingTuneId: _recordSighting() returns early
+        // when geoTagDetections is off, but session history must be saved
+        // regardless of that setting. See _maybeSaveSessionSnapshot().
+        this._lastSavedTuneId = null;
     }
 
     async start(windowSeconds, stepSeconds) {
@@ -81,13 +98,27 @@ class LiveAnalysisService {
             mergeGapSeconds: windowSeconds,
         };
         this.options = options;
-        this.detections = [];
-        this._windowMatches = [];
-        this.elapsedSeconds = 0;
+
+        if (!this.sessionId) {
+            // Fresh session — no open session to resume. Reset everything and
+            // start a new session record; see _persistSession()/clear().
+            this.detections = [];
+            this._windowMatches = [];
+            this.elapsedSeconds = 0;
+            this._lastSightingTuneId = null;
+            this._lastSavedTuneId = null;
+            this._rejectedTunes.clear();
+            this._sessionFix = null;
+            this.sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            this._sessionStartedAt = Date.now();
+        }
+        // else: resuming — detections, _windowMatches, elapsedSeconds and the
+        // rest are left exactly as stop() left them, so the list keeps
+        // appending instead of restarting. See clear() for the only way to end
+        // a session and force the next start() down the fresh-session branch.
+
         this.isRunning = true;
         this.isPaused = false;
-        this._lastSightingTuneId = null;
-        this._rejectedTunes.clear();
 
         // Warms one location fix for the whole session. Not awaited: the
         // session must start on the microphone, never on the radio. By the time
@@ -226,6 +257,20 @@ class LiveAnalysisService {
         if (this._cancelSleep) { this._cancelSleep(); this._cancelSleep = null; }
         this._stopPromise = (async () => {
             try {
+                // Flushes the tail tune's up-to-date endSeconds —
+                // _maybeSaveSessionSnapshot() only saves on a tune CHANGE, so
+                // without this the last tune's duration in IndexedDB could be
+                // stale by however long it kept playing since that edge.
+                // sessionId is deliberately left untouched, which is what makes
+                // this session resumable rather than finished — see clear().
+                //
+                // Awaited (unlike _maybeSaveSessionSnapshot's fire-and-forget
+                // calls) so it is ORDERED before clear()'s own finalizing write
+                // to the same record: clear() calls stop() first, and without
+                // this await the two writes could land out of order, with this
+                // one's endedAt:null overwriting clear()'s endedAt:Date.now()
+                // and silently un-finalizing the session.
+                await this._persistSession();
                 await micService.stopContinuous();
             } finally {
                 eventBus.$emit('liveAnalysisStopped');
@@ -233,6 +278,27 @@ class LiveAnalysisService {
             }
         })();
         return this._stopPromise;
+    }
+
+    // Finalizes the open session (auto-saving it, so nothing is lost even if
+    // the user never taps Clear — see stop()'s own flush) and resets everything
+    // so the next start() is unambiguously fresh rather than a resume.
+    async clear() {
+        if (this.isRunning) await this.stop();
+        // endedAt set — this is what marks the record non-resumable and final.
+        await this._persistSession(Date.now());
+
+        this.sessionId = null;
+        this._sessionStartedAt = null;
+        this._sessionFix = null;
+        this._lastSavedTuneId = null;
+        this.detections = [];
+        this._windowMatches = [];
+        this.elapsedSeconds = 0;
+        this._lastSightingTuneId = null;
+        this._rejectedTunes.clear();
+
+        eventBus.$emit('liveAnalysisCleared');
     }
 
     _startTimer() {
@@ -313,6 +379,7 @@ class LiveAnalysisService {
                         });
                         this._recluster();
                         this._recordSighting();
+                        this._maybeSaveSessionSnapshot();
                         eventBus.$emit('liveAnalysisUpdate', this.detections);
                     }
                 }
@@ -349,6 +416,12 @@ class LiveAnalysisService {
             // A fix already cached from the start of the session costs nothing
             // here; only the first tune of an evening can wait on the radio.
             const fix = await geoService.getFix();
+            // First fix of the session, reused by _persistSession() so a saved
+            // session records where it happened without a second fix per save.
+            // Only ever set here, so it stays null whenever geoTagDetections is
+            // off (this whole method returns early above) — no separate gating
+            // needed in _persistSession().
+            if (this._sessionFix === null) this._sessionFix = fix;
             await store.addSighting({
                 tuneID: latest.tuneId,
                 settingID: latest.settingId,
@@ -357,6 +430,50 @@ class LiveAnalysisService {
                 source: 'live',
             });
         })().catch(e => console.warn('Could not record sighting:', e && e.message));
+    }
+
+    // Edge-triggered on tail-tune-change, same rule as _recordSighting — but
+    // tracked separately (_lastSavedTuneId, not _lastSightingTuneId) because
+    // _recordSighting() returns early when geoTagDetections is off, and session
+    // history must be saved regardless of that setting.
+    _maybeSaveSessionSnapshot() {
+        const latest = this.detections[this.detections.length - 1];
+        if (!latest || latest.tuneId == null) return;
+        if (String(latest.tuneId) === String(this._lastSavedTuneId)) return;
+        this._lastSavedTuneId = latest.tuneId;
+        this._persistSession();
+    }
+
+    // Serialises the current detections into the session record and writes it.
+    // Called both fire-and-forget (from the edge-triggered
+    // _maybeSaveSessionSnapshot(), so a slow write never stalls the analysis
+    // loop) and awaited (from stop() and clear(), so the two writes a Clear
+    // during a running session produces — stop()'s flush and clear()'s own
+    // finalizing write — land in the right order; see stop()). No-ops before
+    // the first tune is recognised, so a session that never matched anything
+    // never clutters Past Sessions with an empty entry.
+    _persistSession(endedAt = null) {
+        if (!this.sessionId || !this.detections.length) return Promise.resolve();
+        const record = {
+            id: this.sessionId,
+            startedAt: this._sessionStartedAt,
+            endedAt,
+            tunes: this.detections.map(d => ({
+                tuneId: d.tuneId,
+                settingId: d.settingId,
+                sourceUrl: d.sourceUrl,
+                dataset: d.dataset,
+                title: d.title,
+                startSeconds: d.startSeconds,
+                endSeconds: d.endSeconds,
+                bestScore: d.bestScore,
+            })),
+            lat: this._sessionFix ? this._sessionFix.lat : null,
+            lon: this._sessionFix ? this._sessionFix.lon : null,
+            accuracy: this._sessionFix ? (this._sessionFix.accuracy ?? null) : null,
+        };
+        return store.upsertLiveSession(record)
+            .catch(e => console.warn('Could not save live session:', e && e.message));
     }
 
     _sleepCancellable(ms) {
