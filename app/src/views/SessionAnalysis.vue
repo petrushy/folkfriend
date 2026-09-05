@@ -514,6 +514,13 @@ export default {
             liveMicError: '',
             liveElapsedSeconds: 0,
             followMode: false,
+            // Mirrors liveAnalysisService.sessionId: true whenever there is an
+            // open session to Resume/Clear, whether or not it has caught a
+            // tune yet. Deliberately NOT derived from detections.length — the
+            // service decides fresh-vs-resume purely on sessionId, so a stop
+            // before anything was recognised (e.g. losing mic access early)
+            // still resumes on the next Start, and the button has to say so.
+            hasOpenSession: false,
             pastSessions: [],
             icons: {
                 openInNew: mdiOpenInNew,
@@ -554,11 +561,13 @@ export default {
             return this.viewMode === 'live';
         },
         // A session has been Stopped but not yet Cleared: the mic is closed but
-        // the list is still on screen, so Start becomes Resume and Clear
-        // becomes available. Scoped to live mode so file-mode results left in
-        // `detections` never make the live Resume/Clear controls appear.
+        // the session is still open, so Start becomes Resume and Clear becomes
+        // available. Keyed on hasOpenSession, not on whether anything was
+        // caught — the service will resume an empty session exactly the same
+        // as a populated one, so the button must say so either way. Scoped to
+        // live mode so file-mode work never makes the live controls appear.
         isResumable() {
-            return this.viewMode === 'live' && !this.liveMicActive && this.detections.length > 0;
+            return this.viewMode === 'live' && !this.liveMicActive && this.hasOpenSession;
         },
         minPastDetectionSeconds() {
             return MIN_PAST_DETECTION_SECONDS;
@@ -629,6 +638,9 @@ export default {
             this.liveIsPaused = false;
             this.followMode = false;
             this.analysisStage = this.detections.length ? 'done' : 'idle';
+            // stop() never clears sessionId, so an open session survives —
+            // Resume/Clear must appear even if nothing was caught yet.
+            this.hasOpenSession = !!liveAnalysisService.sessionId;
         };
         this._onLivePaused = () => { this.liveIsPaused = true; };
         this._onLiveResumed = () => { this.liveIsPaused = false; };
@@ -637,6 +649,7 @@ export default {
             this.analysisStage = 'idle';
             this.analysisSummary = { acceptedWindows: 0, durationSeconds: 0, options: null };
             this.liveElapsedSeconds = 0;
+            this.hasOpenSession = false;
         };
 
         // Past Sessions
@@ -882,6 +895,7 @@ export default {
         // tab-switch data-loss bug, and is what makes Resume pick up a session
         // that was Stopped rather than starting a blank one).
         _restoreLiveState() {
+            this.hasOpenSession = !!liveAnalysisService.sessionId;
             if (!liveAnalysisService.sessionId) return;
             this.liveMicActive = liveAnalysisService.isRunning;
             this.liveIsPaused = liveAnalysisService.isPaused;
@@ -998,10 +1012,16 @@ export default {
             try {
                 await liveAnalysisService.start(windowSeconds, stepSeconds);
                 this.liveMicActive = true;
+                this.hasOpenSession = true;
                 if (resuming) this._restoreLiveState();
             } catch (e) {
                 this.liveMicError = 'Could not access microphone. Please check permissions.';
                 this.analysisStage = this.detections.length ? 'done' : 'idle';
+                // start() assigns sessionId before touching the microphone, so
+                // even a failed mic request leaves an open (empty) session —
+                // the next tap correctly offers Resume rather than pretending
+                // nothing was attempted.
+                this.hasOpenSession = !!liveAnalysisService.sessionId;
             }
         },
         removeDetection(id) {

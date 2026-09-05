@@ -85,8 +85,11 @@ const service = {
     _windowMatches: [],
     async start(windowSeconds, stepSeconds) {
         __starts.push({ windowSeconds, stepSeconds });
-        if (__failNextStart) { __failNextStart = false; throw new Error('denied'); }
+        // Mirrors the real service: sessionId is assigned before the
+        // microphone is ever touched, so a failure below still leaves an
+        // open (resumable) session.
         if (!this.sessionId) this.sessionId = 'session-' + __starts.length;
+        if (__failNextStart) { __failNextStart = false; throw new Error('denied'); }
         this.isRunning = true;
     },
     async stop() { this.isRunning = false; },
@@ -454,6 +457,39 @@ await test('starting a brand new session does clear the follow overlay and reset
 
     assert.equal(follow.__clearLastShownCalls, 1);
     assert.equal(vm.liveElapsedSeconds, 0);
+});
+
+await test('stopping before anything is detected still offers Resume, not a fresh start', async () => {
+    // Reproduces a real report: testing away from a session, with nothing to
+    // recognise (or a lost microphone before any tune landed), Stop left no
+    // Resume button because isResumable used to require detections.length > 0.
+    // The service resumes an equally empty session either way (sessionId is
+    // assigned before the microphone is ever touched), so the button must say
+    // so regardless of whether anything was caught yet.
+    const { vm, live, bus } = await mountView({ indexLoaded: true });
+    await vm.startLiveAnalysis();
+    assert.equal(vm.detections.length, 0);
+    assert.ok(live.default.sessionId, 'the service has an open session from the moment Start is pressed');
+    assert.equal(vm.isResumable, false, 'still actively listening — nothing to resume INTO yet');
+
+    live.default.isRunning = false; // Stop closes the mic but leaves sessionId set
+    bus.__fire('liveAnalysisStopped');
+
+    assert.equal(vm.isResumable, true,
+        'an open session must offer Resume even with an empty list, since the next Start will resume it');
+});
+
+await test('a failed microphone request still leaves an open session to resume', async () => {
+    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
+    const { vm } = await mountView({ indexLoaded: true });
+    liveMod.__setFailNextStart(true);
+
+    await vm.startLiveAnalysis();
+
+    assert.ok(vm.liveMicError);
+    assert.equal(vm.liveMicActive, false);
+    assert.equal(vm.isResumable, true,
+        'start() assigns sessionId before touching the microphone, so a denied permission still leaves a resumable session');
 });
 
 await test('firing liveAnalysisCleared resets the local list and stage', async () => {
