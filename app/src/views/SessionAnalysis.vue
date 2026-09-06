@@ -4,12 +4,14 @@
             Session Analysis
         </h1>
 
+        <!-- Three modes do not fit on one phone row, and v-btn-toggle does not
+             wrap on its own — it just overflows the viewport. -->
         <v-btn-toggle
             v-model="viewMode"
             mandatory
             dense
             rounded
-            class="mb-4"
+            class="mb-4 mode-toggle"
         >
             <v-btn value="file" small>
                 File recording
@@ -22,6 +24,118 @@
                 Past Sessions
             </v-btn>
         </v-btn-toggle>
+
+        <!--
+            The session bar is shown on EVERY tab while a session is open.
+            Listening is a background activity, not a mode: browsing past
+            sessions or analysing a file must never make the microphone
+            invisible, or the only way to find out whether the app is still
+            recording is to go looking for it.
+        -->
+        <v-card v-if="live.hasSession" class="pa-4 my-3 session-bar" :class="sessionBarClass">
+            <div class="d-flex flex-wrap align-center" style="gap: 12px;">
+                <v-chip small :color="liveStatus.color" text-color="white">
+                    <v-icon left x-small>{{ liveStatus.icon }}</v-icon>
+                    {{ liveStatus.label }}
+                </v-chip>
+
+                <span class="text--secondary">
+                    {{ formatSecondsAsClock(live.elapsedSeconds) }} listened
+                    &middot;
+                    {{ live.detections.length }} {{ live.detections.length === 1 ? 'tune' : 'tunes' }}
+                </span>
+
+                <VolumeMeter v-if="live.capturing && live.micHealthy" :active="true" />
+
+                <v-spacer />
+
+                <v-btn
+                    v-if="live.capturing"
+                    small
+                    text
+                    color="secondary"
+                    @click="pauseLive"
+                >
+                    Pause
+                </v-btn>
+                <v-btn
+                    v-else-if="live.canResume"
+                    small
+                    color="primary"
+                    :disabled="!indexLoaded || live.starting"
+                    :loading="live.starting"
+                    @click="resumeLive"
+                >
+                    Resume
+                </v-btn>
+
+                <v-btn
+                    v-if="live.capturing"
+                    small
+                    color="primary"
+                    @click="followMode = true"
+                >
+                    <v-icon left x-small>{{ icons.clef }}</v-icon>
+                    Follow Score
+                </v-btn>
+
+                <v-btn
+                    small
+                    text
+                    color="secondary"
+                    :loading="live.finishing"
+                    @click="finishLiveSession"
+                >
+                    Finish session
+                </v-btn>
+            </div>
+
+            <!--
+                A microphone that has died mid-session used to be invisible:
+                the list simply stopped growing. It is now stated, and the
+                retry reacquires capture without touching the session.
+            -->
+            <v-alert
+                v-if="live.capturing && !live.micHealthy"
+                type="warning"
+                dense
+                text
+                class="mt-3 mb-0"
+            >
+                <div class="d-flex flex-wrap align-center" style="gap: 12px;">
+                    <span>
+                        The microphone stopped delivering audio{{ live.micMessage ? ` (${live.micMessage})` : '' }}.
+                        Nothing is being detected until it comes back — your tune list is safe.
+                    </span>
+                    <v-btn small :loading="live.retryingMic" @click="retryMicrophone">
+                        Retry microphone
+                    </v-btn>
+                </div>
+            </v-alert>
+
+            <v-alert
+                v-if="live.saveState === 'error'"
+                type="error"
+                dense
+                text
+                class="mt-3 mb-0"
+            >
+                <div class="d-flex flex-wrap align-center" style="gap: 12px;">
+                    <span>
+                        This session could not be saved{{ live.saveError ? `: ${live.saveError}` : '' }}.
+                        It is still here — nothing has been lost yet — but it will not survive closing the app.
+                    </span>
+                    <v-btn small :loading="live.retryingSave" @click="retrySave">
+                        Retry save
+                    </v-btn>
+                </div>
+            </v-alert>
+
+            <p v-if="!live.canResume" class="mt-3 mb-0 caption text--secondary">
+                This session was restored after the app was reopened. Its tune list is complete and can be
+                finished, but listening again would start a new session rather than continuing this one.
+            </p>
+        </v-card>
 
         <v-card v-if="viewMode === 'file'" class="pa-5 my-3">
             <h2 class="text-h6 mb-3">
@@ -136,6 +250,11 @@
                 tune starts — brief mis-matches aren't kept. In Follow Score, the thumbs-down button
                 removes the tune on screen and goes back to the previous detection.
             </p>
+            <p class="mb-0 mt-2 text--secondary">
+                <strong>Pause</strong> releases the microphone and keeps the session; <strong>Resume</strong>
+                picks it up where it left off. <strong>Finish session</strong> closes it and files it under
+                Past Sessions. Listening carries on while you look at other tabs.
+            </p>
         </v-card>
 
         <v-card v-else-if="viewMode === 'history'" class="pa-5 my-3">
@@ -144,78 +263,45 @@
             </h2>
             <p class="mb-0 text--secondary">
                 Live sessions are saved automatically as tunes are recognised, so you can look back at what was
-                played on a given evening.
+                played on a given evening. They are kept on this device, synced to your account while you are
+                signed in, and included in the backup file from Settings &rarr; Export.
             </p>
         </v-card>
 
-        <v-card v-if="viewMode !== 'history'" class="pa-5 my-3">
+        <!-- Live controls: only the ones that START a session. Everything for
+             a session already open lives in the persistent bar above. -->
+        <v-card v-if="viewMode === 'live' && !live.hasSession" class="pa-5 my-3">
             <div class="d-flex flex-wrap align-center" style="gap: 12px;">
                 <v-btn
-                    v-if="liveMode && !liveMicActive"
                     color="primary"
-                    :disabled="!canAnalyze"
+                    :disabled="!canStartLive"
+                    :loading="live.starting"
                     @click="startListeningAndFollow"
                 >
                     <v-icon left small>{{ icons.clef }}</v-icon>
-                    {{ isResumable ? 'Resume & Follow' : 'Listen & Follow' }}
+                    Listen &amp; Follow
                 </v-btn>
                 <v-btn
-                    :color="liveMode && !liveMicActive ? 'grey darken-1' : 'secondary'"
-                    :text="liveMode && !liveMicActive"
-                    :disabled="!canAnalyze"
-                    @click="runAnalysis"
-                >
-                    {{ liveMode ? (isResumable ? 'Resume' : 'Listen without score') : 'Analyze Recording' }}
-                </v-btn>
-                <v-btn
-                    v-if="liveMode && liveMicActive"
+                    color="grey darken-1"
                     text
-                    color="secondary"
-                    @click="togglePauseLive"
+                    :disabled="!canStartLive"
+                    @click="startLiveAnalysis"
                 >
-                    {{ liveIsPaused ? 'Resume' : 'Pause' }}
+                    Listen without score
                 </v-btn>
-                <v-btn
-                    v-if="isAnalyzing || (liveMode && liveMicActive)"
-                    text
-                    color="secondary"
-                    @click="cancelAnalysis"
-                >
-                    Stop
-                </v-btn>
-                <v-btn
-                    v-if="isResumable"
-                    text
-                    color="error"
-                    @click="clearLiveSession"
-                >
-                    Clear
-                </v-btn>
-                <v-btn
-                    v-if="liveMode && liveMicActive"
-                    color="primary"
-                    @click="followMode = true"
-                >
-                    <v-icon left small>{{ icons.clef }}</v-icon>
-                    Follow Score
-                </v-btn>
-                <VolumeMeter
-                    v-if="liveMode && liveMicActive && !liveIsPaused"
-                    :active="liveMode && liveMicActive && !liveIsPaused"
-                />
                 <div class="text--secondary">
                     Tune index: {{ indexStatusText }}
                 </div>
             </div>
 
             <v-alert
-                v-if="liveMicError"
+                v-if="live.micError"
                 type="error"
                 dense
                 text
                 class="mt-3 mb-0"
             >
-                {{ liveMicError }}
+                {{ live.micError }}
             </v-alert>
 
             <v-divider class="my-4" />
@@ -223,7 +309,6 @@
             <div class="d-flex flex-wrap align-center" style="gap: 16px;">
                 <v-switch
                     v-model="customAnalysisSettings"
-                    :disabled="liveMicActive"
                     inset
                     hide-details
                     class="mt-0 pt-0"
@@ -231,7 +316,7 @@
                 />
                 <v-text-field
                     v-model.number="analysisSettings.windowSeconds"
-                    :disabled="!customAnalysisSettings || liveMicActive"
+                    :disabled="!customAnalysisSettings"
                     type="number"
                     min="3"
                     step="1"
@@ -242,7 +327,7 @@
                 />
                 <v-text-field
                     v-model.number="analysisSettings.stepSeconds"
-                    :disabled="!customAnalysisSettings || liveMicActive"
+                    :disabled="!customAnalysisSettings"
                     type="number"
                     min="1"
                     step="1"
@@ -254,48 +339,108 @@
             </div>
 
             <p class="mt-2 mb-0 text--secondary">
-                Leave this off for automatic defaults. Turn it on when you want finer or coarser scanning of a session recording, including sparse non-continuous sampling.
+                Leave this off for automatic defaults. Turn it on when you want finer or coarser scanning,
+                including sparse non-continuous sampling.
             </p>
+        </v-card>
 
-            <div v-if="analysisStage !== 'idle'" class="mt-4">
+        <!-- File controls, entirely independent of the live session. -->
+        <v-card v-if="viewMode === 'file'" class="pa-5 my-3">
+            <div class="d-flex flex-wrap align-center" style="gap: 12px;">
+                <v-btn
+                    color="secondary"
+                    :disabled="!canAnalyzeFile"
+                    @click="runFileAnalysis"
+                >
+                    Analyze Recording
+                </v-btn>
+                <v-btn
+                    v-if="isFileAnalyzing"
+                    text
+                    color="secondary"
+                    @click="cancelFileAnalysis"
+                >
+                    Stop
+                </v-btn>
+                <div class="text--secondary">
+                    Tune index: {{ indexStatusText }}
+                </div>
+            </div>
+
+            <v-divider class="my-4" />
+
+            <div class="d-flex flex-wrap align-center" style="gap: 16px;">
+                <v-switch
+                    v-model="customAnalysisSettings"
+                    inset
+                    hide-details
+                    class="mt-0 pt-0"
+                    label="Custom analysis settings"
+                />
+                <v-text-field
+                    v-model.number="analysisSettings.windowSeconds"
+                    :disabled="!customAnalysisSettings"
+                    type="number"
+                    min="3"
+                    step="1"
+                    dense
+                    hide-details
+                    label="Window (sec)"
+                    style="max-width: 150px;"
+                />
+                <v-text-field
+                    v-model.number="analysisSettings.stepSeconds"
+                    :disabled="!customAnalysisSettings"
+                    type="number"
+                    min="1"
+                    step="1"
+                    dense
+                    hide-details
+                    label="Step (sec)"
+                    style="max-width: 150px;"
+                />
+            </div>
+
+            <div v-if="file.stage !== 'idle'" class="mt-4">
                 <div class="mb-2">
-                    <strong>{{ stageLabel }}</strong>
-                    <span v-if="!liveMode && progress.total > 0">
-                        · {{ progress.current }}/{{ progress.total }}
+                    <strong>{{ fileStageLabel }}</strong>
+                    <span v-if="file.progress.total > 0">
+                        &middot; {{ file.progress.current }}/{{ file.progress.total }}
                     </span>
                 </div>
                 <v-progress-linear
-                    :indeterminate="analysisStage === 'decoding' || (liveMode && analysisStage === 'analyzing' && !liveIsPaused)"
-                    :value="progressPercent"
+                    :indeterminate="file.stage === 'decoding'"
+                    :value="fileProgressPercent"
                     rounded
                 />
-                <p v-if="progressLabel" class="mt-2 mb-0 text--secondary">
-                    {{ progressLabel }}
+                <p v-if="fileProgressLabel" class="mt-2 mb-0 text--secondary">
+                    {{ fileProgressLabel }}
                 </p>
             </div>
 
             <v-alert
-                v-if="analysisError"
+                v-if="file.error"
                 type="error"
                 dense
                 text
                 class="mt-4 mb-0"
             >
-                {{ analysisError }}
+                {{ file.error }}
             </v-alert>
         </v-card>
 
-        <v-card v-if="detections.length && viewMode !== 'history'" class="pa-5 my-3">
+        <!-- Results. One table, but the two modes keep their own list. -->
+        <v-card v-if="activeDetections.length && viewMode !== 'history'" class="pa-5 my-3">
             <div class="d-flex flex-wrap justify-space-between align-center" style="gap: 12px;">
                 <div>
                     <h2 class="text-h6 mb-1">
                         Detected Tune Starts
                     </h2>
                     <p class="mb-0 text--secondary">
-                        {{ detections.length }} detections from {{ analysisSummary.acceptedWindows }} matched windows.
+                        {{ activeDetections.length }} detections from {{ activeAcceptedWindows }} matched windows.
                     </p>
                 </div>
-                <div class="d-flex flex-wrap" style="gap: 12px;">
+                <div v-if="viewMode === 'file'" class="d-flex flex-wrap" style="gap: 12px;">
                     <v-btn text color="primary" @click="downloadTuneList">
                         Download Tune List
                     </v-btn>
@@ -313,7 +458,7 @@
                 <template #default>
                     <thead>
                         <tr>
-                            <th v-if="!liveMode" class="text-left">
+                            <th v-if="viewMode === 'file'" class="text-left">
                                 Start
                             </th>
                             <th class="text-left">
@@ -328,8 +473,8 @@
                         </tr>
                     </thead>
                     <tbody>
-                        <tr v-for="detection in detections" :key="detection.id">
-                            <td v-if="!liveMode" class="start-cell">
+                        <tr v-for="detection in activeDetections" :key="detection.id">
+                            <td v-if="viewMode === 'file'" class="start-cell">
                                 <v-text-field
                                     v-model="detection.editableTime"
                                     dense
@@ -374,17 +519,20 @@
             </v-simple-table>
 
             <v-alert
-                v-if="exportError"
+                v-if="file.exportError && viewMode === 'file'"
                 type="error"
                 dense
                 text
                 class="mt-4 mb-0"
             >
-                {{ exportError }}
+                {{ file.exportError }}
             </v-alert>
         </v-card>
 
-        <v-card v-else-if="analysisStage === 'done' && viewMode !== 'history'" class="pa-5 my-3">
+        <v-card
+            v-else-if="viewMode === 'file' && file.stage === 'done'"
+            class="pa-5 my-3"
+        >
             <h2 class="text-h6 mb-2">
                 No tune starts detected
             </h2>
@@ -400,16 +548,30 @@
             <v-expansion-panels v-else flat>
                 <v-expansion-panel v-for="session in pastSessions" :key="session.id">
                     <v-expansion-panel-header>
-                        {{ formatSessionDate(session.startedAt) }}
-                        &middot; {{ session.tunes.length }} {{ session.tunes.length === 1 ? 'tune' : 'tunes' }}
-                        &middot; {{ formatSecondsAsDuration(sessionDurationSeconds(session)) }}
-                        <span v-if="!session.endedAt" class="text--secondary">&middot; still open</span>
+                        <div class="d-flex flex-wrap align-center" style="gap: 8px;">
+                            <strong>{{ formatSessionDate(session.startedAt) }}</strong>
+                            <span class="text--secondary">
+                                {{ session.tunes.length }} {{ session.tunes.length === 1 ? 'tune' : 'tunes' }}
+                                &middot; {{ formatSecondsAsDuration(listenedSeconds(session)) }} listened
+                            </span>
+                            <v-chip v-if="isOpenSession(session)" x-small color="primary" text-color="white">
+                                In progress
+                            </v-chip>
+                            <v-chip v-else-if="!session.endedAt" x-small outlined>
+                                Unfinished
+                            </v-chip>
+                        </div>
                     </v-expansion-panel-header>
                     <v-expansion-panel-content>
+                        <p class="caption text--secondary mb-2">
+                            {{ sessionTimeRange(session) }}
+                        </p>
+
                         <v-simple-table dense>
                             <template #default>
                                 <thead>
                                     <tr>
+                                        <th class="text-left" style="width: 48px;" />
                                         <th class="text-left">
                                             Tune
                                         </th>
@@ -421,20 +583,57 @@
                                 <tbody>
                                     <tr v-for="(tune, i) in session.tunes" :key="i">
                                         <td>
+                                            <v-btn
+                                                icon
+                                                small
+                                                :disabled="!tune.settingId"
+                                                :aria-label="isTuneFavourited(tune) ? 'Remove from favourites' : 'Add to favourites'"
+                                                @click="toggleFavourite(tune)"
+                                            >
+                                                <v-icon
+                                                    small
+                                                    :color="isTuneFavourited(tune) ? 'amber darken-2' : 'grey'"
+                                                >
+                                                    {{ isTuneFavourited(tune) ? icons.star : icons.starOutline }}
+                                                </v-icon>
+                                            </v-btn>
+                                        </td>
+                                        <td>
                                             <router-link :to="tuneLinkForSessionTune(tune)">
                                                 {{ tune.title }}
                                             </router-link>
                                         </td>
                                         <td>
-                                            {{ formatSecondsAsDuration(tune.startSeconds) }}
+                                            {{ formatSecondsAsClock(tune.startSeconds) }}
                                         </td>
                                     </tr>
                                 </tbody>
                             </template>
                         </v-simple-table>
-                        <v-btn text small color="error" class="mt-2" @click="deleteSession(session)">
-                            Delete session
-                        </v-btn>
+
+                        <div class="d-flex flex-wrap align-center mt-3" style="gap: 12px;">
+                            <v-btn
+                                v-if="!session.endedAt && !isOpenSession(session)"
+                                text
+                                small
+                                color="primary"
+                                @click="finishStoredSession(session)"
+                            >
+                                Mark as finished
+                            </v-btn>
+                            <v-btn
+                                text
+                                small
+                                color="error"
+                                :disabled="isOpenSession(session)"
+                                @click="deleteSession(session)"
+                            >
+                                Delete session
+                            </v-btn>
+                            <span v-if="isOpenSession(session)" class="caption text--secondary">
+                                This is the session you are recording now — finish it before deleting it.
+                            </span>
+                        </div>
                     </v-expansion-panel-content>
                 </v-expansion-panel>
             </v-expansion-panels>
@@ -442,7 +641,7 @@
 
         <LiveScoreFollow
             v-if="followMode"
-            :detections="detections"
+            :detections="live.detections"
             @close="followMode = false"
         />
     </v-container>
@@ -451,7 +650,11 @@
 <script>
 import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
-import { mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble } from '@mdi/js';
+import {
+    mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble, mdiStar, mdiStarOutline,
+    mdiPause, mdiRecordCircleOutline, mdiAlertCircleOutline,
+} from '@mdi/js';
+import ffBackend from '@/services/backend.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
@@ -471,6 +674,37 @@ import {
 
 const SESSION_ANALYSIS_STATE_VERSION = 3;
 
+const emptyFileState = () => ({
+    detections: [],
+    stage: 'idle',
+    error: '',
+    exportError: '',
+    summary: { acceptedWindows: 0, durationSeconds: 0, options: null },
+    progress: { current: 0, total: 0, currentTimeSeconds: 0 },
+});
+
+const emptyLiveState = () => ({
+    detections: [],
+    summary: { acceptedWindows: 0 },
+    elapsedSeconds: 0,
+    // A session exists (running or paused). Mirrors liveAnalysisService.sessionId.
+    hasSession: false,
+    // The microphone is open and the loop is running.
+    capturing: false,
+    // A restored session with no stored analysis options can be read and
+    // finished but not extended — see liveAnalysisService.canResume().
+    canResume: true,
+    micHealthy: true,
+    micMessage: '',
+    micError: '',
+    saveState: 'idle',
+    saveError: null,
+    starting: false,
+    finishing: false,
+    retryingMic: false,
+    retryingSave: false,
+});
+
 export default {
     name: 'SessionAnalysisView',
     components: { VolumeMeter, LiveScoreFollow },
@@ -485,127 +719,100 @@ export default {
                 linkedAudioFileName: '',
             },
             fileWarning: '',
-            analysisStage: 'idle',
-            analysisError: '',
-            exportError: '',
             customAnalysisSettings: false,
             analysisSettings: {
                 windowSeconds: 10,
                 stepSeconds: 5,
-            },
-            detections: [],
-            analysisSummary: {
-                acceptedWindows: 0,
-                durationSeconds: 0,
-                options: null,
-            },
-            progress: {
-                current: 0,
-                total: 0,
-                currentTimeSeconds: 0,
             },
             // Live microphone is the default: the overwhelmingly common use is
             // pointing the phone at a session that is happening now. Importing a
             // file is the deliberate, occasional case, and restoreSavedState()
             // below switches back to it when there are saved file results.
             viewMode: 'live', // 'file' | 'live' | 'history'
-            liveMicActive: false,
-            liveIsPaused: false,
-            liveMicError: '',
-            liveElapsedSeconds: 0,
+            // The two analyses keep their own results, progress and errors.
+            // They used to share one set of fields, so starting one wiped the
+            // other's results and the "stage" of whichever ran last decided
+            // what BOTH panels displayed.
+            file: emptyFileState(),
+            live: emptyLiveState(),
             followMode: false,
-            // Mirrors liveAnalysisService.sessionId: true whenever there is an
-            // open session to Resume/Clear, whether or not it has caught a
-            // tune yet. Deliberately NOT derived from detections.length — the
-            // service decides fresh-vs-resume purely on sessionId, so a stop
-            // before anything was recognised (e.g. losing mic access early)
-            // still resumes on the next Start, and the button has to say so.
-            hasOpenSession: false,
             pastSessions: [],
+            // settingIDs of favourited tunes, for the stars in Past Sessions.
+            favouriteSettingIDs: [],
             icons: {
                 openInNew: mdiOpenInNew,
                 microphone: mdiMicrophone,
                 clef: mdiMusicClefTreble,
+                star: mdiStar,
+                starOutline: mdiStarOutline,
+                pause: mdiPause,
+                recording: mdiRecordCircleOutline,
+                alert: mdiAlertCircleOutline,
             },
         };
     },
     watch: {
-        // Switching to 'history' does NOT stop a running live session — only
-        // switching to 'file' does, since a file-audio analysis and a live
-        // capture genuinely can't run together, but browsing Past Sessions
-        // while tonight's session keeps recording is harmless. This matches
-        // the existing "live continues in background" behaviour on navigating
-        // away entirely (see beforeDestroy()).
-        viewMode(newVal, oldVal) {
-            if (oldVal === 'live' && newVal === 'file' && liveAnalysisService.isRunning) {
-                liveAnalysisService.stop();
-            }
-            this.followMode = false;
-            if (newVal === 'live') {
-                // Restores from the service rather than resetting, so a live
-                // session (running OR stopped-but-not-cleared) survives
-                // switching away to another mode and back within this mount —
-                // previously resetResults() wiped it unconditionally here with
-                // nothing to restore it, which is also why Resume needs this
-                // same path after reopening the mic.
-                this._restoreLiveState();
-            } else if (newVal === 'file' && oldVal !== 'file') {
-                this.resetResults();
-            } else if (newVal === 'history') {
-                this.refreshPastSessions();
-            }
+        // Switching tabs is navigation, not a lifecycle event. It never stops
+        // the microphone and never touches either set of results — the live
+        // session carries on exactly as it does when the user navigates to a
+        // different route entirely.
+        viewMode(newVal) {
+            if (newVal !== 'live') this.followMode = false;
+            if (newVal === 'history') this.refreshPastSessions();
         },
     },
     computed: {
-        liveMode() {
-            return this.viewMode === 'live';
-        },
-        // A session has been Stopped but not yet Cleared: the mic is closed but
-        // the session is still open, so Start becomes Resume and Clear becomes
-        // available. Keyed on hasOpenSession, not on whether anything was
-        // caught — the service will resume an empty session exactly the same
-        // as a populated one, so the button must say so either way. Scoped to
-        // live mode so file-mode work never makes the live controls appear.
-        isResumable() {
-            return this.viewMode === 'live' && !this.liveMicActive && this.hasOpenSession;
-        },
         minPastDetectionSeconds() {
             return MIN_PAST_DETECTION_SECONDS;
         },
-        canAnalyze() {
-            if (this.liveMode) return !this.isAnalyzing && this.indexLoaded;
-            return !!this.audioFile && !this.isAnalyzing && this.indexLoaded;
+        activeDetections() {
+            return this.viewMode === 'file' ? this.file.detections : this.live.detections;
         },
-        isAnalyzing() {
-            return this.analysisStage === 'decoding' || this.analysisStage === 'analyzing';
+        activeAcceptedWindows() {
+            return this.viewMode === 'file'
+                ? this.file.summary.acceptedWindows
+                : this.live.summary.acceptedWindows;
+        },
+        canStartLive() {
+            return !this.live.hasSession && !this.live.starting && this.indexLoaded;
+        },
+        canAnalyzeFile() {
+            return !!this.audioFile && !this.isFileAnalyzing && this.indexLoaded;
+        },
+        isFileAnalyzing() {
+            return this.file.stage === 'decoding' || this.file.stage === 'analyzing';
         },
         indexStatusText() {
             return this.indexLoaded ? 'ready' : 'loading…';
         },
-        stageLabel() {
-            if (this.liveMode) {
-                if (this.analysisStage === 'analyzing') return this.liveIsPaused ? 'Paused' : 'Listening…';
-                if (this.analysisStage === 'done') return 'Analysis stopped';
-                return '';
+        liveStatus() {
+            if (this.live.capturing && !this.live.micHealthy) {
+                return { label: 'Microphone unavailable', color: 'warning', icon: this.icons.alert };
             }
-            if (this.analysisStage === 'decoding') return 'Decoding audio';
-            if (this.analysisStage === 'analyzing') return 'Scanning windows';
-            if (this.analysisStage === 'done') return 'Analysis complete';
+            if (this.live.capturing) {
+                return { label: 'Listening', color: 'red darken-1', icon: this.icons.recording };
+            }
+            return { label: 'Paused', color: 'grey darken-1', icon: this.icons.pause };
+        },
+        sessionBarClass() {
+            if (this.live.capturing && !this.live.micHealthy) return 'session-bar--warning';
+            return this.live.capturing ? 'session-bar--live' : 'session-bar--paused';
+        },
+        fileStageLabel() {
+            if (this.file.stage === 'decoding') return 'Decoding audio';
+            if (this.file.stage === 'analyzing') return 'Scanning windows';
+            if (this.file.stage === 'done') return 'Analysis complete';
             return '';
         },
-        progressPercent() {
-            if (this.liveMode) return 0;
-            if (!this.progress.total) return 0;
-            return (this.progress.current / this.progress.total) * 100;
+        fileProgressPercent() {
+            if (!this.file.progress.total) return 0;
+            return (this.file.progress.current / this.file.progress.total) * 100;
         },
-        progressLabel() {
-            if (this.liveMode && this.analysisStage === 'analyzing') {
-                return `Elapsed: ${formatSecondsAsClock(this.liveElapsedSeconds)}`;
+        fileProgressLabel() {
+            if (this.file.stage === 'analyzing') {
+                return `Around ${formatSecondsAsClock(this.file.progress.currentTimeSeconds)} of the recording`;
             }
-            if (this.analysisStage === 'analyzing') {
-                return `Around ${formatSecondsAsClock(this.progress.currentTimeSeconds)} of the recording`;
-            }
-            if (this.analysisStage === 'decoding' && this.audioFile) {
+            if (this.file.stage === 'decoding' && this.audioFile) {
                 return `Preparing ${this.audioFile.name}`;
             }
             return '';
@@ -620,7 +827,7 @@ export default {
 
         // Index
         // The auto-start below cannot run before the tune index is usable
-        // (canAnalyze is false), and arriving from a cold start it usually is
+        // (canStartLive is false), and arriving from a cold start it usually is
         // not — so this is also the retry point, not just a flag flip.
         this._onIndexLoaded = () => {
             this.indexLoaded = true;
@@ -629,27 +836,37 @@ export default {
 
         // Live analysis events
         this._onLiveUpdate = (detections) => {
-            this.detections = detections.map(d => this._buildDetectionRow(d));
-            this.analysisSummary.acceptedWindows = liveAnalysisService._windowMatches.length;
+            this.live.detections = detections.map(d => this._buildDetectionRow(d));
+            this.live.summary.acceptedWindows = liveAnalysisService._windowMatches.length;
         };
-        this._onLiveTimerTick = (secs) => { this.liveElapsedSeconds = secs; };
+        this._onLiveTimerTick = (secs) => { this.live.elapsedSeconds = secs; };
         this._onLiveStopped = () => {
-            this.liveMicActive = false;
-            this.liveIsPaused = false;
+            this.live.capturing = false;
             this.followMode = false;
-            this.analysisStage = this.detections.length ? 'done' : 'idle';
-            // stop() never clears sessionId, so an open session survives —
-            // Resume/Clear must appear even if nothing was caught yet.
-            this.hasOpenSession = !!liveAnalysisService.sessionId;
+            this.live.hasSession = !!liveAnalysisService.sessionId;
         };
-        this._onLivePaused = () => { this.liveIsPaused = true; };
-        this._onLiveResumed = () => { this.liveIsPaused = false; };
-        this._onLiveCleared = () => {
-            this.detections = [];
-            this.analysisStage = 'idle';
-            this.analysisSummary = { acceptedWindows: 0, durationSeconds: 0, options: null };
-            this.liveElapsedSeconds = 0;
-            this.hasOpenSession = false;
+        this._onLiveFinished = () => {
+            this.live = emptyLiveState();
+        };
+        this._onLiveRestored = (detections) => {
+            this._syncLiveFromService();
+            this.live.detections = detections.map(d => this._buildDetectionRow(d));
+        };
+        this._onLiveMicState = ({ healthy }) => {
+            this.live.micHealthy = healthy;
+            if (healthy) this.live.micMessage = '';
+        };
+        this._onLiveSaveState = ({ state, error }) => {
+            this.live.saveState = state;
+            this.live.saveError = error;
+        };
+        this._onMicLost = (detail) => {
+            this.live.micHealthy = false;
+            this.live.micMessage = (detail && detail.reason) || '';
+        };
+        this._onMicRecovered = () => {
+            this.live.micHealthy = true;
+            this.live.micMessage = '';
         };
 
         // Past Sessions
@@ -659,31 +876,34 @@ export default {
 
         // File analysis events
         this._onFileStage = (stage) => {
-            this.analysisStage = stage;
+            this.file.stage = stage;
             if (stage === 'done' || stage === 'idle') this.persistState();
         };
         this._onFileOptions = ({ windowSeconds, stepSeconds, durationSeconds }) => {
             this.analysisSettings.windowSeconds = windowSeconds;
             this.analysisSettings.stepSeconds = stepSeconds;
-            this.analysisSummary.durationSeconds = durationSeconds;
+            this.file.summary.durationSeconds = durationSeconds;
         };
         this._onFileProgress = ({ current, total, currentTimeSeconds, acceptedWindows }) => {
-            this.progress = { current, total, currentTimeSeconds };
-            this.analysisSummary.acceptedWindows = acceptedWindows;
+            this.file.progress = { current, total, currentTimeSeconds };
+            this.file.summary.acceptedWindows = acceptedWindows;
         };
         this._onFileUpdate = (detections, acceptedWindows) => {
-            this.detections = detections.map(d => this._buildDetectionRow(d));
-            this.analysisSummary.acceptedWindows = acceptedWindows;
+            this.file.detections = detections.map(d => this._buildDetectionRow(d));
+            this.file.summary.acceptedWindows = acceptedWindows;
         };
-        this._onFileError = (message) => { this.analysisError = message; };
+        this._onFileError = (message) => { this.file.error = message; };
 
         eventBus.$on('indexLoaded', this._onIndexLoaded);
         eventBus.$on('liveAnalysisUpdate', this._onLiveUpdate);
         eventBus.$on('liveAnalysisTimerTick', this._onLiveTimerTick);
         eventBus.$on('liveAnalysisStopped', this._onLiveStopped);
-        eventBus.$on('liveAnalysisPaused', this._onLivePaused);
-        eventBus.$on('liveAnalysisResumed', this._onLiveResumed);
-        eventBus.$on('liveAnalysisCleared', this._onLiveCleared);
+        eventBus.$on('liveAnalysisFinished', this._onLiveFinished);
+        eventBus.$on('liveAnalysisRestored', this._onLiveRestored);
+        eventBus.$on('liveAnalysisMicState', this._onLiveMicState);
+        eventBus.$on('liveAnalysisSaveState', this._onLiveSaveState);
+        eventBus.$on('micLost', this._onMicLost);
+        eventBus.$on('micRecovered', this._onMicRecovered);
         eventBus.$on('liveSessionsChanged', this._onLiveSessionsChanged);
         eventBus.$on('fileAnalysisStage', this._onFileStage);
         eventBus.$on('fileAnalysisOptions', this._onFileOptions);
@@ -691,46 +911,7 @@ export default {
         eventBus.$on('fileAnalysisUpdate', this._onFileUpdate);
         eventBus.$on('fileAnalysisError', this._onFileError);
 
-        if (liveAnalysisService.isRunning || liveAnalysisService.sessionId) {
-            // Setting viewMode queues the watcher, which calls _restoreLiveState()
-            // asynchronously. Use $nextTick to restore after that watcher has run —
-            // covers both a still-running session and a stopped-but-not-cleared
-            // (resumable) one, since _restoreLiveState() keys off sessionId, not
-            // isRunning.
-            this.viewMode = 'live';
-            this.$nextTick(() => {
-                if (!liveAnalysisService.sessionId) return;
-                this._restoreLiveState();
-                // Already listening — the one-tap entry point has nothing to
-                // start, so it just opens the score.
-                if (this._routeWantsFollow() && this.liveMicActive) this.followMode = true;
-            });
-        } else if (this._routeWantsLive()) {
-            // ?follow=1 is the one-tap "show me what is playing" entry point:
-            // start listening and open the score, with no further taps. It is
-            // deliberately not merely a deep link to this screen — the whole
-            // point is that the two actions it replaces are the two taps.
-            // Deferred one tick so the view is on screen before the microphone
-            // is opened — a permission refusal has to land on a rendered page,
-            // not on one that has not mounted yet.
-            if (this._routeWantsFollow()) {
-                this._autoFollowPending = true;
-                this.$nextTick(() => this._runPendingAutoFollow());
-            }
-        } else {
-            // Saved file results outrank the live default — landing on an empty
-            // microphone panel having previously analysed a recording reads as
-            // the results having been lost.
-            const saved = store.state.sessionAnalysis;
-            if (saved && (saved.audioFile || (saved.detections && saved.detections.length))) {
-                this.viewMode = 'file';
-                // The viewMode watcher is queued now and calls resetResults();
-                // restoring synchronously here would be wiped by it. $nextTick
-                // callbacks run after the scheduler flush, so this lands after.
-                this.$nextTick(() => { this.restoreSavedState(); });
-            }
-        }
-
+        this._initialise();
         eventBus.$emit('parentViewActivated');
     },
     beforeDestroy() {
@@ -748,26 +929,87 @@ export default {
         eventBus.$off('liveAnalysisUpdate', this._onLiveUpdate);
         eventBus.$off('liveAnalysisTimerTick', this._onLiveTimerTick);
         eventBus.$off('liveAnalysisStopped', this._onLiveStopped);
-        eventBus.$off('liveAnalysisPaused', this._onLivePaused);
-        eventBus.$off('liveAnalysisResumed', this._onLiveResumed);
-        eventBus.$off('liveAnalysisCleared', this._onLiveCleared);
+        eventBus.$off('liveAnalysisFinished', this._onLiveFinished);
+        eventBus.$off('liveAnalysisRestored', this._onLiveRestored);
+        eventBus.$off('liveAnalysisMicState', this._onLiveMicState);
+        eventBus.$off('liveAnalysisSaveState', this._onLiveSaveState);
+        eventBus.$off('micLost', this._onMicLost);
+        eventBus.$off('micRecovered', this._onMicRecovered);
         eventBus.$off('liveSessionsChanged', this._onLiveSessionsChanged);
         eventBus.$off('fileAnalysisStage', this._onFileStage);
         eventBus.$off('fileAnalysisOptions', this._onFileOptions);
         eventBus.$off('fileAnalysisProgress', this._onFileProgress);
         eventBus.$off('fileAnalysisUpdate', this._onFileUpdate);
         eventBus.$off('fileAnalysisError', this._onFileError);
-        if (this.viewMode === 'file') {
-            this.persistState();
-        }
+        this.persistState();
     },
     methods: {
+        // Decides what the view opens on, in priority order: a live session
+        // that is already running, an explicit ?live/?follow request, a session
+        // left unfinished by a previous run of the app, then saved file work.
+        async _initialise() {
+            if (liveAnalysisService.sessionId) {
+                this.viewMode = 'live';
+                this._syncLiveFromService();
+                if (this._routeWantsFollow() && this.live.capturing) this.followMode = true;
+                return;
+            }
+
+            if (this._routeWantsLive()) {
+                // ?follow=1 is the one-tap "show me what is playing" entry
+                // point: start listening and open the score, with no further
+                // taps. Deferred one tick so the view is on screen before the
+                // microphone is opened — a permission refusal has to land on a
+                // rendered page, not on one that has not mounted yet.
+                this.viewMode = 'live';
+                if (this._routeWantsFollow()) {
+                    this._autoFollowPending = true;
+                    this.$nextTick(() => this._runPendingAutoFollow());
+                }
+                return;
+            }
+
+            // A session the app was recording when it was last closed. It is
+            // restored WITHOUT opening the microphone — listening again is
+            // always a deliberate act — and offered Resume and Finish.
+            const restored = await liveAnalysisService.restoreOpenSession();
+            if (restored) {
+                this.viewMode = 'live';
+                this._syncLiveFromService();
+                return;
+            }
+
+            // Saved file results outrank the live default — landing on an empty
+            // microphone panel having previously analysed a recording reads as
+            // the results having been lost.
+            const saved = store.state.sessionAnalysis;
+            if (saved && (saved.audioFile || (saved.detections && saved.detections.length))) {
+                this.viewMode = 'file';
+                this.restoreSavedState();
+            }
+        },
+        // Mirrors liveAnalysisService's state into this component. Called on
+        // mount and after any lifecycle change that the events do not fully
+        // describe.
+        _syncLiveFromService() {
+            const svc = liveAnalysisService;
+            this.live.hasSession = !!svc.sessionId;
+            if (!svc.sessionId) return;
+            this.live.capturing = svc.isRunning;
+            this.live.canResume = svc.canResume();
+            this.live.elapsedSeconds = svc.elapsedSeconds;
+            this.live.micHealthy = svc.micHealthy;
+            this.live.saveState = svc.saveState;
+            this.live.saveError = svc.saveError;
+            this.live.detections = svc.detections.map(d => this._buildDetectionRow(d));
+            this.live.summary.acceptedWindows = svc._windowMatches.length;
+        },
         restoreSavedState() {
             const saved = store.state.sessionAnalysis;
             if (!saved) return;
             if (saved.version !== SESSION_ANALYSIS_STATE_VERSION) {
                 store.clearSessionAnalysisState();
-                this.analysisError = 'Saved Session Analysis results were from an older format and have been cleared. Please run the analysis again.';
+                this.file.error = 'Saved Session Analysis results were from an older format and have been cleared. Please run the analysis again.';
                 return;
             }
 
@@ -776,30 +1018,30 @@ export default {
             this.xscText = saved.xscText || '';
             this.xscMetadata = saved.xscMetadata || { linkedAudioFileName: '' };
             this.fileWarning = saved.fileWarning || '';
-            this.analysisStage = saved.analysisStage || 'idle';
-            this.analysisError = saved.analysisError || '';
-            this.exportError = saved.exportError || '';
             this.customAnalysisSettings = !!saved.customAnalysisSettings;
             this.analysisSettings = saved.analysisSettings || {
                 windowSeconds: 10,
                 stepSeconds: 5,
             };
-            this.detections = saved.detections || [];
-            this.analysisSummary = saved.analysisSummary || {
+            this.file.stage = saved.analysisStage || 'idle';
+            this.file.error = saved.analysisError || '';
+            this.file.exportError = saved.exportError || '';
+            this.file.detections = saved.detections || [];
+            this.file.summary = saved.analysisSummary || {
                 acceptedWindows: 0,
                 durationSeconds: 0,
                 options: null,
             };
-            this.progress = saved.progress || {
+            this.file.progress = saved.progress || {
                 current: 0,
                 total: 0,
                 currentTimeSeconds: 0,
             };
 
-            if (this.analysisStage === 'decoding' || this.analysisStage === 'analyzing') {
-                this.analysisStage = this.detections.length ? 'done' : 'idle';
-                if (!this.analysisError && !this.detections.length) {
-                    this.analysisError = 'Analysis was interrupted. Please run it again if needed.';
+            if (this.file.stage === 'decoding' || this.file.stage === 'analyzing') {
+                this.file.stage = this.file.detections.length ? 'done' : 'idle';
+                if (!this.file.error && !this.file.detections.length) {
+                    this.file.error = 'Analysis was interrupted. Please run it again if needed.';
                 }
             }
         },
@@ -811,14 +1053,14 @@ export default {
                 xscText: this.xscText,
                 xscMetadata: this.xscMetadata,
                 fileWarning: this.fileWarning,
-                analysisStage: this.analysisStage,
-                analysisError: this.analysisError,
-                exportError: this.exportError,
+                analysisStage: this.file.stage,
+                analysisError: this.file.error,
+                exportError: this.file.exportError,
                 customAnalysisSettings: this.customAnalysisSettings,
                 analysisSettings: { ...this.analysisSettings },
-                detections: this.detections.map(detection => ({ ...detection })),
-                analysisSummary: { ...this.analysisSummary },
-                progress: { ...this.progress },
+                detections: this.file.detections.map(detection => ({ ...detection })),
+                analysisSummary: { ...this.file.summary },
+                progress: { ...this.file.progress },
             });
         },
         formatFileSize(bytes) {
@@ -862,7 +1104,7 @@ export default {
         setAudioFile(file) {
             if (fileSessionAnalysisService.isRunning) fileSessionAnalysisService.cancel();
             this.audioFile = file;
-            this.resetResults();
+            this.resetFileResults();
             this.updateFileWarning();
             this.persistState();
         },
@@ -870,7 +1112,7 @@ export default {
             this.xscFile = file;
             this.xscText = await file.text();
             this.xscMetadata = parseXscMetadata(this.xscText);
-            this.resetResults();
+            this.resetFileResults();
             this.updateFileWarning();
             this.persistState();
         },
@@ -881,68 +1123,108 @@ export default {
             }
             this.fileWarning = '';
         },
-        resetResults() {
-            this.analysisStage = 'idle';
-            this.analysisError = '';
-            this.exportError = '';
-            this.detections = [];
-            this.progress = { current: 0, total: 0, currentTimeSeconds: 0 };
-            this.analysisSummary = { acceptedWindows: 0, durationSeconds: 0, options: null };
+        resetFileResults() {
+            this.file = emptyFileState();
         },
-        // Mirrors liveAnalysisService's current state into this component. Used
-        // both on mount (a session already running or stopped-but-open when the
-        // view loads) and every time viewMode switches back to 'live' (fixes a
-        // tab-switch data-loss bug, and is what makes Resume pick up a session
-        // that was Stopped rather than starting a blank one).
-        _restoreLiveState() {
-            this.hasOpenSession = !!liveAnalysisService.sessionId;
-            if (!liveAnalysisService.sessionId) return;
-            this.liveMicActive = liveAnalysisService.isRunning;
-            this.liveIsPaused = liveAnalysisService.isPaused;
-            this.liveElapsedSeconds = liveAnalysisService.elapsedSeconds;
-            this.detections = liveAnalysisService.detections.map(d => this._buildDetectionRow(d));
-            this.analysisSummary.acceptedWindows = liveAnalysisService._windowMatches.length;
-            this.analysisStage = liveAnalysisService.isRunning
-                ? 'analyzing'
-                : (this.detections.length ? 'done' : 'idle');
-        },
-        async cancelAnalysis() {
-            if (this.liveMode) {
-                await liveAnalysisService.stop();
-            } else {
-                fileSessionAnalysisService.cancel();
+
+        // ---- live session controls ----------------------------------------
+
+        async startLiveAnalysis() {
+            this.live.micError = '';
+            const resuming = !!liveAnalysisService.sessionId;
+            if (!resuming) {
+                // A fresh session's first detection can coincidentally share a
+                // tuneId with whatever the follow overlay last showed, which
+                // would otherwise read as "same tune, no reload needed" and
+                // could also resurrect a stale manual override.
+                clearLastShown();
+                this.live = emptyLiveState();
+            }
+            this.live.starting = true;
+
+            const windowSeconds = Number(this.analysisSettings.windowSeconds) || 10;
+            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 10;
+
+            try {
+                await liveAnalysisService.start(windowSeconds, stepSeconds);
+            } catch (e) {
+                this.live.micError = 'Could not access microphone. Please check permissions.';
+            } finally {
+                this.live.starting = false;
+                this._syncLiveFromService();
             }
         },
-        // Ends the open session for good: finalizes it in Past Sessions (see
-        // liveAnalysisService.clear()) and empties the working list, so the
-        // next Start begins a brand new session rather than resuming this one.
-        async clearLiveSession() {
-            await liveAnalysisService.clear();
+        // Start listening and put the score on screen in one action.
+        async startListeningAndFollow() {
+            await this.startLiveAnalysis();
+            // Only on success: opening a full-screen overlay over a microphone
+            // that never opened would hide the error explaining why.
+            if (this.live.capturing) this.followMode = true;
         },
-        togglePauseLive() {
-            if (this.liveIsPaused) {
-                liveAnalysisService.resume();
-            } else {
-                liveAnalysisService.pause();
+        resumeLive() {
+            return this.startLiveAnalysis();
+        },
+        async pauseLive() {
+            await liveAnalysisService.pause();
+            this._syncLiveFromService();
+        },
+        // Ends the session: a final save, then it moves to Past Sessions.
+        async finishLiveSession() {
+            this.live.finishing = true;
+            try {
+                const result = await liveAnalysisService.finish();
+                if (!result.ok) {
+                    // The session is deliberately still here. Saying so is the
+                    // whole point — silently keeping it would look like the
+                    // button did nothing.
+                    this._syncLiveFromService();
+                    return;
+                }
+                if (this.viewMode === 'history') await this.refreshPastSessions();
+            } finally {
+                this.live.finishing = false;
             }
         },
-        async runAnalysis() {
-            if (this.liveMode) {
-                await this.startLiveAnalysis();
-                return;
+        async retryMicrophone() {
+            this.live.retryingMic = true;
+            try {
+                await liveAnalysisService.retryMicrophone();
+            } finally {
+                this.live.retryingMic = false;
+                this._syncLiveFromService();
             }
+        },
+        async retrySave() {
+            this.live.retryingSave = true;
+            try {
+                await liveAnalysisService._persistSession();
+            } finally {
+                this.live.retryingSave = false;
+                this._syncLiveFromService();
+            }
+        },
+
+        // ---- file analysis controls ---------------------------------------
+
+        async runFileAnalysis() {
             if (!this.audioFile) return;
-            this.analysisError = '';
-            this.exportError = '';
-            this.detections = [];
-            this.analysisSummary.acceptedWindows = 0;
-            this.progress = { current: 0, total: 0, currentTimeSeconds: 0 };
+            this.file.error = '';
+            this.file.exportError = '';
+            this.file.detections = [];
+            this.file.summary.acceptedWindows = 0;
+            this.file.progress = { current: 0, total: 0, currentTimeSeconds: 0 };
             await fileSessionAnalysisService.start(this.audioFile, {
                 customAnalysisSettings: this.customAnalysisSettings,
                 windowSeconds: this.analysisSettings.windowSeconds,
                 stepSeconds: this.analysisSettings.stepSeconds,
             });
         },
+        cancelFileAnalysis() {
+            fileSessionAnalysisService.cancel();
+        },
+
+        // ---- shared detection table ---------------------------------------
+
         _buildDetectionRow(detection) {
             const tuneOptions = buildTuneOptions(detection);
             const selectedTuneKey = tuneOptionValue({
@@ -970,73 +1252,26 @@ export default {
         _routeWantsFollow() {
             return !!this.$route && this.$route.query.follow === '1';
         },
-        // Start listening and put the score on screen in one action.
-        async startListeningAndFollow() {
-            await this.startLiveAnalysis();
-            // Only on success: opening a full-screen overlay over a microphone
-            // that never opened would hide the error explaining why.
-            if (this.liveMicActive) this.followMode = true;
-        },
         // Runs the ?follow=1 auto-start, or remembers it for the moment the
         // index becomes usable. Called again from the indexLoaded handler.
         _runPendingAutoFollow() {
             if (!this._autoFollowPending) return;
-            if (!this.canAnalyze) return;
+            if (!this.canStartLive) return;
             this._autoFollowPending = false;
             this.startListeningAndFollow();
-        },
-        async startLiveAnalysis() {
-            this.liveMicError = '';
-            // Resuming an open (Stopped-but-not-Cleared) session must not wipe
-            // what's already on screen — only a truly fresh session resets.
-            // liveAnalysisService.start() makes the same fresh-vs-resume
-            // decision internally, keyed off the same sessionId.
-            const resuming = !!liveAnalysisService.sessionId;
-            if (!resuming) {
-                this.detections = [];
-                // A fresh session's first detection can coincidentally share a
-                // tuneId with whatever the follow overlay last showed, which would
-                // otherwise read as "same tune, no reload needed" and could also
-                // resurrect a stale manual override from the previous session.
-                clearLastShown();
-                this.analysisSummary.acceptedWindows = 0;
-                this.liveElapsedSeconds = 0;
-            }
-            this.analysisStage = 'analyzing';
-            this.analysisError = '';
-            this.liveIsPaused = false;
-
-            const windowSeconds = Number(this.analysisSettings.windowSeconds) || 10;
-            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 10;
-
-            try {
-                await liveAnalysisService.start(windowSeconds, stepSeconds);
-                this.liveMicActive = true;
-                this.hasOpenSession = true;
-                if (resuming) this._restoreLiveState();
-            } catch (e) {
-                this.liveMicError = 'Could not access microphone. Please check permissions.';
-                this.analysisStage = this.detections.length ? 'done' : 'idle';
-                // start() assigns sessionId before touching the microphone, so
-                // even a failed mic request leaves an open (empty) session —
-                // the next tap correctly offers Resume rather than pretending
-                // nothing was attempted.
-                this.hasOpenSession = !!liveAnalysisService.sessionId;
-            }
         },
         removeDetection(id) {
             // Route through the service so the underlying window matches are
             // dropped — otherwise the next re-cluster (live every stepSeconds,
             // file during a still-running analysis) brings the row back.
-            if (this.liveMode) {
-                liveAnalysisService.removeDetection(id);
-            } else {
+            if (this.viewMode === 'file') {
                 fileSessionAnalysisService.removeDetection(id);
+                this.file.detections = this.file.detections.filter(d => d.id !== id);
+                this.persistState();
+                return;
             }
-            // Mirror locally in case the service is idle (file analysis 'done')
-            // and so the persisted state reflects the removal immediately.
-            this.detections = this.detections.filter(detection => detection.id !== id);
-            if (!this.liveMode) this.persistState();
+            liveAnalysisService.removeDetection(id);
+            this._syncLiveFromService();
         },
         selectedOptionForDetection(detection) {
             return detection.tuneOptions.find(option => option.value === detection.selectedTuneKey) || detection.tuneOptions[0] || null;
@@ -1052,18 +1287,66 @@ export default {
                 },
             };
         },
-        async refreshPastSessions() {
-            this.pastSessions = (await store.getLiveSessions()).slice().sort((a, b) => b.startedAt - a.startedAt);
+        syncSelectedTune(detection) {
+            const selected = this.selectedOptionForDetection(detection);
+            if (!selected) return;
+            detection.selectedTuneId = selected.tuneId;
+            detection.selectedSettingId = selected.settingId;
+            detection.selectedSourceUrl = selected.sourceUrl || '';
+            detection.selectedTitle = selected.title;
         },
-        sessionDurationSeconds(session) {
-            if (session.endedAt) return Math.round((session.endedAt - session.startedAt) / 1000);
+        onTuneChange(detection) {
+            this.syncSelectedTune(detection);
+            if (this.viewMode === 'file') {
+                this.persistState();
+                return;
+            }
+            // A live correction has to reach the SERVICE, which owns the list
+            // that gets saved. Left in the component it was overwritten by the
+            // next detection update and never reached Past Sessions at all.
+            liveAnalysisService.applyCorrection(detection.id, {
+                tuneId: detection.selectedTuneId,
+                settingId: detection.selectedSettingId,
+                title: detection.selectedTitle,
+                sourceUrl: detection.selectedSourceUrl,
+                dataset: detection.dataset,
+            });
+        },
+
+        // ---- Past Sessions --------------------------------------------------
+
+        async refreshPastSessions() {
+            const [sessions, favourites] = await Promise.all([
+                store.getLiveSessions(),
+                store.getFavourites(),
+            ]);
+            this.pastSessions = sessions.slice().sort((a, b) => b.startedAt - a.startedAt);
+            this.favouriteSettingIDs = favourites.map(f => String(f.result.settingID));
+        },
+        isOpenSession(session) {
+            return !!liveAnalysisService.sessionId && session.id === liveAnalysisService.sessionId;
+        },
+        // How long the microphone was actually listening. Older records have no
+        // listenedSeconds, so fall back to where the last tune ended — which is
+        // the same clock the tune times are on, unlike endedAt - startedAt,
+        // which also counts the time a session spent paused.
+        listenedSeconds(session) {
+            if (typeof session.listenedSeconds === 'number') return session.listenedSeconds;
             const last = session.tunes[session.tunes.length - 1];
             return last ? Math.round(last.endSeconds) : 0;
+        },
+        sessionTimeRange(session) {
+            const start = this.formatSessionTime(session.startedAt);
+            if (!session.endedAt) return `Started ${start}`;
+            return `${start} – ${this.formatSessionTime(session.endedAt)}`;
         },
         formatSessionDate(ms) {
             return new Date(ms).toLocaleString(undefined, {
                 year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
             });
+        },
+        formatSessionTime(ms) {
+            return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
         },
         tuneLinkForSessionTune(tune) {
             return {
@@ -1075,27 +1358,66 @@ export default {
                 },
             };
         },
+        isTuneFavourited(tune) {
+            return !!tune.settingId && this.favouriteSettingIDs.includes(String(tune.settingId));
+        },
+        async toggleFavourite(tune) {
+            if (!tune.settingId) return;
+            const settingID = String(tune.settingId);
+            if (this.isTuneFavourited(tune)) {
+                await store.removeFavourite(settingID);
+            } else {
+                // Same shape as every other star in the app: fetch the full
+                // setting so the favourite carries its ABC and renders a score
+                // preview, rather than a title-only stub.
+                let setting = null;
+                try {
+                    const settings = await ffBackend.settingsFromTuneID(tune.tuneId);
+                    setting = (settings || []).find(s => String(s.setting_id) === settingID) || null;
+                } catch (e) {
+                    console.warn('Could not fetch full setting, starring with what we have', e);
+                }
+                await store.addFavourite({
+                    settingID,
+                    setting: setting || {
+                        setting_id: settingID,
+                        tune_id: tune.tuneId,
+                        name: tune.title,
+                        dataset: tune.dataset || '',
+                        source_url: tune.sourceUrl || '',
+                    },
+                    displayName: tune.title,
+                });
+            }
+            const favourites = await store.getFavourites();
+            this.favouriteSettingIDs = favourites.map(f => String(f.result.settingID));
+        },
+        // Closes out a session left unfinished by a previous run of the app, so
+        // it does not sit in the list labelled "Unfinished" with nothing that
+        // can be done about it.
+        async finishStoredSession(session) {
+            await store.upsertLiveSession({
+                ...session,
+                endedAt: session.startedAt + this.listenedSeconds(session) * 1000,
+            });
+            await this.refreshPastSessions();
+        },
         async deleteSession(session) {
+            // The open session is not deletable: the next autosave would write
+            // it straight back, so the delete would look like it silently
+            // failed. Finish it first — the button is disabled and says so.
+            if (this.isOpenSession(session)) return;
             if (!window.confirm(`Delete this saved session (${session.tunes.length} tunes)? This cannot be undone.`)) return;
             await store.deleteLiveSession(session.id);
             await this.refreshPastSessions();
         },
-        syncSelectedTune(detection) {
-            const selected = this.selectedOptionForDetection(detection);
-            if (!selected) return;
-            detection.selectedTuneId = selected.tuneId;
-            detection.selectedSettingId = selected.settingId;
-            detection.selectedSourceUrl = selected.sourceUrl || '';
-            detection.selectedTitle = selected.title;
-        },
-        onTuneChange(detection) {
-            this.syncSelectedTune(detection);
-            if (!this.liveMode) this.persistState();
-        },
-        normalisedDetectionsForExport() {
-            this.exportError = '';
 
-            const normalised = this.detections.map(detection => {
+        // ---- file export ----------------------------------------------------
+
+        normalisedDetectionsForExport() {
+            this.file.exportError = '';
+
+            const normalised = this.file.detections.map(detection => {
                 const startSeconds = parseClockTime(detection.editableTime);
                 if (Number.isNaN(startSeconds)) {
                     throw new Error(`Invalid time: ${detection.editableTime}`);
@@ -1130,7 +1452,7 @@ export default {
                 const stem = this.audioFile ? this.audioFile.name.replace(/\.[^.]+$/, '') : 'session-analysis';
                 this.downloadText(`${stem}-tunes.txt`, buildTuneListText(detections));
             } catch (e) {
-                this.exportError = e.message;
+                this.file.exportError = e.message;
             }
         },
         downloadUpdatedXsc() {
@@ -1141,10 +1463,11 @@ export default {
                 const stem = this.xscFile.name.replace(/\.xsc$/i, '');
                 this.downloadText(`${stem}-session-analysis.xsc`, updated);
             } catch (e) {
-                this.exportError = e.message;
+                this.file.exportError = e.message;
             }
         },
         formatSecondsAsDuration,
+        formatSecondsAsClock,
     },
 };
 </script>
@@ -1182,20 +1505,39 @@ export default {
     min-width: 120px;
 }
 
-.alternative-list {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    font-size: 0.875rem;
+.mode-toggle {
+    flex-wrap: wrap;
+    height: auto;
 }
 
-.alternative-item {
-    color: #5f6b77;
+.session-bar {
+    border-left: 4px solid transparent;
+}
+
+.session-bar--live {
+    border-left-color: #c62828;
+}
+
+.session-bar--paused {
+    border-left-color: #9e9e9e;
+}
+
+.session-bar--warning {
+    border-left-color: #f9a825;
 }
 
 @media (max-width: 959px) {
     .drop-zone {
         padding: 20px;
+    }
+}
+
+/* On a phone the session bar is the control surface for the whole feature, so
+   its buttons get a full-width row of their own rather than being squeezed
+   beside the status text. */
+@media (max-width: 599px) {
+    .session-bar .v-btn {
+        flex: 1 1 auto;
     }
 }
 </style>

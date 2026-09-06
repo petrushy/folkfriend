@@ -148,11 +148,17 @@ async function loadStore() {
 
 // --- liveAnalysis.js half ----------------------------------------------------
 
-const FAKE_MIC = `export default {
+const FAKE_MIC = `
+export let __healthy = true;
+export let __startCalls = 0;
+export function __setHealthy(v) { __healthy = v; }
+export function __resetCalls() { __startCalls = 0; }
+export function __reset() { __healthy = true; __startCalls = 0; }
+export default {
     audioCtx: null,
-    async startContinuous() {},
+    async startContinuous() { __startCalls++; },
     async stopContinuous() {},
-    async ensureMicHealthy() {},
+    async ensureMicHealthy() { return __healthy; },
     getContinuousAudio() { return new Float32Array(0); },
 };`;
 const FAKE_BACKEND = `export default { async transcribeAndQueryPCMSignal() { return { results: [] }; } };`;
@@ -171,6 +177,9 @@ export let __upsertCalls = 0;
 // because two equal delays preserve call order.
 export let __delays = [];
 export function __setDelays(ds) { __delays = ds.slice(); }
+// Makes the next N writes reject, for the save-failure paths.
+export let __failUpserts = 0;
+export function __failNextUpserts(n) { __failUpserts = n; }
 export const userSettings = { geoTagDetections: false };
 export default {
     userSettings,
@@ -179,17 +188,25 @@ export default {
         __upsertCalls++;
         const delay = __delays.length ? __delays.shift() : 0;
         if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+        if (__failUpserts > 0) { __failUpserts--; throw new Error('quota exceeded'); }
         const record = { ...session };
         const i = __sessions.findIndex(s => s.id === record.id);
         if (i === -1) __sessions.unshift(record); else __sessions[i] = record;
         return record;
     },
     async getLiveSessions() { return __sessions.slice(); },
+    async setOpenLiveSession(state) { __openSession = state; },
+    async getOpenLiveSession() { return __openSession; },
+    async clearOpenLiveSession() { __openSession = null; },
 };
+export let __openSession = null;
+export function __setOpenSession(s) { __openSession = s; }
 export function __reset() {
     __sessions.length = 0;
     __upsertCalls = 0;
     __delays = [];
+    __failUpserts = 0;
+    __openSession = null;
     userSettings.geoTagDetections = false;
 }
 `;
@@ -198,7 +215,7 @@ export const __emits = [];
 export default { $emit(name, payload) { __emits.push({ name, payload }); }, $on() {}, $off() {} };
 `;
 
-async function loadService() {
+async function loadService({ keepStore = false } = {}) {
     await mkdir(serviceTmpDir, { recursive: true });
     await loadSessionAnalysisModule();
 
@@ -229,14 +246,18 @@ async function loadService() {
     const store = await import(path.join(serviceTmpDir, 'fake-store.mjs'));
     const geo = await import(path.join(serviceTmpDir, 'fake-geo.mjs'));
     const bus = await import(path.join(serviceTmpDir, 'fake-eventbus.mjs'));
-    store.__reset();
+    const mic = await import(path.join(serviceTmpDir, 'fake-mic.mjs'));
+    // keepStore models a RELOAD: a brand new service instance over storage
+    // that still holds what the previous one wrote.
+    if (!keepStore) store.__reset();
     geo.__reset();
+    mic.__reset();
     bus.__emits.length = 0;
 
     const mod = await import(`${path.join(serviceTmpDir, 'liveAnalysis.mjs')}?v=${Math.random()}`);
     const service = mod.default;
 
-    return { service, store, geo, bus };
+    return { service, store, geo, bus, mic };
 }
 
 // One window match, as _runLoop would push it.
@@ -344,18 +365,18 @@ async function run() {
         await service.start(10, 5);
 
         play(service, 1, 0, 6);
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
         assert.equal(store.__upsertCalls, 1);
         assert.equal(store.__sessions[0].tunes.length, 1);
 
         // Re-clustering again while the SAME tune is still the tail must not
         // trigger a second save — that is the whole point of the edge tracker.
         play(service, 1, 30, 2);
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
         assert.equal(store.__upsertCalls, 1, 'no save fires while the tail tune has not changed');
 
         play(service, 2, 60, 6);
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
         assert.equal(store.__upsertCalls, 2, 'a genuine tune change triggers a save');
         assert.equal(store.__sessions[0].tunes.length, 2);
 
@@ -380,17 +401,17 @@ async function run() {
         assert.equal(service._windowMatches.length, windowMatchesBefore);
         assert.equal(service.elapsedSeconds, elapsedBefore, 'elapsed time is not reset to 0');
 
-        await service.clear();
-        assert.equal(service.sessionId, null, 'clear() is what actually ends it');
+        await service.finish();
+        assert.equal(service.sessionId, null, 'finish() is what actually ends it');
     });
 
     await test('clear() during an active session ends up finalized despite stop()\'s own flush racing it', async () => {
         const { service, store } = await loadService();
         await service.start(10, 5);
         play(service, 1, 0, 6);
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
 
-        // clear() while still running calls stop() internally first (flush #1,
+        // finish() while still running calls stop() internally first (flush #1,
         // endedAt: null) and then makes its own finalizing write (flush #2,
         // endedAt: set). Real IndexedDB writes are not instant, and nothing
         // guarantees #1 finishes before #2 starts — so make #1 the SLOWER of
@@ -398,7 +419,7 @@ async function run() {
         // silently reverts the session to "open".
         store.__setDelays([50, 0]);
         assert.equal(service.isRunning, true);
-        await service.clear();
+        await service.finish();
 
         // Give a wrongly-unordered flush #1 time to land and clobber flush #2
         // before checking — the bug is only visible once that slow write
@@ -413,14 +434,14 @@ async function run() {
         const { service, store } = await loadService();
         await service.start(10, 5);
         play(service, 1, 0, 6);
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
         assert.equal(store.__upsertCalls, 1);
         const savedEndBefore = store.__sessions[0].tunes[0].endSeconds;
 
         // The tune keeps playing — the live detection's endSeconds advances,
         // but the tail tune has not CHANGED, so the edge tracker stays quiet.
         service.detections[service.detections.length - 1].endSeconds = savedEndBefore + 100;
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
         assert.equal(store.__upsertCalls, 1, 'no new edge fires while the same tune keeps playing');
         assert.equal(store.__sessions[0].tunes[0].endSeconds, savedEndBefore,
             'the stored copy is stale until something forces a re-serialize');
@@ -430,14 +451,14 @@ async function run() {
             "stop() re-serializes the CURRENT detections regardless of the edge tracker");
     });
 
-    await test('clear() finalizes the session and resets service state', async () => {
+    await test('finish() finalizes the session and resets service state', async () => {
         const { service, store } = await loadService();
         await service.start(10, 5);
         play(service, 1, 0, 6);
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
         const sessionId = service.sessionId;
 
-        await service.clear();
+        await service.finish();
 
         assert.equal(service.sessionId, null);
         assert.deepEqual(service.detections, []);
@@ -445,6 +466,221 @@ async function run() {
         assert.equal(service.elapsedSeconds, 0);
         assert.equal(store.__sessions[0].id, sessionId);
         assert.ok(store.__sessions[0].endedAt, 'the finalized record carries an end time');
+    });
+
+    console.log('\nliveAnalysis.js — edits reach the saved list');
+
+    await test('a corrected tune survives the next re-cluster', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        const row = service.detections[service.detections.length - 1];
+
+        service.applyCorrection(row.id, {
+            tuneId: 99, settingId: '990', title: 'What it really was',
+            sourceUrl: '', dataset: 'thesession',
+        });
+        assert.equal(service.detections[0].tuneId, 99);
+
+        // The correction lives in the window matches, so clustering — which
+        // rebuilds detections from scratch every cycle — reproduces it rather
+        // than overwriting it. Recording it on the detection object could not
+        // survive this, because the ids are not stable across a re-cluster.
+        service._recluster();
+        assert.equal(service.detections[0].tuneId, 99, 'the detector does not win it back');
+        assert.equal(service.detections[0].title, 'What it really was');
+
+        await service.stop();
+    });
+
+    await test('a correction reaches the saved record', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+
+        service.applyCorrection(service.detections[0].id, {
+            tuneId: 99, settingId: '990', title: 'What it really was',
+            sourceUrl: '', dataset: 'thesession',
+        });
+        await service._persistSession();
+
+        assert.equal(store.__sessions[0].tunes[0].tuneId, 99);
+        assert.equal(store.__sessions[0].tunes[0].title, 'What it really was');
+        await service.stop();
+    });
+
+    await test('removing the last detection is saved, not silently kept', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        assert.equal(store.__sessions[0].tunes.length, 1);
+
+        service.removeDetection(service.detections[0].id);
+        assert.deepEqual(service.detections, []);
+        await service._persistSession();
+
+        // An empty list is a real edit once the session has a record. Treating
+        // it as "nothing to save" left the removed tune in Past Sessions.
+        assert.equal(store.__sessions[0].tunes.length, 0,
+            'the removal has to reach the stored copy');
+        await service.stop();
+    });
+
+    await test('nothing is stored for a session that never recognised anything', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        await service._persistSession();
+        assert.equal(store.__sessions.length, 0,
+            'an empty session before its first tune is not a record worth keeping');
+        await service.stop();
+    });
+
+    console.log('\nliveAnalysis.js — failures stay recoverable');
+
+    await test('a failed final save keeps the session rather than dropping it', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        // Paused first, so the only write finish() makes is its own finalizing
+        // one — otherwise the injected failure lands on stop()'s flush instead.
+        await service.pause();
+
+        store.__failNextUpserts(1);
+        const result = await service.finish();
+
+        assert.equal(result.ok, false, 'the caller is told');
+        assert.ok(service.sessionId, 'and the only remaining copy is still here');
+        assert.equal(service.detections.length, 1);
+        assert.equal(service.saveState, 'error');
+
+        // Retrying is all that should be needed.
+        const retry = await service._persistSession({ endedAt: Date.now() });
+        assert.equal(retry.ok, true);
+        assert.equal(service.saveState, 'saved');
+    });
+
+    await test('a save failure is reported and cleared again on success', async () => {
+        const { service, store, bus } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+
+        store.__failNextUpserts(1);
+        const failed = await service._persistSession();
+        assert.equal(failed.ok, false);
+        assert.ok(bus.__emits.some(e => e.name === 'liveAnalysisSaveState' && e.payload.state === 'error'));
+
+        const ok = await service._persistSession();
+        assert.equal(ok.ok, true);
+        assert.equal(service.saveError, null);
+        await service.stop();
+    });
+
+    await test('a microphone that cannot be reacquired stops analysis rather than repeating stale audio', async () => {
+        const { service, mic } = await loadService();
+        await service.start(10, 5);
+        mic.__setHealthy(false);
+
+        const healthy = await service.retryMicrophone();
+        assert.equal(healthy, false);
+        assert.equal(service.micHealthy, false, 'and the state says so, so the UI can too');
+
+        mic.__setHealthy(true);
+        assert.equal(await service.retryMicrophone(), true);
+        assert.equal(service.micHealthy, true);
+        await service.stop();
+    });
+
+    console.log('\nliveAnalysis.js — surviving a reload');
+
+    await test('an unfinished session is restored without opening the microphone', async () => {
+        const { service, store, mic } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        const sessionId = service.sessionId;
+        await service.stop();
+
+        // A reload: a brand new service instance over the same storage.
+        const fresh = await loadService({ keepStore: true });
+        mic.__resetCalls();
+        assert.equal(fresh.service.sessionId, null, 'nothing is open until it is restored');
+
+        const restored = await fresh.service.restoreOpenSession();
+        assert.equal(restored, true);
+        assert.equal(fresh.service.sessionId, sessionId, 'the same session, not a new one');
+        assert.equal(fresh.service.detections.length, 1, 'with its tune list');
+        assert.equal(fresh.service.isRunning, false);
+        assert.equal(mic.__startCalls, 0,
+            'a page load must never open a microphone on its own');
+        assert.equal(fresh.service.canResume(), true,
+            'and it can carry on clustering, because the window matches were kept');
+        assert.equal(store.__sessions.length, 1, 'still one session, not a second one');
+    });
+
+    await test('resuming a restored session appends to it rather than starting a second', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        const sessionId = service.sessionId;
+        await service.stop();
+
+        const fresh = await loadService({ keepStore: true });
+        await fresh.service.restoreOpenSession();
+        await fresh.service.start(10, 5);
+
+        assert.equal(fresh.service.sessionId, sessionId);
+        assert.equal(fresh.service.detections.length, 1, 'the previous list is still there');
+        play(fresh.service, 2, 60, 6);
+        assert.deepEqual(fresh.service.detections.map(d => d.tuneId), [1, 2],
+            'and the new tune joins it');
+        await fresh.service.stop();
+    });
+
+    await test('a finished session leaves nothing to restore', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        await service.finish();
+
+        const fresh = await loadService({ keepStore: true });
+        assert.equal(await fresh.service.restoreOpenSession(), false);
+    });
+
+    await test('a deleted session is not restored, and cannot be resurrected', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        await service.stop();
+
+        // The user deleted it from Past Sessions while it was paused.
+        store.__sessions.length = 0;
+
+        const fresh = await loadService({ keepStore: true });
+        assert.equal(await fresh.service.restoreOpenSession(), false,
+            'resume state pointing at a record that is gone is not a session');
+        assert.equal(store.__sessions.length, 0, 'and nothing writes it back');
+    });
+
+    await test('abandon() drops an open session without saving it again', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        store.__sessions.length = 0;
+        const writesBefore = store.__upsertCalls;
+
+        await service.abandon();
+
+        assert.equal(service.sessionId, null);
+        assert.equal(store.__upsertCalls, writesBefore,
+            'a session the user deleted must not be written back by its own teardown');
+        assert.equal(store.__sessions.length, 0);
     });
 
     console.log('\nliveAnalysis.js — history is unconditional, location is not');
@@ -455,7 +691,7 @@ async function run() {
         await service.start(10, 5);
         play(service, 1, 0, 6);
         service._recordSighting();
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
 
         assert.equal(store.__sessions.length, 1, 'history is recorded regardless of the geo setting');
         assert.equal(store.__sessions[0].lat, null);
@@ -472,7 +708,7 @@ async function run() {
         play(service, 1, 0, 6);
         service._recordSighting(); // fire-and-forget; awaits the fake fix internally
         await new Promise(resolve => setTimeout(resolve, 0));
-        service._maybeSaveSessionSnapshot();
+        await service._maybeSaveSessionSnapshot();
 
         // The first edge-triggered save can race the async fix — stop()'s
         // unconditional flush is the documented backstop that always picks it

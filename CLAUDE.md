@@ -1119,6 +1119,28 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 Two changes, in that order, both driven by the same complaint: "I was at a
 session last week and I don't remember what was played."
 
+#### One session, three verbs: Listen, Pause, Finish
+
+There were briefly two pause-shaped controls — one that released the microphone
+and one that only stopped the analysis loop while capture kept running — plus a
+"Clear" that both ended the session and sounded like it deleted it. That is not
+a distinction a user in a pub can be asked to make, and the one that kept
+recording was the surprising default. Now: **Pause** releases the microphone and
+keeps the session, **Resume** is the same start path (it finds `sessionId` set
+and continues appending), **Finish session** writes the final record and closes
+it. `clear()` is gone; `finish()` and `abandon()` replaced it.
+
+**Listening is a background activity, not a mode.** The Session Analysis page
+has three tabs, and switching between them is navigation: none of them stops the
+microphone. A persistent session bar is rendered on ALL of them while a session
+is open, carrying the state (Listening / Paused / Microphone unavailable),
+elapsed listening time, tune count and the controls — otherwise the only way to
+find out whether the app is still recording is to go looking for it. Live and
+file analysis keep entirely separate results, progress and errors; they shared
+one set of fields before, so starting one wiped the other's list and whichever
+ran last decided what BOTH panels said. The shared backend already serialises
+transcription behind `_withPCMBufferLock`, so running both at once is safe.
+
 #### Stop is no longer a dead end
 
 Live analysis had one lifecycle — Start, accumulate, Stop — and Stop was
@@ -1142,15 +1164,19 @@ Three details that are easy to get wrong:
   rather than fire-and-forget because `clear()` calls `stop()` and then makes its
   own finalizing write to the same record — unordered, the slow one lands last
   and silently un-finalizes the session. Caught by mutation-testing the fix.
-- **Resume/Clear are offered on `sessionId`, not on `detections.length`.** The
+- **Resume/Finish are offered on `sessionId`, not on `detections.length`.** The
   service resumes an empty session exactly as it resumes a populated one, so
   gating the button on having caught a tune made it lie: stopping before
   anything was recognised (including a denied microphone) showed "Listen &
   Follow" while the next tap would in fact resume. Found in the field, not by a
   test.
-- **Resume only works within one page load.** A reload resets the singleton, so
-  the session is safely in IndexedDB but no longer resumable — the in-memory
-  `_windowMatches` needed to keep clustering correctly are gone.
+- **A reload no longer loses the session.** `openLiveSession` (local-only, never
+  synced) holds the raw window matches and the analysis options, which is what
+  clustering needs to keep producing the SAME list rather than starting a second
+  one beside it. `restoreOpenSession()` brings it back on load and offers Resume
+  and Finish — it never opens the microphone, because listening again is always
+  a deliberate act. A session stored by an older build has no options, so it can
+  be read and finished but not extended, and says so.
 
 #### Past Sessions
 
@@ -1159,6 +1185,47 @@ as it happens — edge-triggered on the tail tune changing, the same rule
 `_recordSighting` uses, because the loop runs every few seconds for hours and
 saving per cycle would rewrite the record dozens of times an hour. A third mode
 on the Session Analysis page lists them.
+
+**The list the user sees is the list that is saved.** Three separate gaps had to
+close for that to be true:
+
+- **Corrections reach the service, not just the view.** Choosing a different
+  tune for a row rewrites the underlying WINDOW MATCHES rather than the
+  detection object — detections are rebuilt from those matches every cycle and
+  their ids are not stable across a re-cluster, so anything recorded against a
+  detection was gone within seconds and never reached Past Sessions.
+- **Saving is not only edge-triggered.** The tail-tune-change edge misses a tune
+  played for twenty minutes and misses every edit, because a removal or a
+  correction changes the list without changing the tail. A debounced checkpoint
+  covers both.
+- **An empty list is a real edit once the session has a record.** `_persistSession`
+  used to no-op on an empty list, so removing the last row left it in storage.
+  Before the first successful write an empty list still means "nothing
+  recognised yet" and is not worth a record — hence `_hasPersisted`.
+
+**Failures are recoverable rather than silent.** `_persistSession` reports
+`{ ok, error }` and drives a `saveState`, every write goes through one chain so
+a checkpoint and a finish cannot land out of order, and — the important one —
+**`finish()` does not close a session whose final save failed**. The in-memory
+copy is the only copy at that point, so honouring the button press would be the
+one unrecoverable thing this code can do. The bar shows the error and offers a
+retry.
+
+**Deleting the open session is refused rather than half-done.** The next
+autosave would write it straight back, so the delete would look like it silently
+failed; Past Sessions disables it and says to finish the session first.
+`abandon()` exists for the other direction — tearing down a session the user HAS
+deleted — and passes `flush: false` to `stop()`, because stop's normal flush
+would write the deleted record back. *That was caught by its own test, not by
+reasoning.*
+
+**A dead microphone stops analysis instead of repeating stale audio.** The loop
+ignored `ensureMicHealthy()`'s result, so a capture that could not be reacquired
+left the ring buffer frozen and the loop kept confidently re-detecting audio
+from minutes ago — worse than no detection, because the list then claims tunes
+that were not played. The loop now skips the cycle, `micLost`/`micRecovered`
+reach the session bar, and there is an explicit retry that reacquires capture
+without touching the session.
 
 **History is recorded unconditionally, NOT gated by `geoTagDetections`.** That
 setting is about location, and it was gating whether any record was kept at all,
@@ -1254,10 +1321,27 @@ Java, which that chain deliberately does not require.
 > keeps working from its local copy and the sync failure only reaches
 > `console.error`, that presents as "sync silently does nothing".
 
-Tests: `app/test/recordSync.test.mjs` (24 cases) — `sync.js` against a fake
-Firestore whose snapshots the test drives by hand, and `store.js` against a fake
-sync layer that records every push. `app/test/liveSessions.test.mjs` (14) covers
-the resume/clear state machine, and `sessionAnalysisView.test.mjs` grew to 22.
+`openLiveSession` and `liveSessions` are both written through one per-key chain
+(`store._withRecords`). read → modify → write is not atomic against IndexedDB,
+so the analysis loop checkpointing while a remote snapshot merges, or while the
+user deletes a row, loses whichever write commits second. Pinned by a test that
+saves two records at the same moment and requires both to survive — verified by
+removing the chain, which loses one. Note the fake IndexedDB has to YIELD before
+reading and before committing, as a real transaction does; without that gap the
+two never interleave and the test passes against unserialised code.
+
+Tests: `app/test/recordSync.test.mjs` (25) — `sync.js` against a fake Firestore
+whose snapshots the test drives by hand, plus `store.js` write serialisation.
+`app/test/liveSessions.test.mjs` (26) covers the session state machine,
+corrections, save failures and reload recovery.
+`app/test/sessionAnalysisView.test.mjs` (29) covers the view, including that
+switching tabs never stops capture and that live and file results stay separate.
+`app/test/firestoreRules.test.mjs` (20, emulator) covers the rules.
+
+⚠️ **Microphone interruption recovery is still only tested against a fake.**
+Everything above is driven by a scriptable `micService` stand-in; the real
+paths — iOS handing the microphone to a call, a track that comes back live but
+permanently muted — have not been exercised on a device for this change.
 
 ### Session Analysis: live by default, short blips dropped, wrong tunes rejectable (August 2026 — v3.12.0)
 

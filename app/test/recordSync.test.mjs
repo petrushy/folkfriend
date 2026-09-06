@@ -481,6 +481,27 @@ async function run() {
         assert.equal(sessions[0].tunes[0].title, 'The Kesh');
     });
 
+    console.log('\nstore.js — overlapping writes to one collection');
+
+    await test('two saves at the same moment do not lose one', async () => {
+        const { store } = await signedInStore();
+
+        // read → modify → write is not atomic against IndexedDB. Unserialised,
+        // both of these read the same array before either writes, and whichever
+        // commits second silently discards the other. The analysis loop
+        // checkpointing while a remote snapshot merges is exactly this.
+        await Promise.all([
+            store.upsertLiveSession({ id: 'A', startedAt: 1, tunes: [] }),
+            store.upsertLiveSession({ id: 'B', startedAt: 2, tunes: [] }),
+        ]);
+
+        assert.deepEqual(
+            new Set((await store.getLiveSessions()).map(s => s.id)),
+            new Set(['A', 'B']),
+            'the later write must not be built on a copy that predates the earlier one',
+        );
+    });
+
     await test('signing out stops the collection listeners', async () => {
         const { store, sync } = await signedInStore();
         assert.equal(sync.__subs.length, 3, 'places, sightings and sessions');
@@ -519,11 +540,16 @@ export function __reset() { __pushes.length = 0; __records.length = 0; }
 `;
 
 const STORE_FAKES = {
+    // Yields before reading and before committing, as a real IndexedDB
+    // transaction does. Without that gap two overlapping read-modify-writes
+    // never actually interleave and a serialisation test passes against
+    // unserialised code.
     'fake-idb.mjs': `
+const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 export const __db = new Map();
-export async function get(key) { return __db.get(key); }
-export async function set(key, value) { __db.set(key, value); }
-export async function del(key) { __db.delete(key); }
+export async function get(key) { await tick(); return __db.get(key); }
+export async function set(key, value) { await tick(); __db.set(key, value); }
+export async function del(key) { await tick(); __db.delete(key); }
 `,
     'fake-sync.mjs': FAKE_SYNC,
     'fake-ai.mjs': `

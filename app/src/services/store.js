@@ -178,6 +178,16 @@ const KEY_LIVE_SESSIONS = 'liveSessions';
 // represents at its own (per-hearing) granularity.
 const MAX_LIVE_SESSIONS = 300;
 
+// Enough state to resume the one unfinished session across a reload: the raw
+// window matches clustering needs to keep producing the same list, plus the
+// options they were recorded with.
+//
+// Deliberately NOT part of the session record and NOT synced. It is several
+// times the size of the record, it is meaningless to another device (which
+// cannot continue this device's capture), and it is scratch state — the
+// session itself is already safely in 'liveSessions'.
+const KEY_OPEN_LIVE_SESSION = 'openLiveSession';
+
 class Store {
     constructor() {
         this.state = {
@@ -1130,36 +1140,94 @@ class Store {
         }
     }
 
+    // Every mutation of one stored array runs through here, one at a time, per
+    // key.
+    //
+    // read → modify → write is not atomic against IndexedDB, so two of them
+    // overlapping both read the same array and the second write silently
+    // discards the first. That is not hypothetical here: the analysis loop
+    // checkpoints while the user is deleting a row, and a snapshot from
+    // another device merges in while both are happening. A delete losing that
+    // race reappears as the deleted session coming back.
+    _withRecords(key, mutate, event) {
+        this._writeChains = this._writeChains || new Map();
+        const previous = this._writeChains.get(key) || Promise.resolve();
+
+        const run = previous.then(async () => {
+            let records;
+            try {
+                records = await get(key) || [];
+            } catch (e) {
+                console.error(`IndexedDB read error (${key})`, e);
+                records = [];
+            }
+            const result = await mutate(records);
+            if (result && result.write) {
+                await this._dbSet(key, result.records);
+                if (event) eventBus.$emit(event);
+            }
+            return result ? result.value : undefined;
+        });
+
+        // The chain must survive a failed link, or one error stalls every
+        // later write for the life of the page.
+        this._writeChains.set(key, run.catch(() => {}));
+        return run;
+    }
+
     // Creates or updates a session record by id. liveAnalysis.js calls this
-    // repeatedly while a session is open (on each tune change, on Stop, and on
-    // Clear), so lookup is always by id rather than by list position.
+    // repeatedly while a session is open (on each tune change, on a checkpoint,
+    // on Pause and on Finish), so lookup is always by id rather than by list
+    // position.
     async upsertLiveSession(session) {
         if (!session || !session.id) return null;
-        const sessions = await this.getLiveSessions();
-        const index = sessions.findIndex(s => s.id === session.id);
         const record = { ...session };
-        if (index === -1) sessions.unshift(record);
-        else sessions[index] = record;
-        sessions.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
-        await this._dbSet(KEY_LIVE_SESSIONS, sessions.slice(0, MAX_LIVE_SESSIONS));
+        await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
+            const index = sessions.findIndex(s => s.id === record.id);
+            if (index === -1) sessions.unshift(record);
+            else sessions[index] = record;
+            sessions.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+            return { write: true, records: sessions.slice(0, MAX_LIVE_SESSIONS) };
+        }, 'liveSessionsChanged');
         this._syncPush('liveSessions', record);
-        eventBus.$emit('liveSessionsChanged');
         return record;
     }
 
     async deleteLiveSession(sessionID) {
-        const sessions = (await this.getLiveSessions()).filter(s => s.id !== sessionID);
-        await this._dbSet(KEY_LIVE_SESSIONS, sessions);
+        await this._withRecords(KEY_LIVE_SESSIONS, sessions => ({
+            write: true,
+            records: sessions.filter(s => s.id !== sessionID),
+        }), 'liveSessionsChanged');
         this._syncDelete('liveSessions', sessionID);
-        eventBus.$emit('liveSessionsChanged');
     }
 
     async clearLiveSessions() {
         // Ids collected before the wipe, for the same reason as clearSightings.
-        const sessionIDs = (await this.getLiveSessions()).map(s => s.id);
-        await this._dbSet(KEY_LIVE_SESSIONS, []);
+        let sessionIDs = [];
+        await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
+            sessionIDs = sessions.map(s => s.id);
+            return { write: true, records: [] };
+        }, 'liveSessionsChanged');
         this._syncDeleteMany('liveSessions', sessionIDs);
-        eventBus.$emit('liveSessionsChanged');
+    }
+
+    // ---- The one unfinished session, for resuming across a reload ----------
+
+    async getOpenLiveSession() {
+        try {
+            return await get(KEY_OPEN_LIVE_SESSION) || null;
+        } catch (e) {
+            console.error(`IndexedDB read error (${KEY_OPEN_LIVE_SESSION})`, e);
+            return null;
+        }
+    }
+
+    async setOpenLiveSession(state) {
+        await this._dbSet(KEY_OPEN_LIVE_SESSION, state);
+    }
+
+    async clearOpenLiveSession() {
+        await this._dbSet(KEY_OPEN_LIVE_SESSION, null);
     }
 
     // ---- Syncing places, sightings and live sessions -----------------------
@@ -1201,27 +1269,23 @@ class Store {
     // records to stay within it, and pushing that as authoritative would delete
     // another device's history — so only ids Firestore actually reported as
     // removed are removed here, and the cap is applied afterwards, locally.
-    async _mergeRemoteRecords(key, upserts, removals, { sortBy, cap, event }) {
-        let records;
-        try {
-            records = await get(key) || [];
-        } catch (e) {
-            console.error(`IndexedDB read error (${key})`, e);
-            records = [];
-        }
+    _mergeRemoteRecords(key, upserts, removals, { sortBy, cap, event }) {
+        // Through the same per-key chain as the local mutations: a snapshot
+        // arriving from another device while this one is mid-save is exactly
+        // the interleaving that loses a write.
+        return this._withRecords(key, records => {
+            const byID = new Map(records.map(r => [String(r.id), r]));
+            for (const record of upserts || []) {
+                if (record && record.id != null) byID.set(String(record.id), record);
+            }
+            for (const id of removals || []) byID.delete(String(id));
 
-        const byID = new Map(records.map(r => [String(r.id), r]));
-        for (const record of upserts || []) {
-            if (record && record.id != null) byID.set(String(record.id), record);
-        }
-        for (const id of removals || []) byID.delete(String(id));
+            const merged = [...byID.values()]
+                .sort((a, b) => (b[sortBy] || 0) - (a[sortBy] || 0))
+                .slice(0, cap);
 
-        const merged = [...byID.values()]
-            .sort((a, b) => (b[sortBy] || 0) - (a[sortBy] || 0))
-            .slice(0, cap);
-
-        await this._dbSet(key, merged);
-        eventBus.$emit(event);
+            return { write: true, records: merged };
+        }, event);
     }
 
     _subscribeRecordCollections(uid) {

@@ -39,6 +39,11 @@ function collapseConsecutiveSameTune(detections) {
 // rule stays "two minutes", which is something a user can predict.
 const REJECT_COOLDOWN_SECONDS = 120;
 
+// How long an edit or a still-playing tune waits before the session is written
+// again. Long enough that a burst of corrections costs one write, short enough
+// that closing the tab loses at most a few seconds of the list.
+const CHECKPOINT_DEBOUNCE_MS = 10_000;
+
 const DEFAULT_OPTIONS = {
     minTopScore: 0.4,
     minClusterHits: 2,
@@ -85,6 +90,37 @@ class LiveAnalysisService {
         // when geoTagDetections is off, but session history must be saved
         // regardless of that setting. See _maybeSaveSessionSnapshot().
         this._lastSavedTuneId = null;
+
+        // Whether the microphone is actually delivering audio right now.
+        // ensureMicHealthy() returns false when a capture has died and could
+        // not be reacquired, and the loop must not go on analysing the stale
+        // seconds still sitting in the ring buffer — a session that silently
+        // stops hearing anything while claiming to listen is the exact failure
+        // this whole health-check path exists to end. See _runLoop().
+        this.micHealthy = true;
+
+        // 'idle' | 'saving' | 'saved' | 'error', plus the last failure. A save
+        // that fails has to be visible: the session lives in memory until it is
+        // written, so a silent failure is the one way an evening can still be
+        // lost. See _persistSession().
+        this.saveState = 'idle';
+        this.saveError = null;
+        // Serialises session writes. Two saves racing (a checkpoint and a
+        // finish, say) can otherwise land out of order and leave the older
+        // snapshot as the stored one.
+        this._saveChain = Promise.resolve();
+        // Set once the session has a record on disk. Until then an empty tune
+        // list means "nothing recognised yet" and is not worth storing; after
+        // it, an empty list is a real edit (the user removed the last row) and
+        // MUST be written, or the removal silently un-happens on reload.
+        this._hasPersisted = false;
+        this._checkpointTimer = null;
+    }
+
+    // True when a session exists but the microphone is released — the state
+    // Pause leaves behind, and the one a reloaded app restores into.
+    get isPausedSession() {
+        return !!this.sessionId && !this.isRunning;
     }
 
     async start(windowSeconds, stepSeconds) {
@@ -109,6 +145,9 @@ class LiveAnalysisService {
             this._lastSavedTuneId = null;
             this._rejectedTunes.clear();
             this._sessionFix = null;
+            this._hasPersisted = false;
+            this.saveState = 'idle';
+            this.saveError = null;
             this.sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             this._sessionStartedAt = Date.now();
         }
@@ -119,6 +158,7 @@ class LiveAnalysisService {
 
         this.isRunning = true;
         this.isPaused = false;
+        this.micHealthy = true;
 
         // Warms one location fix for the whole session. Not awaited: the
         // session must start on the microphone, never on the radio. By the time
@@ -130,6 +170,12 @@ class LiveAnalysisService {
             await micService.startContinuous(windowSeconds);
         } catch (e) {
             this.isRunning = false;
+            // The session itself survives a microphone that would not open —
+            // resuming is exactly what the user will try next, and throwing
+            // away their tune list for a failed getUserMedia would be the
+            // worst possible answer to it.
+            this.micHealthy = false;
+            eventBus.$emit('liveAnalysisMicState', { healthy: false });
             throw e;
         }
 
@@ -144,24 +190,107 @@ class LiveAnalysisService {
         });
     }
 
+    // Releases the microphone and keeps the session open. Resuming is just
+    // start() again, which finds sessionId set and continues appending.
+    //
+    // There used to be a SECOND pause that stopped only the analysis loop and
+    // left the capture open. Two pause-shaped controls, one of which quietly
+    // held the microphone, is not a distinction a user in a pub can be asked
+    // to make — and the one that kept recording was the surprising default.
+    // Pause now means what it says.
     pause() {
-        if (!this.isRunning || this.isPaused) return;
-        this.isPaused = true;
-        this._stopTimer();
-        if (this._cancelSleep) { this._cancelSleep(); this._cancelSleep = null; }
-        eventBus.$emit('liveAnalysisPaused');
+        return this.stop();
     }
 
-    resume() {
-        if (!this.isRunning || !this.isPaused) return;
-        this.isPaused = false;
-        this._startTimer();
-        // Ring buffer has been accumulating — skip the initial fill wait
-        this._runLoop(this.options, true).catch(e => {
-            console.error('Live analysis loop error:', e);
-            this.stop();
-        });
-        eventBus.$emit('liveAnalysisResumed');
+    // Ends the session for good: a final save, then the state reset that makes
+    // the next start() a fresh session.
+    //
+    // Returns { ok, error }. The session is NOT closed when the save fails —
+    // the in-memory copy is the only remaining copy at that point, and
+    // throwing it away to honour a button press would be the one unrecoverable
+    // thing this code can do. The caller shows the error and offers a retry.
+    async finish() {
+        if (!this.sessionId) return { ok: true };
+        if (this.isRunning) await this.stop();
+
+        const result = await this._persistSession({ endedAt: Date.now() });
+        if (!result.ok) {
+            eventBus.$emit('liveAnalysisSaveState', this._saveSnapshot());
+            return result;
+        }
+
+        await this._clearResumeState();
+        this._resetSessionState();
+        eventBus.$emit('liveAnalysisFinished');
+        return result;
+    }
+
+    // Drops the open session WITHOUT saving. Only for a session the user has
+    // deleted from their history: finishing it would write the record straight
+    // back, which is what makes a delete look like it silently failed.
+    async abandon() {
+        if (this.isRunning) await this.stop({ flush: false });
+        this._cancelCheckpoint();
+        await this._clearResumeState();
+        this._resetSessionState();
+        eventBus.$emit('liveAnalysisFinished');
+    }
+
+    _resetSessionState() {
+        this.sessionId = null;
+        this._sessionStartedAt = null;
+        this._sessionFix = null;
+        this._lastSavedTuneId = null;
+        this._hasPersisted = false;
+        this.detections = [];
+        this._windowMatches = [];
+        this.elapsedSeconds = 0;
+        this._lastSightingTuneId = null;
+        this._rejectedTunes.clear();
+        this.saveState = 'idle';
+        this.saveError = null;
+    }
+
+    // Reacquires the microphone for a session that is running but has lost
+    // capture, without touching the session or its tune list.
+    async retryMicrophone() {
+        if (!this.isRunning) return false;
+        const healthy = await micService.ensureMicHealthy();
+        this.micHealthy = healthy;
+        eventBus.$emit('liveAnalysisMicState', { healthy });
+        return healthy;
+    }
+
+    // The user picked a different tune for a row than the one detected.
+    //
+    // The correction is written into the underlying WINDOW MATCHES, not onto
+    // the detection object, and that is the whole trick. Detections are
+    // rebuilt from those matches every cycle and their ids are not stable
+    // across a re-cluster (the id carries the cluster's index, which shifts as
+    // clusters merge or get filtered), so anything recorded against a
+    // detection is lost within seconds. Rewriting the matches means the very
+    // next re-cluster reproduces the correction on its own — and it stays
+    // consistent with removeDetection(), which finds matches by tuneId.
+    applyCorrection(id, selection) {
+        const target = this.detections.find(d => d.id === id);
+        if (!target || !selection || selection.tuneId == null) return;
+
+        const epsilon = 1e-6;
+        for (const match of this._windowMatches) {
+            const withinRow = match.tuneId === target.tuneId &&
+                match.startSeconds >= target.startSeconds - epsilon &&
+                match.startSeconds <= target.endSeconds + epsilon;
+            if (!withinRow) continue;
+            match.tuneId = selection.tuneId;
+            match.settingId = selection.settingId;
+            match.displayName = selection.title;
+            match.sourceUrl = selection.sourceUrl || '';
+            match.dataset = selection.dataset || '';
+        }
+
+        this._recluster();
+        this._scheduleCheckpoint();
+        eventBus.$emit('liveAnalysisUpdate', this.detections);
     }
 
     // Drops the underlying window matches that produced a given detection cluster,
@@ -177,6 +306,10 @@ class LiveAnalysisService {
             match.startSeconds <= target.endSeconds + epsilon
         ));
         this._recluster();
+        // A removal changes the list without changing the tail tune, so the
+        // edge trigger will not fire and the stored copy would keep the row
+        // the user just deleted until some later tune change happened to save.
+        this._scheduleCheckpoint();
         eventBus.$emit('liveAnalysisUpdate', this.detections);
     }
 
@@ -216,6 +349,7 @@ class LiveAnalysisService {
         // Nothing was on the list for a tune that never became a detection, but
         // the suppression above is still wanted, so tell the view either way.
         if (!removedAny) eventBus.$emit('liveAnalysisUpdate', this.detections);
+        else this._scheduleCheckpoint();
     }
 
     // Results for tunes the user has rejected, while the rejection still holds.
@@ -249,11 +383,15 @@ class LiveAnalysisService {
         );
     }
 
-    async stop() {
+    // `flush` is false only for abandon(), which is tearing down a session the
+    // user has just deleted — flushing there writes the deleted record
+    // straight back, and the delete looks like it silently failed.
+    async stop({ flush = true } = {}) {
         if (!this.isRunning) return this._stopPromise || Promise.resolve();
         this.isRunning = false;
         this.isPaused = false;
         this._stopTimer();
+        this._cancelCheckpoint();
         if (this._cancelSleep) { this._cancelSleep(); this._cancelSleep = null; }
         this._stopPromise = (async () => {
             try {
@@ -265,12 +403,12 @@ class LiveAnalysisService {
                 // this session resumable rather than finished — see clear().
                 //
                 // Awaited (unlike _maybeSaveSessionSnapshot's fire-and-forget
-                // calls) so it is ORDERED before clear()'s own finalizing write
-                // to the same record: clear() calls stop() first, and without
+                // calls) so it is ORDERED before finish()'s own finalizing
+                // write to the same record: finish() pauses first, and without
                 // this await the two writes could land out of order, with this
-                // one's endedAt:null overwriting clear()'s endedAt:Date.now()
-                // and silently un-finalizing the session.
-                await this._persistSession();
+                // one's endedAt:null overwriting finish()'s endedAt and
+                // silently un-finalizing the session.
+                if (flush) await this._persistSession();
                 await micService.stopContinuous();
             } finally {
                 eventBus.$emit('liveAnalysisStopped');
@@ -278,27 +416,6 @@ class LiveAnalysisService {
             }
         })();
         return this._stopPromise;
-    }
-
-    // Finalizes the open session (auto-saving it, so nothing is lost even if
-    // the user never taps Clear — see stop()'s own flush) and resets everything
-    // so the next start() is unambiguously fresh rather than a resume.
-    async clear() {
-        if (this.isRunning) await this.stop();
-        // endedAt set — this is what marks the record non-resumable and final.
-        await this._persistSession(Date.now());
-
-        this.sessionId = null;
-        this._sessionStartedAt = null;
-        this._sessionFix = null;
-        this._lastSavedTuneId = null;
-        this.detections = [];
-        this._windowMatches = [];
-        this.elapsedSeconds = 0;
-        this._lastSightingTuneId = null;
-        this._rejectedTunes.clear();
-
-        eventBus.$emit('liveAnalysisCleared');
     }
 
     _startTimer() {
@@ -330,8 +447,19 @@ class LiveAnalysisService {
             // freezes and we keep re-analysing the same stale seconds. Check
             // every cycle so the session recovers on its own rather than
             // needing the user to notice and restart it. See mic.js.
-            await micService.ensureMicHealthy();
-            const pcm = micService.getContinuousAudio();
+            const healthy = await micService.ensureMicHealthy();
+            if (healthy !== this.micHealthy) {
+                this.micHealthy = healthy;
+                eventBus.$emit('liveAnalysisMicState', { healthy });
+            }
+
+            // A capture that could not be reacquired leaves the ring buffer
+            // frozen on the last seconds it managed to record. Analysing those
+            // again produces confident detections of audio from minutes ago —
+            // worse than no detection, because the list then claims tunes were
+            // played that were not. Skip the cycle and try again next time;
+            // mic.js is backing off and retrying underneath.
+            const pcm = healthy ? micService.getContinuousAudio() : new Float32Array(0);
 
             if (pcm.length > 0) {
                 // Guard against a hung worker — generous ceiling well beyond
@@ -436,24 +564,73 @@ class LiveAnalysisService {
     // tracked separately (_lastSavedTuneId, not _lastSightingTuneId) because
     // _recordSighting() returns early when geoTagDetections is off, and session
     // history must be saved regardless of that setting.
+    // Returns the write so a caller that needs it settled can await it. The
+    // analysis loop deliberately does not — a slow disk must never stall
+    // detection — but everything else, tests included, should.
     _maybeSaveSessionSnapshot() {
         const latest = this.detections[this.detections.length - 1];
-        if (!latest || latest.tuneId == null) return;
-        if (String(latest.tuneId) === String(this._lastSavedTuneId)) return;
+        if (!latest || latest.tuneId == null) return Promise.resolve({ ok: true });
+        if (String(latest.tuneId) === String(this._lastSavedTuneId)) {
+            return Promise.resolve({ ok: true });
+        }
         this._lastSavedTuneId = latest.tuneId;
-        this._persistSession();
+        return this._persistSession();
     }
 
-    // Serialises the current detections into the session record and writes it.
-    // Called both fire-and-forget (from the edge-triggered
-    // _maybeSaveSessionSnapshot(), so a slow write never stalls the analysis
-    // loop) and awaited (from stop() and clear(), so the two writes a Clear
-    // during a running session produces — stop()'s flush and clear()'s own
-    // finalizing write — land in the right order; see stop()). No-ops before
-    // the first tune is recognised, so a session that never matched anything
-    // never clutters Past Sessions with an empty entry.
-    _persistSession(endedAt = null) {
-        if (!this.sessionId || !this.detections.length) return Promise.resolve();
+    // A save that is not tied to the tail tune changing.
+    //
+    // The edge trigger alone leaves real gaps: one long tune played for twenty
+    // minutes writes nothing after its first cycle, and an edit — a removal, a
+    // rejection, a corrected tune — changes the list without changing the tail
+    // at all. Debounced rather than immediate so a burst of corrections costs
+    // one write, and because these arrive from the UI thread while the loop is
+    // also saving.
+    _scheduleCheckpoint(delayMs = CHECKPOINT_DEBOUNCE_MS) {
+        if (!this.sessionId) return;
+        this._cancelCheckpoint();
+        this._checkpointTimer = setTimeout(() => {
+            this._checkpointTimer = null;
+            this._persistSession();
+        }, delayMs);
+    }
+
+    _cancelCheckpoint() {
+        if (this._checkpointTimer) {
+            clearTimeout(this._checkpointTimer);
+            this._checkpointTimer = null;
+        }
+    }
+
+    _saveSnapshot() {
+        return { state: this.saveState, error: this.saveError };
+    }
+
+    _setSaveState(state, error = null) {
+        if (this.saveState === state && this.saveError === error) return;
+        this.saveState = state;
+        this.saveError = error;
+        eventBus.$emit('liveAnalysisSaveState', this._saveSnapshot());
+    }
+
+    // Serialises the current detections into the session record and writes it,
+    // reporting { ok, error } rather than swallowing a failure — the in-memory
+    // list is the only copy until this succeeds, so a silent failure here is
+    // the one remaining way to lose an evening.
+    //
+    // Every write goes through _saveChain, so a checkpoint and a finish cannot
+    // land out of order and leave the older snapshot stored.
+    //
+    // Before the first successful write an empty tune list is "nothing has
+    // been recognised yet" and is not worth a record. Afterwards it is an edit
+    // — the user removed the last row — and must be written, or the removal
+    // un-happens on the next reload.
+    _persistSession({ endedAt = null } = {}) {
+        if (!this.sessionId) return Promise.resolve({ ok: true });
+        if (!this.detections.length && !this._hasPersisted) {
+            return Promise.resolve({ ok: true });
+        }
+
+        this._cancelCheckpoint();
         const record = {
             id: this.sessionId,
             startedAt: this._sessionStartedAt,
@@ -468,12 +645,113 @@ class LiveAnalysisService {
                 endSeconds: d.endSeconds,
                 bestScore: d.bestScore,
             })),
+            // How long the microphone was actually listening, which is not the
+            // same as endedAt - startedAt once a session has been paused.
+            listenedSeconds: Math.round(this.elapsedSeconds),
             lat: this._sessionFix ? this._sessionFix.lat : null,
             lon: this._sessionFix ? this._sessionFix.lon : null,
             accuracy: this._sessionFix ? (this._sessionFix.accuracy ?? null) : null,
         };
-        return store.upsertLiveSession(record)
-            .catch(e => console.warn('Could not save live session:', e && e.message));
+
+        this._setSaveState('saving');
+        this._saveChain = this._saveChain.then(async () => {
+            try {
+                await store.upsertLiveSession(record);
+                this._hasPersisted = true;
+                await this._saveResumeState();
+                this._setSaveState('saved');
+                return { ok: true };
+            } catch (e) {
+                const message = (e && e.message) || String(e);
+                console.warn('Could not save live session:', message);
+                this._setSaveState('error', message);
+                return { ok: false, error: message };
+            }
+        });
+        return this._saveChain;
+    }
+
+    // Enough state to carry an unfinished session across a reload.
+    //
+    // Local-only and separate from the session record: it holds the raw window
+    // matches, which are what clustering needs to keep producing the SAME list
+    // rather than starting a second one beside it. They are also several times
+    // the size of the record itself and of no interest to another device, so
+    // they have no business on the synced document.
+    _saveResumeState() {
+        if (!this.sessionId) return Promise.resolve();
+        return store.setOpenLiveSession({
+            sessionId: this.sessionId,
+            startedAt: this._sessionStartedAt,
+            elapsedSeconds: this.elapsedSeconds,
+            options: this.options,
+            windowMatches: this._windowMatches,
+            lastSightingTuneId: this._lastSightingTuneId,
+            lastSavedTuneId: this._lastSavedTuneId,
+            fix: this._sessionFix,
+        }).catch(e => console.warn('Could not save session resume state:', e && e.message));
+    }
+
+    _clearResumeState() {
+        return store.clearOpenLiveSession()
+            .catch(e => console.warn('Could not clear session resume state:', e && e.message));
+    }
+
+    // Restores an unfinished session left behind by a reload, WITHOUT opening
+    // the microphone. The user is offered Resume and Finish; listening again
+    // is always a deliberate act, never something a page load does on its own.
+    async restoreOpenSession() {
+        if (this.sessionId) return !!this.sessionId;
+        const saved = await store.getOpenLiveSession();
+        if (!saved || !saved.sessionId) return false;
+
+        const record = (await store.getLiveSessions())
+            .find(s => s.id === saved.sessionId);
+        // The resume state outlived the session record — the user deleted it
+        // from their history in another tab, or a save never landed. Either
+        // way there is nothing to resume into.
+        if (!record) {
+            await this._clearResumeState();
+            return false;
+        }
+
+        this.sessionId = saved.sessionId;
+        this._sessionStartedAt = saved.startedAt || record.startedAt || Date.now();
+        this.elapsedSeconds = saved.elapsedSeconds || 0;
+        this.options = saved.options || null;
+        this._windowMatches = saved.windowMatches || [];
+        this._lastSightingTuneId = saved.lastSightingTuneId ?? null;
+        this._lastSavedTuneId = saved.lastSavedTuneId ?? null;
+        this._sessionFix = saved.fix || null;
+        this._hasPersisted = true;
+        this.isRunning = false;
+        this.isPaused = true;
+
+        // Re-cluster from the matches where possible so a resumed session
+        // keeps appending to the same rows. With no options (a session saved
+        // by an older build) the stored tune list is still shown, but it can
+        // only be finished, not extended — clustering needs the window and
+        // step it was recorded with.
+        if (this.options && this._windowMatches.length) {
+            this._recluster();
+        } else {
+            this.detections = (record.tunes || []).map((tune, index) => ({
+                ...tune,
+                id: `restored-${index}`,
+                averageScore: tune.bestScore,
+                hits: 1,
+                alternatives: [],
+            }));
+        }
+
+        eventBus.$emit('liveAnalysisRestored', this.detections);
+        return true;
+    }
+
+    // Whether a restored session can actually keep clustering, or can only be
+    // read and finished.
+    canResume() {
+        return !!this.sessionId && !!this.options;
     }
 
     _sleepCancellable(ms) {
