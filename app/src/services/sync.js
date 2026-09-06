@@ -61,8 +61,9 @@ export function subscribe(uid, getLocalFavs, onChange) {
             }
         }
     }, err => {
-        console.error('Firestore favourites snapshot error:', err.code, err.message);
-        eventBus.$emit('syncError', 'Sync error — favourites may be out of date.');
+        console.error('[folkfriend sync] favourites listener failed:', err.code, err.message, err);
+        eventBus.$emit('syncError',
+            `Favourites sync failed (${err.code || 'unknown'}) — they may be out of date.`);
     });
 
     return () => { unsubFav(); };
@@ -109,6 +110,20 @@ export const SYNCED_COLLECTIONS = ['places', 'sightings', 'liveSessions'];
 // Firestore rejects a batch over 500 operations.
 const BATCH_LIMIT = 400;
 
+// One report per collection per minute. A rules rejection or a lost connection
+// fails EVERY record, and seeding can be thousands of them — without this the
+// first sign of trouble is a stampede of identical snackbars that buries the
+// one message worth reading.
+const REPORT_INTERVAL_MS = 60_000;
+const lastReported = new Map();
+
+function reportSyncProblem(key, message) {
+    const now = Date.now();
+    if (now - (lastReported.get(key) || 0) < REPORT_INTERVAL_MS) return;
+    lastReported.set(key, now);
+    eventBus.$emit('syncError', message);
+}
+
 function collectionRef(uid, name) {
     return collection(db, 'users', uid, name);
 }
@@ -152,8 +167,15 @@ export function subscribeCollection(uid, name, { applyRemote, getLocal }) {
             try {
                 await applyRemote(upserts, removals);
             } catch (e) {
-                console.error(`Could not apply remote ${name}:`, e && e.message);
-                eventBus.$emit('syncError', `Sync error — ${name} could not be saved on this device.`);
+                // NOT a sync failure: the data arrived, and writing it to this
+                // device's own IndexedDB is what failed — quota, or a browser
+                // blocking storage. Saying "sync error" sends anyone debugging
+                // it to the network and the security rules, which is the wrong
+                // half of the system entirely.
+                const reason = (e && (e.name || e.message)) || 'unknown error';
+                console.error(`[folkfriend sync] could not store ${name} locally:`, e);
+                reportSyncProblem(`local:${name}`,
+                    `Could not save ${name} on this device (${reason}).`);
                 return;
             }
         }
@@ -166,14 +188,23 @@ export function subscribeCollection(uid, name, { applyRemote, getLocal }) {
             if (missing.length) await pushRecords(uid, name, missing);
         }
     }, err => {
-        console.error(`Firestore ${name} snapshot error:`, err.code, err.message);
-        eventBus.$emit('syncError', `Sync error — ${name} may be out of date.`);
+        console.error(`[folkfriend sync] ${name} listener failed:`, err.code, err.message, err);
+        reportSyncProblem(`listen:${name}`,
+            `Could not read ${name} from your account (${err.code || 'unknown'}).`);
     });
 }
 
 export function pushRecord(uid, name, record) {
     if (!record || record.id == null) return Promise.resolve();
-    return setDoc(recordRef(uid, name, record.id), toPlain(record)).catch(console.error);
+    return setDoc(recordRef(uid, name, record.id), toPlain(record)).catch(e => {
+        // A rejected write here is usually the security rules refusing the
+        // document's shape, which is otherwise completely silent: the local
+        // copy saved fine and every view reads that, so the app looks perfect
+        // while nothing reaches the account.
+        console.error(`[folkfriend sync] could not push ${name}/${record.id}:`, e && e.code, e);
+        reportSyncProblem(`push:${name}`,
+            `Could not sync ${name} to your account (${(e && e.code) || 'unknown'}).`);
+    });
 }
 
 export async function pushRecords(uid, name, records) {
@@ -183,7 +214,11 @@ export async function pushRecords(uid, name, records) {
         for (const record of usable.slice(i, i + BATCH_LIMIT)) {
             batch.set(recordRef(uid, name, record.id), toPlain(record));
         }
-        await batch.commit().catch(console.error);
+        await batch.commit().catch(e => {
+            console.error(`[folkfriend sync] could not push a batch of ${name}:`, e && e.code, e);
+            reportSyncProblem(`push:${name}`,
+                `Could not sync ${name} to your account (${(e && e.code) || 'unknown'}).`);
+        });
     }
 }
 

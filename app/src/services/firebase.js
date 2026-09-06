@@ -41,7 +41,7 @@ export const firestore = getFirestore(firebaseApp);
 // depend on it, and does not: the app's own IndexedDB is the source of truth
 // for everything it displays, and Firestore is only the transport.
 enableMultiTabIndexedDbPersistence(firestore).catch(e => {
-    console.warn('Firestore offline cache unavailable:', e && e.code);
+    console.warn('[folkfriend sync] offline cache unavailable, using memory:', e && e.code, e);
 });
 
 export default firebaseApp;

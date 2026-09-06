@@ -89,11 +89,16 @@ const place = (over = {}) => ({
     ...over,
 });
 
-// liveAnalysis._persistSession.
+// liveAnalysis._persistSession — kept in step with the real record, including
+// the named/place fields and the per-tune alternatives.
 const liveSession = (over = {}) => ({
     id: 'session-1757000000000-q7w8e9',
     startedAt: 1757000000000,
     endedAt: 1757003600000,
+    name: '6 Sep, The Cobblestone',
+    customName: false,
+    placeName: 'The Cobblestone',
+    listenedSeconds: 3600,
     tunes: [{
         tuneId: 42,
         settingId: '420',
@@ -103,6 +108,9 @@ const liveSession = (over = {}) => ({
         startSeconds: 0,
         endSeconds: 55,
         bestScore: 0.87,
+        alternatives: [
+            { tuneId: 43, settingId: '430', sourceUrl: '', dataset: 'thesession', title: 'Another', score: 0.61 },
+        ],
     }],
     lat: 53.3489,
     lon: -6.2795,
