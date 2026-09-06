@@ -2454,10 +2454,27 @@ getting them wrong is tearing down a working microphone in a quiet room:
   does it emit `micLost`, because by then it is not going to fix itself and an
   app claiming to listen while hearing nothing is the whole problem.
 
-⚠️ `noiseSuppression` is left at the browser default (on, in Chrome) and is a
-known open question: it is tuned for speech, it can damage music, and an
-aggressive gate is the one plausible way a WORKING capture reaches digital
-silence. The escalation is what makes that survivable rather than a loop.
+**`noiseSuppression: false` is now requested explicitly**, alongside
+`echoCancellation: false`. All three of these constraints are the browser's
+VOICE processing chain, tuned for speech on a call, and this app feeds music to
+a pitch tracker: noise suppression is a speech-band gate that attacks exactly
+what a tune is made of, and it is also the one plausible way a WORKING capture
+reaches digital silence and trips the watchdog above.
+
+They are sent as BARE values, which the spec treats as **ideal**, not required.
+Sending them as `exact` would make `getUserMedia` reject outright on a browser
+that cannot honour them — trading damaged audio for no microphone at all.
+
+⚠️ **Asking is not getting, and on iOS especially.** WebKit decides much of
+this from its own audio session, and on iOS `echoCancellation: false` has
+historically been the lever that moves capture off the voice-processing audio
+unit (taking NS and AGC with it) rather than the individual flags. Safari also
+reports a narrower set from `getSettings()` than Chrome. So `micService.appliedAudioSettings`
+records what the track actually reports, an absent key reads as **"not
+reported"** rather than "off", and Settings → Audio displays it — because on an
+installed iPhone app there is no console to check without a Mac and a cable.
+**What iOS actually applies here is still unmeasured**; that readout is how to
+find out on the device that matters.
 
 Things that are easy to get wrong here, and how they're handled:
 

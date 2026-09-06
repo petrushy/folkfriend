@@ -76,14 +76,20 @@ const env = {
     gumDelayMs: 0,
     visibility: 'visible',
     visibilityListeners: [],
+    // Every constraints object getUserMedia was called with.
+    gumConstraints: [],
+    // What the fake device reports back from track.getSettings().
+    appliedSettings: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 48000 },
 };
 
 class FakeTrack {
-    constructor() {
+    constructor(applied = {}) {
         this.readyState = 'live';
         this.muted = false;
         this._listeners = {};
+        this._applied = applied;
     }
+    getSettings() { return this._applied; }
     addEventListener(name, fn) {
         (this._listeners[name] = this._listeners[name] || []).push(fn);
     }
@@ -100,7 +106,7 @@ class FakeTrack {
 }
 
 class FakeStream {
-    constructor() { this.track = new FakeTrack(); }
+    constructor() { this.track = new FakeTrack(env.appliedSettings); }
     getAudioTracks() { return [this.track]; }
     getTracks() { return [this.track]; }
 }
@@ -142,7 +148,8 @@ function installGlobals() {
         writable: true,
         value: {
             mediaDevices: {
-                async getUserMedia() {
+                async getUserMedia(constraints) {
+                    env.gumConstraints.push(constraints);
                     if (env.gumDelayMs) await new Promise(r => setTimeout(r, env.gumDelayMs));
                     if (env.gumFailure) throw env.gumFailure;
                     const stream = new FakeStream();
@@ -167,6 +174,8 @@ function resetEnv() {
     env.gumFailure = null;
     env.gumDelayMs = 0;
     env.visibility = 'visible';
+    env.appliedSettings = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 48000 };
+    env.gumConstraints = [];
     env.visibilityListeners = [];
 }
 
@@ -283,6 +292,40 @@ await test('a track muted by another app is re-acquired', async () => {
     assert.equal(await mic.ensureMicHealthy(), true);
     assert.equal(env.streams.length, 2);
     assert.equal(env.streams[1].track.muted, false);
+
+    await mic.stopContinuous();
+});
+
+await test('speech processing is asked to be off, as an ideal not a requirement', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+
+    const asked = env.gumConstraints[0].audio;
+    assert.equal(asked.echoCancellation, false);
+    assert.equal(asked.noiseSuppression, false,
+        'noise suppression is a speech-band gate and this app is feeding music to a pitch tracker');
+    // Bare values are IDEAL per the spec. Sending them as `exact` would make
+    // getUserMedia reject outright on a browser that cannot honour them, which
+    // would trade damaged audio for no microphone at all.
+    assert.equal(typeof asked.noiseSuppression, 'boolean', 'not an {exact: …} requirement');
+
+    await mic.stopContinuous();
+});
+
+await test('what the device actually applied is recorded, not what was asked', async () => {
+    // Asking and getting are different things, and iOS decides much of this
+    // from its own audio session. Safari also reports a narrower set than
+    // Chrome, so an absent key must read as "not reported", never as "off".
+    const { mic } = await loadMic();
+    // After loadMic, which resets the environment.
+    env.appliedSettings = { echoCancellation: false, autoGainControl: true, sampleRate: 44100 };
+    await mic.startContinuous(10);
+
+    assert.equal(mic.appliedAudioSettings.autoGainControl, true,
+        'the device overrode what was asked, and the app knows');
+    assert.equal(mic.appliedAudioSettings.noiseSuppression, undefined,
+        'a browser that will not say must not be shown as "off"');
+    assert.equal(mic.appliedAudioSettings.sampleRate, 44100);
 
     await mic.stopContinuous();
 });

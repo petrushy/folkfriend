@@ -2,14 +2,30 @@ import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import store from './store';
 
-// Build getUserMedia constraints. Echo cancellation stays off (it mangles
-// music). Auto gain control is opt-in via settings — it lets the OS boost quiet
-// input at capture time (better than post-capture digital gain, which can't
-// improve SNR), at the risk of level "pumping" on sustained notes.
+// Build getUserMedia constraints.
+//
+// All three of these are the browser's VOICE processing chain, tuned for
+// speech on a call, and this app is feeding music to a pitch tracker:
+//
+//  - echoCancellation mangles music outright.
+//  - noiseSuppression is a speech-band gate. It attacks exactly what a tune is
+//    made of — sustained tones, room reverb, the other instruments — and it is
+//    also the one plausible way a WORKING capture reaches digital silence, so
+//    it interacts badly with the silence watchdog below.
+//  - autoGainControl is opt-in via settings: it lets the OS boost quiet input
+//    at capture time (better than post-capture digital gain, which cannot
+//    improve SNR), at the risk of level "pumping" on sustained notes.
+//
+// Bare values are IDEAL constraints per the spec, not required ones, so a
+// browser that does not support one ignores it rather than failing
+// getUserMedia. Asking is therefore free; what actually gets applied is
+// recorded in appliedAudioSettings, because browsers differ and iOS in
+// particular decides much of this from its own audio session.
 function audioConstraints() {
     return {
         audio: {
             echoCancellation: false,
+            noiseSuppression: false,
             autoGainControl: !!store.userSettings.autoGainControl,
         }
     };
@@ -91,6 +107,12 @@ class MicService {
         this._lastSoundAt = 0;
         this._silenceStrikes = 0;
         this._silenceReported = false;
+
+        // What the device ACTUALLY applied, from the track itself — asking for
+        // a constraint and getting it are different things, and on an iPhone
+        // PWA there is no console to check without a Mac and a cable. Surfaced
+        // in Settings so it can be read on the device that matters.
+        this.appliedAudioSettings = null;
 
         // Running RMS accumulator. Both startRecording() and startContinuous()
         // feed every chunk through _accumulateRms(); UI components call
@@ -174,6 +196,29 @@ class MicService {
     }
 
     // Why the current capture is unusable, or null if it looks healthy.
+    // Records what the browser actually gave us. Safari reports a narrower set
+    // than Chrome, and a key that is simply absent means "this browser will not
+    // say" — which is different from "off" and must not be shown as off.
+    _recordAppliedSettings() {
+        const track = this._micTrack();
+        if (!track || typeof track.getSettings !== 'function') {
+            this.appliedAudioSettings = null;
+            return;
+        }
+        try {
+            const settings = track.getSettings() || {};
+            this.appliedAudioSettings = {
+                echoCancellation: settings.echoCancellation,
+                noiseSuppression: settings.noiseSuppression,
+                autoGainControl: settings.autoGainControl,
+                sampleRate: settings.sampleRate,
+            };
+            console.debug('Microphone audio processing applied:', this.appliedAudioSettings);
+        } catch (e) {
+            this.appliedAudioSettings = null;
+        }
+    }
+
     _captureFault() {
         if (!this.micStream) return 'no stream';
         const track = this._micTrack();
@@ -435,6 +480,7 @@ class MicService {
         }
 
         this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+        this._recordAppliedSettings();
         this._watchMicTrack();
         // A fresh capture gets a full window before anything judges it silent —
         // otherwise the very first health check condemns a pipeline that has
