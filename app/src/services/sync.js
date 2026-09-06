@@ -145,7 +145,17 @@ export function subscribeCollection(uid, name, { applyRemote, getLocal }) {
         }
 
         if (upserts.length || removals.length) {
-            await applyRemote(upserts, removals);
+            // The store's writes are strict now, so a failed merge rejects
+            // rather than quietly writing an empty collection. Inside an
+            // onSnapshot callback that would otherwise surface only as an
+            // unhandled rejection.
+            try {
+                await applyRemote(upserts, removals);
+            } catch (e) {
+                console.error(`Could not apply remote ${name}:`, e && e.message);
+                eventBus.$emit('syncError', `Sync error — ${name} could not be saved on this device.`);
+                return;
+            }
         }
 
         if (!seeded && !snap.metadata.fromCache) {

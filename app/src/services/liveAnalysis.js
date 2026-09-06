@@ -44,6 +44,12 @@ const REJECT_COOLDOWN_SECONDS = 120;
 // that closing the tab loses at most a few seconds of the list.
 const CHECKPOINT_DEBOUNCE_MS = 10_000;
 
+// However often updates arrive, a checkpoint lands at least this often. A pure
+// debounce is reset by every update, and the analysis loop produces one every
+// few seconds all evening — so the "debounced" save would never actually fire
+// during exactly the long unbroken session it exists for.
+const CHECKPOINT_MAX_WAIT_MS = 60_000;
+
 const DEFAULT_OPTIONS = {
     minTopScore: 0.4,
     minClusterHits: 2,
@@ -98,6 +104,7 @@ class LiveAnalysisService {
         // stops hearing anything while claiming to listen is the exact failure
         // this whole health-check path exists to end. See _runLoop().
         this.micHealthy = true;
+        this.micIssue = '';
 
         // 'idle' | 'saving' | 'saved' | 'error', plus the last failure. A save
         // that fails has to be visible: the session lives in memory until it is
@@ -115,6 +122,34 @@ class LiveAnalysisService {
         // MUST be written, or the removal silently un-happens on reload.
         this._hasPersisted = false;
         this._checkpointTimer = null;
+        // Latest time a checkpoint actually reached storage, so a stream of
+        // updates cannot postpone one indefinitely — see _scheduleCheckpoint().
+        this._lastCheckpointAt = 0;
+
+        // Bumped by every lifecycle transition (start, stop, finish, abandon).
+        // The analysis loop captures it and re-checks after every await: a
+        // transcription in flight when the user pauses resolves into a loop
+        // that no longer owns the microphone, and without this it sees
+        // isRunning true again after a quick Resume, appends its stale result
+        // and carries on running ALONGSIDE the new loop.
+        this._generation = 0;
+
+        // mic.js knows capture has died before the next analysis cycle asks,
+        // so adopt its verdict directly rather than waiting up to a full step
+        // to notice. This keeps micHealthy the SINGLE source of truth — the UI
+        // reads the service, never the microphone, so the two cannot disagree.
+        eventBus.$on('micLost', ({ reason } = {}) => {
+            if (!this.isRunning) return;
+            this.micHealthy = false;
+            this.micIssue = reason || '';
+            eventBus.$emit('liveAnalysisMicState', { healthy: false, reason: this.micIssue });
+        });
+        eventBus.$on('micRecovered', () => {
+            if (!this.isRunning) return;
+            this.micHealthy = true;
+            this.micIssue = '';
+            eventBus.$emit('liveAnalysisMicState', { healthy: true, reason: '' });
+        });
     }
 
     // True when a session exists but the microphone is released — the state
@@ -183,10 +218,11 @@ class LiveAnalysisService {
 
         this._startTimer();
 
+        const generation = ++this._generation;
         // Fire-and-forget: loop runs independently of any Vue component
-        this._runLoop(options, false).catch(e => {
+        this._runLoop(options, false, generation).catch(e => {
             console.error('Live analysis loop error:', e);
-            this.stop();
+            if (generation === this._generation) this.stop();
         });
     }
 
@@ -212,6 +248,7 @@ class LiveAnalysisService {
     async finish() {
         if (!this.sessionId) return { ok: true };
         if (this.isRunning) await this.stop();
+        this._generation++;
 
         const result = await this._persistSession({ endedAt: Date.now() });
         if (!result.ok) {
@@ -230,6 +267,7 @@ class LiveAnalysisService {
     // back, which is what makes a delete look like it silently failed.
     async abandon() {
         if (this.isRunning) await this.stop({ flush: false });
+        this._generation++;
         this._cancelCheckpoint();
         await this._clearResumeState();
         this._resetSessionState();
@@ -253,9 +291,13 @@ class LiveAnalysisService {
 
     // Reacquires the microphone for a session that is running but has lost
     // capture, without touching the session or its tune list.
+    // An explicit tap must actually try. ensureMicHealthy() honours the
+    // automatic retry backoff, which is right for the once-a-second watchdog
+    // and wrong here — during a backoff window the button would do nothing at
+    // all, which reads as broken.
     async retryMicrophone() {
         if (!this.isRunning) return false;
-        const healthy = await micService.ensureMicHealthy();
+        const healthy = await micService.ensureMicHealthy({ force: true });
         this.micHealthy = healthy;
         eventBus.$emit('liveAnalysisMicState', { healthy });
         return healthy;
@@ -392,9 +434,17 @@ class LiveAnalysisService {
         this.isPaused = false;
         this._stopTimer();
         this._cancelCheckpoint();
+        // Ends the run: any transcription still in flight resolves into a loop
+        // that no longer owns the microphone and must not touch anything.
+        this._generation++;
         if (this._cancelSleep) { this._cancelSleep(); this._cancelSleep = null; }
         this._stopPromise = (async () => {
             try {
+                // The microphone is released FIRST. Pause is a direct response
+                // to a tap — often "stop listening to me" — and making it wait
+                // on a storage write means slow or failing storage holds the
+                // microphone open for as long as it takes.
+                await micService.stopContinuous();
                 // Flushes the tail tune's up-to-date endSeconds —
                 // _maybeSaveSessionSnapshot() only saves on a tune CHANGE, so
                 // without this the last tune's duration in IndexedDB could be
@@ -409,7 +459,6 @@ class LiveAnalysisService {
                 // one's endedAt:null overwriting finish()'s endedAt and
                 // silently un-finalizing the session.
                 if (flush) await this._persistSession();
-                await micService.stopContinuous();
             } finally {
                 eventBus.$emit('liveAnalysisStopped');
                 this._stopPromise = null;
@@ -433,12 +482,18 @@ class LiveAnalysisService {
         }
     }
 
-    async _runLoop(options, skipInitialWait) {
+    // `generation` is the run this loop belongs to. Anything that ends a run —
+    // pause, finish, abandon, a restart — bumps it, and every await below is
+    // followed by a check, so a loop whose run is over stops touching state
+    // that now belongs to a different one.
+    async _runLoop(options, skipInitialWait, generation) {
+        const current = () => generation === this._generation;
+
         if (!skipInitialWait) {
             await this._sleepCancellable(options.windowSeconds * 1000);
         }
 
-        while (this.isRunning && !this.isPaused) {
+        while (this.isRunning && !this.isPaused && current()) {
             const cycleStart = Date.now();
             // Capture can die under us mid-session: the AudioContext suspends
             // (backgrounded tab, or a browser power-saving heuristic), or the
@@ -448,6 +503,7 @@ class LiveAnalysisService {
             // every cycle so the session recovers on its own rather than
             // needing the user to notice and restart it. See mic.js.
             const healthy = await micService.ensureMicHealthy();
+            if (!current()) break;
             if (healthy !== this.micHealthy) {
                 this.micHealthy = healthy;
                 eventBus.$emit('liveAnalysisMicState', { healthy });
@@ -469,7 +525,11 @@ class LiveAnalysisService {
                 let response;
                 try {
                     response = await Promise.race([
-                        ffBackend.transcribeAndQueryPCMSignal(pcm),
+                        // Re-read rather than using the rate captured at
+                        // start(): a recovery reopens the pipeline and can come
+                        // back on a different rate.
+                        ffBackend.transcribeAndQueryPCMSignal(
+                            pcm, micService.sampleRate || this._sampleRate),
                         new Promise((_, reject) => setTimeout(
                             () => reject(new Error('analysis timeout')),
                             analysisCeilingMs,
@@ -483,6 +543,10 @@ class LiveAnalysisService {
                 const usableResults = response.results
                     ? this._withoutRejectedTunes(response.results)
                     : [];
+
+                // The transcription above is the long await, and the one a
+                // pause is most likely to land inside.
+                if (!current()) break;
 
                 if (this.isRunning && !this.isPaused && !response.error && usableResults.length > 0) {
                     const previousTuneId = this.detections.length > 0
@@ -508,12 +572,17 @@ class LiveAnalysisService {
                         this._recluster();
                         this._recordSighting();
                         this._maybeSaveSessionSnapshot();
+                        // Even when the tail tune has not changed, the tune's
+                        // duration, the elapsed time and the resume state have
+                        // — so a tune played for twenty minutes would
+                        // otherwise store nothing after its first cycle.
+                        this._scheduleCheckpoint();
                         eventBus.$emit('liveAnalysisUpdate', this.detections);
                     }
                 }
             }
 
-            if (!this.isRunning || this.isPaused) break;
+            if (!this.isRunning || this.isPaused || !current()) break;
             // Subtract the time already spent analysing so the effective step
             // stays close to stepSeconds regardless of backend latency.
             const analysisMs = Date.now() - cycleStart;
@@ -587,11 +656,24 @@ class LiveAnalysisService {
     // also saving.
     _scheduleCheckpoint(delayMs = CHECKPOINT_DEBOUNCE_MS) {
         if (!this.sessionId) return;
+
+        // Overdue: save now rather than pushing the deadline out again.
+        const since = Date.now() - (this._lastCheckpointAt || 0);
+        if (this._lastCheckpointAt && since >= CHECKPOINT_MAX_WAIT_MS) {
+            this._cancelCheckpoint();
+            this._persistSession();
+            return;
+        }
+
+        // Otherwise debounce, but never past the ceiling.
+        const remaining = this._lastCheckpointAt
+            ? Math.max(0, CHECKPOINT_MAX_WAIT_MS - since)
+            : CHECKPOINT_MAX_WAIT_MS;
         this._cancelCheckpoint();
         this._checkpointTimer = setTimeout(() => {
             this._checkpointTimer = null;
             this._persistSession();
-        }, delayMs);
+        }, Math.min(delayMs, remaining));
     }
 
     _cancelCheckpoint() {
@@ -658,6 +740,10 @@ class LiveAnalysisService {
             try {
                 await store.upsertLiveSession(record);
                 this._hasPersisted = true;
+                this._lastCheckpointAt = Date.now();
+                // Reported, not swallowed: resume state that failed to save is
+                // a session that cannot be recovered after a reload, and the
+                // user has no way to know unless we say so.
                 await this._saveResumeState();
                 this._setSaveState('saved');
                 return { ok: true };
@@ -689,7 +775,7 @@ class LiveAnalysisService {
             lastSightingTuneId: this._lastSightingTuneId,
             lastSavedTuneId: this._lastSavedTuneId,
             fix: this._sessionFix,
-        }).catch(e => console.warn('Could not save session resume state:', e && e.message));
+        });
     }
 
     _clearResumeState() {
@@ -705,12 +791,20 @@ class LiveAnalysisService {
         const saved = await store.getOpenLiveSession();
         if (!saved || !saved.sessionId) return false;
 
-        const record = (await store.getLiveSessions())
+        // Strict: a read that FAILED must not be read as "the record is gone",
+        // because the next line would then throw away recoverable state over a
+        // transient disk error.
+        const record = (await store.getLiveSessionsStrict())
             .find(s => s.id === saved.sessionId);
+
         // The resume state outlived the session record — the user deleted it
         // from their history in another tab, or a save never landed. Either
         // way there is nothing to resume into.
-        if (!record) {
+        //
+        // A record with endedAt is FINISHED, and resuming it would reopen a
+        // session the user has already closed — appending tonight's tunes to
+        // last night's evening.
+        if (!record || record.endedAt) {
             await this._clearResumeState();
             return false;
         }

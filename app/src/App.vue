@@ -205,6 +205,10 @@
         </v-app-bar>
 
         <v-main>
+            <!-- Follows the user everywhere: a session survives navigating
+                 away from Session Analysis, so its status and controls have to
+                 as well. -->
+            <SessionStatusBar />
             <router-view />
         </v-main>
 
@@ -259,10 +263,11 @@ import {
 } from '@mdi/js';
 import utils from '@/js/utils.js';
 import TuneBackgroundDialog from '@/components/TuneBackgroundDialog.vue';
+import SessionStatusBar from '@/components/SessionStatusBar.vue';
 
 export default {
     name: 'App',
-    components: { TuneBackgroundDialog },
+    components: { TuneBackgroundDialog, SessionStatusBar },
     data: () => ({
         drawer: null,
         menu: null,

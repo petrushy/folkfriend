@@ -303,12 +303,26 @@ class Store {
         return this.selectedDatasets();
     }
 
+    // Lenient write: logs and continues. Right for the many callers whose data
+    // can be regenerated or re-fetched, and who have no way to report a failure
+    // to the user anyway.
     async _dbSet(key, value) {
         try {
             await set(key, value);
         } catch (e) {
             console.error(`IndexedDB write error (${key})`, e);
         }
+    }
+
+    // Strict write: rethrows.
+    //
+    // A live session lives in memory until it is written, so swallowing the
+    // failure here means the UI is told the save succeeded, "Finish session"
+    // discards the only copy, and the evening is gone — the exact outcome the
+    // save-error handling exists to prevent. Quota is the realistic cause and
+    // it is not rare on a phone holding a 40 MB tune index.
+    async _dbSetStrict(key, value) {
+        await set(key, value);
     }
 
     async updateUserSettings(userSettings) {
@@ -1154,16 +1168,16 @@ class Store {
         const previous = this._writeChains.get(key) || Promise.resolve();
 
         const run = previous.then(async () => {
-            let records;
-            try {
-                records = await get(key) || [];
-            } catch (e) {
-                console.error(`IndexedDB read error (${key})`, e);
-                records = [];
-            }
+            // A FAILED READ IS NOT AN EMPTY COLLECTION. Substituting [] here
+            // and then writing the mutation on top of it turns one unreadable
+            // read into a wiped history — the read failed, so we have no idea
+            // what was there, and the one thing we must not do is claim it was
+            // nothing. Let it propagate; the caller reports it and the stored
+            // copy is left exactly as it was.
+            const records = await get(key) || [];
             const result = await mutate(records);
             if (result && result.write) {
-                await this._dbSet(key, result.records);
+                await this._dbSetStrict(key, result.records);
                 if (event) eventBus.$emit(event);
             }
             return result ? result.value : undefined;
@@ -1222,12 +1236,22 @@ class Store {
         }
     }
 
+    // Strict, like the session writes: resume state that silently failed to
+    // save is a session that silently cannot be resumed after a reload.
     async setOpenLiveSession(state) {
-        await this._dbSet(KEY_OPEN_LIVE_SESSION, state);
+        await this._dbSetStrict(KEY_OPEN_LIVE_SESSION, state);
     }
 
     async clearOpenLiveSession() {
-        await this._dbSet(KEY_OPEN_LIVE_SESSION, null);
+        await this._dbSetStrict(KEY_OPEN_LIVE_SESSION, null);
+    }
+
+    // Rethrows rather than answering "no sessions" for a read that failed.
+    // restoreOpenSession() decides whether to DROP the resume state on the
+    // answer, so a swallowed read error there would throw away a recoverable
+    // session because the disk hiccuped once.
+    async getLiveSessionsStrict() {
+        return await get(KEY_LIVE_SESSIONS) || [];
     }
 
     // ---- Syncing places, sightings and live sessions -----------------------

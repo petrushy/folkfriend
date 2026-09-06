@@ -26,116 +26,31 @@
         </v-btn-toggle>
 
         <!--
-            The session bar is shown on EVERY tab while a session is open.
-            Listening is a background activity, not a mode: browsing past
-            sessions or analysing a file must never make the microphone
-            invisible, or the only way to find out whether the app is still
-            recording is to go looking for it.
+            The session's own status and controls live in SessionStatusBar,
+            rendered by App.vue so they follow the user off this page. What
+            stays here is the detail that only makes sense beside the tune
+            list — the restore notice and the reduced-capability warning.
         -->
-        <v-card v-if="live.hasSession" class="pa-4 my-3 session-bar" :class="sessionBarClass">
-            <div class="d-flex flex-wrap align-center" style="gap: 12px;">
-                <v-chip small :color="liveStatus.color" text-color="white">
-                    <v-icon left x-small>{{ liveStatus.icon }}</v-icon>
-                    {{ liveStatus.label }}
-                </v-chip>
+        <v-alert
+            v-if="live.restoreError"
+            type="warning"
+            dense
+            text
+            class="my-3"
+        >
+            {{ live.restoreError }}
+        </v-alert>
 
-                <span class="text--secondary">
-                    {{ formatSecondsAsClock(live.elapsedSeconds) }} listened
-                    &middot;
-                    {{ live.detections.length }} {{ live.detections.length === 1 ? 'tune' : 'tunes' }}
-                </span>
-
-                <VolumeMeter v-if="live.capturing && live.micHealthy" :active="true" />
-
-                <v-spacer />
-
-                <v-btn
-                    v-if="live.capturing"
-                    small
-                    text
-                    color="secondary"
-                    @click="pauseLive"
-                >
-                    Pause
-                </v-btn>
-                <v-btn
-                    v-else-if="live.canResume"
-                    small
-                    color="primary"
-                    :disabled="!indexLoaded || live.starting"
-                    :loading="live.starting"
-                    @click="resumeLive"
-                >
-                    Resume
-                </v-btn>
-
-                <v-btn
-                    v-if="live.capturing"
-                    small
-                    color="primary"
-                    @click="followMode = true"
-                >
-                    <v-icon left x-small>{{ icons.clef }}</v-icon>
-                    Follow Score
-                </v-btn>
-
-                <v-btn
-                    small
-                    text
-                    color="secondary"
-                    :loading="live.finishing"
-                    @click="finishLiveSession"
-                >
-                    Finish session
-                </v-btn>
-            </div>
-
-            <!--
-                A microphone that has died mid-session used to be invisible:
-                the list simply stopped growing. It is now stated, and the
-                retry reacquires capture without touching the session.
-            -->
-            <v-alert
-                v-if="live.capturing && !live.micHealthy"
-                type="warning"
-                dense
-                text
-                class="mt-3 mb-0"
-            >
-                <div class="d-flex flex-wrap align-center" style="gap: 12px;">
-                    <span>
-                        The microphone stopped delivering audio{{ live.micMessage ? ` (${live.micMessage})` : '' }}.
-                        Nothing is being detected until it comes back — your tune list is safe.
-                    </span>
-                    <v-btn small :loading="live.retryingMic" @click="retryMicrophone">
-                        Retry microphone
-                    </v-btn>
-                </div>
-            </v-alert>
-
-            <v-alert
-                v-if="live.saveState === 'error'"
-                type="error"
-                dense
-                text
-                class="mt-3 mb-0"
-            >
-                <div class="d-flex flex-wrap align-center" style="gap: 12px;">
-                    <span>
-                        This session could not be saved{{ live.saveError ? `: ${live.saveError}` : '' }}.
-                        It is still here — nothing has been lost yet — but it will not survive closing the app.
-                    </span>
-                    <v-btn small :loading="live.retryingSave" @click="retrySave">
-                        Retry save
-                    </v-btn>
-                </div>
-            </v-alert>
-
-            <p v-if="!live.canResume" class="mt-3 mb-0 caption text--secondary">
-                This session was restored after the app was reopened. Its tune list is complete and can be
-                finished, but listening again would start a new session rather than continuing this one.
-            </p>
-        </v-card>
+        <v-alert
+            v-if="live.hasSession && !live.canResume"
+            type="info"
+            dense
+            text
+            class="my-3"
+        >
+            This session was restored after the app was reopened. Its tune list is complete and can be
+            finished, but listening again would start a new session rather than continuing this one.
+        </v-alert>
 
         <v-card v-if="viewMode === 'file'" class="pa-5 my-3">
             <h2 class="text-h6 mb-3">
@@ -268,8 +183,22 @@
             </p>
         </v-card>
 
+        <v-card v-if="viewMode === 'live' && live.capturing" class="pa-5 my-3">
+            <div class="d-flex flex-wrap align-center" style="gap: 12px;">
+                <v-btn color="primary" @click="followMode = true">
+                    <v-icon left small>{{ icons.clef }}</v-icon>
+                    Follow Score
+                </v-btn>
+                <VolumeMeter :active="live.micHealthy" />
+                <span class="text--secondary">
+                    Pause, Resume and Finish are in the session bar at the top of the screen — they stay
+                    there wherever you navigate.
+                </span>
+            </div>
+        </v-card>
+
         <!-- Live controls: only the ones that START a session. Everything for
-             a session already open lives in the persistent bar above. -->
+             a session already open lives in the app-level session bar. -->
         <v-card v-if="viewMode === 'live' && !live.hasSession" class="pa-5 my-3">
             <div class="d-flex flex-wrap align-center" style="gap: 12px;">
                 <v-btn
@@ -652,7 +581,6 @@ import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
 import {
     mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble, mdiStar, mdiStarOutline,
-    mdiPause, mdiRecordCircleOutline, mdiAlertCircleOutline,
 } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
@@ -697,6 +625,7 @@ const emptyLiveState = () => ({
     micHealthy: true,
     micMessage: '',
     micError: '',
+    restoreError: '',
     saveState: 'idle',
     saveError: null,
     starting: false,
@@ -745,9 +674,6 @@ export default {
                 clef: mdiMusicClefTreble,
                 star: mdiStar,
                 starOutline: mdiStarOutline,
-                pause: mdiPause,
-                recording: mdiRecordCircleOutline,
-                alert: mdiAlertCircleOutline,
             },
         };
     },
@@ -785,19 +711,6 @@ export default {
         indexStatusText() {
             return this.indexLoaded ? 'ready' : 'loading…';
         },
-        liveStatus() {
-            if (this.live.capturing && !this.live.micHealthy) {
-                return { label: 'Microphone unavailable', color: 'warning', icon: this.icons.alert };
-            }
-            if (this.live.capturing) {
-                return { label: 'Listening', color: 'red darken-1', icon: this.icons.recording };
-            }
-            return { label: 'Paused', color: 'grey darken-1', icon: this.icons.pause };
-        },
-        sessionBarClass() {
-            if (this.live.capturing && !this.live.micHealthy) return 'session-bar--warning';
-            return this.live.capturing ? 'session-bar--live' : 'session-bar--paused';
-        },
         fileStageLabel() {
             if (this.file.stage === 'decoding') return 'Decoding audio';
             if (this.file.stage === 'analyzing') return 'Scanning windows';
@@ -820,6 +733,9 @@ export default {
     },
     created() {
         this._pcm = null;
+        // Set by beforeDestroy so an in-flight restore cannot act on a view
+        // the user has already left.
+        this._destroyed = false;
         // Set when ?follow=1 asked for a session that could not be started yet
         // because the tune index was still loading. Non-reactive: nothing
         // renders it.
@@ -852,23 +768,14 @@ export default {
             this._syncLiveFromService();
             this.live.detections = detections.map(d => this._buildDetectionRow(d));
         };
-        this._onLiveMicState = ({ healthy }) => {
+        this._onLiveMicState = ({ healthy, reason }) => {
             this.live.micHealthy = healthy;
-            if (healthy) this.live.micMessage = '';
+            this.live.micMessage = healthy ? '' : (reason || this.live.micMessage);
         };
         this._onLiveSaveState = ({ state, error }) => {
             this.live.saveState = state;
             this.live.saveError = error;
         };
-        this._onMicLost = (detail) => {
-            this.live.micHealthy = false;
-            this.live.micMessage = (detail && detail.reason) || '';
-        };
-        this._onMicRecovered = () => {
-            this.live.micHealthy = true;
-            this.live.micMessage = '';
-        };
-
         // Past Sessions
         this._onLiveSessionsChanged = () => {
             if (this.viewMode === 'history') this.refreshPastSessions();
@@ -902,8 +809,6 @@ export default {
         eventBus.$on('liveAnalysisRestored', this._onLiveRestored);
         eventBus.$on('liveAnalysisMicState', this._onLiveMicState);
         eventBus.$on('liveAnalysisSaveState', this._onLiveSaveState);
-        eventBus.$on('micLost', this._onMicLost);
-        eventBus.$on('micRecovered', this._onMicRecovered);
         eventBus.$on('liveSessionsChanged', this._onLiveSessionsChanged);
         eventBus.$on('fileAnalysisStage', this._onFileStage);
         eventBus.$on('fileAnalysisOptions', this._onFileOptions);
@@ -916,6 +821,7 @@ export default {
     },
     beforeDestroy() {
         this._pcm = null;
+        this._destroyed = true;
         // Withdraws a ?follow=1 auto-start that has not fired yet. The
         // eventBus unsubscribe below covers a late indexLoaded, but not the
         // $nextTick callback created() already queued — that one holds its own
@@ -933,8 +839,6 @@ export default {
         eventBus.$off('liveAnalysisRestored', this._onLiveRestored);
         eventBus.$off('liveAnalysisMicState', this._onLiveMicState);
         eventBus.$off('liveAnalysisSaveState', this._onLiveSaveState);
-        eventBus.$off('micLost', this._onMicLost);
-        eventBus.$off('micRecovered', this._onMicRecovered);
         eventBus.$off('liveSessionsChanged', this._onLiveSessionsChanged);
         eventBus.$off('fileAnalysisStage', this._onFileStage);
         eventBus.$off('fileAnalysisOptions', this._onFileOptions);
@@ -955,6 +859,40 @@ export default {
                 return;
             }
 
+            // RESTORE FIRST, including on the one-tap entry points.
+            //
+            // ?live=1 / ?follow=1 is the shortcut people actually use to start
+            // listening, so resolving it before looking for an unfinished
+            // session is precisely the path that would silently orphan last
+            // night's — a new session would open beside it and the old one
+            // would sit in Past Sessions labelled Unfinished for ever. Recovery
+            // has to be offered on every route into the view or it may as well
+            // not exist.
+            let restored = false;
+            try {
+                restored = await liveAnalysisService.restoreOpenSession();
+            } catch (e) {
+                // A failed read is not "no session" — say so rather than
+                // starting a second session on top of one we cannot see.
+                console.warn('Could not check for an unfinished session:', e && e.message);
+                this.live.restoreError =
+                    'Could not check for an unfinished session. Starting a new one may leave it behind.';
+            }
+
+            // The view may have been left, or a session started, while that
+            // read was in flight.
+            if (this._destroyed) return;
+            if (restored) {
+                this.viewMode = 'live';
+                this._syncLiveFromService();
+                // An unfinished session is NOT resumed automatically, even by
+                // ?follow=1: continuing last night's evening is a decision, not
+                // something a deep link should make. The bar offers Resume and
+                // Finish, and ?follow=1 waits for that answer.
+                if (this._routeWantsLive()) this._autoFollowPending = false;
+                return;
+            }
+
             if (this._routeWantsLive()) {
                 // ?follow=1 is the one-tap "show me what is playing" entry
                 // point: start listening and open the score, with no further
@@ -966,16 +904,6 @@ export default {
                     this._autoFollowPending = true;
                     this.$nextTick(() => this._runPendingAutoFollow());
                 }
-                return;
-            }
-
-            // A session the app was recording when it was last closed. It is
-            // restored WITHOUT opening the microphone — listening again is
-            // always a deliberate act — and offered Resume and Finish.
-            const restored = await liveAnalysisService.restoreOpenSession();
-            if (restored) {
-                this.viewMode = 'live';
-                this._syncLiveFromService();
                 return;
             }
 
@@ -1255,7 +1183,14 @@ export default {
         // Runs the ?follow=1 auto-start, or remembers it for the moment the
         // index becomes usable. Called again from the indexLoaded handler.
         _runPendingAutoFollow() {
-            if (!this._autoFollowPending) return;
+            if (!this._autoFollowPending || this._destroyed) return;
+            // A session may have been restored, or started by hand, while this
+            // was waiting for the tune index.
+            if (liveAnalysisService.sessionId) {
+                this._autoFollowPending = false;
+                this._syncLiveFromService();
+                return;
+            }
             if (!this.canStartLive) return;
             this._autoFollowPending = false;
             this.startListeningAndFollow();
@@ -1510,34 +1445,10 @@ export default {
     height: auto;
 }
 
-.session-bar {
-    border-left: 4px solid transparent;
-}
-
-.session-bar--live {
-    border-left-color: #c62828;
-}
-
-.session-bar--paused {
-    border-left-color: #9e9e9e;
-}
-
-.session-bar--warning {
-    border-left-color: #f9a825;
-}
-
 @media (max-width: 959px) {
     .drop-zone {
         padding: 20px;
     }
 }
 
-/* On a phone the session bar is the control surface for the whole feature, so
-   its buttons get a full-width row of their own rather than being squeezed
-   beside the status text. */
-@media (max-width: 599px) {
-    .session-bar .v-btn {
-        flex: 1 1 auto;
-    }
-}
 </style>

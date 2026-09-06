@@ -55,10 +55,26 @@ async function test(name, fn) {
 // --- store.js half ----------------------------------------------------------
 
 const STORE_FAKES = {
+    // Failures are injected at the IndexedDB boundary, which is where they
+    // actually happen (quota, a closed connection). Faking a rejecting
+    // store.upsertLiveSession() instead tests a layer that cannot fail in
+    // production — store._dbSet used to swallow the error, so the real code
+    // never saw one and the whole save-error path was dead.
     'fake-idb.mjs': `
 export const __db = new Map();
-export async function get(key) { return __db.get(key); }
-export async function set(key, value) { __db.set(key, value); }
+export let __failWrites = new Set();
+export let __failReads = new Set();
+export function __failWritesTo(key) { __failWrites.add(key); }
+export function __failReadsOf(key) { __failReads.add(key); }
+export function __allowAll() { __failWrites.clear(); __failReads.clear(); }
+export async function get(key) {
+    if (__failReads.has(key)) throw new Error('read failed');
+    return __db.get(key);
+}
+export async function set(key, value) {
+    if (__failWrites.has(key)) throw new Error('QuotaExceededError');
+    __db.set(key, value);
+}
 export async function del(key) { __db.delete(key); }
 `,
     'fake-eventbus.mjs': `
@@ -139,11 +155,12 @@ async function loadStore() {
 
     const idb = await import(path.join(storeTmpDir, 'fake-idb.mjs'));
     idb.__db.clear();
+    idb.__allowAll();
     const bus = await import(path.join(storeTmpDir, 'fake-eventbus.mjs'));
     bus.__events.length = 0;
 
     const mod = await import(`${path.join(storeTmpDir, 'store.mjs')}?v=${Math.random()}`);
-    return { store: mod.default, bus };
+    return { store: mod.default, bus, idb };
 }
 
 // --- liveAnalysis.js half ----------------------------------------------------
@@ -153,15 +170,39 @@ export let __healthy = true;
 export let __startCalls = 0;
 export function __setHealthy(v) { __healthy = v; }
 export function __resetCalls() { __startCalls = 0; }
-export function __reset() { __healthy = true; __startCalls = 0; }
+export function __reset() { __healthy = true; __startCalls = 0; __pcm = new Float32Array(0); }
+export let __pcm = new Float32Array(0);
+export function __setPcm(n) { __pcm = new Float32Array(n); }
 export default {
     audioCtx: null,
+    sampleRate: 44100,
     async startContinuous() { __startCalls++; },
     async stopContinuous() {},
     async ensureMicHealthy() { return __healthy; },
-    getContinuousAudio() { return new Float32Array(0); },
+    getContinuousAudio() { return __pcm; },
 };`;
-const FAKE_BACKEND = `export default { async transcribeAndQueryPCMSignal() { return { results: [] }; } };`;
+// Controllable: a test can hold a transcription open across a Pause, which is
+// the window in which a stale loop does its damage.
+const FAKE_BACKEND = `
+export const __calls = [];
+export let __pending = null;
+export function __holdNext() {
+    let release;
+    __pending = { promise: new Promise(r => { release = r; }), release };
+    return __pending;
+}
+export function __reset() { __calls.length = 0; __pending = null; }
+export default {
+    async transcribeAndQueryPCMSignal(pcm, sampleRate) {
+        __calls.push({ length: pcm.length, sampleRate });
+        if (__pending) {
+            const held = __pending;
+            __pending = null;
+            return held.promise;
+        }
+        return { results: [] };
+    },
+};`;
 const FAKE_GEO = `
 export let __fix = null;
 export function __setFix(f) { __fix = f; }
@@ -195,6 +236,7 @@ export default {
         return record;
     },
     async getLiveSessions() { return __sessions.slice(); },
+    async getLiveSessionsStrict() { return __sessions.slice(); },
     async setOpenLiveSession(state) { __openSession = state; },
     async getOpenLiveSession() { return __openSession; },
     async clearOpenLiveSession() { __openSession = null; },
@@ -247,6 +289,8 @@ async function loadService({ keepStore = false } = {}) {
     const geo = await import(path.join(serviceTmpDir, 'fake-geo.mjs'));
     const bus = await import(path.join(serviceTmpDir, 'fake-eventbus.mjs'));
     const mic = await import(path.join(serviceTmpDir, 'fake-mic.mjs'));
+    const backend = await import(path.join(serviceTmpDir, 'fake-backend.mjs'));
+    backend.__reset();
     // keepStore models a RELOAD: a brand new service instance over storage
     // that still holds what the previous one wrote.
     if (!keepStore) store.__reset();
@@ -257,7 +301,7 @@ async function loadService({ keepStore = false } = {}) {
     const mod = await import(`${path.join(serviceTmpDir, 'liveAnalysis.mjs')}?v=${Math.random()}`);
     const service = mod.default;
 
-    return { service, store, geo, bus, mic };
+    return { service, store, geo, bus, mic, backend };
 }
 
 // One window match, as _runLoop would push it.
@@ -347,6 +391,47 @@ async function run() {
         await store.upsertLiveSession({ id: 's1', startedAt: 1, tunes: [] });
         await store.importUserData(JSON.stringify({ version: 4, historyItems: [], favouriteItems: [] }));
         assert.equal((await store.getLiveSessions()).length, 1, 'an older backup must not delete sessions');
+    });
+
+    console.log('\nstore — a failed write is a failure, not a success');
+
+    await test('a failed session write rejects instead of reporting success', async () => {
+        const { store, idb } = await loadStore();
+        idb.__failWritesTo('liveSessions');
+
+        await assert.rejects(
+            () => store.upsertLiveSession({ id: 's1', startedAt: 1, tunes: [] }),
+            // store._dbSet swallows write errors, which is right for data that
+            // can be re-fetched and catastrophically wrong here: the session
+            // lives in memory until this write lands, so a swallowed failure
+            // means the UI is told it saved and Finish then discards the only
+            // copy. Session persistence uses the strict path.
+            /Quota/,
+        );
+    });
+
+    await test('a failed read never presents as an empty collection', async () => {
+        const { store, idb } = await loadStore();
+        await store.upsertLiveSession({ id: 'keep-me', startedAt: 1, tunes: [{ tuneId: 1 }] });
+        idb.__failReadsOf('liveSessions');
+
+        await assert.rejects(() => store.upsertLiveSession({ id: 's2', startedAt: 2, tunes: [] }));
+
+        // The mutation reads the current list, changes it and writes it back.
+        // Substituting [] for a failed read would write that empty array over
+        // a history we simply could not see — one unreadable read becoming a
+        // wiped log.
+        idb.__allowAll();
+        const kept = await store.getLiveSessions();
+        assert.equal(kept.length, 1, 'the stored history is untouched by a failed read');
+        assert.equal(kept[0].id, 'keep-me');
+    });
+
+    await test('a failed resume-state write is reported too', async () => {
+        const { store, idb } = await loadStore();
+        idb.__failWritesTo('openLiveSession');
+        await assert.rejects(() => store.setOpenLiveSession({ sessionId: 's1' }),
+            'resume state that silently failed to save is a session that cannot be recovered');
     });
 
     console.log('\nliveAnalysis.js — fresh vs resume, and when a session is saved');
@@ -591,6 +676,210 @@ async function run() {
         assert.equal(await service.retryMicrophone(), true);
         assert.equal(service.micHealthy, true);
         await service.stop();
+    });
+
+    console.log('\nliveAnalysis.js — checkpoints and stale loops');
+
+    await test('a continuing tune is checkpointed without any explicit save', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        const writesAfterEdge = store.__upsertCalls;
+
+        // The tail tune has not changed, so the edge trigger stays silent — but
+        // the tune's duration and the elapsed time have moved on, and before
+        // the checkpoint was wired into the loop a twenty-minute tune stored
+        // nothing after its first cycle.
+        service.detections[0].endSeconds += 600;
+        service.elapsedSeconds += 600;
+        service._scheduleCheckpoint(1);
+        await new Promise(resolve => setTimeout(resolve, 40));
+
+        assert.ok(store.__upsertCalls > writesAfterEdge, 'the checkpoint fired on its own');
+        assert.equal(store.__sessions[0].listenedSeconds, service.elapsedSeconds,
+            'and it recorded the listening time, not just the tunes');
+        await service.stop();
+    });
+
+    await test('a stream of updates cannot postpone a checkpoint for ever', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._persistSession();
+
+        // A pure debounce is reset by every update, and the loop produces one
+        // every few seconds — so during exactly the long unbroken session the
+        // checkpoint exists for, it would never fire.
+        service._lastCheckpointAt = Date.now() - 10 * 60 * 1000;
+        service._scheduleCheckpoint();
+        assert.equal(service._checkpointTimer, null,
+            'an overdue checkpoint saves now rather than pushing the deadline out again');
+        await service.stop();
+    });
+
+    await test('a transcription in flight across Pause then Resume is discarded', async () => {
+        const { service, mic, backend } = await loadService();
+        mic.__setPcm(4096);
+        const held = backend.__holdNext();
+
+        // Very short window/step so the loop reaches its transcription quickly.
+        await service.start(0.02, 0.02);
+        for (let i = 0; i < 50 && backend.__calls.length === 0; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        assert.equal(backend.__calls.length, 1, 'the loop is waiting on a transcription');
+
+        await service.pause();
+        const detectionsAtPause = service.detections.length;
+        // Resume BEFORE the held transcription resolves. This is the reported
+        // sequence: isRunning is true again, so the old loop's own isRunning
+        // check waves its stale result through, appends it, and carries on
+        // looping alongside the new one. Only the generation token separates
+        // them.
+        mic.__setPcm(0);
+        await service.start(0.02, 0.02);
+        const callsAfterResume = backend.__calls.length;
+
+        held.release({
+            results: [{ setting: { tune_id: 7, dataset: 'thesession' }, setting_id: 70, score: 0.9, display_name: 'Ghost tune' }],
+        });
+        await new Promise(r => setTimeout(r, 60));
+
+        assert.equal(service.detections.length, detectionsAtPause,
+            'a result from a run that has ended must not reach the session');
+        // The new loop is entitled to keep calling; the OLD one is not, so the
+        // count must not have jumped by the two loops both running.
+        assert.ok(backend.__calls.length - callsAfterResume <= 1,
+            'the old loop must not still be cycling beside the new one');
+        await service.stop();
+    });
+
+    await test('a transcription pending across Finish cannot reach the next session', async () => {
+        const { service, mic, backend } = await loadService();
+        mic.__setPcm(4096);
+        const held = backend.__holdNext();
+
+        await service.start(0.02, 0.02);
+        for (let i = 0; i < 50 && backend.__calls.length === 0; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        await service.finish();
+
+        mic.__setPcm(0); // the new session hears nothing, so nothing else can add rows
+        await service.start(0.02, 0.02);
+        const newSessionId = service.sessionId;
+
+        held.release({
+            results: [{ setting: { tune_id: 7, dataset: 'thesession' }, setting_id: 70, score: 0.9, display_name: 'Ghost tune' }],
+        });
+        await new Promise(r => setTimeout(r, 60));
+
+        assert.equal(service.sessionId, newSessionId);
+        assert.deepEqual(service.detections, [],
+            'last session\'s audio must not appear in this one');
+        await service.stop();
+    });
+
+    await test('pause and finish each invalidate the run they end', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        const before = service.detections.length;
+
+        // The generation is what the loop checks after every await. Pausing
+        // ends the run, so an in-flight transcription resolving afterwards
+        // belongs to nobody.
+        const staleGeneration = service._generation;
+        await service.pause();
+        assert.notEqual(service._generation, staleGeneration,
+            'pausing invalidates the run the old loop belongs to');
+
+        await service.start(10, 5);
+        assert.notEqual(service._generation, staleGeneration,
+            'and resuming does not hand the old loop its run back');
+        assert.equal(service.detections.length, before);
+        await service.stop();
+    });
+
+    await test('finishing and starting again invalidates the old run', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        const staleGeneration = service._generation;
+
+        await service.finish();
+        assert.notEqual(service._generation, staleGeneration);
+
+        await service.start(10, 5);
+        assert.notEqual(service._generation, staleGeneration,
+            'a previous session\'s result must not reach a newly started one');
+        assert.deepEqual(service.detections, [], 'and the new session starts empty');
+        await service.stop();
+    });
+
+    await test('pause releases the microphone before waiting on storage', async () => {
+        const { service, store, mic } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+
+        // Storage is slow. Pause is a direct response to a tap — often "stop
+        // listening to me" — so the microphone must not be held open for it.
+        store.__setDelays([200]);
+        const order = [];
+        const originalStop = mic.default.stopContinuous;
+        mic.default.stopContinuous = async () => { order.push('mic released'); };
+        const originalUpsert = store.default.upsertLiveSession;
+
+        await service.pause();
+        assert.deepEqual(order, ['mic released']);
+        mic.default.stopContinuous = originalStop;
+        void originalUpsert;
+    });
+
+    await test('each analysis job declares its own sample rate', async () => {
+        const { service, mic, backend } = await loadService();
+        mic.__setPcm(4096);
+        mic.default.sampleRate = 44100;
+
+        await service.start(0.02, 0.02);
+        for (let i = 0; i < 50 && backend.__calls.length === 0; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        await service.stop();
+
+        // The rate is a single global on the WASM side and capture does not
+        // share it with file decoding (44.1 kHz mic, 48 kHz decode). Setting it
+        // outside the lock let a file analysis change how these samples were
+        // interpreted — every pitch and duration out by the ratio, showing up
+        // as detections quietly getting worse rather than as an error.
+        assert.ok(backend.__calls.length >= 1);
+        assert.equal(backend.__calls[0].sampleRate, 44100,
+            'the microphone job carries the microphone rate');
+    });
+
+    await test('a microphone recovery onto a different rate is picked up', async () => {
+        const { service, mic, backend } = await loadService();
+        mic.__setPcm(4096);
+        mic.default.sampleRate = 44100;
+        await service.start(0.02, 0.02);
+        for (let i = 0; i < 50 && backend.__calls.length === 0; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+
+        // Recovery reopens the pipeline and can come back on another rate, so
+        // the rate captured at start() is not good enough.
+        mic.default.sampleRate = 48000;
+        const before = backend.__calls.length;
+        for (let i = 0; i < 50 && backend.__calls.length === before; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        await service.stop();
+
+        assert.equal(backend.__calls[backend.__calls.length - 1].sampleRate, 48000,
+            'the rate is re-read each cycle, not captured once');
     });
 
     console.log('\nliveAnalysis.js — surviving a reload');

@@ -158,6 +158,7 @@ import store from '@/services/store';
 import eventBus from '@/eventBus';
 import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiMusicClefTreble } from '@mdi/js';
 import micService from '@/services/mic';
+import liveAnalysisService from '@/services/liveAnalysis.js';
 import { DATASET_LABELS } from '@/js/source.mjs';
 
 export default {
@@ -283,6 +284,23 @@ export default {
             window.requestAnimationFrame(pulse);
         },
         async toggleMonitor() {
+            // A live session OWNS the capture. Closing it here left the session
+            // still believing it was listening, with the microphone shut — the
+            // list silently stopped growing and the session bar said
+            // "Listening". Route through the session's own lifecycle so the two
+            // cannot disagree.
+            if (liveAnalysisService.sessionId) {
+                if (liveAnalysisService.isRunning) {
+                    await liveAnalysisService.pause();
+                } else {
+                    await liveAnalysisService.start(
+                        liveAnalysisService.options ? liveAnalysisService.options.windowSeconds : 10,
+                        liveAnalysisService.options ? liveAnalysisService.options.stepSeconds : 5,
+                    );
+                }
+                return;
+            }
+
             if (store.isListening()) {
                 await micService.stopContinuous();
             } else {
@@ -346,7 +364,7 @@ export default {
                 await ffBackend.feedEntirePCMSignal(audioData);
                 console.timeEnd('feed-pcm-signal');
                 
-                await ffBackend.submitFilledBuffer();
+                await ffBackend.submitFilledBuffer(false, micService.sampleRate);
             } catch(e) {
                 console.error(e);
             } finally {

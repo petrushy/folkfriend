@@ -113,7 +113,9 @@ class FileSessionAnalysisService {
 
                 if (rmsOfSignal(segment) < options.minRms) continue;
 
-                const response = await ffBackend.transcribeAndQueryPCMSignal(segment);
+                // Decoding is fixed at audioService.sampleRate; say so, rather
+                // than relying on a global a live capture may have changed.
+                const response = await ffBackend.transcribeAndQueryPCMSignal(segment, sampleRate);
                 if (response.error || !response.contour || response.contour.length < options.minContourLength) continue;
 
                 const normalized = normaliseQueryResults(response.results, options);

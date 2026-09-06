@@ -141,7 +141,7 @@ export default {
                 break;
             case store.searchStates.RECORDING:
                 await micService.stopRecording();
-                await ffBackend.submitFilledBuffer();
+                await ffBackend.submitFilledBuffer(false, micService.sampleRate);
                 break;
             case store.searchStates.WORKING:
                 break;

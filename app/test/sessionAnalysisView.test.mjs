@@ -108,6 +108,8 @@ export const __calls = [];
 export let __failNextStart = false;
 export let __failNextFinish = false;
 export let __restorable = null;
+export let __restoreThrows = false;
+export function __setRestoreThrows(v) { __restoreThrows = v; }
 export function __setFailNextStart(v) { __failNextStart = v; }
 export function __setFailNextFinish(v) { __failNextFinish = v; }
 export function __setRestorable(v) { __restorable = v; }
@@ -151,6 +153,7 @@ const service = {
     async retryMicrophone() { __calls.push('retryMicrophone'); this.micHealthy = true; return true; },
     async restoreOpenSession() {
         __calls.push('restoreOpenSession');
+        if (__restoreThrows) { __restoreThrows = false; throw new Error('read failed'); }
         if (!__restorable) return false;
         Object.assign(this, __restorable);
         return true;
@@ -169,6 +172,7 @@ export function __reset() {
     __failNextStart = false;
     __failNextFinish = false;
     __restorable = null;
+    __restoreThrows = false;
     service.isRunning = false;
     service.sessionId = null;
     service.detections = [];
@@ -270,6 +274,7 @@ async function writeFakes() {
 async function mountView({
     query = {}, indexLoaded = false, saved = null,
     running = false, sessionId = undefined, detections = [], restorable = null,
+    restoreThrows = false,
 } = {}) {
     const store = await import(path.join(tmpDir, 'fake-store.mjs'));
     const bus = await import(path.join(tmpDir, 'fake-eventbus.mjs'));
@@ -287,6 +292,9 @@ async function mountView({
     if (live.default.sessionId) live.default._options = {};
     live.default.detections = detections;
     if (restorable) live.__setRestorable(restorable);
+    // Set before created() runs: _initialise() calls restoreOpenSession()
+    // synchronously on its first tick, so a flag set afterwards is too late.
+    if (restoreThrows) live.__setRestoreThrows(true);
 
     const mod = await import(`${path.join(tmpDir, 'view.mjs')}?v=${Math.random()}`);
     const component = mod.default;
@@ -496,34 +504,32 @@ await test('a lost microphone is reported, and a retry reacquires it', async () 
     const { vm, settle, bus, live } = await mountView({ indexLoaded: true, running: true });
     await settle();
 
-    bus.__fire('micLost', { reason: 'track ended' });
+    bus.__fire('liveAnalysisMicState', { healthy: false, reason: 'track ended' });
     assert.equal(vm.live.micHealthy, false);
     assert.equal(vm.live.micMessage, 'track ended');
-    assert.equal(vm.liveStatus.label, 'Microphone unavailable');
 
     await vm.retryMicrophone();
     assert.ok(live.__calls.includes('retryMicrophone'));
     assert.equal(vm.live.micHealthy, true);
 });
 
-await test('micRecovered clears the warning on its own', async () => {
+await test('recovery clears the warning on its own', async () => {
     const { vm, settle, bus } = await mountView({ indexLoaded: true, running: true });
     await settle();
-    bus.__fire('micLost', { reason: 'track ended' });
-    bus.__fire('micRecovered');
+    bus.__fire('liveAnalysisMicState', { healthy: false, reason: 'track ended' });
+    bus.__fire('liveAnalysisMicState', { healthy: true, reason: '' });
     assert.equal(vm.live.micHealthy, true);
     assert.equal(vm.live.micMessage, '');
 });
 
-await test('the status reads Paused once capture is released', async () => {
+await test('pausing releases capture but keeps the session', async () => {
     const { vm, settle } = await mountView({ indexLoaded: true, running: true });
     await settle();
-    assert.equal(vm.liveStatus.label, 'Listening');
+    assert.equal(vm.live.capturing, true);
 
     await vm.pauseLive();
     assert.equal(vm.live.capturing, false);
     assert.equal(vm.live.hasSession, true, 'pausing keeps the session');
-    assert.equal(vm.liveStatus.label, 'Paused');
 });
 
 console.log('\nsaving, finishing and deleting');
@@ -627,6 +633,39 @@ await test('correcting a file row persists locally instead', async () => {
     vm.onTuneChange(detection);
     assert.ok(!live.__calls.some(c => c.op === 'applyCorrection'),
         'file analysis has nothing to do with the live service');
+});
+
+await test('an unfinished session is restored even when arriving via ?follow=1', async () => {
+    // The shortcut is how people actually start listening, so resolving it
+    // before looking for an unfinished session is precisely the path that
+    // would orphan last night's — a new session opening beside it, the old
+    // one left in Past Sessions labelled Unfinished for ever.
+    const { vm, settle, live } = await mountView({
+        query: { live: '1', follow: '1' },
+        indexLoaded: true,
+        restorable: {
+            sessionId: 'restored-follow',
+            isRunning: false,
+            _options: {},
+            detections: [{ id: 'r1', tuneId: 1, settingId: '10', title: 'From last night', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
+            elapsedSeconds: 120,
+        },
+    });
+    await settle();
+
+    assert.equal(live.default.sessionId, 'restored-follow');
+    assert.equal(live.__starts.length, 0,
+        'the shortcut must not start a second session on top of an unfinished one');
+    assert.equal(vm.followMode, false, 'and it does not auto-open the score for it either');
+    assert.equal(vm.live.hasSession, true);
+});
+
+await test('a restore that fails does not silently start a new session', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true, restoreThrows: true });
+    await settle();
+
+    assert.ok(vm.live.restoreError, 'a read that failed is not "there is no session"');
+    assert.equal(live.__starts.length, 0);
 });
 
 await test('an unfinished session is restored on load without opening the mic', async () => {

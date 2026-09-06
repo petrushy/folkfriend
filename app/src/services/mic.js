@@ -116,6 +116,13 @@ class MicService {
         }
     }
 
+    // The rate the currently open capture is delivering. Analysis jobs declare
+    // this so a concurrent file analysis cannot change how their samples are
+    // interpreted — see backend._applySampleRateForJob.
+    get sampleRate() {
+        return (this.audioCtx && this.audioCtx.sampleRate) || this._recordingSampleRate || null;
+    }
+
     async resumeIfSuspended() {
         if (this.audioCtx && this.audioCtx.state === 'suspended') {
             try {
@@ -183,17 +190,32 @@ class MicService {
     // same moment, and each one racing its own getUserMedia would leave
     // orphaned microphones open. `_healthCheck` is assigned before the first
     // await, so concurrent callers always join the one in flight.
-    ensureMicHealthy() {
+    // `force` is for an explicit user action ("Retry microphone"). The
+    // automatic backoff below exists to stop the watchdog spinning
+    // getUserMedia against a permanently denied microphone; applying it to a
+    // deliberate tap means the button silently does nothing for up to thirty
+    // seconds, which reads as broken. A tap is also new information — the user
+    // has probably just hung up the call that took the microphone.
+    ensureMicHealthy({ force = false } = {}) {
         if (!this._mode) return Promise.resolve(true);
         if (this._recovering) return this._recovering;
-        if (this._healthCheck) return this._healthCheck;
+        if (force) {
+            this._nextRecoveryAt = 0;
+            this._recoveryFailures = 0;
+            // Never join an in-flight passive check: it may already have
+            // decided to back off, and returning its answer would make the tap
+            // look ignored.
+            this._healthCheck = null;
+        } else if (this._healthCheck) {
+            return this._healthCheck;
+        }
 
-        this._healthCheck = this._runHealthCheck()
+        this._healthCheck = this._runHealthCheck(force)
             .finally(() => { this._healthCheck = null; });
         return this._healthCheck;
     }
 
-    async _runHealthCheck() {
+    async _runHealthCheck(force = false) {
         await this.resumeIfSuspended();
         if (!this._mode) return true;
 
@@ -216,8 +238,9 @@ class MicService {
         }
         // Honour the backoff here rather than only in the watchdog, so the
         // live-analysis loop's per-cycle check can't turn a permanently denied
-        // microphone into a getUserMedia call every few seconds.
-        if (Date.now() < this._nextRecoveryAt) return false;
+        // microphone into a getUserMedia call every few seconds. A forced
+        // check has already cleared it.
+        if (!force && Date.now() < this._nextRecoveryAt) return false;
         return this._recoverCapture(fault);
     }
 

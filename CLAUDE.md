@@ -1338,6 +1338,56 @@ corrections, save failures and reload recovery.
 switching tabs never stops capture and that live and file results stay separate.
 `app/test/firestoreRules.test.mjs` (20, emulator) covers the rules.
 
+#### Second review pass — the failures that were still invisible
+
+Seven follow-up findings, each a case where the code looked right and did
+nothing:
+
+1. **`_dbSet` swallowed write errors, so the whole save-error path was dead
+   code.** The tests missed it by faking a rejecting `upsertLiveSession()` — a
+   layer that cannot fail in production. Session persistence now uses
+   `_dbSetStrict`, and the failure tests inject at the **IndexedDB boundary**,
+   which is where quota actually bites. `_withRecords` no longer substitutes
+   `[]` for a failed READ either: writing a mutation on top of that turns one
+   unreadable read into a wiped history.
+2. **The checkpoint was never wired into normal listening**, only into edits —
+   so a tune played for twenty minutes still stored nothing after its first
+   cycle. It now runs on every update, with `CHECKPOINT_MAX_WAIT_MS` so a
+   steady stream of updates cannot postpone it for ever (a pure debounce is
+   reset by every update, and the loop produces one every few seconds — it
+   would never have fired during exactly the long session it exists for).
+3. **The sample rate is a single WASM global that capture and file decoding do
+   not share** (44.1 kHz microphone, 48 kHz decode), and both set it OUTSIDE
+   the PCM lock. Each job now declares its own rate and applies it inside the
+   lock. The live loop re-reads it every cycle, because a recovery reopens the
+   pipeline and can come back on a different one.
+4. **Reload recovery was bypassed by the shortcut people actually use.**
+   `?live=1`/`?follow=1` returned before the restore check, so the one-tap
+   entry point started a second session beside last night's unfinished one.
+   Restore now runs first on every route in, a finalized record (`endedAt` set)
+   is rejected rather than reopened, and the restore is guarded against
+   navigation and a concurrently started session.
+5. **A quick Pause → Resume revived the old analysis loop.** `stop()` does not
+   await an in-flight transcription, so it resolved into a loop that checked
+   `isRunning` — true again after the Resume — accepted its stale result and
+   carried on running beside the new one. A `_generation` token, bumped by
+   every lifecycle transition and re-checked after every await, is what
+   separates them. *Pinned by holding a transcription open across Pause→Resume
+   and across Finish→new session.*
+6. **"Retry microphone" honoured the automatic backoff**, so tapping it during
+   a backoff window did nothing at all. `ensureMicHealthy({ force: true })`
+   clears the backoff and refuses to join an in-flight passive check. `stop()`
+   also releases the microphone BEFORE persisting — Pause is usually "stop
+   listening to me", and it must not wait on slow storage.
+7. **The session bar only existed on the Session Analysis page.**
+   `SessionStatusBar` is rendered by `App.vue`, so status and Pause/Resume/
+   Finish follow the user everywhere; it subscribes to the service directly
+   rather than taking props. Search's "Stop monitoring" routed straight to
+   `micService.stopContinuous()`, which closed the session's capture while the
+   session still believed it was listening — it now goes through the session
+   lifecycle. `micHealthy` lives on the service alone, which adopts mic.js's
+   events and republishes them, so the bar and the session cannot disagree.
+
 ⚠️ **Microphone interruption recovery is still only tested against a fake.**
 Everything above is driven by a scriptable `micService` stand-in; the real
 paths — iOS handing the microphone to a call, a track that comes back live but
