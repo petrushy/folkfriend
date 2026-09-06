@@ -1215,6 +1215,21 @@ ownership-based — nothing in this app is readable by anyone but its owner — 
 light shape validation. Deliberately light: over-strict rules reject writes,
 and a rejected write here is a lost observation.
 
+> ⚠️ **Rules are NOT deployed by CI**, which runs `--only hosting`. They also
+> were not wired into any `firebase.json` until this change (the file sat at the
+> repo root and had been pasted into the console by hand), so `app/firebase.json`
+> now points at it and the deploy is:
+>
+> ```sh
+> cd app && firebase deploy --only firestore:rules
+> ```
+>
+> Until that runs, the live rules only permit `users/{uid}/data/{doc}` and every
+> write to the new subcollections is rejected with `permission-denied`. The app
+> keeps working — the local IndexedDB copy is the source of truth and the sync
+> failure only logs — so this fails as "sync silently does nothing", which is
+> exactly the shape of bug that hides for a whole session.
+
 Tests: `app/test/recordSync.test.mjs` (24 cases) — `sync.js` against a fake
 Firestore whose snapshots the test drives by hand, and `store.js` against a fake
 sync layer that records every push. `app/test/liveSessions.test.mjs` (14) covers
