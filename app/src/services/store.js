@@ -171,12 +171,8 @@ const SIGHTING_DEDUP_MS = 60 * 1000;
 // holding an ORDERED tune list with durations.
 const KEY_LIVE_SESSIONS = 'liveSessions';
 
-// A live session is a much heavier object than a sighting — up to ~30 tune
-// entries, each carrying a title/ids/score. The cap is far lower than
-// sightings' 5000 for that reason. At roughly one evening per record, 300 is
-// several years of regular playing — the same order of magnitude MAX_SIGHTINGS
-// represents at its own (per-hearing) granularity.
-const MAX_LIVE_SESSIONS = 300;
+// Sessions are retained until explicitly deleted. Unlike transient search
+// history, the user's session log must not disappear when a count is reached.
 
 // Enough state to resume the one unfinished session across a reload: the raw
 // window matches clustering needs to keep producing the same list, plus the
@@ -1193,15 +1189,49 @@ class Store {
     // repeatedly while a session is open (on each tune change, on a checkpoint,
     // on Pause and on Finish), so lookup is always by id rather than by list
     // position.
+    _liveSessionLabel(record, places) {
+        if (record.customName) return { name: record.name, placeName: record.placeName || '' };
+        const place = matchPlace(record, places);
+        const placeName = place ? place.name : (record.placeName || '');
+        const date = new Date(record.startedAt).toLocaleString(undefined, {
+            year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+        });
+        return { name: placeName ? `${date} · ${placeName}` : date, placeName };
+    }
+
+    async getNamedLiveSessions() {
+        const [records, places] = await Promise.all([
+            this.getLiveSessionsStrict(),
+            this.userSettings.geoTagDetections ? this.getPlaces() : [],
+        ]);
+        // Also gives older sessions date/place labels without rewriting them.
+        return records.map(record => ({ ...record, ...this._liveSessionLabel(record, places) }));
+    }
+
     async upsertLiveSession(session) {
         if (!session || !session.id) return null;
         const record = { ...session };
+        Object.assign(record, this._liveSessionLabel(record, this.userSettings.geoTagDetections ? await this.getPlaces() : []));
         await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
             const index = sessions.findIndex(s => s.id === record.id);
             if (index === -1) sessions.unshift(record);
             else sessions[index] = record;
             sessions.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
-            return { write: true, records: sessions.slice(0, MAX_LIVE_SESSIONS) };
+            return { write: true, records: sessions };
+        }, 'liveSessionsChanged');
+        this._syncPush('liveSessions', record);
+        return record;
+    }
+
+    // Edits merge with the latest record inside the write queue. A deleted
+    // session must never be recreated by a late editor save.
+    async updateLiveSession(sessionID, patch) {
+        const record = await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
+            const index = sessions.findIndex(s => s.id === sessionID);
+            if (index < 0) throw new Error('This session was deleted. Your changes have not been saved.');
+            const updated = { ...sessions[index], ...patch, id: sessionID };
+            sessions[index] = updated;
+            return { write: true, records: sessions, value: updated };
         }, 'liveSessionsChanged');
         this._syncPush('liveSessions', record);
         return record;
@@ -1335,7 +1365,7 @@ class Store {
                 getLocal: () => this.getLiveSessions(),
                 applyRemote: (upserts, removals) => this._mergeRemoteRecords(
                     KEY_LIVE_SESSIONS, upserts, removals,
-                    { sortBy: 'startedAt', cap: MAX_LIVE_SESSIONS, event: 'liveSessionsChanged' },
+                    { sortBy: 'startedAt', cap: Infinity, event: 'liveSessionsChanged' },
                 ),
             }),
         ];

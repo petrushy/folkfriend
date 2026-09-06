@@ -7,7 +7,8 @@
         <!-- Three modes do not fit on one phone row, and v-btn-toggle does not
              wrap on its own — it just overflows the viewport. -->
         <v-btn-toggle
-            v-model="viewMode"
+            :value="viewMode === 'file' ? 'file' : 'session'"
+            @change="viewMode = $event === 'file' ? 'file' : lastSessionView"
             mandatory
             dense
             rounded
@@ -16,14 +17,56 @@
             <v-btn value="file" small>
                 File recording
             </v-btn>
-            <v-btn value="live" small>
+            <v-btn value="session" small>
                 <v-icon left small>{{ icons.microphone }}</v-icon>
-                Live microphone
-            </v-btn>
-            <v-btn value="history" small>
-                Past Sessions
+                Sessions
             </v-btn>
         </v-btn-toggle>
+        <v-btn text color="primary" class="mb-4" @click="openSessionPicker">Past sessions</v-btn>
+        <v-btn text color="primary" class="mb-4" :disabled="workspaceBusy || !indexLoaded || live.starting" @click="newSession">New session</v-btn>
+
+        <v-dialog v-model="sessionPicker" max-width="640">
+            <v-card class="pa-5">
+                <h2 class="text-h6 mb-3">Open a session</h2>
+                <v-autocomplete v-if="sessionPicker"
+                    :items="pastSessions" item-value="id" :item-text="sessionLabel" :filter="filterSession"
+                    label="Search by name, date or place" clearable autofocus
+                    :loading="pickerLoading" :menu-props="{ maxHeight: 320 }"
+                    no-data-text="No saved sessions" @change="selectSession"
+                />
+                <p class="caption text--secondary">Opening a saved session keeps current listening running.</p>
+                <v-btn text @click="sessionPicker = false">Close</v-btn>
+            </v-card>
+        </v-dialog>
+
+        <v-card v-if="viewMode !== 'file' && activeSession" class="pa-5 my-3">
+            <v-text-field :value="activeSession.name || sessionLabel(activeSession)" label="Session name"
+                maxlength="160" hide-details class="mb-3" :disabled="workspaceBusy" @change="renameSession" />
+            <p class="caption text--secondary">
+                {{ formatSessionDate(activeSession.startedAt) }} · {{ formatSecondsAsDuration(activeListenedSeconds) }} listened.
+                Changes are saved automatically.
+            </p>
+            <div class="d-flex flex-wrap" style="gap: 8px;">
+                <v-btn v-if="viewMode === 'history' && live.hasSession" text color="primary" @click="viewMode = 'live'">Current session</v-btn>
+                <v-menu offset-y>
+                    <template #activator="{ on, attrs }">
+                        <v-btn text small v-bind="attrs" v-on="on">Session actions</v-btn>
+                    </template>
+                    <v-list dense>
+                        <v-list-item role="menuitem" :disabled="!activeDetections.length || workspaceBusy" @click="clearSessionTunes">
+                            <v-list-item-title>Clear tune list</v-list-item-title>
+                        </v-list-item>
+                        <v-list-item role="menuitem" :disabled="workspaceBusy" @click="deleteSelectedSession">
+                            <v-list-item-title class="error--text">Delete session</v-list-item-title>
+                        </v-list-item>
+                    </v-list>
+                </v-menu>
+            </div>
+        </v-card>
+        <v-alert v-if="workspaceError" type="error" dense text>
+            {{ workspaceError }}
+            <v-btn v-if="pendingSessionPatch" small text @click="retrySessionEdit">Retry save</v-btn>
+        </v-alert>
 
         <!--
             The session's own status and controls live in SessionStatusBar,
@@ -49,8 +92,10 @@
             class="my-3"
         >
             This session was restored after the app was reopened. Its tune list is complete and can be
-            finished, but listening again would start a new session rather than continuing this one.
+            viewed and edited. Use New session to start another recording.
         </v-alert>
+
+        <v-alert v-if="live.micError && viewMode === 'live'" type="error" dense text>{{ live.micError }}</v-alert>
 
         <v-card v-if="viewMode === 'file'" class="pa-5 my-3">
             <h2 class="text-h6 mb-3">
@@ -151,7 +196,7 @@
             </v-alert>
         </v-card>
 
-        <v-card v-else-if="viewMode === 'live'" class="pa-5 my-3">
+        <v-card v-else-if="viewMode === 'live' && !live.hasSession" class="pa-5 my-3">
             <h2 class="text-h6 mb-3">
                 Live Microphone
             </h2>
@@ -167,19 +212,8 @@
             </p>
             <p class="mb-0 mt-2 text--secondary">
                 <strong>Pause</strong> releases the microphone and keeps the session; <strong>Resume</strong>
-                picks it up where it left off. <strong>Finish session</strong> closes it and files it under
-                Past Sessions. Listening carries on while you look at other tabs.
-            </p>
-        </v-card>
-
-        <v-card v-else-if="viewMode === 'history'" class="pa-5 my-3">
-            <h2 class="text-h6 mb-3">
-                Past Sessions
-            </h2>
-            <p class="mb-0 text--secondary">
-                Live sessions are saved automatically as tunes are recognised, so you can look back at what was
-                played on a given evening. They are kept on this device, synced to your account while you are
-                signed in, and included in the backup file from Settings &rarr; Export.
+                picks it up where it left off. Everything is saved automatically. <strong>New session</strong>
+                starts a separate tune list. Listening carries on while you browse past sessions or other pages.
             </p>
         </v-card>
 
@@ -191,7 +225,7 @@
                 </v-btn>
                 <VolumeMeter :active="live.micHealthy" />
                 <span class="text--secondary">
-                    Pause, Resume and Finish are in the session bar at the top of the screen — they stay
+                    Pause and Resume are in the session bar at the top of the screen — they stay
                     there wherever you navigate.
                 </span>
             </div>
@@ -223,15 +257,7 @@
                 </div>
             </div>
 
-            <v-alert
-                v-if="live.micError"
-                type="error"
-                dense
-                text
-                class="mt-3 mb-0"
-            >
-                {{ live.micError }}
-            </v-alert>
+
 
             <v-divider class="my-4" />
 
@@ -359,22 +385,22 @@
         </v-card>
 
         <!-- Results. One table, but the two modes keep their own list. -->
-        <v-card v-if="activeDetections.length && viewMode !== 'history'" class="pa-5 my-3">
+        <v-card v-if="activeDetections.length" class="pa-5 my-3">
             <div class="d-flex flex-wrap justify-space-between align-center" style="gap: 12px;">
                 <div>
                     <h2 class="text-h6 mb-1">
                         Detected Tune Starts
                     </h2>
                     <p class="mb-0 text--secondary">
-                        {{ activeDetections.length }} detections from {{ activeAcceptedWindows }} matched windows.
+                        {{ activeDetections.length }} tunes<span v-if="activeAcceptedWindows"> from {{ activeAcceptedWindows }} matched windows</span>.
                     </p>
                 </div>
-                <div v-if="viewMode === 'file'" class="d-flex flex-wrap" style="gap: 12px;">
+                <div class="d-flex flex-wrap" style="gap: 12px;">
                     <v-btn text color="primary" @click="downloadTuneList">
                         Download Tune List
                     </v-btn>
                     <v-btn
-                        v-if="xscFile"
+                        v-if="xscFile && viewMode === 'file'"
                         color="primary"
                         @click="downloadUpdatedXsc"
                     >
@@ -383,7 +409,7 @@
                 </div>
             </div>
 
-            <v-simple-table class="mt-4">
+            <v-simple-table class="mt-4 session-results">
                 <template #default>
                     <thead>
                         <tr>
@@ -406,6 +432,7 @@
                             <td v-if="viewMode === 'file'" class="start-cell">
                                 <v-text-field
                                     v-model="detection.editableTime"
+                                    aria-label="Tune start time"
                                     dense
                                     hide-details
                                     solo
@@ -414,30 +441,39 @@
                             <td>
                                 <v-select
                                     v-model="detection.selectedTuneKey"
+                                    aria-label="Tune"
                                     :items="detection.tuneOptions"
                                     item-text="text"
                                     item-value="value"
                                     dense
                                     hide-details
                                     solo
+                                    :disabled="workspaceBusy"
                                     @change="onTuneChange(detection)"
                                 />
                             </td>
-                            <td>
+                            <td class="duration-cell">
                                 {{ formatSecondsAsDuration(detection.endSeconds - detection.startSeconds) }}
                             </td>
                             <td>
                                 <div class="d-flex align-center" style="gap: 8px;">
+                                    <v-btn icon small :aria-label="isTuneFavourited(detection) ? 'Remove favourite' : 'Add favourite'"
+                                        @click="toggleFavourite(detection)">
+                                        <v-icon small :color="isTuneFavourited(detection) ? 'amber darken-2' : 'grey'">
+                                            {{ isTuneFavourited(detection) ? icons.star : icons.starOutline }}
+                                        </v-icon>
+                                    </v-btn>
                                     <v-btn
                                         icon
                                         small
                                         :to="tuneLinkForDetection(detection)"
+                                        aria-label="Open tune"
                                     >
                                         <v-icon small>
                                             {{ icons.openInNew }}
                                         </v-icon>
                                     </v-btn>
-                                    <v-btn text small color="secondary" @click="removeDetection(detection.id)">
+                                    <v-btn text small color="secondary" :disabled="workspaceBusy" @click="removeDetection(detection.id)">
                                         Remove
                                     </v-btn>
                                 </div>
@@ -470,102 +506,9 @@
             </p>
         </v-card>
 
-        <v-card v-if="viewMode === 'history'" class="pa-5 my-3">
-            <p v-if="!pastSessions.length" class="text--secondary mb-0">
-                Nothing saved yet. Live sessions are recorded automatically as tunes are recognised.
-            </p>
-            <v-expansion-panels v-else flat>
-                <v-expansion-panel v-for="session in pastSessions" :key="session.id">
-                    <v-expansion-panel-header>
-                        <div class="d-flex flex-wrap align-center" style="gap: 8px;">
-                            <strong>{{ formatSessionDate(session.startedAt) }}</strong>
-                            <span class="text--secondary">
-                                {{ session.tunes.length }} {{ session.tunes.length === 1 ? 'tune' : 'tunes' }}
-                                &middot; {{ formatSecondsAsDuration(listenedSeconds(session)) }} listened
-                            </span>
-                            <v-chip v-if="isOpenSession(session)" x-small color="primary" text-color="white">
-                                In progress
-                            </v-chip>
-                            <v-chip v-else-if="!session.endedAt" x-small outlined>
-                                Unfinished
-                            </v-chip>
-                        </div>
-                    </v-expansion-panel-header>
-                    <v-expansion-panel-content>
-                        <p class="caption text--secondary mb-2">
-                            {{ sessionTimeRange(session) }}
-                        </p>
-
-                        <v-simple-table dense>
-                            <template #default>
-                                <thead>
-                                    <tr>
-                                        <th class="text-left" style="width: 48px;" />
-                                        <th class="text-left">
-                                            Tune
-                                        </th>
-                                        <th class="text-left">
-                                            Heard at
-                                        </th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr v-for="(tune, i) in session.tunes" :key="i">
-                                        <td>
-                                            <v-btn
-                                                icon
-                                                small
-                                                :disabled="!tune.settingId"
-                                                :aria-label="isTuneFavourited(tune) ? 'Remove from favourites' : 'Add to favourites'"
-                                                @click="toggleFavourite(tune)"
-                                            >
-                                                <v-icon
-                                                    small
-                                                    :color="isTuneFavourited(tune) ? 'amber darken-2' : 'grey'"
-                                                >
-                                                    {{ isTuneFavourited(tune) ? icons.star : icons.starOutline }}
-                                                </v-icon>
-                                            </v-btn>
-                                        </td>
-                                        <td>
-                                            <router-link :to="tuneLinkForSessionTune(tune)">
-                                                {{ tune.title }}
-                                            </router-link>
-                                        </td>
-                                        <td>
-                                            {{ formatSecondsAsClock(tune.startSeconds) }}
-                                        </td>
-                                    </tr>
-                                </tbody>
-                            </template>
-                        </v-simple-table>
-
-                        <div class="d-flex flex-wrap align-center mt-3" style="gap: 12px;">
-                            <v-btn
-                                v-if="!session.endedAt && !isOpenSession(session)"
-                                text
-                                small
-                                color="primary"
-                                @click="finishStoredSession(session)"
-                            >
-                                Mark as finished
-                            </v-btn>
-                            <v-btn
-                                text
-                                small
-                                color="error"
-                                :disabled="isOpenSession(session)"
-                                @click="deleteSession(session)"
-                            >
-                                Delete session
-                            </v-btn>
-                            <span v-if="isOpenSession(session)" class="caption text--secondary">
-                                This is the session you are recording now — finish it before deleting it.
-                            </span>
-                        </div>
-                    </v-expansion-panel-content>
-                </v-expansion-panel>
-            </v-expansion-panels>
+        <v-card v-if="viewMode !== 'file' && activeSession && !activeDetections.length" class="pa-5 my-3">
+            <h2 class="text-h6">No tunes in this session yet</h2>
+            <p class="mb-0 text--secondary">{{ viewMode === 'live' ? 'The session is saved. Recognised tunes will appear here while listening.' : 'The session is saved with an empty tune list.' }}</p>
         </v-card>
 
         <LiveScoreFollow
@@ -617,6 +560,9 @@ const emptyLiveState = () => ({
     elapsedSeconds: 0,
     // A session exists (running or paused). Mirrors liveAnalysisService.sessionId.
     hasSession: false,
+    sessionId: null,
+    sessionName: '',
+    startedAt: null,
     // The microphone is open and the loop is running.
     capturing: false,
     // A restored session with no stored analysis options can be read and
@@ -629,7 +575,6 @@ const emptyLiveState = () => ({
     saveState: 'idle',
     saveError: null,
     starting: false,
-    finishing: false,
     retryingMic: false,
     retryingSave: false,
 });
@@ -658,6 +603,7 @@ export default {
             // file is the deliberate, occasional case, and restoreSavedState()
             // below switches back to it when there are saved file results.
             viewMode: 'live', // 'file' | 'live' | 'history'
+            lastSessionView: 'live',
             // The two analyses keep their own results, progress and errors.
             // They used to share one set of fields, so starting one wiped the
             // other's results and the "stage" of whichever ran last decided
@@ -666,6 +612,13 @@ export default {
             live: emptyLiveState(),
             followMode: false,
             pastSessions: [],
+            selectedSession: null,
+            savedDetections: [],
+            sessionPicker: false,
+            pickerLoading: false,
+            workspaceBusy: false,
+            workspaceError: '',
+            pendingSessionPatch: null,
             // settingIDs of favourited tunes, for the stars in Past Sessions.
             favouriteSettingIDs: [],
             icons: {
@@ -682,7 +635,11 @@ export default {
         // the microphone and never touches either set of results — the live
         // session carries on exactly as it does when the user navigates to a
         // different route entirely.
+        '$route.query.live'(value) {
+            if (value === '1') this.viewMode = 'live';
+        },
         viewMode(newVal) {
+            if (newVal !== 'file') this.lastSessionView = newVal;
             if (newVal !== 'live') this.followMode = false;
             if (newVal === 'history') this.refreshPastSessions();
         },
@@ -692,9 +649,22 @@ export default {
             return MIN_PAST_DETECTION_SECONDS;
         },
         activeDetections() {
+            if (this.viewMode === 'history') return this.savedDetections;
             return this.viewMode === 'file' ? this.file.detections : this.live.detections;
         },
+        activeSession() {
+            if (this.viewMode === 'history') return this.selectedSession;
+            if (!this.live.hasSession) return null;
+            return {
+                id: this.live.sessionId, name: this.live.sessionName,
+                startedAt: this.live.startedAt, listenedSeconds: this.live.elapsedSeconds,
+            };
+        },
+        activeListenedSeconds() {
+            return this.activeSession ? this.listenedSeconds(this.activeSession) : 0;
+        },
         activeAcceptedWindows() {
+            if (this.viewMode === 'history') return 0;
             return this.viewMode === 'file'
                 ? this.file.summary.acceptedWindows
                 : this.live.summary.acceptedWindows;
@@ -745,6 +715,8 @@ export default {
         // The auto-start below cannot run before the tune index is usable
         // (canStartLive is false), and arriving from a cold start it usually is
         // not — so this is also the retry point, not just a flag flip.
+        this._onOpenCurrent = () => { this.viewMode = 'live'; this._syncLiveFromService(); };
+        eventBus.$on('openCurrentSession', this._onOpenCurrent);
         this._onIndexLoaded = () => {
             this.indexLoaded = true;
             this._runPendingAutoFollow();
@@ -773,6 +745,7 @@ export default {
             this.live.micMessage = healthy ? '' : (reason || this.live.micMessage);
         };
         this._onLiveSaveState = ({ state, error }) => {
+            this.live.sessionName = liveAnalysisService.sessionName;
             this.live.saveState = state;
             this.live.saveError = error;
         };
@@ -816,12 +789,23 @@ export default {
         eventBus.$on('fileAnalysisUpdate', this._onFileUpdate);
         eventBus.$on('fileAnalysisError', this._onFileError);
 
+        if (store.state.sessionWorkspace) {
+            const saved = store.state.sessionWorkspace;
+            this.selectedSession = saved.session;
+            this.savedDetections = saved.detections;
+            this.pendingSessionPatch = saved.pending;
+        }
+        this.refreshPastSessions();
         this._initialise();
         eventBus.$emit('parentViewActivated');
     },
     beforeDestroy() {
         this._pcm = null;
         this._destroyed = true;
+        store.state.sessionWorkspace = this.selectedSession && (this.viewMode === 'history' || this.pendingSessionPatch) ? {
+            session: this.selectedSession, detections: this.savedDetections,
+            pending: this.pendingSessionPatch,
+        } : null;
         // Withdraws a ?follow=1 auto-start that has not fired yet. The
         // eventBus unsubscribe below covers a late indexLoaded, but not the
         // $nextTick callback created() already queued — that one holds its own
@@ -831,6 +815,7 @@ export default {
         if (fileSessionAnalysisService.isRunning) {
             fileSessionAnalysisService.cancel();
         }
+        eventBus.$off('openCurrentSession', this._onOpenCurrent);
         eventBus.$off('indexLoaded', this._onIndexLoaded);
         eventBus.$off('liveAnalysisUpdate', this._onLiveUpdate);
         eventBus.$off('liveAnalysisTimerTick', this._onLiveTimerTick);
@@ -852,6 +837,11 @@ export default {
         // that is already running, an explicit ?live/?follow request, a session
         // left unfinished by a previous run of the app, then saved file work.
         async _initialise() {
+            if (this.selectedSession && !this._routeWantsLive()) {
+                this.viewMode = 'history';
+                this._syncLiveFromService();
+                return;
+            }
             if (liveAnalysisService.sessionId) {
                 this.viewMode = 'live';
                 this._syncLiveFromService();
@@ -888,7 +878,7 @@ export default {
                 // An unfinished session is NOT resumed automatically, even by
                 // ?follow=1: continuing last night's evening is a decision, not
                 // something a deep link should make. The bar offers Resume and
-                // Finish, and ?follow=1 waits for that answer.
+                // New session, and ?follow=1 waits for that answer.
                 if (this._routeWantsLive()) this._autoFollowPending = false;
                 return;
             }
@@ -922,6 +912,9 @@ export default {
         _syncLiveFromService() {
             const svc = liveAnalysisService;
             this.live.hasSession = !!svc.sessionId;
+            this.live.sessionId = svc.sessionId;
+            this.live.sessionName = svc.sessionName;
+            this.live.startedAt = svc._sessionStartedAt;
             if (!svc.sessionId) return;
             this.live.capturing = svc.isRunning;
             this.live.canResume = svc.canResume();
@@ -1076,7 +1069,7 @@ export default {
             try {
                 await liveAnalysisService.start(windowSeconds, stepSeconds);
             } catch (e) {
-                this.live.micError = 'Could not access microphone. Please check permissions.';
+                this.live.micError = `Could not access microphone: ${e.message || 'please check permissions'}. Your session is kept; use Resume to retry.`;
             } finally {
                 this.live.starting = false;
                 this._syncLiveFromService();
@@ -1095,23 +1088,6 @@ export default {
         async pauseLive() {
             await liveAnalysisService.pause();
             this._syncLiveFromService();
-        },
-        // Ends the session: a final save, then it moves to Past Sessions.
-        async finishLiveSession() {
-            this.live.finishing = true;
-            try {
-                const result = await liveAnalysisService.finish();
-                if (!result.ok) {
-                    // The session is deliberately still here. Saying so is the
-                    // whole point — silently keeping it would look like the
-                    // button did nothing.
-                    this._syncLiveFromService();
-                    return;
-                }
-                if (this.viewMode === 'history') await this.refreshPastSessions();
-            } finally {
-                this.live.finishing = false;
-            }
         },
         async retryMicrophone() {
             this.live.retryingMic = true;
@@ -1205,6 +1181,10 @@ export default {
                 this.persistState();
                 return;
             }
+            if (this.viewMode === 'history') {
+                this.savedDetections = this.savedDetections.filter(d => d.id !== id);
+                return this.saveSessionEdit({ tunes: this.savedTunes() });
+            }
             liveAnalysisService.removeDetection(id);
             this._syncLiveFromService();
         },
@@ -1236,6 +1216,9 @@ export default {
                 this.persistState();
                 return;
             }
+            if (this.viewMode === 'history') {
+                return this.saveSessionEdit({ tunes: this.savedTunes() });
+            }
             // A live correction has to reach the SERVICE, which owns the list
             // that gets saved. Left in the component it was overwritten by the
             // next detection update and never reached Past Sessions at all.
@@ -1248,15 +1231,137 @@ export default {
             });
         },
 
+        sessionLabel(session) {
+            const date = this.formatSessionDate(session.startedAt);
+            return session.name || (session.placeName ? `${date} · ${session.placeName}` : date);
+        },
+        filterSession(session, query) {
+            return [this.sessionLabel(session), this.formatSessionDate(session.startedAt), session.placeName || '']
+                .join(' ').toLocaleLowerCase().includes(query.toLocaleLowerCase());
+        },
+        async openSessionPicker() {
+            this.sessionPicker = true;
+            this.pickerLoading = true;
+            try { await this.refreshPastSessions(); }
+            finally { this.pickerLoading = false; }
+        },
+        selectSession(id) {
+            if (!id || this.workspaceBusy) return;
+            if (this.pendingSessionPatch) {
+                this.workspaceError = 'Save your pending changes before opening another session.';
+                return;
+            }
+            const session = this.pastSessions.find(s => s.id === id);
+            if (!session) return;
+            this.sessionPicker = false;
+            this.workspaceError = '';
+            if (this.isOpenSession(session)) {
+                this.viewMode = 'live';
+                this._syncLiveFromService();
+                return;
+            }
+            this.selectedSession = { ...session };
+            this.savedDetections = (session.tunes || []).map((tune, index) =>
+                this._buildDetectionRow({ ...tune, id: `saved-${index}` }));
+            this.viewMode = 'history';
+        },
+        savedTunes() {
+            return this.savedDetections.map(d => ({
+                tuneId: d.selectedTuneId, settingId: d.selectedSettingId,
+                title: d.selectedTitle, sourceUrl: d.selectedSourceUrl,
+                dataset: d.dataset || '', startSeconds: d.startSeconds,
+                endSeconds: d.endSeconds, bestScore: d.bestScore || 0,
+                alternatives: d.alternatives || [],
+            }));
+        },
+        async saveSessionEdit(patch) {
+            const id = this.selectedSession.id;
+            this.pendingSessionPatch = { id, patch: { ...(this.pendingSessionPatch ? this.pendingSessionPatch.patch : {}), ...patch } };
+            return this.retrySessionEdit();
+        },
+        async retrySessionEdit() {
+            if (!this.pendingSessionPatch || this.workspaceBusy) return;
+            this.workspaceBusy = true;
+            this.workspaceError = '';
+            const pending = this.pendingSessionPatch;
+            try {
+                const saved = await store.updateLiveSession(pending.id, pending.patch);
+                if (this.selectedSession && this.selectedSession.id === pending.id) this.selectedSession = saved;
+                if (this.pendingSessionPatch === pending) this.pendingSessionPatch = null;
+                if (store.state.sessionWorkspace && store.state.sessionWorkspace.session.id === pending.id) {
+                    store.state.sessionWorkspace.session = saved;
+                    store.state.sessionWorkspace.pending = this.pendingSessionPatch;
+                }
+                await this.refreshPastSessions();
+            } catch (e) {
+                this.workspaceError = `Changes have not been saved: ${e.message}`;
+            } finally { this.workspaceBusy = false; }
+            if (!this.workspaceError && this.pendingSessionPatch) return this.retrySessionEdit();
+        },
+        async renameSession(name) {
+            if (this.viewMode === 'history') {
+                const value = name.trim() || this.sessionLabel({ ...this.selectedSession, name: '' });
+                this.selectedSession = { ...this.selectedSession, name: value };
+                return this.saveSessionEdit({ name: value, customName: !!name.trim() });
+            }
+            await liveAnalysisService.rename(name);
+            this._syncLiveFromService();
+        },
+        async clearSessionTunes() {
+            if (!window.confirm('Remove all tunes from this session? The session and its name will be kept.')) return;
+            if (this.viewMode === 'history') {
+                this.savedDetections = [];
+                return this.saveSessionEdit({ tunes: [] });
+            }
+            await liveAnalysisService.clearTunes();
+            this._syncLiveFromService();
+        },
+        async deleteSelectedSession() {
+            if (this.workspaceBusy) return;
+            if (!this.activeSession || !window.confirm('Delete this session and its tune list? This cannot be undone.')) return;
+            this.workspaceBusy = true;
+            try {
+                if (this.viewMode === 'history') await store.deleteLiveSession(this.selectedSession.id);
+                else await liveAnalysisService.deleteSession();
+                this.selectedSession = null;
+                store.state.sessionWorkspace = null;
+                this.savedDetections = [];
+                this.pendingSessionPatch = null;
+                this.workspaceError = '';
+                this.viewMode = 'live';
+                this._syncLiveFromService();
+                await this.refreshPastSessions();
+            } catch (e) { this.workspaceError = `Could not delete session: ${e.message}`; }
+            finally { this.workspaceBusy = false; }
+        },
+        async newSession() {
+            if (this.pendingSessionPatch) {
+                this.workspaceError = 'Save your pending changes before starting a new session.';
+                return;
+            }
+            this.workspaceBusy = true;
+            try {
+                const result = await liveAnalysisService.finish();
+                if (!result.ok) return;
+                this.selectedSession = null;
+                this.viewMode = 'live';
+                this._syncLiveFromService();
+                await this.startLiveAnalysis();
+            } catch (e) { this.workspaceError = `Could not start a new session: ${e.message}`; }
+            finally { this.workspaceBusy = false; }
+        },
+
         // ---- Past Sessions --------------------------------------------------
 
         async refreshPastSessions() {
-            const [sessions, favourites] = await Promise.all([
-                store.getLiveSessions(),
-                store.getFavourites(),
-            ]);
-            this.pastSessions = sessions.slice().sort((a, b) => b.startedAt - a.startedAt);
-            this.favouriteSettingIDs = favourites.map(f => String(f.result.settingID));
+            try {
+                const [sessions, favourites] = await Promise.all([
+                    store.getNamedLiveSessions(),
+                    store.getFavourites(),
+                ]);
+                this.pastSessions = sessions.slice().sort((a, b) => b.startedAt - a.startedAt);
+                this.favouriteSettingIDs = favourites.map(f => String(f.result.settingID));
+            } catch (e) { this.workspaceError = `Could not load sessions: ${e.message}`; }
         },
         isOpenSession(session) {
             return !!liveAnalysisService.sessionId && session.id === liveAnalysisService.sessionId;
@@ -1294,9 +1399,15 @@ export default {
             };
         },
         isTuneFavourited(tune) {
-            return !!tune.settingId && this.favouriteSettingIDs.includes(String(tune.settingId));
+            const id = tune.selectedSettingId || tune.settingId;
+            return !!id && this.favouriteSettingIDs.includes(String(id));
         },
         async toggleFavourite(tune) {
+            tune = { ...tune,
+                tuneId: tune.selectedTuneId || tune.tuneId,
+                settingId: tune.selectedSettingId || tune.settingId,
+                title: tune.selectedTitle || tune.title,
+            };
             if (!tune.settingId) return;
             const settingID = String(tune.settingId);
             if (this.isTuneFavourited(tune)) {
@@ -1327,32 +1438,12 @@ export default {
             const favourites = await store.getFavourites();
             this.favouriteSettingIDs = favourites.map(f => String(f.result.settingID));
         },
-        // Closes out a session left unfinished by a previous run of the app, so
-        // it does not sit in the list labelled "Unfinished" with nothing that
-        // can be done about it.
-        async finishStoredSession(session) {
-            await store.upsertLiveSession({
-                ...session,
-                endedAt: session.startedAt + this.listenedSeconds(session) * 1000,
-            });
-            await this.refreshPastSessions();
-        },
-        async deleteSession(session) {
-            // The open session is not deletable: the next autosave would write
-            // it straight back, so the delete would look like it silently
-            // failed. Finish it first — the button is disabled and says so.
-            if (this.isOpenSession(session)) return;
-            if (!window.confirm(`Delete this saved session (${session.tunes.length} tunes)? This cannot be undone.`)) return;
-            await store.deleteLiveSession(session.id);
-            await this.refreshPastSessions();
-        },
-
         // ---- file export ----------------------------------------------------
 
         normalisedDetectionsForExport() {
             this.file.exportError = '';
 
-            const normalised = this.file.detections.map(detection => {
+            const normalised = this.activeDetections.map(detection => {
                 const startSeconds = parseClockTime(detection.editableTime);
                 if (Number.isNaN(startSeconds)) {
                     throw new Error(`Invalid time: ${detection.editableTime}`);
@@ -1384,10 +1475,14 @@ export default {
         downloadTuneList() {
             try {
                 const detections = this.normalisedDetectionsForExport();
-                const stem = this.audioFile ? this.audioFile.name.replace(/\.[^.]+$/, '') : 'session-analysis';
+                const title = this.viewMode === 'file'
+                    ? (this.audioFile ? this.audioFile.name.replace(/\.[^.]+$/, '') : 'session-analysis')
+                    : (this.activeSession ? this.sessionLabel(this.activeSession) : 'session');
+                const stem = title.replace(/[\\/:*?"<>|]/g, '-');
                 this.downloadText(`${stem}-tunes.txt`, buildTuneListText(detections));
             } catch (e) {
-                this.file.exportError = e.message;
+                if (this.viewMode === 'file') this.file.exportError = e.message;
+                else this.workspaceError = e.message;
             }
         },
         downloadUpdatedXsc() {
@@ -1398,7 +1493,8 @@ export default {
                 const stem = this.xscFile.name.replace(/\.xsc$/i, '');
                 this.downloadText(`${stem}-session-analysis.xsc`, updated);
             } catch (e) {
-                this.file.exportError = e.message;
+                if (this.viewMode === 'file') this.file.exportError = e.message;
+                else this.workspaceError = e.message;
             }
         },
         formatSecondsAsDuration,
@@ -1408,6 +1504,17 @@ export default {
 </script>
 
 <style scoped>
+@media (max-width: 599px) {
+    .session-results ::v-deep table,
+    .session-results ::v-deep tbody,
+    .session-results ::v-deep tr,
+    .session-results ::v-deep td { display: block; width: 100%; }
+    .session-results ::v-deep thead { display: none; }
+    .session-results ::v-deep tr { padding: 12px 0; border-bottom: 1px solid #ddd; }
+    .session-results ::v-deep td { height: auto !important; padding: 5px 0 !important; border: 0 !important; }
+    .session-results .duration-cell::before { content: 'Duration: '; color: #666; }
+}
+
 .drop-zone {
     border: 2px dashed rgba(5, 85, 129, 0.35);
     border-radius: 14px;

@@ -1119,7 +1119,34 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 Two changes, in that order, both driven by the same complaint: "I was at a
 session last week and I don't remember what was played."
 
-#### One session, three verbs: Listen, Pause, Finish
+#### Saving is not an action — one shared session workspace
+
+**There is no Finish step required to make a session durable.** A session is a
+record from the moment it starts, empty or not, and stays one until it is
+explicitly deleted. "Finish" only ever meant "and now save it", which is a
+promise the autosave was already keeping — so its real effect was to make users
+believe an unfinished session had not been stored. What remains is **New
+session** (save the current one, start a separate one) and, under Session
+actions, **Clear tune list** (keep the session, empty its list) and **Delete
+session**. The 300-session cap is gone with it: a log the user has not deleted
+must not evict itself.
+
+**Saved and live sessions are the same view.** Past Sessions is a searchable
+picker over one shared tune table, so a stored session has the tune links,
+favourite stars, alternative matches, per-row removal and export the live one
+has, and editing one is the same gesture in both. Opening a stored session does
+not stop background detection; "Current session" in the status bar returns to
+the listening one. Names default to date plus the matching named place (no
+reverse geocoding — the same coordinate/`matchPlace` route as sightings, so a
+place named later still labels old sessions) and are user-editable, with
+`customName` marking a name the app must stop regenerating.
+
+`alternatives` are persisted per tune, which is what lets a stored session offer
+the same dropdown; records written before that still show their chosen tune.
+See `docs/session-workspace.md`, and `app/test/e2e/session-workspace.mjs` for
+the browser test that seeds 240 sessions and drives the whole loop.
+
+#### The lifecycle underneath it: Listen, Pause, New session
 
 There were briefly two pause-shaped controls — one that released the microphone
 and one that only stopped the analysis loop while capture kept running — plus a
@@ -1127,8 +1154,10 @@ and one that only stopped the analysis loop while capture kept running — plus 
 a distinction a user in a pub can be asked to make, and the one that kept
 recording was the surprising default. Now: **Pause** releases the microphone and
 keeps the session, **Resume** is the same start path (it finds `sessionId` set
-and continues appending), **Finish session** writes the final record and closes
-it. `clear()` is gone; `finish()` and `abandon()` replaced it.
+and continues appending), and **New session** files the current one away and
+opens another. `clear()` is gone; `finish()`, `abandon()` and `deleteSession()`
+replaced it, and every session transition is serialised so Resume cannot race a
+New session or a delete.
 
 **Listening is a background activity, not a mode.** The Session Analysis page
 has three tabs, and switching between them is navigation: none of them stops the

@@ -11,6 +11,7 @@
                 {{ status.label }}
             </v-chip>
 
+            <span v-if="sessionName" class="caption session-name" :title="sessionName">{{ sessionName }}</span>
             <span class="caption text--secondary">
                 {{ formatSecondsAsClock(elapsedSeconds) }}
                 &middot;
@@ -41,24 +42,16 @@
             </v-btn>
 
             <v-btn
-                v-if="!onSessionPage"
                 x-small
                 text
                 color="primary"
-                :to="{ name: 'session-analysis' }"
+                :to="{ name: 'session-analysis', query: { live: '1' } }"
+                @click="openCurrent"
             >
-                Open
+                Current session
             </v-btn>
 
-            <v-btn
-                x-small
-                text
-                color="secondary"
-                :loading="finishing"
-                @click="finish"
-            >
-                Finish
-            </v-btn>
+
         </div>
 
         <div
@@ -118,6 +111,7 @@ export default {
     data() {
         return {
             hasSession: false,
+            sessionName: '',
             capturing: false,
             canResume: true,
             elapsedSeconds: 0,
@@ -129,7 +123,6 @@ export default {
             indexLoaded: store.state.indexLoaded,
             pausing: false,
             resuming: false,
-            finishing: false,
             retryingMic: false,
             retryingSave: false,
             icons: {
@@ -161,6 +154,7 @@ export default {
         this._sync = () => {
             const svc = liveAnalysisService;
             this.hasSession = !!svc.sessionId;
+            this.sessionName = svc.sessionName || '';
             this.capturing = svc.isRunning;
             this.canResume = svc.canResume();
             this.elapsedSeconds = svc.elapsedSeconds;
@@ -203,6 +197,7 @@ export default {
     },
     methods: {
         formatSecondsAsClock,
+        openCurrent() { eventBus.$emit('openCurrentSession'); },
         async pause() {
             this.pausing = true;
             try { await liveAnalysisService.pause(); } finally {
@@ -221,13 +216,6 @@ export default {
                 console.warn('Could not resume listening:', e && e.message);
             } finally {
                 this.resuming = false;
-                this._sync();
-            }
-        },
-        async finish() {
-            this.finishing = true;
-            try { await liveAnalysisService.finish(); } finally {
-                this.finishing = false;
                 this._sync();
             }
         },
@@ -250,6 +238,7 @@ export default {
 </script>
 
 <style scoped>
+.session-name { max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-status-bar {
     border-left: 4px solid transparent;
     position: sticky;

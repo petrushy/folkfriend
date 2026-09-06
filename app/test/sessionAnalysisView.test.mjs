@@ -48,17 +48,28 @@ export const state = { indexLoaded: false, sessionAnalysis: null };
 export const __liveSessions = [];
 export const __favourites = [];
 export const __calls = [];
+export let __failEdit = false;
+export function __setFailEdit(value) { __failEdit = value; }
 export default {
     state,
     setSessionAnalysisState(s) { state.sessionAnalysis = s; },
     clearSessionAnalysisState() { state.sessionAnalysis = null; },
     async getLiveSessions() { return __liveSessions.slice(); },
+    async getNamedLiveSessions() { return __liveSessions.slice(); },
     async getFavourites() { return __favourites.slice(); },
     async upsertLiveSession(session) {
         __calls.push({ op: 'upsert', session });
         const i = __liveSessions.findIndex(s => s.id === session.id);
         if (i === -1) __liveSessions.push(session); else __liveSessions[i] = session;
         return session;
+    },
+    async updateLiveSession(id, patch) {
+        if (__failEdit) throw new Error('disk full');
+        const i = __liveSessions.findIndex(s => s.id === id);
+        if (i < 0) throw new Error('deleted');
+        __liveSessions[i] = { ...__liveSessions[i], ...patch };
+        __calls.push({ op: 'edit', id, patch });
+        return __liveSessions[i];
     },
     async deleteLiveSession(id) {
         __calls.push({ op: 'delete', id });
@@ -77,6 +88,8 @@ export function __reset() {
     __favourites.length = 0;
     __calls.length = 0;
     state.sessionAnalysis = null;
+    state.sessionWorkspace = null;
+    __failEdit = false;
 }
 `;
 
@@ -214,7 +227,7 @@ export const mdiAlertCircleOutline = 'alert';
 `;
 
 const FAKE_SESSION_ANALYSIS = `
-export function buildTuneListText() { return ''; }
+export function buildTuneListText(rows) { return rows.map(r => r.title).join(' / '); }
 export function buildTuneOptions() { return []; }
 export function buildUpdatedXsc() { return ''; }
 export function formatSecondsAsClock(s) { return String(s); }
@@ -546,57 +559,22 @@ await test('a save failure is surfaced and can be retried', async () => {
     assert.ok(live.__calls.includes('persist'), 'retrying actually writes again');
 });
 
-await test('a finish that fails keeps the session on screen', async () => {
-    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
-    const { vm, settle } = await mountView({ indexLoaded: true, running: true });
+await test('New session preserves the previous session if saving it fails', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true, running: true });
     await settle();
-    liveMod.__setFailNextFinish(true);
-
-    await vm.finishLiveSession();
-
-    assert.equal(vm.live.hasSession, true,
-        'the in-memory list is the only copy left — dropping it would lose the evening');
-    assert.equal(vm.live.saveState, 'error');
+    live.__setFailNextFinish(true);
+    await vm.newSession();
+    assert.equal(live.__starts.length, 0, 'no new session may replace an unsaved one');
 });
 
-await test('a finish that succeeds clears the session', async () => {
-    const { vm, settle } = await mountView({ indexLoaded: true, running: true });
-    await settle();
-
-    await vm.finishLiveSession();
-    // The service emits liveAnalysisFinished, which resets the view's copy.
-    const bus = await import(path.join(tmpDir, 'fake-eventbus.mjs'));
-    bus.__fire('liveAnalysisFinished');
-
-    assert.equal(vm.live.hasSession, false);
-    assert.equal(vm.live.detections.length, 0);
-});
-
-await test('the open session cannot be deleted from Past Sessions', async () => {
-    const { vm, settle, store, live } = await mountView({ indexLoaded: true, running: true });
-    await settle();
-    store.__liveSessions.push({ id: live.default.sessionId, startedAt: 1, tunes: [] });
-    await vm.refreshPastSessions();
-
-    const open = vm.pastSessions[0];
-    assert.equal(vm.isOpenSession(open), true);
-
-    await vm.deleteSession(open);
-    assert.ok(!store.__calls.some(c => c.op === 'delete'),
-        'the next autosave would write it straight back, so it is refused');
-    assert.equal(store.__liveSessions.length, 1);
-});
-
-await test('a session that is not open deletes normally', async () => {
+await test('a selected historical session deletes independently', async () => {
     const { vm, settle, store } = await mountView({ indexLoaded: true });
     await settle();
     store.__liveSessions.push({ id: 'old-session', startedAt: 1, tunes: [] });
     await vm.refreshPastSessions();
-
+    vm.selectSession('old-session');
     globalThis.window = { confirm: () => true };
-    await vm.deleteSession(vm.pastSessions[0]);
-    delete globalThis.window;
-
+    try { await vm.deleteSelectedSession(); } finally { delete globalThis.window; }
     assert.ok(store.__calls.some(c => c.op === 'delete' && c.id === 'old-session'));
     assert.equal(store.__liveSessions.length, 0);
 });
@@ -721,19 +699,6 @@ await test('listening time is preferred over wall-clock, with a fallback', async
     assert.equal(vm.listenedSeconds({ tunes: [] }), 0);
 });
 
-await test('an unfinished older session can be marked finished', async () => {
-    const { vm, settle, store } = await mountView({ indexLoaded: true });
-    await settle();
-    store.__liveSessions.push({ id: 'old', startedAt: 1000, endedAt: null, listenedSeconds: 60, tunes: [] });
-    await vm.refreshPastSessions();
-
-    await vm.finishStoredSession(vm.pastSessions[0]);
-
-    const written = store.__calls.find(c => c.op === 'upsert');
-    assert.ok(written, 'it does not have to sit there labelled Unfinished for ever');
-    assert.equal(written.session.endedAt, 1000 + 60 * 1000);
-});
-
 await test('starring a tune from a past session uses the real favourites path', async () => {
     const { vm, settle, store } = await mountView({ indexLoaded: true });
     await settle();
@@ -748,6 +713,63 @@ await test('starring a tune from a past session uses the real favourites path', 
     await vm.toggleFavourite({ tuneId: 42, settingId: '420', title: 'The Kesh' });
     assert.ok(store.__calls.some(c => c.op === 'unfavourite' && c.id === '420'));
     assert.equal(vm.isTuneFavourited({ settingId: '420' }), false);
+});
+
+await test('saved sessions use the shared table and export without disturbing capture', async () => {
+    const { vm, settle, store, live, bus } = await mountView({ running: true, detections: [{ id: 'live', tuneId: 1, title: 'Current tune' }] });
+    await settle();
+    store.__liveSessions.push({ id: 'old', name: 'Last Sunday', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'Old tune', startSeconds: 0, endSeconds: 60 },
+    ] });
+    await vm.openSessionPicker();
+    vm.selectSession('old');
+    assert.equal(vm.viewMode, 'history');
+    assert.equal(vm.activeDetections[0].title, 'Old tune');
+    bus.__fire('liveAnalysisUpdate', [{ id: 'new-live', tuneId: 3, title: 'Another current tune' }]);
+    assert.equal(vm.activeDetections[0].title, 'Old tune', 'background updates cannot replace the selected session');
+    let exported;
+    vm.downloadText = (name, text) => { exported = { name, text }; };
+    vm.downloadTuneList();
+    assert.equal(exported.text, 'Old tune');
+    assert.equal(exported.name, 'Last Sunday-tunes.txt');
+    assert.equal(live.default.isRunning, true);
+    assert.ok(!live.__calls.includes('stop'));
+});
+
+await test('removing and renaming a saved session persist without changing live results', async () => {
+    const { vm, settle, store, live } = await mountView({ running: true });
+    await settle();
+    store.__liveSessions.push({ id: 'old', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'Old tune', startSeconds: 0, endSeconds: 60 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('old');
+    await vm.renameSession('Our favourite evening');
+    await vm.removeDetection(vm.activeDetections[0].id);
+    assert.equal(store.__liveSessions[0].name, 'Our favourite evening');
+    assert.equal(store.__liveSessions[0].customName, true);
+    assert.deepEqual(store.__liveSessions[0].tunes, []);
+    assert.equal(live.default.isRunning, true);
+});
+
+await test('a failed historical edit keeps the edited list for retry', async () => {
+    const { vm, settle, store } = await mountView();
+    await settle();
+    store.__liveSessions.push({ id: 'old', startedAt: 1000, tunes: [
+        { tuneId: 2, title: 'Old tune', startSeconds: 0, endSeconds: 60 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('old');
+    store.__setFailEdit(true);
+    await vm.removeDetection(vm.activeDetections[0].id);
+    assert.deepEqual(vm.activeDetections, []);
+    assert.equal(store.__liveSessions[0].tunes.length, 1);
+    assert.match(vm.workspaceError, /not been saved/);
+    assert.ok(vm.pendingSessionPatch);
+    store.__setFailEdit(false);
+    await vm.retrySessionEdit();
+    assert.deepEqual(store.__liveSessions[0].tunes, []);
+    assert.equal(vm.pendingSessionPatch, null);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

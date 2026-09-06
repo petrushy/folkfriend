@@ -235,6 +235,10 @@ export default {
         if (i === -1) __sessions.unshift(record); else __sessions[i] = record;
         return record;
     },
+    async deleteLiveSession(id) {
+        const index = __sessions.findIndex(s => s.id === id);
+        if (index >= 0) __sessions.splice(index, 1);
+    },
     async getLiveSessions() { return __sessions.slice(); },
     async getLiveSessionsStrict() { return __sessions.slice(); },
     async setOpenLiveSession(state) { __openSession = state; },
@@ -346,14 +350,14 @@ async function run() {
         assert.equal(sessions[0].endedAt, 2000);
     });
 
-    await test('writing past the cap prunes the oldest sessions', async () => {
+    await test('saved sessions are retained beyond the former 300-session limit', async () => {
         const { store } = await loadStore();
         for (let i = 0; i < 301; i++) {
             await store.upsertLiveSession({ id: `s${i}`, startedAt: i, endedAt: i, tunes: [] });
         }
         const sessions = await store.getLiveSessions();
-        assert.equal(sessions.length, 300, 'capped at MAX_LIVE_SESSIONS');
-        assert.ok(!sessions.some(s => s.id === 's0'), 'the oldest session is pruned');
+        assert.equal(sessions.length, 301);
+        assert.ok(sessions.some(s => s.id === 's0'), 'the oldest session is still saved');
         assert.ok(sessions.some(s => s.id === 's300'), 'the most recent session survives');
     });
 
@@ -434,14 +438,46 @@ async function run() {
             'resume state that silently failed to save is a session that cannot be recovered');
     });
 
+    await test('names include the matching place only when enabled, and manual names survive', async () => {
+        const { store } = await loadStore();
+        store.getPlaces = async () => [{ id: 'pub', name: 'The Cobblestone', lat: 53.35, lon: -6.28 }];
+        const record = { id: 'named', startedAt: 1757000000000, tunes: [], lat: 53.35, lon: -6.28 };
+        store.userSettings.geoTagDetections = false;
+        const plain = await store.upsertLiveSession(record);
+        assert.ok(plain.name);
+        assert.ok(!plain.name.includes('Cobblestone'));
+        store.userSettings.geoTagDetections = true;
+        const placed = await store.upsertLiveSession(record);
+        assert.ok(placed.name.includes('The Cobblestone'));
+        const renamed = await store.upsertLiveSession({ ...placed, name: 'Sunday reels', customName: true });
+        assert.equal(renamed.name, 'Sunday reels');
+    });
+
+    await test('editing stored tunes preserves metadata and cannot resurrect a deleted session', async () => {
+        const { store } = await loadStore();
+        await store.upsertLiveSession({ id: 'edited', startedAt: 1000, name: 'Evening', customName: true, tunes: [{ tuneId: 1 }] });
+        await Promise.all([
+            store.updateLiveSession('edited', { name: 'Renamed' }),
+            store.updateLiveSession('edited', { tunes: [] }),
+        ]);
+        const [saved] = await store.getLiveSessions();
+        assert.equal(saved.name, 'Renamed');
+        assert.equal(saved.startedAt, 1000);
+        assert.deepEqual(saved.tunes, []);
+        await store.deleteLiveSession('edited');
+        await assert.rejects(store.updateLiveSession('edited', { tunes: [{ tuneId: 2 }] }));
+        assert.deepEqual(await store.getLiveSessions(), []);
+    });
+
     console.log('\nliveAnalysis.js — fresh vs resume, and when a session is saved');
 
-    await test('fresh start() assigns a sessionId; nothing saves before a detection', async () => {
+    await test('fresh start() saves the empty session before any detection', async () => {
         const { service, store } = await loadService();
         assert.equal(service.sessionId, null);
         await service.start(10, 5);
         assert.ok(service.sessionId, 'a fresh session gets an id');
-        assert.equal(store.__sessions.length, 0, 'nothing saved before any tune is recognised');
+        await service._saveChain;
+        assert.equal(store.__sessions.length, 1, 'the session is saved without a Finish action');
         await service.stop();
     });
 
@@ -451,18 +487,18 @@ async function run() {
 
         play(service, 1, 0, 6);
         await service._maybeSaveSessionSnapshot();
-        assert.equal(store.__upsertCalls, 1);
+        assert.equal(store.__upsertCalls, 2);
         assert.equal(store.__sessions[0].tunes.length, 1);
 
         // Re-clustering again while the SAME tune is still the tail must not
         // trigger a second save — that is the whole point of the edge tracker.
         play(service, 1, 30, 2);
         await service._maybeSaveSessionSnapshot();
-        assert.equal(store.__upsertCalls, 1, 'no save fires while the tail tune has not changed');
+        assert.equal(store.__upsertCalls, 2, 'no save fires while the tail tune has not changed');
 
         play(service, 2, 60, 6);
         await service._maybeSaveSessionSnapshot();
-        assert.equal(store.__upsertCalls, 2, 'a genuine tune change triggers a save');
+        assert.equal(store.__upsertCalls, 3, 'a genuine tune change triggers a save');
         assert.equal(store.__sessions[0].tunes.length, 2);
 
         await service.stop();
@@ -520,14 +556,14 @@ async function run() {
         await service.start(10, 5);
         play(service, 1, 0, 6);
         await service._maybeSaveSessionSnapshot();
-        assert.equal(store.__upsertCalls, 1);
+        assert.equal(store.__upsertCalls, 2);
         const savedEndBefore = store.__sessions[0].tunes[0].endSeconds;
 
         // The tune keeps playing — the live detection's endSeconds advances,
         // but the tail tune has not CHANGED, so the edge tracker stays quiet.
         service.detections[service.detections.length - 1].endSeconds = savedEndBefore + 100;
         await service._maybeSaveSessionSnapshot();
-        assert.equal(store.__upsertCalls, 1, 'no new edge fires while the same tune keeps playing');
+        assert.equal(store.__upsertCalls, 2, 'no new edge fires while the same tune keeps playing');
         assert.equal(store.__sessions[0].tunes[0].endSeconds, savedEndBefore,
             'the stored copy is stale until something forces a re-serialize');
 
@@ -613,13 +649,43 @@ async function run() {
         await service.stop();
     });
 
-    await test('nothing is stored for a session that never recognised anything', async () => {
+    await test('a session with no recognised tunes remains saved', async () => {
         const { service, store } = await loadService();
         await service.start(10, 5);
         await service._persistSession();
-        assert.equal(store.__sessions.length, 0,
-            'an empty session before its first tune is not a record worth keeping');
+        assert.equal(store.__sessions.length, 1,
+            'empty sessions are saved automatically too');
         await service.stop();
+    });
+
+    await test('Clear keeps the named session and microphone, and persists an empty list', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        const id = service.sessionId;
+        await service.rename('Sunday session');
+        await service.clearTunes();
+        assert.equal(service.sessionId, id);
+        assert.equal(service.isRunning, true);
+        assert.equal(store.__sessions[0].name, 'Sunday session');
+        assert.deepEqual(store.__sessions[0].tunes, []);
+        assert.deepEqual(service._windowMatches, []);
+        await service.stop();
+    });
+
+    await test('deleting a session waits for queued saves and never recreates it', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        await service._saveChain;
+        play(service, 1, 0, 6);
+        store.__setDelays([30]);
+        service._persistSession();
+        await service.deleteSession();
+        assert.equal(service.sessionId, null);
+        assert.equal(service.isRunning, false);
+        assert.deepEqual(store.__sessions, []);
+        await service._persistSession();
+        assert.deepEqual(store.__sessions, []);
     });
 
     console.log('\nliveAnalysis.js — failures stay recoverable');

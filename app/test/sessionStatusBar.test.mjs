@@ -246,18 +246,6 @@ async function run() {
         assert.equal(vm.capturing, true);
     });
 
-    await test('Finish clears the bar', async () => {
-        const { vm, component, live } = await loadComponent();
-        live.default.sessionId = 'session-1';
-        live.default.isRunning = true;
-        component.created.call(vm);
-
-        await vm.finish();
-
-        assert.ok(live.__calls.some(c => c.op === 'finish'));
-        assert.equal(vm.hasSession, false);
-    });
-
     await test('an explicit retry asks the service to reacquire', async () => {
         const { vm, component, live } = await loadComponent();
         live.default.sessionId = 'session-1';

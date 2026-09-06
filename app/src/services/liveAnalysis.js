@@ -85,6 +85,9 @@ class LiveAnalysisService {
         // whether start() means "begin fresh" or "resume", and for whether the
         // UI should offer Resume/Clear. See start()/stop()/clear().
         this.sessionId = null;
+        this.sessionName = '';
+        this.customName = false;
+        this.placeName = '';
         this._sessionStartedAt = null;
         // First location fix obtained during the session, reused by
         // _persistSession() so a session records where it happened without a
@@ -159,6 +162,14 @@ class LiveAnalysisService {
     }
 
     async start(windowSeconds, stepSeconds) {
+        if (this._sessionTransition) await this._sessionTransition;
+        if (this._startPromise) return this._startPromise;
+        this._startPromise = this._startCapture(windowSeconds, stepSeconds);
+        try { return await this._startPromise; }
+        finally { this._startPromise = null; }
+    }
+
+    async _startCapture(windowSeconds, stepSeconds) {
         if (this._stopPromise) await this._stopPromise;
         if (this.isRunning) return;
 
@@ -200,6 +211,15 @@ class LiveAnalysisService {
         // the first tune is recognised (a window later, at least) the fix is
         // normally already there.
         geoService.beginSession();
+        if (store.userSettings.geoTagDetections && !this._sessionFix) {
+            const sessionId = this.sessionId;
+            geoService.getFix().then(fix => {
+                if (this.sessionId !== sessionId || !store.userSettings.geoTagDetections || !fix) return;
+                this._sessionFix = fix;
+                this._scheduleCheckpoint();
+            }).catch(e => console.warn('Could not locate session:', e && e.message));
+        }
+        this._persistSession();
 
         try {
             await micService.startContinuous(windowSeconds);
@@ -214,6 +234,7 @@ class LiveAnalysisService {
             throw e;
         }
 
+        if (!this.isRunning) return;
         this._sampleRate = micService.audioCtx ? micService.audioCtx.sampleRate : 48000;
 
         this._startTimer();
@@ -245,9 +266,23 @@ class LiveAnalysisService {
     // the in-memory copy is the only remaining copy at that point, and
     // throwing it away to honour a button press would be the one unrecoverable
     // thing this code can do. The caller shows the error and offers a retry.
-    async finish() {
+    _transitionSession(action) {
+        if (this._sessionTransition) return this._sessionTransition;
+        this._sessionTransition = (async () => {
+            if (this._startPromise) {
+                try { await this._startPromise; } catch (_) { /* keep the failed session */ }
+            }
+            return action();
+        })().finally(() => { this._sessionTransition = null; });
+        return this._sessionTransition;
+    }
+
+    // Used by New session. Saving itself never requires this action.
+    finish() { return this._transitionSession(() => this._finishSession()); }
+
+    async _finishSession() {
         if (!this.sessionId) return { ok: true };
-        if (this.isRunning) await this.stop();
+        await this.stop();
         this._generation++;
 
         const result = await this._persistSession({ endedAt: Date.now() });
@@ -275,7 +310,11 @@ class LiveAnalysisService {
     }
 
     _resetSessionState() {
+        this._cancelCheckpoint();
         this.sessionId = null;
+        this.sessionName = '';
+        this.customName = false;
+        this.placeName = '';
         this._sessionStartedAt = null;
         this._sessionFix = null;
         this._lastSavedTuneId = null;
@@ -287,6 +326,42 @@ class LiveAnalysisService {
         this._rejectedTunes.clear();
         this.saveState = 'idle';
         this.saveError = null;
+    }
+
+    async rename(name) {
+        this.sessionName = String(name || '').trim().slice(0, 160);
+        this.customName = !!this.sessionName;
+        return this._persistSession();
+    }
+
+    async clearTunes() {
+        this._generation++;
+        this._windowMatches = [];
+        this.detections = [];
+        this._lastSavedTuneId = null;
+        this._lastSightingTuneId = null;
+        this._rejectedTunes.clear();
+        // The old transcription must not repopulate the cleared list.
+        if (this._cancelSleep) this._cancelSleep();
+        if (this.isRunning) {
+            const generation = this._generation;
+            this._runLoop(this.options, false, generation).catch(() => {
+                if (generation === this._generation) this.stop();
+            });
+        }
+        eventBus.$emit('liveAnalysisUpdate', this.detections);
+        return this._persistSession();
+    }
+
+    deleteSession() { return this._transitionSession(() => this._deleteSession()); }
+
+    async _deleteSession() {
+        await this.stop({ flush: false });
+        this._cancelCheckpoint();
+        await this._saveChain;
+        // Delete only after earlier checkpoints have settled.
+        await store.deleteLiveSession(this.sessionId);
+        await this.abandon();
     }
 
     // Reacquires the microphone for a session that is running but has lost
@@ -609,6 +684,7 @@ class LiveAnalysisService {
         if (String(latest.tuneId) === String(this._lastSightingTuneId)) return;
         this._lastSightingTuneId = latest.tuneId;
 
+        const sessionId = this.sessionId;
         (async () => {
             // A fix already cached from the start of the session costs nothing
             // here; only the first tune of an evening can wait on the radio.
@@ -618,7 +694,11 @@ class LiveAnalysisService {
             // Only ever set here, so it stays null whenever geoTagDetections is
             // off (this whole method returns early above) — no separate gating
             // needed in _persistSession().
-            if (this._sessionFix === null) this._sessionFix = fix;
+            if (this.sessionId !== sessionId) return;
+            if (this._sessionFix === null) {
+                this._sessionFix = fix;
+                this._scheduleCheckpoint();
+            }
             await store.addSighting({
                 tuneID: latest.tuneId,
                 settingID: latest.settingId,
@@ -655,7 +735,7 @@ class LiveAnalysisService {
     // one write, and because these arrive from the UI thread while the loop is
     // also saving.
     _scheduleCheckpoint(delayMs = CHECKPOINT_DEBOUNCE_MS) {
-        if (!this.sessionId) return;
+        if (!this.sessionId || this._sessionTransition) return;
 
         // Overdue: save now rather than pushing the deadline out again.
         const since = Date.now() - (this._lastCheckpointAt || 0);
@@ -702,20 +782,18 @@ class LiveAnalysisService {
     // Every write goes through _saveChain, so a checkpoint and a finish cannot
     // land out of order and leave the older snapshot stored.
     //
-    // Before the first successful write an empty tune list is "nothing has
-    // been recognised yet" and is not worth a record. Afterwards it is an edit
-    // — the user removed the last row — and must be written, or the removal
-    // un-happens on the next reload.
+    // Empty sessions are records too: a new session and a cleared list both
+    // survive a reload. No Finish action is needed to make a session durable.
     _persistSession({ endedAt = null } = {}) {
         if (!this.sessionId) return Promise.resolve({ ok: true });
-        if (!this.detections.length && !this._hasPersisted) {
-            return Promise.resolve({ ok: true });
-        }
 
         this._cancelCheckpoint();
         const record = {
             id: this.sessionId,
             startedAt: this._sessionStartedAt,
+            name: this.sessionName,
+            customName: this.customName,
+            placeName: this.placeName,
             endedAt,
             tunes: this.detections.map(d => ({
                 tuneId: d.tuneId,
@@ -726,6 +804,7 @@ class LiveAnalysisService {
                 startSeconds: d.startSeconds,
                 endSeconds: d.endSeconds,
                 bestScore: d.bestScore,
+                alternatives: d.alternatives || [],
             })),
             // How long the microphone was actually listening, which is not the
             // same as endedAt - startedAt once a session has been paused.
@@ -738,7 +817,11 @@ class LiveAnalysisService {
         this._setSaveState('saving');
         this._saveChain = this._saveChain.then(async () => {
             try {
-                await store.upsertLiveSession(record);
+                const saved = await store.upsertLiveSession(record);
+                if (saved && this.sessionId === record.id && !this.customName) {
+                    this.sessionName = saved.name || this.sessionName;
+                    this.placeName = saved.placeName || '';
+                }
                 this._hasPersisted = true;
                 this._lastCheckpointAt = Date.now();
                 // Reported, not swallowed: resume state that failed to save is
@@ -810,6 +893,9 @@ class LiveAnalysisService {
         }
 
         this.sessionId = saved.sessionId;
+        this.sessionName = record.name || '';
+        this.customName = !!record.customName;
+        this.placeName = record.placeName || '';
         this._sessionStartedAt = saved.startedAt || record.startedAt || Date.now();
         this.elapsedSeconds = saved.elapsedSeconds || 0;
         this.options = saved.options || null;
