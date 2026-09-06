@@ -867,8 +867,10 @@ modes it was: never saved, or saved-then-evicted.
   (schema 2, read-only, migrated away)
 - `'tuneIndex'` / `'tuneIndexMetadata'` — schema-1 tune index (read-only, migrated away)
 - `'aiTuneSummaries'` — AI background notes, `{ tuneID: { text, model, generatedAt, sourceUrl } }`
-- `'tuneSightings'` — where tunes were heard, append-only, capped at 5000. **Local-only, never synced**
-- `'places'` — user-named locations, `{ id, name, lat, lon, radiusM, createdAt }`
+- `'tuneSightings'` — where tunes were heard, append-only, capped at 5000. Synced
+- `'places'` — user-named locations, `{ id, name, lat, lon, radiusM, createdAt }`. Synced
+- `'liveSessions'` — saved Past Sessions, capped at 300,
+  `{ id, startedAt, endedAt, tunes: [...], lat, lon, accuracy }`. Synced
 
 Not IndexedDB, but worth listing alongside — localStorage keys: `'userSettings'`,
 `'favouritesLocalUpdatedAt'`, `'anthropicApiKey'` (deliberately outside
@@ -878,7 +880,19 @@ device resurrecting cleared notes).
 
 ### Firebase / Firestore
 
-Only **favourites** are synced to Firestore (under `users/{uid}/data/favourites`). **History is local-only** — it lives in IndexedDB on the device and is never pushed to Firestore. Firestore SDK handles its own offline queue for favourites — writes made while offline are automatically replayed when connectivity returns. Security rules are in `firestore.rules`.
+Four things sync, in two different shapes. **History is still local-only** — it
+lives in IndexedDB on the device and is never pushed to Firestore. The Firestore
+SDK handles its own offline queue, so writes made offline are replayed when
+connectivity returns. Security rules are in `firestore.rules`.
+
+**One document holding the whole array:**
+
+- **favourites** — `users/{uid}/data/favourites`. Small, always rewritten
+  wholesale, arbitrated by a document-level `clientUpdatedAt`.
+
+**One document per record** (`users/{uid}/{places,sightings,liveSessions}/{id}`),
+added September 2026 — see "Syncing the play log" below for why the favourites
+shape could not be reused and what the merge rules are.
 
 ## CI/CD — GitHub Actions (July 2026)
 
@@ -1099,6 +1113,112 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 - The Results page shows a small debug line: transcriber (ML/DSP) + the contour string — compare against the CLI's `transcribe` output for the same clip.
 
 ## Recent changes
+
+### Resumable sessions, Past Sessions, and syncing the play log (September 2026)
+
+Two changes, in that order, both driven by the same complaint: "I was at a
+session last week and I don't remember what was played."
+
+#### Stop is no longer a dead end
+
+Live analysis had one lifecycle — Start, accumulate, Stop — and Stop was
+terminal for the on-screen list. `stop()` never cleared `detections` itself, but
+the only way back in was `start()`, which unconditionally reset everything, so
+carrying on after a break meant losing the evening so far. That mattered most in
+the case it was hit: **stopping to recover a microphone the OS had taken away**
+is a normal thing to need on iOS, and it cost the user their list every time.
+
+`liveAnalysisService.sessionId` is now the single source of truth for "is there
+an open session". `start()` branches on it: null means a fresh session (reset
+everything, mint an id), non-null means **resume** — `detections`,
+`_windowMatches`, `elapsedSeconds` and the reject cooldowns are all left exactly
+as `stop()` left them. Only the new `clear()` ends a session and nulls the id.
+
+Three details that are easy to get wrong:
+
+- **`stop()` awaits its own flush.** `_maybeSaveSessionSnapshot` only writes on a
+  tune *change*, so the tail tune's `endSeconds` is stale by however long it kept
+  playing; `stop()` re-serialises the current detections. It has to be *awaited*
+  rather than fire-and-forget because `clear()` calls `stop()` and then makes its
+  own finalizing write to the same record — unordered, the slow one lands last
+  and silently un-finalizes the session. Caught by mutation-testing the fix.
+- **Resume/Clear are offered on `sessionId`, not on `detections.length`.** The
+  service resumes an empty session exactly as it resumes a populated one, so
+  gating the button on having caught a tune made it lie: stopping before
+  anything was recognised (including a denied microphone) showed "Listen &
+  Follow" while the next tap would in fact resume. Found in the field, not by a
+  test.
+- **Resume only works within one page load.** A reload resets the singleton, so
+  the session is safely in IndexedDB but no longer resumable — the in-memory
+  `_windowMatches` needed to keep clustering correctly are gone.
+
+#### Past Sessions
+
+Every live session is auto-saved to IndexedDB (`'liveSessions'`, capped at 300)
+as it happens — edge-triggered on the tail tune changing, the same rule
+`_recordSighting` uses, because the loop runs every few seconds for hours and
+saving per cycle would rewrite the record dozens of times an hour. A third mode
+on the Session Analysis page lists them.
+
+**History is recorded unconditionally, NOT gated by `geoTagDetections`.** That
+setting is about location, and it was gating whether any record was kept at all,
+which is why an evening could vanish entirely. It now controls only whether
+`lat`/`lon` are attached — hence `_lastSavedTuneId` as a **separate** edge
+tracker from `_lastSightingTuneId`, since `_recordSighting` returns early when
+the setting is off and the session save must not.
+
+#### Syncing the play log
+
+Sightings, places and sessions were device-local, which answers the question for
+the wrong device: recorded on a phone in a pub, wanted later on a computer.
+
+**They do NOT reuse the favourites shape, and could not.** Favourites are one
+document holding the whole array. At their caps, 5000 sightings and 300 sessions
+each approach or pass Firestore's **1 MiB document limit** — so that shape would
+have started failing for the people using the feature most, silently. And a live
+session saves on every tune change, so an array push would re-upload the user's
+entire history every time a tune was recognised, over an evening, on mobile data.
+
+So: **one document per record**, under `users/{uid}/{places,sightings,liveSessions}/{id}`.
+Each write is a few hundred bytes, and deletion is a deleted document rather than
+an absence — which is what forced the whole tombstone apparatus around AI
+summaries.
+
+Rules the tests pin, each verified by reinstating the bug:
+
+1. **Seeding is a UNION, not a replace.** This is the opposite of what the
+   favourites document does, and it is the property everything else rests on:
+   these are observation logs, so a record on one side and not the other is
+   always "not yet synced", never "deleted". Replacing local with remote would
+   wipe every session a device recorded before its owner signed in.
+2. **Seeding waits for a SERVER snapshot.** With the offline cache on, the local
+   cache answers first; seeding from it pushes up everything the cache happens
+   not to hold yet.
+3. **Local pruning is not a deletion.** A device at its cap drops its oldest
+   records and must never propagate that — the other device is not at the cap
+   and is still showing them. The cap is applied after merging, locally only.
+4. **Deleting a place UPDATES its sightings remotely, never deletes them** —
+   same reasoning as locally, where the observation survives its label.
+5. **A clear reads the ids before wiping.** Otherwise the local log is cleared,
+   the remote copies are not, and the next snapshot puts everything back.
+6. **A restored backup is pushed up**, rather than waiting for a seed that only
+   runs when a listener is first attached.
+
+`enableMultiTabIndexedDbPersistence` is enabled in `firebase.js` so a launch
+reads from disk and the server sends only what changed — without it, every
+launch re-downloads up to 5000 sighting documents. It is never awaited and never
+fatal: the app's own IndexedDB is the source of truth for everything displayed,
+and Firestore is only the transport.
+
+`firestore.rules` gained the three subcollections. The rules are
+ownership-based — nothing in this app is readable by anyone but its owner — with
+light shape validation. Deliberately light: over-strict rules reject writes,
+and a rejected write here is a lost observation.
+
+Tests: `app/test/recordSync.test.mjs` (24 cases) — `sync.js` against a fake
+Firestore whose snapshots the test drives by hand, and `store.js` against a fake
+sync layer that records every push. `app/test/liveSessions.test.mjs` (14) covers
+the resume/clear state machine, and `sessionAnalysisView.test.mjs` grew to 22.
 
 ### Session Analysis: live by default, short blips dropped, wrong tunes rejectable (August 2026 — v3.12.0)
 
@@ -1361,14 +1481,22 @@ Both are wrong, for reasons that only show up once the feature is used:
   same tune in several places is the normal case, not an edge case.
 - **Starring happens on the sofa, days later.** A location captured at
   favouriting time is not merely absent, it is *wrong*, and confidently so.
-- **Favourites sync to Firestore.** Coordinates there would push a log of the
-  user's physical movements to the cloud and into every synced device, which is
-  a materially different class of data from a list of tune IDs.
+- **Favourites are one Firestore document.** Coordinates on it would ride a
+  document that is rewritten wholesale on every star, and would bloat the one
+  document the whole app depends on.
 
 So sightings are their own append-only IndexedDB key, `'tuneSightings'`, capped
 at 5000 (history's 100 is far too low — an evening that was not logged cannot be
-recovered), **local-only**, and never touched by `sync.js`. A test asserts
-directly that coordinates never reach `favouriteItems`.
+recovered). A test asserts directly that coordinates never reach
+`favouriteItems`.
+
+⚠️ They were **local-only and never touched by `sync.js`** until September 2026,
+on the argument that a log of the user's physical movements is a materially
+different class of data from a list of tune IDs and should not leave the device.
+That was reversed deliberately — see "Syncing the play log" — because the log is
+worth very little on the single device that happened to record it. The privacy
+argument was not wrong, and it is why this data goes to the user's **own**
+account and nowhere else.
 
 #### Battery: one fix per session, and high accuracy on purpose
 
@@ -1633,14 +1761,18 @@ are easy to get wrong:
    falling back to an unplaced sighting. A record the user cannot see anywhere
    is worse than no record.
 
-#### Export includes them; sync never does
+#### Export includes them
 
-`exportUserData` is now **version 4** and carries `tuneSightings` + `places`.
-This is the only copy of that data — it is never synced — and a backup that
-silently drops the one dataset that cannot be regenerated is not a backup. The
-Settings panel says plainly that a backup file therefore discloses where the user
-has played. `importUserData` accepts v1–v4 and only writes the keys when present,
-so restoring an older backup does not wipe sightings recorded since.
+`exportUserData` is **version 5** and carries `tuneSightings` + `places` +
+`liveSessions`. A backup that silently drops the one dataset that cannot be
+regenerated is not a backup. The Settings panel says plainly that a backup file
+therefore discloses where the user has played. `importUserData` accepts v1–v5
+and only writes the keys when present, so restoring an older backup does not
+wipe records made since.
+
+Sync does not make the export redundant, and the reverse least of all: sync
+holds **one live copy**, so a mistaken "clear" propagates to every device,
+while an export is a snapshot that does not.
 
 #### Tests
 

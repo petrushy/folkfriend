@@ -161,10 +161,11 @@
             </p>
             <p class="caption text--secondary">
                 One location fix is taken when a listening session starts, not a continuous
-                track, so the battery cost is negligible beside running the microphone. These
-                records stay on this device — unlike favourites, they are never synced — but
-                they <strong>are</strong> included in exported backups, so a backup file
-                discloses where you have played.
+                track, so the battery cost is negligible beside running the microphone. While
+                you are signed in these records sync to <strong>your own account</strong>, so
+                an evening recorded on your phone is there on your other devices. They are
+                also included in exported backups, so a backup file discloses where you have
+                played.
             </p>
             <v-row>
                 <v-switch

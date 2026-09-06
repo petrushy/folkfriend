@@ -65,7 +65,17 @@ export function subscribe(uid, getLocal, onChange) {
     __onChange = onChange;
     return () => { __onChange = null; };
 }
-export function __reset() { __pushes.length = 0; __onChange = null; }
+export const __records = [];
+export function subscribeCollection() { return () => {}; }
+export function pushRecord(uid, name, record) { __records.push({ op: 'push', name, record }); }
+export function pushRecords(uid, name, records) {
+    for (const record of records) __records.push({ op: 'push', name, record });
+}
+export function deleteRecord(uid, name, id) { __records.push({ op: 'delete', name, id }); }
+export function deleteRecords(uid, name, ids) {
+    for (const id of ids) __records.push({ op: 'delete', name, id });
+}
+export function __reset() { __pushes.length = 0; __onChange = null; __records.length = 0; }
 `,
     'fake-ai.mjs': `
 export const DEFAULT_MODEL = 'claude-haiku-4-5';

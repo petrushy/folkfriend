@@ -1,8 +1,101 @@
 rules_version = '2';
+
+// ===============================================================
+// Assumed data model
+// ===============================================================
+//
+// Everything lives under users/{uid} and is private to that user. There is no
+// sharing, no public data and no cross-user read of any kind in this app.
+//
+// users/{uid}/data/favourites          — one document holding the whole
+//                                        favourites array (small, always
+//                                        rewritten wholesale)
+//   - items: list
+//   - clientUpdatedAt: number (millis)  — conflict arbitration
+//   - updatedAt: server timestamp
+//
+// The three below are ONE DOCUMENT PER RECORD, because at their local caps
+// (5000 sightings, 300 sessions) an array document would pass Firestore's
+// 1 MiB limit, and because a live session writes on every tune change — see
+// the comment in app/src/services/sync.js.
+//
+// users/{uid}/places/{placeID}
+//   - id: string (matches the document id), name: string
+//   - lat/lon: number, radiusM: number, createdAt: number
+//
+// users/{uid}/sightings/{sightingID}   — "this tune was heard here, then"
+//   - id: string (matches the document id), tuneID: string
+//   - timestamp: number
+//   - settingID/displayName/lat/lon/accuracy/placeID: optional, nullable
+//
+// users/{uid}/liveSessions/{sessionID} — a saved Past Session
+//   - id: string (matches the document id), startedAt: number
+//   - tunes: list, endedAt: number|null
+//   - lat/lon/accuracy: optional, nullable
+//
+// ===============================================================
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    match /users/{uid}/data/{doc} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+
+    // ---- Helpers ---------------------------------------------------------
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
     }
+
+    // The document id is the record's own id, and the two must agree —
+    // otherwise a record could be written under an address nothing looks it
+    // up by, which reads as silent data loss rather than as an error.
+    function idMatches(docID) {
+      return request.resource.data.id is string
+        && request.resource.data.id == docID;
+    }
+
+    function isValidPlace(docID) {
+      return idMatches(docID)
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0
+        && request.resource.data.name.size() <= 200
+        && request.resource.data.lat is number
+        && request.resource.data.lon is number;
+    }
+
+    function isValidSighting(docID) {
+      return idMatches(docID)
+        && request.resource.data.tuneID is string
+        && request.resource.data.timestamp is number;
+    }
+
+    function isValidLiveSession(docID) {
+      return idMatches(docID)
+        && request.resource.data.startedAt is number
+        && request.resource.data.tunes is list
+        && request.resource.data.tunes.size() <= 1000;
+    }
+
+    // ---- Rules -----------------------------------------------------------
+
+    match /users/{uid}/data/{doc} {
+      allow read, write: if isOwner(uid);
+    }
+
+    match /users/{uid}/places/{placeID} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isValidPlace(placeID);
+    }
+
+    match /users/{uid}/sightings/{sightingID} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isValidSighting(sightingID);
+    }
+
+    match /users/{uid}/liveSessions/{sessionID} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isValidLiveSession(sessionID);
+    }
+
+    // Anything not matched above is denied. Nothing in this app is readable
+    // without being signed in as the owner.
   }
 }
