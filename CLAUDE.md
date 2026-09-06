@@ -2427,6 +2427,38 @@ before the first `await` — without that, returning to the foreground fires thr
 of those paths at once and each races its own `getUserMedia`, leaving orphaned
 microphones open.
 
+**There is a THIRD failure, and it was not covered until September 2026: the
+buffers keep arriving and contain nothing.** When another app takes the
+microphone, the OS commonly hands back a track that is still `live`, still
+UNMUTED, on a context still `running`, delivering digital silence for ever.
+Every check above passes — chunks arrive on schedule so the stall test is
+happy, and `track.muted` is the flag browsers set least reliably — so the
+watchdog reported healthy while the session heard nothing and said it was
+listening. `_audioSilent()` closes it: `_onAudioChunk` records the last chunk
+that contained any signal at all, and sustained digital silence is a fault like
+any other.
+
+The thresholds matter more than the mechanism, because the failure mode of
+getting them wrong is tearing down a working microphone in a quiet room:
+
+- `SILENT_RMS` is 1e-6 — a "this is literally dead" threshold, not a "this is
+  quiet" one. A live microphone in a silent room has a noise floor orders of
+  magnitude above it; a dead capture is exact zeroes.
+- The window escalates (10 s → 30 s → 60 s) each time a rebuild fails to bring
+  the sound back, and any real audio resets it. Without that, a genuinely
+  silent input — a muted external interface, an aggressive noise gate — would
+  be reacquired every ten seconds for ever.
+- Silence is never judged while backgrounded, for the same reason nothing else
+  is.
+- The first detection rebuilds silently; only once a rebuild has already failed
+  does it emit `micLost`, because by then it is not going to fix itself and an
+  app claiming to listen while hearing nothing is the whole problem.
+
+⚠️ `noiseSuppression` is left at the browser default (on, in Chrome) and is a
+known open question: it is tuned for speech, it can damage music, and an
+aggressive gate is the one plausible way a WORKING capture reaches digital
+silence. The escalation is what makes that survivable rather than a loop.
+
 Things that are easy to get wrong here, and how they're handled:
 
 - **Never re-acquire while backgrounded.** It would fail, or snatch the mic back

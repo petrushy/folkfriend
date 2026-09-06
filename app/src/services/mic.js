@@ -24,6 +24,27 @@ const HEALTH_CHECK_INTERVAL_MS = 2000;
 // tab is visible, means the capture has silently died.
 const AUDIO_STALL_MS = 1500;
 
+// A capture can also die WITHOUT the buffers stopping. When another app takes
+// the microphone — a call, a video, anything that grabs the input — the OS
+// commonly hands back a track that is still 'live', still unmuted, feeding an
+// AudioContext that is still 'running', and every buffer is digital silence,
+// for ever. Every other check here passes: chunks arrive on schedule, so the
+// stall test is happy, and `track.muted` is the flag browsers set least
+// reliably. The session simply stops hearing anything and says it is listening.
+//
+// Anything above this RMS counts as signal. It is a "is this literally dead"
+// threshold, not a "is this quiet" one: a live microphone in a silent room
+// still has a noise floor two or three orders of magnitude above it, while a
+// dead capture is exact zeroes.
+const SILENT_RMS = 1e-6;
+
+// How long that has to persist before the capture is rebuilt, escalating each
+// time a rebuild fails to bring the sound back. Without the escalation, a
+// genuinely silent input (a muted external interface, an aggressive noise gate
+// in a quiet room) would be reacquired every ten seconds for ever. Any real
+// audio resets it.
+const SILENT_WINDOWS_MS = [10_000, 30_000, 60_000];
+
 // After resuming a suspended context, how long to wait for the first buffer
 // before concluding it is never coming. One ScriptProcessor buffer at 48 kHz is
 // ~21 ms, so this is very generous.
@@ -65,6 +86,11 @@ class MicService {
         // is whether the count *advances*, not its value.
         this._chunkCount = 0;
         this._lastChunkAt = 0;
+        // Last time a chunk contained anything at all, and how many times a
+        // rebuild has failed to change that. See SILENT_RMS.
+        this._lastSoundAt = 0;
+        this._silenceStrikes = 0;
+        this._silenceReported = false;
 
         // Running RMS accumulator. Both startRecording() and startContinuous()
         // feed every chunk through _accumulateRms(); UI components call
@@ -165,6 +191,21 @@ class MicService {
         return this._lastChunkAt > 0 && Date.now() - this._lastChunkAt > AUDIO_STALL_MS;
     }
 
+    _silenceWindowMs() {
+        return SILENT_WINDOWS_MS[Math.min(this._silenceStrikes, SILENT_WINDOWS_MS.length - 1)];
+    }
+
+    // Buffers are arriving, and every one of them is empty.
+    //
+    // Not checked while backgrounded: a hidden tab may legitimately deliver
+    // nothing, and re-acquiring there would either fail or snatch the
+    // microphone back from whatever the user switched to.
+    _audioSilent() {
+        if (!this._mode || !this._lastSoundAt || this._isHidden()) return false;
+        if (this._audioStalled()) return false;   // that is the other fault
+        return Date.now() - this._lastSoundAt > this._silenceWindowMs();
+    }
+
     // Resolves true as soon as a new audio chunk arrives, false if none does
     // within ms (or the capture is stopped while waiting).
     _waitForAudio(ms) {
@@ -229,6 +270,23 @@ class MicService {
             const flowing = await this._waitForAudio(AUDIO_RESUME_GRACE_MS);
             if (!this._mode) return true;
             fault = flowing ? this._captureFault() : 'no audio delivered';
+        }
+
+        if (!fault && this._audioSilent()) {
+            // Count the attempt before making it, so a rebuild that does not
+            // restore the sound waits longer before the next one.
+            this._silenceStrikes++;
+            fault = 'no signal';
+
+            // Rebuilding usually fixes this and the user never needs to know.
+            // Once a rebuild has already failed to bring the sound back, it is
+            // not going to fix itself, and an app sitting there claiming to
+            // listen while it hears nothing is the failure this whole path
+            // exists to end — so say so.
+            if (this._silenceStrikes > 1 && !this._silenceReported) {
+                this._silenceReported = true;
+                eventBus.$emit('micLost', { reason: 'no signal from the microphone' });
+            }
         }
 
         if (!fault) {
@@ -327,7 +385,18 @@ class MicService {
         const channelData = audioProcessingEvent.inputBuffer.getChannelData(0);
         this._chunkCount++;
         this._lastChunkAt = Date.now();
-        this._accumulateRms(channelData);
+        const sumSquares = this._accumulateRms(channelData);
+
+        // Real audio: the capture is alive, and any escalated silence window is
+        // forgotten.
+        if (sumSquares > channelData.length * SILENT_RMS * SILENT_RMS) {
+            this._lastSoundAt = Date.now();
+            this._silenceStrikes = 0;
+            if (this._silenceReported) {
+                this._silenceReported = false;
+                eventBus.$emit('micRecovered');
+            }
+        }
 
         if (mode === 'continuous') {
             this._ringBuffer.push(new Float32Array(channelData)); // copy
@@ -367,6 +436,10 @@ class MicService {
 
         this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
         this._watchMicTrack();
+        // A fresh capture gets a full window before anything judges it silent —
+        // otherwise the very first health check condemns a pipeline that has
+        // not had time to deliver a single buffer.
+        this._lastSoundAt = Date.now();
 
         // IMPORTANT NOTE: we can simply set
         //  { sampleRate: FFConfig.SAMPLE_RATE }
@@ -431,6 +504,9 @@ class MicService {
 
     async _teardownPipeline() {
         this._stopHealthWatchdog();
+        // Nothing is expected to arrive with no capture open, so a closed
+        // pipeline must not read as a silent one.
+        this._lastSoundAt = 0;
 
         if (this.micProcessor) {
             this.micProcessor.onaudioprocess = null;
@@ -455,6 +531,8 @@ class MicService {
         }
     }
 
+    // Returns this chunk's sum of squares, which _onAudioChunk uses to tell
+    // signal from digital silence without a second pass over the buffer.
     _accumulateRms(samples) {
         let sum = 0;
         for (let i = 0; i < samples.length; i++) {
@@ -462,6 +540,7 @@ class MicService {
         }
         this._rmsSquaredSum += sum;
         this._rmsSampleCount += samples.length;
+        return sum;
     }
 
     // Returns the integrated RMS level since the last call (linear amplitude,
