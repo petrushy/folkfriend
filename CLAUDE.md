@@ -883,7 +883,7 @@ device resurrecting cleared notes).
 Four things sync, in two different shapes. **History is still local-only** — it
 lives in IndexedDB on the device and is never pushed to Firestore. The Firestore
 SDK handles its own offline queue, so writes made offline are replayed when
-connectivity returns. Security rules are in `firestore.rules`.
+connectivity returns. Security rules are in `app/firestore.rules`.
 
 **One document holding the whole array:**
 
@@ -950,7 +950,7 @@ This fork uses a separate Firebase project (`folkfriend-petrush-fork`) — not t
 ### Firebase services enabled
 
 - **Authentication:** Google sign-in provider; authorized domains include `localhost` and `folkfriend-petrush-fork.web.app`. The local HTTPS IP (e.g. `192.168.0.99`) is **not** an authorized domain — auth only works on the deployed URL or localhost, not the local IP serve.
-- **Firestore:** production mode; security rules in `firestore.rules` (users can only read/write their own data)
+- **Firestore:** production mode; security rules in `app/firestore.rules` (users can only read/write their own data), tested against the emulator by `npm run test:rules`
 - **Analytics:** inherited from original app, wired through `store.loadAnalytics()`
 
 ### Google sign-in on iOS — IMPORTANT
@@ -1210,25 +1210,49 @@ launch re-downloads up to 5000 sighting documents. It is never awaited and never
 fatal: the app's own IndexedDB is the source of truth for everything displayed,
 and Firestore is only the transport.
 
-`firestore.rules` gained the three subcollections. The rules are
+`app/firestore.rules` gained the three subcollections. The rules are
 ownership-based — nothing in this app is readable by anyone but its owner — with
 light shape validation. Deliberately light: over-strict rules reject writes,
-and a rejected write here is a lost observation.
+and a rejected write here is a lost observation that the user never learns
+about, since the local IndexedDB copy has already saved and is what every view
+reads.
 
-> ⚠️ **Rules are NOT deployed by CI**, which runs `--only hosting`. They also
-> were not wired into any `firebase.json` until this change (the file sat at the
-> repo root and had been pasted into the console by hand), so `app/firebase.json`
-> now points at it and the deploy is:
+That failure mode is why the rules have their own tests. `app/test/firestoreRules.test.mjs`
+(20 cases) runs against the **real Firestore emulator** and checks two separate
+things: that owners reach their own data and nobody else's, and — the quiet one
+— that the rules accept the EXACT documents the app writes. Those fixtures are
+copied from `addSighting` / `namePlace` / `_persistSession`, including the
+awkward ones: a sighting with no fix, a manual sighting with no `settingID`, a
+session still open with `endedAt: null`, a session recorded with geo-tagging
+off. If a field changes in the store and not here, this fails rather than the
+user's evening quietly not leaving their phone.
+
+```sh
+cd app && npm run test:rules
+```
+
+It is **not** in the `npm test` chain: it needs the emulator, and therefore
+Java, which that chain deliberately does not require.
+
+> ⚠️ **firebase-tools 14+ requires JDK 21.** With an older JDK the emulator
+> refuses to start, with a message that has nothing to do with the rules. The
+> fallback is `npx firebase-tools@13`, which accepts Java 11 — see the header of
+> the test file. That older CLI also rejects a `rules` path outside the project
+> directory, which is why `firestore.rules` now sits next to `firebase.json` in
+> `app/` rather than at the repo root where it used to live.
+
+> ⚠️ **Rules are NOT deployed by CI**, which runs `--only hosting`, and they were
+> not wired into any `firebase.json` until this change — the file sat at the repo
+> root and had been pasted into the console by hand. The deploy is:
 >
 > ```sh
 > cd app && firebase deploy --only firestore:rules
 > ```
 >
-> Until that runs, the live rules only permit `users/{uid}/data/{doc}` and every
-> write to the new subcollections is rejected with `permission-denied`. The app
-> keeps working — the local IndexedDB copy is the source of truth and the sync
-> failure only logs — so this fails as "sync silently does nothing", which is
-> exactly the shape of bug that hides for a whole session.
+> Until that runs after a rules change, writes to anything the deployed ruleset
+> does not cover are rejected with `permission-denied` — and because the app
+> keeps working from its local copy and the sync failure only reaches
+> `console.error`, that presents as "sync silently does nothing".
 
 Tests: `app/test/recordSync.test.mjs` (24 cases) — `sync.js` against a fake
 Firestore whose snapshots the test drives by hand, and `store.js` against a fake
