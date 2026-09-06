@@ -948,6 +948,83 @@ async function run() {
             'the rate is re-read each cycle, not captured once');
     });
 
+    console.log('\nliveAnalysis.js — the one-tap Follow entry point');
+
+    await test('Follow resumes a session paused a few minutes ago', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        const sessionId = service.sessionId;
+        await service.pause();
+
+        const result = await service.startForFollow(10, 5);
+
+        assert.equal(result.ok, true);
+        assert.equal(service.sessionId, sessionId, 'the same session, continued');
+        assert.equal(service.isRunning, true);
+        assert.equal(service.detections.length, 1, 'with its tunes');
+        await service.stop();
+    });
+
+    await test('Follow starts a separate session when the open one is from another day', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        const tuesday = service.sessionId;
+        await service.pause();
+
+        // A session stays open until a new one is started, so the open session
+        // on Wednesday is still Tuesday's. Continuing it would append
+        // Wednesday's tunes to a record named and placed as Tuesday, which the
+        // user can only unpick row by row.
+        service._lastActiveAt = Date.now() - 30 * 60 * 60 * 1000;
+        assert.equal(service.isRecentEnoughToResume(), false);
+
+        const result = await service.startForFollow(10, 5);
+
+        assert.equal(result.ok, true);
+        assert.notEqual(service.sessionId, tuesday, 'a separate session is listening now');
+        assert.deepEqual(service.detections, [], 'and it starts empty');
+        const stored = store.__sessions.find(s => s.id === tuesday);
+        assert.ok(stored.endedAt, 'the old one is closed, not abandoned');
+        assert.equal(stored.tunes.length, 1, 'and keeps its tunes');
+        await service.stop();
+    });
+
+    await test('Follow does not replace a stale session it could not save', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        const tuesday = service.sessionId;
+        await service.pause();
+        service._lastActiveAt = Date.now() - 30 * 60 * 60 * 1000;
+
+        store.__failNextUpserts(1);
+        const result = await service.startForFollow(10, 5);
+
+        // Starting a replacement on top of a session that failed to save is
+        // the one way to actually lose it.
+        assert.equal(result.ok, false);
+        assert.equal(service.sessionId, tuesday, 'the unsaved session is still here');
+        assert.equal(service.isRunning, false, 'and nothing replaced it');
+    });
+
+    await test('Follow on an already-running session changes nothing', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        const sessionId = service.sessionId;
+
+        const result = await service.startForFollow(10, 5);
+
+        assert.equal(result.ok, true);
+        assert.equal(service.sessionId, sessionId);
+        assert.equal(service.isRunning, true);
+        await service.stop();
+    });
+
     console.log('\nliveAnalysis.js — surviving a reload');
 
     await test('an unfinished session is restored without opening the microphone', async () => {

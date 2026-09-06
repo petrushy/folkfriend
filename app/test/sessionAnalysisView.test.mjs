@@ -123,6 +123,8 @@ export let __failNextFinish = false;
 export let __restorable = null;
 export let __restoreThrows = false;
 export function __setRestoreThrows(v) { __restoreThrows = v; }
+export let __recentEnough = true;
+export function __setRecentEnough(v) { __recentEnough = v; }
 export function __setFailNextStart(v) { __failNextStart = v; }
 export function __setFailNextFinish(v) { __failNextFinish = v; }
 export function __setRestorable(v) { __restorable = v; }
@@ -145,6 +147,17 @@ const service = {
         if (!this.sessionId) { this.sessionId = 'session-' + __starts.length; this._options = {}; }
         if (__failNextStart) { __failNextStart = false; throw new Error('denied'); }
         this.isRunning = true;
+    },
+    isRecentEnoughToResume() { return !!this.sessionId && (this.isRunning || __recentEnough); },
+    async startForFollow(w, sec) {
+        __calls.push('startForFollow');
+        if (this.isRunning) return { ok: true };
+        if (this.sessionId && !this.isRecentEnoughToResume()) {
+            const result = await this.finish();
+            if (!result.ok) return result;
+        }
+        await this.start(w, sec);
+        return { ok: true };
     },
     async stop() { __calls.push('stop'); this.isRunning = false; },
     async pause() { __calls.push('pause'); this.isRunning = false; },
@@ -186,6 +199,7 @@ export function __reset() {
     __failNextFinish = false;
     __restorable = null;
     __restoreThrows = false;
+    __recentEnough = true;
     service.isRunning = false;
     service.sessionId = null;
     service.detections = [];
@@ -613,11 +627,77 @@ await test('correcting a file row persists locally instead', async () => {
         'file analysis has nothing to do with the live service');
 });
 
-await test('an unfinished session is restored even when arriving via ?follow=1', async () => {
-    // The shortcut is how people actually start listening, so resolving it
-    // before looking for an unfinished session is precisely the path that
-    // would orphan last night's — a new session opening beside it, the old
-    // one left in Past Sessions labelled Unfinished for ever.
+console.log('\nFollow session always ends on the score');
+
+await test('a paused session is resumed rather than left for the user to start', async () => {
+    const detections = [{ id: 'a', tuneId: 1, settingId: '10', title: 'Earlier', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }];
+    const { vm, settle, live } = await mountView({
+        query: { live: '1', follow: '1' },
+        indexLoaded: true,
+        running: false,
+        sessionId: 'session-paused',
+        detections,
+    });
+    await settle();
+
+    assert.ok(live.__calls.includes('startForFollow'));
+    assert.equal(live.default.sessionId, 'session-paused', 'the same session, continued');
+    assert.equal(vm.live.capturing, true);
+    assert.equal(vm.followMode, true, 'and the score is on screen without another tap');
+    assert.ok(!live.__calls.includes('finish'), 'a recent session is not filed away');
+});
+
+await test('a session already listening just shows the score', async () => {
+    const { vm, settle, live } = await mountView({
+        query: { live: '1', follow: '1' }, indexLoaded: true, running: true,
+    });
+    await settle();
+
+    assert.equal(live.__starts.length, 0, 'nothing to start');
+    assert.equal(vm.followMode, true);
+});
+
+await test('a session from another day is filed away and a fresh one started', async () => {
+    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
+    const detections = [{ id: 'a', tuneId: 1, settingId: '10', title: 'Tuesday', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }];
+    const { vm, settle, live } = await mountView({
+        query: { live: '1', follow: '1' },
+        indexLoaded: true,
+        running: false,
+        sessionId: 'session-tuesday',
+        detections,
+    });
+    liveMod.__setRecentEnough(false);
+    await settle();
+
+    assert.ok(live.__calls.includes('finish'),
+        'Wednesday must not be appended to a record named and placed as Tuesday');
+    assert.notEqual(live.default.sessionId, 'session-tuesday');
+    assert.ok(live.default.sessionId, 'a separate session is listening now');
+    assert.equal(vm.followMode, true, 'and it still ends on the score');
+});
+
+await test('a stale session that cannot be saved blocks the new one', async () => {
+    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
+    const { vm, settle, live } = await mountView({
+        query: { live: '1', follow: '1' },
+        indexLoaded: true,
+        running: false,
+        sessionId: 'session-tuesday',
+        detections: [{ id: 'a', tuneId: 1, settingId: '10', title: 'Tuesday', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
+    });
+    liveMod.__setRecentEnough(false);
+    liveMod.__setFailNextFinish(true);
+    await settle();
+
+    // Starting a replacement on top of a session that failed to save is the
+    // one way to actually lose it.
+    assert.equal(live.default.sessionId, 'session-tuesday', 'the unsaved session is still here');
+    assert.equal(live.__starts.length, 0, 'and nothing replaced it');
+    assert.equal(vm.followMode, false);
+});
+
+await test('a recent session restored after a reload is resumed by ?follow=1', async () => {
     const { vm, settle, live } = await mountView({
         query: { live: '1', follow: '1' },
         indexLoaded: true,
@@ -625,17 +705,40 @@ await test('an unfinished session is restored even when arriving via ?follow=1',
             sessionId: 'restored-follow',
             isRunning: false,
             _options: {},
-            detections: [{ id: 'r1', tuneId: 1, settingId: '10', title: 'From last night', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
+            detections: [{ id: 'r1', tuneId: 1, settingId: '10', title: 'Earlier tonight', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
             elapsedSeconds: 120,
         },
     });
     await settle();
 
-    assert.equal(live.default.sessionId, 'restored-follow');
-    assert.equal(live.__starts.length, 0,
-        'the shortcut must not start a second session on top of an unfinished one');
-    assert.equal(vm.followMode, false, 'and it does not auto-open the score for it either');
-    assert.equal(vm.live.hasSession, true);
+    // Reopening the app mid-evening and tapping Follow is the same intent as
+    // tapping Resume: carry on. It must not land on a paused screen needing
+    // another tap.
+    assert.equal(live.default.sessionId, 'restored-follow', 'the same session, continued');
+    assert.equal(vm.live.capturing, true);
+    assert.equal(vm.followMode, true);
+    assert.ok(!live.__calls.includes('finish'));
+});
+
+await test('a stale session restored after a reload is not continued', async () => {
+    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
+    const { vm, settle, live } = await mountView({
+        query: { live: '1', follow: '1' },
+        indexLoaded: true,
+        restorable: {
+            sessionId: 'restored-tuesday',
+            isRunning: false,
+            _options: {},
+            detections: [{ id: 'r1', tuneId: 1, settingId: '10', title: 'Tuesday', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
+            elapsedSeconds: 120,
+        },
+    });
+    liveMod.__setRecentEnough(false);
+    await settle();
+
+    assert.ok(live.__calls.includes('finish'), 'last week\'s session is filed away, not extended');
+    assert.notEqual(live.default.sessionId, 'restored-tuesday');
+    assert.equal(vm.followMode, true, 'and Follow still ends on the score');
 });
 
 await test('a restore that fails does not silently start a new session', async () => {

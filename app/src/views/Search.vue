@@ -64,13 +64,18 @@
                 {{ searchState === 'listening' || searchState === 'working' ? 'Stop monitoring' : 'Monitor' }}
             </v-btn>
             <!-- One tap from here to "show me what is playing": follow=1 makes
-                 Session Analysis start listening and open the score itself,
-                 rather than landing on a screen needing two more taps. -->
+                 Session Analysis reach the score whatever it finds — starting a
+                 session, resuming a recently paused one, or simply showing the
+                 score of one already running.
+
+                 Never disabled. It used to be greyed out while monitoring or
+                 recording, which is the state someone is most likely to be in
+                 when they decide they want the dots — and the whole promise of
+                 the button is that it is always one tap away. -->
             <v-btn
                 small
                 text
                 color="grey darken-1"
-                :disabled="searchState === 'recording' || searchState === 'listening' || searchState === 'working'"
                 :to="{ name: 'session-analysis', query: { live: '1', follow: '1' } }"
             >
                 <v-icon left small>{{ icons.clef }}</v-icon>

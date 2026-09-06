@@ -50,6 +50,16 @@ const CHECKPOINT_DEBOUNCE_MS = 10_000;
 // during exactly the long unbroken session it exists for.
 const CHECKPOINT_MAX_WAIT_MS = 60_000;
 
+// How recently a paused session must have been active for the one-tap "Follow
+// session" entry point to CONTINUE it rather than start a new one.
+//
+// A session stays open until a new one is started, so without this the open
+// session on Wednesday is still Tuesday's — and Follow would append Wednesday's
+// tunes to a record named after Tuesday, with Tuesday's place. Six hours covers
+// stepping outside, a set break, or the pub moving to the back room; it does
+// not cover coming back the following week, which is the case this app is for.
+const RESUME_WINDOW_MS = 6 * 60 * 60 * 1000;
+
 const DEFAULT_OPTIONS = {
     minTopScore: 0.4,
     minClusterHits: 2,
@@ -128,6 +138,10 @@ class LiveAnalysisService {
         // Latest time a checkpoint actually reached storage, so a stream of
         // updates cannot postpone one indefinitely — see _scheduleCheckpoint().
         this._lastCheckpointAt = 0;
+        // Wall-clock time of the last save, i.e. the last time this session was
+        // actually doing anything. elapsedSeconds cannot answer that — it is
+        // listening time, and stops while paused.
+        this._lastActiveAt = 0;
 
         // Bumped by every lifecycle transition (start, stop, finish, abandon).
         // The analysis loop captures it and re-checks after every await: a
@@ -196,6 +210,7 @@ class LiveAnalysisService {
             this.saveError = null;
             this.sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             this._sessionStartedAt = Date.now();
+            this._lastActiveAt = Date.now();
         }
         // else: resuming — detections, _windowMatches, elapsedSeconds and the
         // rest are left exactly as stop() left them, so the list keeps
@@ -809,6 +824,7 @@ class LiveAnalysisService {
             // How long the microphone was actually listening, which is not the
             // same as endedAt - startedAt once a session has been paused.
             listenedSeconds: Math.round(this.elapsedSeconds),
+            lastActiveAt: Date.now(),
             lat: this._sessionFix ? this._sessionFix.lat : null,
             lon: this._sessionFix ? this._sessionFix.lon : null,
             accuracy: this._sessionFix ? (this._sessionFix.accuracy ?? null) : null,
@@ -824,6 +840,7 @@ class LiveAnalysisService {
                 }
                 this._hasPersisted = true;
                 this._lastCheckpointAt = Date.now();
+                this._lastActiveAt = record.lastActiveAt;
                 // Reported, not swallowed: resume state that failed to save is
                 // a session that cannot be recovered after a reload, and the
                 // user has no way to know unless we say so.
@@ -857,6 +874,7 @@ class LiveAnalysisService {
             windowMatches: this._windowMatches,
             lastSightingTuneId: this._lastSightingTuneId,
             lastSavedTuneId: this._lastSavedTuneId,
+            lastActiveAt: this._lastActiveAt,
             fix: this._sessionFix,
         });
     }
@@ -897,6 +915,7 @@ class LiveAnalysisService {
         this.customName = !!record.customName;
         this.placeName = record.placeName || '';
         this._sessionStartedAt = saved.startedAt || record.startedAt || Date.now();
+        this._lastActiveAt = saved.lastActiveAt || record.lastActiveAt || this._sessionStartedAt;
         this.elapsedSeconds = saved.elapsedSeconds || 0;
         this.options = saved.options || null;
         this._windowMatches = saved.windowMatches || [];
@@ -926,6 +945,38 @@ class LiveAnalysisService {
 
         eventBus.$emit('liveAnalysisRestored', this.detections);
         return true;
+    }
+
+    // Whether the open session is recent enough that continuing it is what the
+    // user meant. See RESUME_WINDOW_MS.
+    isRecentEnoughToResume() {
+        if (!this.sessionId) return false;
+        if (this.isRunning) return true;
+        const lastActive = this._lastActiveAt || this._sessionStartedAt || 0;
+        return Date.now() - lastActive <= RESUME_WINDOW_MS;
+    }
+
+    // The one-tap "Follow session" entry point, which must always end on the
+    // score whatever state it finds:
+    //
+    //   nothing open  → start a session
+    //   paused, recent → resume it
+    //   paused, stale  → save it, start a separate one
+    //   already running → nothing to do
+    //
+    // A stale session is FINISHED rather than abandoned, and the new one only
+    // starts once that has actually been written — resuming into a fresh
+    // session while the old one failed to save would be the one way to lose it.
+    async startForFollow(windowSeconds, stepSeconds) {
+        if (this.isRunning) return { ok: true };
+
+        if (this.sessionId && !this.isRecentEnoughToResume()) {
+            const result = await this.finish();
+            if (!result.ok) return result;
+        }
+
+        await this.start(windowSeconds, stepSeconds);
+        return { ok: true };
     }
 
     // Whether a restored session can actually keep clustering, or can only be

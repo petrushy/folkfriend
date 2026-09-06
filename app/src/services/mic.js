@@ -512,6 +512,15 @@ class MicService {
         if (this._continuousTransition) await this._continuousTransition;
         if (store.isListening()) return;
 
+        // A one-shot recording holds its own pipeline. Opening a second one on
+        // top leaves two live AudioContexts on the same microphone, so the
+        // recording is torn down first — "Follow session" is reachable from the
+        // Search screen while a recording is running, and must not have to be
+        // disabled to stay safe.
+        if (this._mode === 'recording') {
+            await this._teardownPipeline();
+        }
+
         this._continuousTransition = (async () => {
             store.setSearchState(store.searchStates.LISTENING);
             this._ringBuffer = [];

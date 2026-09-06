@@ -1199,6 +1199,27 @@ Three details that are easy to get wrong:
   anything was recognised (including a denied microphone) showed "Listen &
   Follow" while the next tap would in fact resume. Found in the field, not by a
   test.
+- **"Follow session" always ends on the score.** It is reachable from Search in
+  every state, and it never lands the user on a screen needing another tap:
+  nothing open starts a session, an already-listening one just shows the score,
+  and a paused one is RESUMED on the way there. It is deliberately never
+  disabled — monitoring or recording is exactly the state someone is in when
+  they decide they want the dots.
+
+  The one judgement in it is `RESUME_WINDOW_MS` (6 h). A session stays open
+  until a new one is started, so the open session on Wednesday is still
+  Tuesday's, and continuing it would append Wednesday's tunes to a record named
+  and placed as Tuesday — which the user can only unpick row by row. Inside the
+  window Follow continues the session; outside it, `startForFollow()` FINISHES
+  the old one and starts a separate one. It refuses to start the replacement if
+  that save failed, since a new session on top of an unsaved one is the one way
+  to actually lose it. Recency is wall-clock `lastActiveAt`, not
+  `elapsedSeconds`, which is listening time and stops while paused.
+
+  `micService.startContinuous` tears down a one-shot recording pipeline first,
+  so the button being always-enabled cannot leave two AudioContexts on one
+  microphone.
+
 - **A reload no longer loses the session.** `openLiveSession` (local-only, never
   synced) holds the raw window matches and the analysis options, which is what
   clustering needs to keep producing the SAME list rather than starting a second

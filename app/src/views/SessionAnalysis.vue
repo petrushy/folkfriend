@@ -845,7 +845,17 @@ export default {
             if (liveAnalysisService.sessionId) {
                 this.viewMode = 'live';
                 this._syncLiveFromService();
-                if (this._routeWantsFollow() && this.live.capturing) this.followMode = true;
+                // Follow always ends on the score. A session that is merely
+                // paused is resumed on the way there rather than left for the
+                // user to start by hand — the whole point of the shortcut is
+                // that it takes one tap from "what is this tune" to the dots.
+                if (this._routeWantsFollow()) {
+                    if (this.live.capturing) this.followMode = true;
+                    else {
+                        this._autoFollowPending = true;
+                        this.$nextTick(() => this._runPendingAutoFollow());
+                    }
+                }
                 return;
             }
 
@@ -875,11 +885,16 @@ export default {
             if (restored) {
                 this.viewMode = 'live';
                 this._syncLiveFromService();
-                // An unfinished session is NOT resumed automatically, even by
-                // ?follow=1: continuing last night's evening is a decision, not
-                // something a deep link should make. The bar offers Resume and
-                // New session, and ?follow=1 waits for that answer.
-                if (this._routeWantsLive()) this._autoFollowPending = false;
+                // Follow carries on through a restored session too, and always
+                // ends on the score. Whether it CONTINUES that session or files
+                // it away and starts a separate one is the service's call, on
+                // how long ago the session was last active — see
+                // startForFollow(). Arriving any other way leaves it paused,
+                // with Resume and New session in the bar.
+                if (this._routeWantsFollow()) {
+                    this._autoFollowPending = true;
+                    this.$nextTick(() => this._runPendingAutoFollow());
+                }
                 return;
             }
 
@@ -1076,8 +1091,37 @@ export default {
             }
         },
         // Start listening and put the score on screen in one action.
+        //
+        // Goes through startForFollow, which resumes a session that was paused
+        // recently and starts a separate one when the open session is from
+        // another day — a Wednesday appended to Tuesday's record would be
+        // named and placed as Tuesday, which is not a thing the user can undo
+        // except row by row.
         async startListeningAndFollow() {
-            await this.startLiveAnalysis();
+            this.live.micError = '';
+            const resuming = !!liveAnalysisService.sessionId;
+            if (!resuming) clearLastShown();
+            this.live.starting = true;
+
+            const windowSeconds = Number(this.analysisSettings.windowSeconds) || 10;
+            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 10;
+
+            try {
+                const result = await liveAnalysisService.startForFollow(windowSeconds, stepSeconds);
+                if (!result.ok) {
+                    // The previous session could not be saved, so it is still
+                    // here and nothing new has started. Say so instead of
+                    // opening a score over a session the user did not expect.
+                    this._syncLiveFromService();
+                    return;
+                }
+            } catch (e) {
+                this.live.micError = 'Could not access microphone. Please check permissions.';
+            } finally {
+                this.live.starting = false;
+                this._syncLiveFromService();
+            }
+
             // Only on success: opening a full-screen overlay over a microphone
             // that never opened would hide the error explaining why.
             if (this.live.capturing) this.followMode = true;
@@ -1160,14 +1204,14 @@ export default {
         // index becomes usable. Called again from the indexLoaded handler.
         _runPendingAutoFollow() {
             if (!this._autoFollowPending || this._destroyed) return;
-            // A session may have been restored, or started by hand, while this
-            // was waiting for the tune index.
-            if (liveAnalysisService.sessionId) {
+            // Already listening — nothing to start, just show the score.
+            if (liveAnalysisService.isRunning) {
                 this._autoFollowPending = false;
                 this._syncLiveFromService();
+                this.followMode = true;
                 return;
             }
-            if (!this.canStartLive) return;
+            if (!this.indexLoaded || this.live.starting) return;
             this._autoFollowPending = false;
             this.startListeningAndFollow();
         },
