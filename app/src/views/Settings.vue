@@ -69,6 +69,24 @@
                     @change="settingsChanged"
                 />
             </v-row>
+            <!-- Asking for a constraint and getting it are different things,
+                 and on an installed iPhone app there is no console to check
+                 without a Mac and a cable. -->
+            <p class="caption text--secondary mb-0 pl-2">
+                <strong>Audio processing actually applied:</strong>
+                <span v-if="!appliedAudioSettings">
+                    unknown — record or listen once, then come back.
+                </span>
+                <span v-else>
+                    echo cancellation {{ describeAudioSetting(appliedAudioSettings.echoCancellation) }},
+                    noise suppression {{ describeAudioSetting(appliedAudioSettings.noiseSuppression) }},
+                    auto gain {{ describeAudioSetting(appliedAudioSettings.autoGainControl) }}<span
+                        v-if="appliedAudioSettings.sampleRate"
+                    >, {{ appliedAudioSettings.sampleRate }} Hz</span>.
+                </span>
+                The app asks for echo cancellation and noise suppression to be off — they are
+                speech processing, and they damage music — but the device decides.
+            </p>
         </v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
@@ -161,10 +179,11 @@
             </p>
             <p class="caption text--secondary">
                 One location fix is taken when a listening session starts, not a continuous
-                track, so the battery cost is negligible beside running the microphone. These
-                records stay on this device — unlike favourites, they are never synced — but
-                they <strong>are</strong> included in exported backups, so a backup file
-                discloses where you have played.
+                track, so the battery cost is negligible beside running the microphone. While
+                you are signed in these records sync to <strong>your own account</strong>, so
+                an evening recorded on your phone is there on your other devices. They are
+                also included in exported backups, so a backup file discloses where you have
+                played.
             </p>
             <v-row>
                 <v-switch
@@ -781,6 +800,7 @@ import store, { KNOWN_DATASETS } from '@/services/store.js';
 import { DATASET_LABELS, DATASET_DESCRIPTIONS } from '@/js/source.mjs';
 import ffBackend from '@/services/backend.js';
 import geoService from '@/services/geo.js';
+import micService from '@/services/mic.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
 import { fetchDatasetsManifest } from '@/services/tuneIndexNetwork.js';
@@ -830,6 +850,10 @@ export default {
         next();
     },
     data: () => ({
+        // What the device actually applied the last time capture opened.
+        // Read once: it only changes when a capture opens, and this panel is
+        // not on screen then.
+        appliedAudioSettings: micService.appliedAudioSettings,
         currentUser: null,
         signingIn: false,
         signingOut: false,
@@ -1122,6 +1146,12 @@ export default {
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
     },
     methods: {
+        // An absent key means the browser will not say, which is different
+        // from "off" and must not be shown as off.
+        describeAudioSetting(value) {
+            if (value === undefined || value === null) return 'not reported';
+            return value ? 'on' : 'off';
+        },
         async _refreshOfflineStatus() {
             try {
                 this.offlineStatus = await ffBackend.getOfflineStatus();

@@ -64,13 +64,18 @@
                 {{ searchState === 'listening' || searchState === 'working' ? 'Stop monitoring' : 'Monitor' }}
             </v-btn>
             <!-- One tap from here to "show me what is playing": follow=1 makes
-                 Session Analysis start listening and open the score itself,
-                 rather than landing on a screen needing two more taps. -->
+                 Session Analysis reach the score whatever it finds — starting a
+                 session, resuming a recently paused one, or simply showing the
+                 score of one already running.
+
+                 Never disabled. It used to be greyed out while monitoring or
+                 recording, which is the state someone is most likely to be in
+                 when they decide they want the dots — and the whole promise of
+                 the button is that it is always one tap away. -->
             <v-btn
                 small
                 text
                 color="grey darken-1"
-                :disabled="searchState === 'recording' || searchState === 'listening' || searchState === 'working'"
                 :to="{ name: 'session-analysis', query: { live: '1', follow: '1' } }"
             >
                 <v-icon left small>{{ icons.clef }}</v-icon>
@@ -158,6 +163,7 @@ import store from '@/services/store';
 import eventBus from '@/eventBus';
 import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiMusicClefTreble } from '@mdi/js';
 import micService from '@/services/mic';
+import liveAnalysisService from '@/services/liveAnalysis.js';
 import { DATASET_LABELS } from '@/js/source.mjs';
 
 export default {
@@ -283,6 +289,23 @@ export default {
             window.requestAnimationFrame(pulse);
         },
         async toggleMonitor() {
+            // A live session OWNS the capture. Closing it here left the session
+            // still believing it was listening, with the microphone shut — the
+            // list silently stopped growing and the session bar said
+            // "Listening". Route through the session's own lifecycle so the two
+            // cannot disagree.
+            if (liveAnalysisService.sessionId) {
+                if (liveAnalysisService.isRunning) {
+                    await liveAnalysisService.pause();
+                } else {
+                    await liveAnalysisService.start(
+                        liveAnalysisService.options ? liveAnalysisService.options.windowSeconds : 10,
+                        liveAnalysisService.options ? liveAnalysisService.options.stepSeconds : 5,
+                    );
+                }
+                return;
+            }
+
             if (store.isListening()) {
                 await micService.stopContinuous();
             } else {
@@ -346,7 +369,7 @@ export default {
                 await ffBackend.feedEntirePCMSignal(audioData);
                 console.timeEnd('feed-pcm-signal');
                 
-                await ffBackend.submitFilledBuffer();
+                await ffBackend.submitFilledBuffer(false, micService.sampleRate);
             } catch(e) {
                 console.error(e);
             } finally {

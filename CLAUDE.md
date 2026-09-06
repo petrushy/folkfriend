@@ -867,8 +867,10 @@ modes it was: never saved, or saved-then-evicted.
   (schema 2, read-only, migrated away)
 - `'tuneIndex'` / `'tuneIndexMetadata'` — schema-1 tune index (read-only, migrated away)
 - `'aiTuneSummaries'` — AI background notes, `{ tuneID: { text, model, generatedAt, sourceUrl } }`
-- `'tuneSightings'` — where tunes were heard, append-only, capped at 5000. **Local-only, never synced**
-- `'places'` — user-named locations, `{ id, name, lat, lon, radiusM, createdAt }`
+- `'tuneSightings'` — where tunes were heard, append-only, capped at 5000. Synced
+- `'places'` — user-named locations, `{ id, name, lat, lon, radiusM, createdAt }`. Synced
+- `'liveSessions'` — saved Past Sessions, capped at 300,
+  `{ id, startedAt, endedAt, tunes: [...], lat, lon, accuracy }`. Synced
 
 Not IndexedDB, but worth listing alongside — localStorage keys: `'userSettings'`,
 `'favouritesLocalUpdatedAt'`, `'anthropicApiKey'` (deliberately outside
@@ -878,7 +880,19 @@ device resurrecting cleared notes).
 
 ### Firebase / Firestore
 
-Only **favourites** are synced to Firestore (under `users/{uid}/data/favourites`). **History is local-only** — it lives in IndexedDB on the device and is never pushed to Firestore. Firestore SDK handles its own offline queue for favourites — writes made while offline are automatically replayed when connectivity returns. Security rules are in `firestore.rules`.
+Four things sync, in two different shapes. **History is still local-only** — it
+lives in IndexedDB on the device and is never pushed to Firestore. The Firestore
+SDK handles its own offline queue, so writes made offline are replayed when
+connectivity returns. Security rules are in `app/firestore.rules`.
+
+**One document holding the whole array:**
+
+- **favourites** — `users/{uid}/data/favourites`. Small, always rewritten
+  wholesale, arbitrated by a document-level `clientUpdatedAt`.
+
+**One document per record** (`users/{uid}/{places,sightings,liveSessions}/{id}`),
+added September 2026 — see "Syncing the play log" below for why the favourites
+shape could not be reused and what the merge rules are.
 
 ## CI/CD — GitHub Actions (July 2026)
 
@@ -936,7 +950,7 @@ This fork uses a separate Firebase project (`folkfriend-petrush-fork`) — not t
 ### Firebase services enabled
 
 - **Authentication:** Google sign-in provider; authorized domains include `localhost` and `folkfriend-petrush-fork.web.app`. The local HTTPS IP (e.g. `192.168.0.99`) is **not** an authorized domain — auth only works on the deployed URL or localhost, not the local IP serve.
-- **Firestore:** production mode; security rules in `firestore.rules` (users can only read/write their own data)
+- **Firestore:** production mode; security rules in `app/firestore.rules` (users can only read/write their own data), tested against the emulator by `npm run test:rules`
 - **Analytics:** inherited from original app, wired through `store.loadAnalytics()`
 
 ### Google sign-in on iOS — IMPORTANT
@@ -1099,6 +1113,335 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 - The Results page shows a small debug line: transcriber (ML/DSP) + the contour string — compare against the CLI's `transcribe` output for the same clip.
 
 ## Recent changes
+
+### Resumable sessions, Past Sessions, and syncing the play log (September 2026)
+
+Two changes, in that order, both driven by the same complaint: "I was at a
+session last week and I don't remember what was played."
+
+#### Saving is not an action — one shared session workspace
+
+**There is no Finish step required to make a session durable.** A session is a
+record from the moment it starts, empty or not, and stays one until it is
+explicitly deleted. "Finish" only ever meant "and now save it", which is a
+promise the autosave was already keeping — so its real effect was to make users
+believe an unfinished session had not been stored. What remains is **New
+session** (save the current one, start a separate one) and, under Session
+actions, **Clear tune list** (keep the session, empty its list) and **Delete
+session**. The 300-session cap is gone with it: a log the user has not deleted
+must not evict itself.
+
+**Saved and live sessions are the same view.** Past Sessions is a searchable
+picker over one shared tune table, so a stored session has the tune links,
+favourite stars, alternative matches, per-row removal and export the live one
+has, and editing one is the same gesture in both. Opening a stored session does
+not stop background detection; "Current session" in the status bar returns to
+the listening one. Names default to date plus the matching named place (no
+reverse geocoding — the same coordinate/`matchPlace` route as sightings, so a
+place named later still labels old sessions) and are user-editable, with
+`customName` marking a name the app must stop regenerating.
+
+`alternatives` are persisted per tune, which is what lets a stored session offer
+the same dropdown; records written before that still show their chosen tune.
+See `docs/session-workspace.md`, and `app/test/e2e/session-workspace.mjs` for
+the browser test that seeds 240 sessions and drives the whole loop.
+
+#### The lifecycle underneath it: Listen, Pause, New session
+
+There were briefly two pause-shaped controls — one that released the microphone
+and one that only stopped the analysis loop while capture kept running — plus a
+"Clear" that both ended the session and sounded like it deleted it. That is not
+a distinction a user in a pub can be asked to make, and the one that kept
+recording was the surprising default. Now: **Pause** releases the microphone and
+keeps the session, **Resume** is the same start path (it finds `sessionId` set
+and continues appending), and **New session** files the current one away and
+opens another. `clear()` is gone; `finish()`, `abandon()` and `deleteSession()`
+replaced it, and every session transition is serialised so Resume cannot race a
+New session or a delete.
+
+**Listening is a background activity, not a mode.** The Session Analysis page
+has three tabs, and switching between them is navigation: none of them stops the
+microphone. A persistent session bar is rendered on ALL of them while a session
+is open, carrying the state (Listening / Paused / Microphone unavailable),
+elapsed listening time, tune count and the controls — otherwise the only way to
+find out whether the app is still recording is to go looking for it. Live and
+file analysis keep entirely separate results, progress and errors; they shared
+one set of fields before, so starting one wiped the other's list and whichever
+ran last decided what BOTH panels said. The shared backend already serialises
+transcription behind `_withPCMBufferLock`, so running both at once is safe.
+
+#### Stop is no longer a dead end
+
+Live analysis had one lifecycle — Start, accumulate, Stop — and Stop was
+terminal for the on-screen list. `stop()` never cleared `detections` itself, but
+the only way back in was `start()`, which unconditionally reset everything, so
+carrying on after a break meant losing the evening so far. That mattered most in
+the case it was hit: **stopping to recover a microphone the OS had taken away**
+is a normal thing to need on iOS, and it cost the user their list every time.
+
+`liveAnalysisService.sessionId` is now the single source of truth for "is there
+an open session". `start()` branches on it: null means a fresh session (reset
+everything, mint an id), non-null means **resume** — `detections`,
+`_windowMatches`, `elapsedSeconds` and the reject cooldowns are all left exactly
+as `stop()` left them. Only the new `clear()` ends a session and nulls the id.
+
+Three details that are easy to get wrong:
+
+- **`stop()` awaits its own flush.** `_maybeSaveSessionSnapshot` only writes on a
+  tune *change*, so the tail tune's `endSeconds` is stale by however long it kept
+  playing; `stop()` re-serialises the current detections. It has to be *awaited*
+  rather than fire-and-forget because `clear()` calls `stop()` and then makes its
+  own finalizing write to the same record — unordered, the slow one lands last
+  and silently un-finalizes the session. Caught by mutation-testing the fix.
+- **Resume/Finish are offered on `sessionId`, not on `detections.length`.** The
+  service resumes an empty session exactly as it resumes a populated one, so
+  gating the button on having caught a tune made it lie: stopping before
+  anything was recognised (including a denied microphone) showed "Listen &
+  Follow" while the next tap would in fact resume. Found in the field, not by a
+  test.
+- **"Follow session" always ends on the score.** It is reachable from Search in
+  every state, and it never lands the user on a screen needing another tap:
+  nothing open starts a session, an already-listening one just shows the score,
+  and a paused one is RESUMED on the way there. It is deliberately never
+  disabled — monitoring or recording is exactly the state someone is in when
+  they decide they want the dots.
+
+  The one judgement in it is `RESUME_WINDOW_MS` (6 h). A session stays open
+  until a new one is started, so the open session on Wednesday is still
+  Tuesday's, and continuing it would append Wednesday's tunes to a record named
+  and placed as Tuesday — which the user can only unpick row by row. Inside the
+  window Follow continues the session; outside it, `startForFollow()` FINISHES
+  the old one and starts a separate one. It refuses to start the replacement if
+  that save failed, since a new session on top of an unsaved one is the one way
+  to actually lose it. Recency is wall-clock `lastActiveAt`, not
+  `elapsedSeconds`, which is listening time and stops while paused.
+
+  `micService.startContinuous` tears down a one-shot recording pipeline first,
+  so the button being always-enabled cannot leave two AudioContexts on one
+  microphone.
+
+- **A reload no longer loses the session.** `openLiveSession` (local-only, never
+  synced) holds the raw window matches and the analysis options, which is what
+  clustering needs to keep producing the SAME list rather than starting a second
+  one beside it. `restoreOpenSession()` brings it back on load and offers Resume
+  and Finish — it never opens the microphone, because listening again is always
+  a deliberate act. A session stored by an older build has no options, so it can
+  be read and finished but not extended, and says so.
+
+#### Past Sessions
+
+Every live session is auto-saved to IndexedDB (`'liveSessions'`, capped at 300)
+as it happens — edge-triggered on the tail tune changing, the same rule
+`_recordSighting` uses, because the loop runs every few seconds for hours and
+saving per cycle would rewrite the record dozens of times an hour. A third mode
+on the Session Analysis page lists them.
+
+**The list the user sees is the list that is saved.** Three separate gaps had to
+close for that to be true:
+
+- **Corrections reach the service, not just the view.** Choosing a different
+  tune for a row rewrites the underlying WINDOW MATCHES rather than the
+  detection object — detections are rebuilt from those matches every cycle and
+  their ids are not stable across a re-cluster, so anything recorded against a
+  detection was gone within seconds and never reached Past Sessions.
+- **Saving is not only edge-triggered.** The tail-tune-change edge misses a tune
+  played for twenty minutes and misses every edit, because a removal or a
+  correction changes the list without changing the tail. A debounced checkpoint
+  covers both.
+- **An empty list is a real edit once the session has a record.** `_persistSession`
+  used to no-op on an empty list, so removing the last row left it in storage.
+  Before the first successful write an empty list still means "nothing
+  recognised yet" and is not worth a record — hence `_hasPersisted`.
+
+**Failures are recoverable rather than silent.** `_persistSession` reports
+`{ ok, error }` and drives a `saveState`, every write goes through one chain so
+a checkpoint and a finish cannot land out of order, and — the important one —
+**`finish()` does not close a session whose final save failed**. The in-memory
+copy is the only copy at that point, so honouring the button press would be the
+one unrecoverable thing this code can do. The bar shows the error and offers a
+retry.
+
+**Deleting the open session is refused rather than half-done.** The next
+autosave would write it straight back, so the delete would look like it silently
+failed; Past Sessions disables it and says to finish the session first.
+`abandon()` exists for the other direction — tearing down a session the user HAS
+deleted — and passes `flush: false` to `stop()`, because stop's normal flush
+would write the deleted record back. *That was caught by its own test, not by
+reasoning.*
+
+**A dead microphone stops analysis instead of repeating stale audio.** The loop
+ignored `ensureMicHealthy()`'s result, so a capture that could not be reacquired
+left the ring buffer frozen and the loop kept confidently re-detecting audio
+from minutes ago — worse than no detection, because the list then claims tunes
+that were not played. The loop now skips the cycle, `micLost`/`micRecovered`
+reach the session bar, and there is an explicit retry that reacquires capture
+without touching the session.
+
+**History is recorded unconditionally, NOT gated by `geoTagDetections`.** That
+setting is about location, and it was gating whether any record was kept at all,
+which is why an evening could vanish entirely. It now controls only whether
+`lat`/`lon` are attached — hence `_lastSavedTuneId` as a **separate** edge
+tracker from `_lastSightingTuneId`, since `_recordSighting` returns early when
+the setting is off and the session save must not.
+
+#### Syncing the play log
+
+Sightings, places and sessions were device-local, which answers the question for
+the wrong device: recorded on a phone in a pub, wanted later on a computer.
+
+**They do NOT reuse the favourites shape, and could not.** Favourites are one
+document holding the whole array. At their caps, 5000 sightings and 300 sessions
+each approach or pass Firestore's **1 MiB document limit** — so that shape would
+have started failing for the people using the feature most, silently. And a live
+session saves on every tune change, so an array push would re-upload the user's
+entire history every time a tune was recognised, over an evening, on mobile data.
+
+So: **one document per record**, under `users/{uid}/{places,sightings,liveSessions}/{id}`.
+Each write is a few hundred bytes, and deletion is a deleted document rather than
+an absence — which is what forced the whole tombstone apparatus around AI
+summaries.
+
+Rules the tests pin, each verified by reinstating the bug:
+
+1. **Seeding is a UNION, not a replace.** This is the opposite of what the
+   favourites document does, and it is the property everything else rests on:
+   these are observation logs, so a record on one side and not the other is
+   always "not yet synced", never "deleted". Replacing local with remote would
+   wipe every session a device recorded before its owner signed in.
+2. **Seeding waits for a SERVER snapshot.** With the offline cache on, the local
+   cache answers first; seeding from it pushes up everything the cache happens
+   not to hold yet.
+3. **Local pruning is not a deletion.** A device at its cap drops its oldest
+   records and must never propagate that — the other device is not at the cap
+   and is still showing them. The cap is applied after merging, locally only.
+4. **Deleting a place UPDATES its sightings remotely, never deletes them** —
+   same reasoning as locally, where the observation survives its label.
+5. **A clear reads the ids before wiping.** Otherwise the local log is cleared,
+   the remote copies are not, and the next snapshot puts everything back.
+6. **A restored backup is pushed up**, rather than waiting for a seed that only
+   runs when a listener is first attached.
+
+`enableMultiTabIndexedDbPersistence` is enabled in `firebase.js` so a launch
+reads from disk and the server sends only what changed — without it, every
+launch re-downloads up to 5000 sighting documents. It is never awaited and never
+fatal: the app's own IndexedDB is the source of truth for everything displayed,
+and Firestore is only the transport.
+
+`app/firestore.rules` gained the three subcollections. The rules are
+ownership-based — nothing in this app is readable by anyone but its owner — with
+light shape validation. Deliberately light: over-strict rules reject writes,
+and a rejected write here is a lost observation that the user never learns
+about, since the local IndexedDB copy has already saved and is what every view
+reads.
+
+That failure mode is why the rules have their own tests. `app/test/firestoreRules.test.mjs`
+(20 cases) runs against the **real Firestore emulator** and checks two separate
+things: that owners reach their own data and nobody else's, and — the quiet one
+— that the rules accept the EXACT documents the app writes. Those fixtures are
+copied from `addSighting` / `namePlace` / `_persistSession`, including the
+awkward ones: a sighting with no fix, a manual sighting with no `settingID`, a
+session still open with `endedAt: null`, a session recorded with geo-tagging
+off. If a field changes in the store and not here, this fails rather than the
+user's evening quietly not leaving their phone.
+
+```sh
+cd app && npm run test:rules
+```
+
+It is **not** in the `npm test` chain: it needs the emulator, and therefore
+Java, which that chain deliberately does not require.
+
+> ⚠️ **firebase-tools 14+ requires JDK 21.** With an older JDK the emulator
+> refuses to start, with a message that has nothing to do with the rules. The
+> fallback is `npx firebase-tools@13`, which accepts Java 11 — see the header of
+> the test file. That older CLI also rejects a `rules` path outside the project
+> directory, which is why `firestore.rules` now sits next to `firebase.json` in
+> `app/` rather than at the repo root where it used to live.
+
+> ⚠️ **Rules are NOT deployed by CI**, which runs `--only hosting`, and they were
+> not wired into any `firebase.json` until this change — the file sat at the repo
+> root and had been pasted into the console by hand. The deploy is:
+>
+> ```sh
+> cd app && firebase deploy --only firestore:rules
+> ```
+>
+> Until that runs after a rules change, writes to anything the deployed ruleset
+> does not cover are rejected with `permission-denied` — and because the app
+> keeps working from its local copy and the sync failure only reaches
+> `console.error`, that presents as "sync silently does nothing".
+
+`openLiveSession` and `liveSessions` are both written through one per-key chain
+(`store._withRecords`). read → modify → write is not atomic against IndexedDB,
+so the analysis loop checkpointing while a remote snapshot merges, or while the
+user deletes a row, loses whichever write commits second. Pinned by a test that
+saves two records at the same moment and requires both to survive — verified by
+removing the chain, which loses one. Note the fake IndexedDB has to YIELD before
+reading and before committing, as a real transaction does; without that gap the
+two never interleave and the test passes against unserialised code.
+
+Tests: `app/test/recordSync.test.mjs` (25) — `sync.js` against a fake Firestore
+whose snapshots the test drives by hand, plus `store.js` write serialisation.
+`app/test/liveSessions.test.mjs` (26) covers the session state machine,
+corrections, save failures and reload recovery.
+`app/test/sessionAnalysisView.test.mjs` (29) covers the view, including that
+switching tabs never stops capture and that live and file results stay separate.
+`app/test/firestoreRules.test.mjs` (20, emulator) covers the rules.
+
+#### Second review pass — the failures that were still invisible
+
+Seven follow-up findings, each a case where the code looked right and did
+nothing:
+
+1. **`_dbSet` swallowed write errors, so the whole save-error path was dead
+   code.** The tests missed it by faking a rejecting `upsertLiveSession()` — a
+   layer that cannot fail in production. Session persistence now uses
+   `_dbSetStrict`, and the failure tests inject at the **IndexedDB boundary**,
+   which is where quota actually bites. `_withRecords` no longer substitutes
+   `[]` for a failed READ either: writing a mutation on top of that turns one
+   unreadable read into a wiped history.
+2. **The checkpoint was never wired into normal listening**, only into edits —
+   so a tune played for twenty minutes still stored nothing after its first
+   cycle. It now runs on every update, with `CHECKPOINT_MAX_WAIT_MS` so a
+   steady stream of updates cannot postpone it for ever (a pure debounce is
+   reset by every update, and the loop produces one every few seconds — it
+   would never have fired during exactly the long session it exists for).
+3. **The sample rate is a single WASM global that capture and file decoding do
+   not share** (44.1 kHz microphone, 48 kHz decode), and both set it OUTSIDE
+   the PCM lock. Each job now declares its own rate and applies it inside the
+   lock. The live loop re-reads it every cycle, because a recovery reopens the
+   pipeline and can come back on a different one.
+4. **Reload recovery was bypassed by the shortcut people actually use.**
+   `?live=1`/`?follow=1` returned before the restore check, so the one-tap
+   entry point started a second session beside last night's unfinished one.
+   Restore now runs first on every route in, a finalized record (`endedAt` set)
+   is rejected rather than reopened, and the restore is guarded against
+   navigation and a concurrently started session.
+5. **A quick Pause → Resume revived the old analysis loop.** `stop()` does not
+   await an in-flight transcription, so it resolved into a loop that checked
+   `isRunning` — true again after the Resume — accepted its stale result and
+   carried on running beside the new one. A `_generation` token, bumped by
+   every lifecycle transition and re-checked after every await, is what
+   separates them. *Pinned by holding a transcription open across Pause→Resume
+   and across Finish→new session.*
+6. **"Retry microphone" honoured the automatic backoff**, so tapping it during
+   a backoff window did nothing at all. `ensureMicHealthy({ force: true })`
+   clears the backoff and refuses to join an in-flight passive check. `stop()`
+   also releases the microphone BEFORE persisting — Pause is usually "stop
+   listening to me", and it must not wait on slow storage.
+7. **The session bar only existed on the Session Analysis page.**
+   `SessionStatusBar` is rendered by `App.vue`, so status and Pause/Resume/
+   Finish follow the user everywhere; it subscribes to the service directly
+   rather than taking props. Search's "Stop monitoring" routed straight to
+   `micService.stopContinuous()`, which closed the session's capture while the
+   session still believed it was listening — it now goes through the session
+   lifecycle. `micHealthy` lives on the service alone, which adopts mic.js's
+   events and republishes them, so the bar and the session cannot disagree.
+
+⚠️ **Microphone interruption recovery is still only tested against a fake.**
+Everything above is driven by a scriptable `micService` stand-in; the real
+paths — iOS handing the microphone to a call, a track that comes back live but
+permanently muted — have not been exercised on a device for this change.
 
 ### Session Analysis: live by default, short blips dropped, wrong tunes rejectable (August 2026 — v3.12.0)
 
@@ -1361,14 +1704,22 @@ Both are wrong, for reasons that only show up once the feature is used:
   same tune in several places is the normal case, not an edge case.
 - **Starring happens on the sofa, days later.** A location captured at
   favouriting time is not merely absent, it is *wrong*, and confidently so.
-- **Favourites sync to Firestore.** Coordinates there would push a log of the
-  user's physical movements to the cloud and into every synced device, which is
-  a materially different class of data from a list of tune IDs.
+- **Favourites are one Firestore document.** Coordinates on it would ride a
+  document that is rewritten wholesale on every star, and would bloat the one
+  document the whole app depends on.
 
 So sightings are their own append-only IndexedDB key, `'tuneSightings'`, capped
 at 5000 (history's 100 is far too low — an evening that was not logged cannot be
-recovered), **local-only**, and never touched by `sync.js`. A test asserts
-directly that coordinates never reach `favouriteItems`.
+recovered). A test asserts directly that coordinates never reach
+`favouriteItems`.
+
+⚠️ They were **local-only and never touched by `sync.js`** until September 2026,
+on the argument that a log of the user's physical movements is a materially
+different class of data from a list of tune IDs and should not leave the device.
+That was reversed deliberately — see "Syncing the play log" — because the log is
+worth very little on the single device that happened to record it. The privacy
+argument was not wrong, and it is why this data goes to the user's **own**
+account and nowhere else.
 
 #### Battery: one fix per session, and high accuracy on purpose
 
@@ -1633,14 +1984,18 @@ are easy to get wrong:
    falling back to an unplaced sighting. A record the user cannot see anywhere
    is worse than no record.
 
-#### Export includes them; sync never does
+#### Export includes them
 
-`exportUserData` is now **version 4** and carries `tuneSightings` + `places`.
-This is the only copy of that data — it is never synced — and a backup that
-silently drops the one dataset that cannot be regenerated is not a backup. The
-Settings panel says plainly that a backup file therefore discloses where the user
-has played. `importUserData` accepts v1–v4 and only writes the keys when present,
-so restoring an older backup does not wipe sightings recorded since.
+`exportUserData` is **version 5** and carries `tuneSightings` + `places` +
+`liveSessions`. A backup that silently drops the one dataset that cannot be
+regenerated is not a backup. The Settings panel says plainly that a backup file
+therefore discloses where the user has played. `importUserData` accepts v1–v5
+and only writes the keys when present, so restoring an older backup does not
+wipe records made since.
+
+Sync does not make the export redundant, and the reverse least of all: sync
+holds **one live copy**, so a mistaken "clear" propagates to every device,
+while an export is a snapshot that does not.
 
 #### Tests
 
@@ -2071,6 +2426,55 @@ Concurrent callers join the single in-flight check via `_healthCheck`, assigned
 before the first `await` — without that, returning to the foreground fires three
 of those paths at once and each races its own `getUserMedia`, leaving orphaned
 microphones open.
+
+**There is a THIRD failure, and it was not covered until September 2026: the
+buffers keep arriving and contain nothing.** When another app takes the
+microphone, the OS commonly hands back a track that is still `live`, still
+UNMUTED, on a context still `running`, delivering digital silence for ever.
+Every check above passes — chunks arrive on schedule so the stall test is
+happy, and `track.muted` is the flag browsers set least reliably — so the
+watchdog reported healthy while the session heard nothing and said it was
+listening. `_audioSilent()` closes it: `_onAudioChunk` records the last chunk
+that contained any signal at all, and sustained digital silence is a fault like
+any other.
+
+The thresholds matter more than the mechanism, because the failure mode of
+getting them wrong is tearing down a working microphone in a quiet room:
+
+- `SILENT_RMS` is 1e-6 — a "this is literally dead" threshold, not a "this is
+  quiet" one. A live microphone in a silent room has a noise floor orders of
+  magnitude above it; a dead capture is exact zeroes.
+- The window escalates (10 s → 30 s → 60 s) each time a rebuild fails to bring
+  the sound back, and any real audio resets it. Without that, a genuinely
+  silent input — a muted external interface, an aggressive noise gate — would
+  be reacquired every ten seconds for ever.
+- Silence is never judged while backgrounded, for the same reason nothing else
+  is.
+- The first detection rebuilds silently; only once a rebuild has already failed
+  does it emit `micLost`, because by then it is not going to fix itself and an
+  app claiming to listen while hearing nothing is the whole problem.
+
+**`noiseSuppression: false` is now requested explicitly**, alongside
+`echoCancellation: false`. All three of these constraints are the browser's
+VOICE processing chain, tuned for speech on a call, and this app feeds music to
+a pitch tracker: noise suppression is a speech-band gate that attacks exactly
+what a tune is made of, and it is also the one plausible way a WORKING capture
+reaches digital silence and trips the watchdog above.
+
+They are sent as BARE values, which the spec treats as **ideal**, not required.
+Sending them as `exact` would make `getUserMedia` reject outright on a browser
+that cannot honour them — trading damaged audio for no microphone at all.
+
+⚠️ **Asking is not getting, and on iOS especially.** WebKit decides much of
+this from its own audio session, and on iOS `echoCancellation: false` has
+historically been the lever that moves capture off the voice-processing audio
+unit (taking NS and AGC with it) rather than the individual flags. Safari also
+reports a narrower set from `getSettings()` than Chrome. So `micService.appliedAudioSettings`
+records what the track actually reports, an absent key reads as **"not
+reported"** rather than "off", and Settings → Audio displays it — because on an
+installed iPhone app there is no console to check without a Mac and a cable.
+**What iOS actually applies here is still unmeasured**; that readout is how to
+find out on the device that matters.
 
 Things that are easy to get wrong here, and how they're handled:
 

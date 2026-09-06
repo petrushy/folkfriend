@@ -7,8 +7,10 @@
         "build:wasm": "bash build-wasm.sh",
         "prebuild": "bash build-wasm.sh",
         "build": "vue-cli-service build",
-        "test": "node test/tune-index-cache.test.mjs && node test/tune-index-install.test.mjs && node test/source-links.test.mjs && node test/abcTempo.test.mjs && node test/sessionAnalysis.test.mjs && node test/liveScoreFollow.test.mjs && node test/liveScoreFollowComponent.test.mjs && node test/liveAnalysisReject.test.mjs && node test/sessionAnalysisView.test.mjs && node test/mic.test.mjs && node test/aiSummary.test.mjs && node test/aiSummaryStore.test.mjs && node test/tuneBackgroundDialog.test.mjs && node test/sightings.test.mjs && node test/rowWindow.test.mjs && node test/favouriteRow.test.mjs",
-        "test:e2e": "node test/e2e/settings-wiring.mjs && node test/e2e/offline-index.mjs && node test/e2e/unreachable-host.mjs && node test/e2e/recovery.mjs"
+        "test": "node test/tune-index-cache.test.mjs && node test/tune-index-install.test.mjs && node test/source-links.test.mjs && node test/abcTempo.test.mjs && node test/sessionAnalysis.test.mjs && node test/liveScoreFollow.test.mjs && node test/liveScoreFollowComponent.test.mjs && node test/liveAnalysisReject.test.mjs && node test/sessionAnalysisView.test.mjs && node test/sessionStatusBar.test.mjs && node test/liveSessions.test.mjs && node test/recordSync.test.mjs && node test/mic.test.mjs && node test/aiSummary.test.mjs && node test/aiSummaryStore.test.mjs && node test/tuneBackgroundDialog.test.mjs && node test/sightings.test.mjs && node test/rowWindow.test.mjs && node test/favouriteRow.test.mjs",
+        "test:e2e": "node test/e2e/settings-wiring.mjs && node test/e2e/offline-index.mjs && node test/e2e/unreachable-host.mjs && node test/e2e/recovery.mjs",
+        "test:rules": "firebase emulators:exec --only firestore --project demo-folkfriend-rules \"node test/firestoreRules.test.mjs\"",
+        "test:session-workspace": "node test/e2e/session-workspace.mjs"
     },
     "dependencies": {
         "@mdi/font": "^6.5.95",
@@ -24,6 +26,7 @@
         "vuetify": "^2.4.0"
     },
     "devDependencies": {
+        "@firebase/rules-unit-testing": "^2.0.7",
         "@mdi/js": "^6.5.95",
         "@vue/cli-plugin-babel": "^5.0.6",
         "@vue/cli-plugin-pwa": "^5.0.6",

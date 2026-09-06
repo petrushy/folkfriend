@@ -1,8 +1,8 @@
-import { getFirestore, doc, setDoc, onSnapshot, serverTimestamp } from 'firebase/firestore';
-import firebaseApp from './firebase.js';
+import {
+    doc, collection, setDoc, deleteDoc, writeBatch, onSnapshot, serverTimestamp,
+} from 'firebase/firestore';
+import { firestore as db } from './firebase.js';
 import eventBus from '@/eventBus';
-
-const db = getFirestore(firebaseApp);
 
 // localStorage key for tracking when local favourites were last modified
 const FAV_TS_KEY = 'favouritesLocalUpdatedAt';
@@ -61,8 +61,9 @@ export function subscribe(uid, getLocalFavs, onChange) {
             }
         }
     }, err => {
-        console.error('Firestore favourites snapshot error:', err.code, err.message);
-        eventBus.$emit('syncError', 'Sync error — favourites may be out of date.');
+        console.error('[folkfriend sync] favourites listener failed:', err.code, err.message, err);
+        eventBus.$emit('syncError',
+            `Favourites sync failed (${err.code || 'unknown'}) — they may be out of date.`);
     });
 
     return () => { unsubFav(); };
@@ -83,4 +84,156 @@ export function pushFavourites(uid, items) {
         updatedAt: serverTimestamp(),
         clientUpdatedAt,
     }).catch(console.error);
+}
+
+// ---- Record-per-document collections -------------------------------------
+//
+// Places, sightings and live sessions sync as ONE DOCUMENT PER RECORD, not as
+// one array document like favourites. Two reasons, and both are hard limits
+// rather than preferences:
+//
+//   • Size. Firestore caps a document at 1 MiB. At their local caps, 5000
+//     sightings and 300 sessions (each holding its own tune list) are both
+//     around or past that, so the favourites shape would start failing once a
+//     user had a year of sessions behind them — silently, and only for the
+//     people using the feature most.
+//   • Write amplification. A live session saves on every tune change, so an
+//     array push would re-upload the user's ENTIRE history every time a tune
+//     is recognised — repeatedly, over an evening, on mobile data. One
+//     document per record makes that write a few hundred bytes.
+//
+// It also makes deletion explicit. The favourites document has to encode
+// deletion as absence, which is what forced the tombstone machinery around AI
+// summaries; here a delete is a deleted document and the listener reports it.
+export const SYNCED_COLLECTIONS = ['places', 'sightings', 'liveSessions'];
+
+// Firestore rejects a batch over 500 operations.
+const BATCH_LIMIT = 400;
+
+// One report per collection per minute. A rules rejection or a lost connection
+// fails EVERY record, and seeding can be thousands of them — without this the
+// first sign of trouble is a stampede of identical snackbars that buries the
+// one message worth reading.
+const REPORT_INTERVAL_MS = 60_000;
+const lastReported = new Map();
+
+function reportSyncProblem(key, message) {
+    const now = Date.now();
+    if (now - (lastReported.get(key) || 0) < REPORT_INTERVAL_MS) return;
+    lastReported.set(key, now);
+    eventBus.$emit('syncError', message);
+}
+
+function collectionRef(uid, name) {
+    return collection(db, 'users', uid, name);
+}
+
+function recordRef(uid, name, id) {
+    return doc(db, 'users', uid, name, String(id));
+}
+
+// Subscribes to one collection.
+//
+// `applyRemote(upserts, removals)` receives what actually changed, so a local
+// store only has to merge deltas rather than diff whole arrays. `getLocal()`
+// is called once, on the first snapshot that came from the server, to find
+// records this device has that Firestore does not.
+//
+// Seeding is a UNION, deliberately, and this is the property the whole design
+// rests on: these are append-only observation logs, and a record missing from
+// one side is always "not yet synced", never "deleted". Replacing local with
+// remote — what the favourites document does — would throw away every session
+// recorded before the user signed in, on a device that was working perfectly.
+//
+// The seed waits for a SERVER snapshot (`fromCache` false). The local cache
+// answers first when persistence is on, and seeding from it would push
+// everything the cache happens to be missing straight back up.
+export function subscribeCollection(uid, name, { applyRemote, getLocal }) {
+    let seeded = false;
+
+    return onSnapshot(collectionRef(uid, name), async snap => {
+        const upserts = [];
+        const removals = [];
+        for (const change of snap.docChanges()) {
+            if (change.type === 'removed') removals.push(change.doc.id);
+            else upserts.push(change.doc.data());
+        }
+
+        if (upserts.length || removals.length) {
+            // The store's writes are strict now, so a failed merge rejects
+            // rather than quietly writing an empty collection. Inside an
+            // onSnapshot callback that would otherwise surface only as an
+            // unhandled rejection.
+            try {
+                await applyRemote(upserts, removals);
+            } catch (e) {
+                // NOT a sync failure: the data arrived, and writing it to this
+                // device's own IndexedDB is what failed — quota, or a browser
+                // blocking storage. Saying "sync error" sends anyone debugging
+                // it to the network and the security rules, which is the wrong
+                // half of the system entirely.
+                const reason = (e && (e.name || e.message)) || 'unknown error';
+                console.error(`[folkfriend sync] could not store ${name} locally:`, e);
+                reportSyncProblem(`local:${name}`,
+                    `Could not save ${name} on this device (${reason}).`);
+                return;
+            }
+        }
+
+        if (!seeded && !snap.metadata.fromCache) {
+            seeded = true;
+            const local = await getLocal();
+            const remoteIDs = new Set(snap.docs.map(d => d.id));
+            const missing = (local || []).filter(r => r && r.id && !remoteIDs.has(String(r.id)));
+            if (missing.length) await pushRecords(uid, name, missing);
+        }
+    }, err => {
+        console.error(`[folkfriend sync] ${name} listener failed:`, err.code, err.message, err);
+        reportSyncProblem(`listen:${name}`,
+            `Could not read ${name} from your account (${err.code || 'unknown'}).`);
+    });
+}
+
+export function pushRecord(uid, name, record) {
+    if (!record || record.id == null) return Promise.resolve();
+    return setDoc(recordRef(uid, name, record.id), toPlain(record)).catch(e => {
+        // A rejected write here is usually the security rules refusing the
+        // document's shape, which is otherwise completely silent: the local
+        // copy saved fine and every view reads that, so the app looks perfect
+        // while nothing reaches the account.
+        console.error(`[folkfriend sync] could not push ${name}/${record.id}:`, e && e.code, e);
+        reportSyncProblem(`push:${name}`,
+            `Could not sync ${name} to your account (${(e && e.code) || 'unknown'}).`);
+    });
+}
+
+export async function pushRecords(uid, name, records) {
+    const usable = (records || []).filter(r => r && r.id != null);
+    for (let i = 0; i < usable.length; i += BATCH_LIMIT) {
+        const batch = writeBatch(db);
+        for (const record of usable.slice(i, i + BATCH_LIMIT)) {
+            batch.set(recordRef(uid, name, record.id), toPlain(record));
+        }
+        await batch.commit().catch(e => {
+            console.error(`[folkfriend sync] could not push a batch of ${name}:`, e && e.code, e);
+            reportSyncProblem(`push:${name}`,
+                `Could not sync ${name} to your account (${(e && e.code) || 'unknown'}).`);
+        });
+    }
+}
+
+export function deleteRecord(uid, name, id) {
+    if (id == null) return Promise.resolve();
+    return deleteDoc(recordRef(uid, name, id)).catch(console.error);
+}
+
+export async function deleteRecords(uid, name, ids) {
+    const usable = (ids || []).filter(id => id != null);
+    for (let i = 0; i < usable.length; i += BATCH_LIMIT) {
+        const batch = writeBatch(db);
+        for (const id of usable.slice(i, i + BATCH_LIMIT)) {
+            batch.delete(recordRef(uid, name, id));
+        }
+        await batch.commit().catch(console.error);
+    }
 }

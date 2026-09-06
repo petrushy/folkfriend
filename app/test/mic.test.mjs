@@ -76,14 +76,20 @@ const env = {
     gumDelayMs: 0,
     visibility: 'visible',
     visibilityListeners: [],
+    // Every constraints object getUserMedia was called with.
+    gumConstraints: [],
+    // What the fake device reports back from track.getSettings().
+    appliedSettings: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 48000 },
 };
 
 class FakeTrack {
-    constructor() {
+    constructor(applied = {}) {
         this.readyState = 'live';
         this.muted = false;
         this._listeners = {};
+        this._applied = applied;
     }
+    getSettings() { return this._applied; }
     addEventListener(name, fn) {
         (this._listeners[name] = this._listeners[name] || []).push(fn);
     }
@@ -100,7 +106,7 @@ class FakeTrack {
 }
 
 class FakeStream {
-    constructor() { this.track = new FakeTrack(); }
+    constructor() { this.track = new FakeTrack(env.appliedSettings); }
     getAudioTracks() { return [this.track]; }
     getTracks() { return [this.track]; }
 }
@@ -142,7 +148,8 @@ function installGlobals() {
         writable: true,
         value: {
             mediaDevices: {
-                async getUserMedia() {
+                async getUserMedia(constraints) {
+                    env.gumConstraints.push(constraints);
                     if (env.gumDelayMs) await new Promise(r => setTimeout(r, env.gumDelayMs));
                     if (env.gumFailure) throw env.gumFailure;
                     const stream = new FakeStream();
@@ -167,6 +174,8 @@ function resetEnv() {
     env.gumFailure = null;
     env.gumDelayMs = 0;
     env.visibility = 'visible';
+    env.appliedSettings = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 48000 };
+    env.gumConstraints = [];
     env.visibilityListeners = [];
 }
 
@@ -284,6 +293,157 @@ await test('a track muted by another app is re-acquired', async () => {
     assert.equal(env.streams.length, 2);
     assert.equal(env.streams[1].track.muted, false);
 
+    await mic.stopContinuous();
+});
+
+await test('speech processing is asked to be off, as an ideal not a requirement', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+
+    const asked = env.gumConstraints[0].audio;
+    assert.equal(asked.echoCancellation, false);
+    assert.equal(asked.noiseSuppression, false,
+        'noise suppression is a speech-band gate and this app is feeding music to a pitch tracker');
+    // Bare values are IDEAL per the spec. Sending them as `exact` would make
+    // getUserMedia reject outright on a browser that cannot honour them, which
+    // would trade damaged audio for no microphone at all.
+    assert.equal(typeof asked.noiseSuppression, 'boolean', 'not an {exact: …} requirement');
+
+    await mic.stopContinuous();
+});
+
+await test('what the device actually applied is recorded, not what was asked', async () => {
+    // Asking and getting are different things, and iOS decides much of this
+    // from its own audio session. Safari also reports a narrower set than
+    // Chrome, so an absent key must read as "not reported", never as "off".
+    const { mic } = await loadMic();
+    // After loadMic, which resets the environment.
+    env.appliedSettings = { echoCancellation: false, autoGainControl: true, sampleRate: 44100 };
+    await mic.startContinuous(10);
+
+    assert.equal(mic.appliedAudioSettings.autoGainControl, true,
+        'the device overrode what was asked, and the app knows');
+    assert.equal(mic.appliedAudioSettings.noiseSuppression, undefined,
+        'a browser that will not say must not be shown as "off"');
+    assert.equal(mic.appliedAudioSettings.sampleRate, 44100);
+
+    await mic.stopContinuous();
+});
+
+await test('a capture delivering nothing but silence is re-acquired', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    env.contexts[0].deliver(2, 0.5);
+
+    // The failure every other check misses. Another app takes the microphone
+    // and the OS hands back a track that is still live, still UNMUTED, on a
+    // running context, delivering digital silence for ever. Chunks keep
+    // arriving on schedule, so the stall test is happy; track.muted is the flag
+    // browsers set least reliably, so the fault test is happy too.
+    env.contexts[0].deliver(20, 0);
+    assert.equal(env.streams[0].track.muted, false, 'nothing declares itself broken');
+    assert.equal(env.streams[0].track.readyState, 'live');
+
+    // Not condemned straight away — a silent moment is not a dead microphone.
+    assert.equal(await mic.ensureMicHealthy(), true);
+    assert.equal(env.streams.length, 1, 'a short silence is left alone');
+
+    // Sustained past the window, it is.
+    mic._lastSoundAt = Date.now() - 11_000;
+    assert.equal(await mic.ensureMicHealthy(), true);
+    assert.equal(env.streams.length, 2, 'the capture is rebuilt');
+
+    await mic.stopContinuous();
+});
+
+await test('real audio keeps a quiet capture alive', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+
+    mic._lastSoundAt = Date.now() - 11_000;
+    env.contexts[0].deliver(1, 0.5);   // one chunk with something in it
+
+    assert.equal(await mic.ensureMicHealthy(), true);
+    assert.equal(env.streams.length, 1,
+        'a working microphone must never be torn down for being briefly quiet');
+
+    await mic.stopContinuous();
+});
+
+await test('a freshly opened capture is given time before it is judged', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+
+    // No buffer has been delivered yet at all. Judging the pipeline now would
+    // condemn every capture at the moment it opens.
+    assert.equal(await mic.ensureMicHealthy(), true);
+    assert.equal(env.streams.length, 1);
+
+    await mic.stopContinuous();
+});
+
+await test('a rebuild that does not restore sound waits longer before the next', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    env.contexts[0].deliver(2, 0.5);
+
+    mic._lastSoundAt = Date.now() - 11_000;
+    await mic.ensureMicHealthy();
+    assert.equal(env.streams.length, 2);
+
+    // Still silent after the rebuild. A fixed window would reacquire the
+    // microphone every ten seconds for ever — a genuinely silent input (a
+    // muted interface, a noise gate in a quiet room) would never settle.
+    mic._lastSoundAt = Date.now() - 11_000;
+    await mic.ensureMicHealthy();
+    assert.equal(env.streams.length, 2, 'the window has escalated past ten seconds');
+
+    mic._lastSoundAt = Date.now() - 31_000;
+    await mic.ensureMicHealthy();
+    assert.equal(env.streams.length, 3, 'and it does try again, later');
+
+    await mic.stopContinuous();
+});
+
+await test('a microphone that stays silent through a rebuild is reported', async () => {
+    const { mic, bus } = await loadMic();
+    await mic.startContinuous(10);
+    env.contexts[0].deliver(2, 0.5);
+
+    // First detection: rebuild quietly, the user need not know.
+    mic._lastSoundAt = Date.now() - 11_000;
+    await mic.ensureMicHealthy();
+    assert.ok(!bus.emitted.some(([name]) => name === 'micLost'), 'a self-healing blip stays quiet');
+
+    // Still nothing after the rebuild. It is not going to fix itself, and an
+    // app claiming to listen while it hears nothing is the whole problem.
+    mic._lastSoundAt = Date.now() - 31_000;
+    await mic.ensureMicHealthy();
+    const lost = bus.emitted.find(([name]) => name === 'micLost');
+    assert.ok(lost, 'the user is told the microphone is delivering nothing');
+    assert.match(lost[1].reason, /no signal/);
+
+    // And told when it comes back.
+    env.contexts[env.contexts.length - 1].deliver(1, 0.5);
+    assert.ok(bus.emitted.some(([name]) => name === 'micRecovered'));
+
+    await mic.stopContinuous();
+});
+
+await test('silence is ignored while the tab is in the background', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    env.contexts[0].deliver(2, 0.5);
+
+    setVisibility('hidden');
+    mic._lastSoundAt = Date.now() - 61_000;
+
+    // A hidden tab legitimately delivers nothing, and re-acquiring there would
+    // either fail or take the microphone from whatever the user switched to.
+    assert.equal(await mic.ensureMicHealthy(), true);
+    assert.equal(env.streams.length, 1);
+
+    setVisibility('visible');
     await mic.stopContinuous();
 });
 

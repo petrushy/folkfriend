@@ -252,7 +252,25 @@ class FFBackend {
             };
         }
 
+        this._sampleRate = sampleRate;
         await this.folkfriendWorker.setSampleRate(sampleRate);
+    }
+
+    // The sample rate is a single global on the WASM side, and live capture and
+    // file analysis do not share one: a microphone is commonly 44.1 kHz while
+    // decoding is fixed at 48 kHz. Setting it OUTSIDE the PCM lock — which is
+    // what both callers used to do — means a file analysis (or a microphone
+    // recovery, which reopens the pipeline and re-sets the rate) can change how
+    // the other stream's samples are interpreted while its job is queued. The
+    // audio is then read at the wrong rate: every pitch and every duration is
+    // out by the ratio, which surfaces as detections quietly getting worse
+    // rather than as an error.
+    //
+    // So each job declares its own rate and applies it inside the lock, next to
+    // the flush/feed/transcribe it belongs to.
+    async _applySampleRateForJob(sampleRate) {
+        if (!sampleRate || sampleRate === this._sampleRate) return;
+        await this.setSampleRate(sampleRate);
     }
 
     async setUseMlTranscriber(useMl) {
@@ -300,11 +318,15 @@ class FFBackend {
         });
     }
 
-    submitFilledBuffer(skipHistory = false) {
-        return this._withPCMBufferLock(() => this._submitFilledBufferUnlocked(skipHistory));
+    submitFilledBuffer(skipHistory = false, sampleRate = null) {
+        return this._withPCMBufferLock(
+            () => this._submitFilledBufferUnlocked(skipHistory, sampleRate));
     }
 
-    async _submitFilledBufferUnlocked(skipHistory) {
+    async _submitFilledBufferUnlocked(skipHistory, sampleRate) {
+        // The buffer being transcribed was fed at the capture's rate, which a
+        // concurrent file analysis may have changed since.
+        await this._applySampleRateForJob(sampleRate);
         let t0 = performance.now();
         const contour = await this.transcribePCMBuffer();
         let tEnd = performance.now();
@@ -400,11 +422,13 @@ class FFBackend {
         });
     }
 
-    transcribeAndQueryPCMSignal(PCMSignal) {
-        return this._withPCMBufferLock(() => this._transcribeAndQueryPCMSignalUnlocked(PCMSignal));
+    transcribeAndQueryPCMSignal(PCMSignal, sampleRate = null) {
+        return this._withPCMBufferLock(
+            () => this._transcribeAndQueryPCMSignalUnlocked(PCMSignal, sampleRate));
     }
 
-    async _transcribeAndQueryPCMSignalUnlocked(PCMSignal) {
+    async _transcribeAndQueryPCMSignalUnlocked(PCMSignal, sampleRate) {
+        await this._applySampleRateForJob(sampleRate);
         await this.flushPCMBuffer();
 
         try {

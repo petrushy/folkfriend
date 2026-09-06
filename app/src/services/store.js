@@ -7,7 +7,10 @@ import {FavouriteItem} from '@/js/schema';
 import {estimateCostUsd, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
 import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '@/js/places.mjs';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
-import { subscribe as syncSubscribe, pushFavourites } from './sync.js';
+import {
+    subscribe as syncSubscribe, pushFavourites,
+    subscribeCollection, pushRecord, pushRecords, deleteRecord, deleteRecords,
+} from './sync.js';
 import {
     logEvent
 } from 'firebase/analytics';
@@ -134,10 +137,13 @@ const AI_SUMMARY_MAX_CHARS = 1200;
 //    entry for a tune (see its dedup loop), so a location there would only ever
 //    answer "where did I last hear this" — and starring happens on the sofa
 //    days later, where the location is not merely absent but wrong.
-//  - It is deliberately local-only, like history and unlike favourites. These
-//    records are a log of the user's physical movements; putting them on the
-//    favourites document would sync them to Firestore, which is a materially
-//    different class of data from a list of tune IDs.
+//  - It is its own key rather than a field on the favourites document, which
+//    is what lets it sync as one document per record. These are also a log of
+//    the user's physical movements, which is a materially different class of
+//    data from a list of tune IDs — it was deliberately never synced at first
+//    for that reason, and now syncs to the signed-in user's own account
+//    because the log is worth little on the one device that recorded it. See
+//    _subscribeRecordCollections.
 const KEY_SIGHTINGS = 'tuneSightings';
 
 // Named locations, matched to sightings by proximity rather than by any
@@ -155,6 +161,28 @@ const MAX_SIGHTINGS = 5000;
 // tune changed", which lives in liveAnalysis.js, and a genuine A-B-A set must
 // still record two sightings of A.
 const SIGHTING_DEDUP_MS = 60 * 1000;
+
+// Saved live-listening sessions ("Past Sessions"). Recorded unconditionally —
+// unlike tuneSightings, this is NOT gated by geoTagDetections; that setting
+// only controls whether lat/lon get attached to the record (see
+// liveAnalysis.js _recordSighting / _sessionFix). Kept as its own key rather
+// than folded into tuneSightings because the shapes are different: sightings
+// are one flat row per hearing, a live session is one record per evening
+// holding an ORDERED tune list with durations.
+const KEY_LIVE_SESSIONS = 'liveSessions';
+
+// Sessions are retained until explicitly deleted. Unlike transient search
+// history, the user's session log must not disappear when a count is reached.
+
+// Enough state to resume the one unfinished session across a reload: the raw
+// window matches clustering needs to keep producing the same list, plus the
+// options they were recorded with.
+//
+// Deliberately NOT part of the session record and NOT synced. It is several
+// times the size of the record, it is meaningless to another device (which
+// cannot continue this device's capture), and it is scratch state — the
+// session itself is already safely in 'liveSessions'.
+const KEY_OPEN_LIVE_SESSION = 'openLiveSession';
 
 class Store {
     constructor() {
@@ -226,6 +254,7 @@ class Store {
         this.currentUser = null;
         this.auth = null;
         this._unsubscribeSync = null;
+        this._unsubscribeRecordSync = null;
     }
 
     // The datasets the user wants searched. Always an array of known ids.
@@ -270,12 +299,26 @@ class Store {
         return this.selectedDatasets();
     }
 
+    // Lenient write: logs and continues. Right for the many callers whose data
+    // can be regenerated or re-fetched, and who have no way to report a failure
+    // to the user anyway.
     async _dbSet(key, value) {
         try {
             await set(key, value);
         } catch (e) {
             console.error(`IndexedDB write error (${key})`, e);
         }
+    }
+
+    // Strict write: rethrows.
+    //
+    // A live session lives in memory until it is written, so swallowing the
+    // failure here means the UI is told the save succeeded, "Finish session"
+    // discards the only copy, and the evening is gone — the exact outcome the
+    // save-error handling exists to prevent. Quota is the realistic cause and
+    // it is not rare on a phone holding a 40 MB tune index.
+    async _dbSetStrict(key, value) {
+        await set(key, value);
     }
 
     async updateUserSettings(userSettings) {
@@ -949,6 +992,7 @@ class Store {
 
         sightings.unshift(sighting);
         await this._dbSet(KEY_SIGHTINGS, sightings.slice(0, MAX_SIGHTINGS));
+        this._syncPush('sightings', sighting);
         eventBus.$emit('sightingsChanged');
         return sighting;
     }
@@ -977,6 +1021,7 @@ class Store {
 
         const removedIDs = new Set(removed.map(s => s.id));
         await this._dbSet(KEY_SIGHTINGS, sightings.filter(s => !removedIDs.has(s.id)));
+        this._syncDeleteMany('sightings', [...removedIDs]);
         eventBus.$emit('sightingsChanged');
         return removed;
     }
@@ -994,6 +1039,7 @@ class Store {
             .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
             .slice(0, MAX_SIGHTINGS);
         await this._dbSet(KEY_SIGHTINGS, merged);
+        this._syncPushMany('sightings', missing);
         eventBus.$emit('sightingsChanged');
     }
 
@@ -1037,6 +1083,11 @@ class Store {
             await this._dbSet(KEY_SIGHTINGS, sightings);
         }
 
+        this._syncPush('places', place);
+        // Naming is retroactive, so it rewrites the placeID of every sighting
+        // it adopted — those have to go up too, or the other device keeps
+        // showing them as unplaced under a name it can already see.
+        this._syncPushMany('sightings', sightings.filter(s => adopting.has(s.id)));
         eventBus.$emit('sightingsChanged');
         return place;
     }
@@ -1050,43 +1101,296 @@ class Store {
         await this._dbSet(KEY_PLACES, places);
 
         const sightings = await this.getSightings();
-        let changed = false;
+        const orphaned = [];
         for (const sighting of sightings) {
             if (sighting.placeID === placeID) {
                 sighting.placeID = null;
-                changed = true;
+                orphaned.push(sighting);
             }
         }
-        if (changed) await this._dbSet(KEY_SIGHTINGS, sightings);
+        if (orphaned.length) await this._dbSet(KEY_SIGHTINGS, sightings);
+
+        this._syncDelete('places', placeID);
+        // The sightings survive the name being deleted, so they are UPDATED
+        // remotely, never removed — the other device has to learn they are
+        // unplaced now, not that they never happened.
+        this._syncPushMany('sightings', orphaned);
         eventBus.$emit('sightingsChanged');
     }
 
     async deleteSighting(sightingID) {
         const sightings = (await this.getSightings()).filter(s => s.id !== sightingID);
         await this._dbSet(KEY_SIGHTINGS, sightings);
+        this._syncDelete('sightings', sightingID);
         eventBus.$emit('sightingsChanged');
     }
 
     async clearSightings() {
+        // Read before wiping: the remote copies are addressed by id, so the
+        // ids have to be collected while they still exist locally. Without
+        // this the local log is cleared and the synced one is not, and the
+        // next snapshot puts every record straight back.
+        const sightingIDs = (await this.getSightings()).map(s => s.id);
+        const placeIDs = (await this.getPlaces()).map(p => p.id);
         await this._dbSet(KEY_SIGHTINGS, []);
         await this._dbSet(KEY_PLACES, []);
+        this._syncDeleteMany('sightings', sightingIDs);
+        this._syncDeleteMany('places', placeIDs);
         eventBus.$emit('sightingsChanged');
+    }
+
+    // ---- Live listening sessions (Past Sessions) ---------------------------
+
+    async getLiveSessions() {
+        try {
+            return await get(KEY_LIVE_SESSIONS) || [];
+        } catch (e) {
+            console.error(`IndexedDB read error (${KEY_LIVE_SESSIONS})`, e);
+            return [];
+        }
+    }
+
+    // Every mutation of one stored array runs through here, one at a time, per
+    // key.
+    //
+    // read → modify → write is not atomic against IndexedDB, so two of them
+    // overlapping both read the same array and the second write silently
+    // discards the first. That is not hypothetical here: the analysis loop
+    // checkpoints while the user is deleting a row, and a snapshot from
+    // another device merges in while both are happening. A delete losing that
+    // race reappears as the deleted session coming back.
+    _withRecords(key, mutate, event) {
+        this._writeChains = this._writeChains || new Map();
+        const previous = this._writeChains.get(key) || Promise.resolve();
+
+        const run = previous.then(async () => {
+            // A FAILED READ IS NOT AN EMPTY COLLECTION. Substituting [] here
+            // and then writing the mutation on top of it turns one unreadable
+            // read into a wiped history — the read failed, so we have no idea
+            // what was there, and the one thing we must not do is claim it was
+            // nothing. Let it propagate; the caller reports it and the stored
+            // copy is left exactly as it was.
+            const records = await get(key) || [];
+            const result = await mutate(records);
+            if (result && result.write) {
+                await this._dbSetStrict(key, result.records);
+                if (event) eventBus.$emit(event);
+            }
+            return result ? result.value : undefined;
+        });
+
+        // The chain must survive a failed link, or one error stalls every
+        // later write for the life of the page.
+        this._writeChains.set(key, run.catch(() => {}));
+        return run;
+    }
+
+    // Creates or updates a session record by id. liveAnalysis.js calls this
+    // repeatedly while a session is open (on each tune change, on a checkpoint,
+    // on Pause and on Finish), so lookup is always by id rather than by list
+    // position.
+    _liveSessionLabel(record, places) {
+        if (record.customName) return { name: record.name, placeName: record.placeName || '' };
+        const place = matchPlace(record, places);
+        const placeName = place ? place.name : (record.placeName || '');
+        const date = new Date(record.startedAt).toLocaleString(undefined, {
+            year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+        });
+        return { name: placeName ? `${date} · ${placeName}` : date, placeName };
+    }
+
+    async getNamedLiveSessions() {
+        const [records, places] = await Promise.all([
+            this.getLiveSessionsStrict(),
+            this.userSettings.geoTagDetections ? this.getPlaces() : [],
+        ]);
+        // Also gives older sessions date/place labels without rewriting them.
+        return records.map(record => ({ ...record, ...this._liveSessionLabel(record, places) }));
+    }
+
+    async upsertLiveSession(session) {
+        if (!session || !session.id) return null;
+        const record = { ...session };
+        Object.assign(record, this._liveSessionLabel(record, this.userSettings.geoTagDetections ? await this.getPlaces() : []));
+        await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
+            const index = sessions.findIndex(s => s.id === record.id);
+            if (index === -1) sessions.unshift(record);
+            else sessions[index] = record;
+            sessions.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+            return { write: true, records: sessions };
+        }, 'liveSessionsChanged');
+        this._syncPush('liveSessions', record);
+        return record;
+    }
+
+    // Edits merge with the latest record inside the write queue. A deleted
+    // session must never be recreated by a late editor save.
+    async updateLiveSession(sessionID, patch) {
+        const record = await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
+            const index = sessions.findIndex(s => s.id === sessionID);
+            if (index < 0) throw new Error('This session was deleted. Your changes have not been saved.');
+            const updated = { ...sessions[index], ...patch, id: sessionID };
+            sessions[index] = updated;
+            return { write: true, records: sessions, value: updated };
+        }, 'liveSessionsChanged');
+        this._syncPush('liveSessions', record);
+        return record;
+    }
+
+    async deleteLiveSession(sessionID) {
+        await this._withRecords(KEY_LIVE_SESSIONS, sessions => ({
+            write: true,
+            records: sessions.filter(s => s.id !== sessionID),
+        }), 'liveSessionsChanged');
+        this._syncDelete('liveSessions', sessionID);
+    }
+
+    async clearLiveSessions() {
+        // Ids collected before the wipe, for the same reason as clearSightings.
+        let sessionIDs = [];
+        await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
+            sessionIDs = sessions.map(s => s.id);
+            return { write: true, records: [] };
+        }, 'liveSessionsChanged');
+        this._syncDeleteMany('liveSessions', sessionIDs);
+    }
+
+    // ---- The one unfinished session, for resuming across a reload ----------
+
+    async getOpenLiveSession() {
+        try {
+            return await get(KEY_OPEN_LIVE_SESSION) || null;
+        } catch (e) {
+            console.error(`IndexedDB read error (${KEY_OPEN_LIVE_SESSION})`, e);
+            return null;
+        }
+    }
+
+    // Strict, like the session writes: resume state that silently failed to
+    // save is a session that silently cannot be resumed after a reload.
+    async setOpenLiveSession(state) {
+        await this._dbSetStrict(KEY_OPEN_LIVE_SESSION, state);
+    }
+
+    async clearOpenLiveSession() {
+        await this._dbSetStrict(KEY_OPEN_LIVE_SESSION, null);
+    }
+
+    // Rethrows rather than answering "no sessions" for a read that failed.
+    // restoreOpenSession() decides whether to DROP the resume state on the
+    // answer, so a swallowed read error there would throw away a recoverable
+    // session because the disk hiccuped once.
+    async getLiveSessionsStrict() {
+        return await get(KEY_LIVE_SESSIONS) || [];
+    }
+
+    // ---- Syncing places, sightings and live sessions -----------------------
+    //
+    // These three are the user's own record of what they played and where, and
+    // they are the one thing in the app that CANNOT be regenerated — an evening
+    // that was not logged is gone. They are also recorded on a phone in a pub
+    // and read back later on a computer, so a device-local log answers the
+    // question for the wrong device.
+    //
+    // Every push is fire-and-forget. The Firestore SDK queues writes made
+    // offline and replays them, and a sync failure must never break the local
+    // write that has already happened — IndexedDB is the source of truth for
+    // everything the app displays, and Firestore is only the transport.
+
+    _syncPush(name, record) {
+        if (!this.currentUser || !record) return;
+        pushRecord(this.currentUser.uid, name, record);
+    }
+
+    _syncPushMany(name, records) {
+        if (!this.currentUser || !records || !records.length) return;
+        pushRecords(this.currentUser.uid, name, records);
+    }
+
+    _syncDelete(name, id) {
+        if (!this.currentUser || id == null) return;
+        deleteRecord(this.currentUser.uid, name, id);
+    }
+
+    _syncDeleteMany(name, ids) {
+        if (!this.currentUser || !ids || !ids.length) return;
+        deleteRecords(this.currentUser.uid, name, ids);
+    }
+
+    // Merges inbound records into a stored array, by id.
+    //
+    // Local pruning is NOT a deletion. A device at its cap drops the oldest
+    // records to stay within it, and pushing that as authoritative would delete
+    // another device's history — so only ids Firestore actually reported as
+    // removed are removed here, and the cap is applied afterwards, locally.
+    _mergeRemoteRecords(key, upserts, removals, { sortBy, cap, event }) {
+        // Through the same per-key chain as the local mutations: a snapshot
+        // arriving from another device while this one is mid-save is exactly
+        // the interleaving that loses a write.
+        return this._withRecords(key, records => {
+            const byID = new Map(records.map(r => [String(r.id), r]));
+            for (const record of upserts || []) {
+                if (record && record.id != null) byID.set(String(record.id), record);
+            }
+            for (const id of removals || []) byID.delete(String(id));
+
+            const merged = [...byID.values()]
+                .sort((a, b) => (b[sortBy] || 0) - (a[sortBy] || 0))
+                .slice(0, cap);
+
+            return { write: true, records: merged };
+        }, event);
+    }
+
+    _subscribeRecordCollections(uid) {
+        const subs = [
+            subscribeCollection(uid, 'places', {
+                getLocal: () => this.getPlaces(),
+                applyRemote: (upserts, removals) => this._mergeRemoteRecords(
+                    KEY_PLACES, upserts, removals,
+                    // Places have no natural recency and are few, so the cap is
+                    // effectively absent — capping them would silently drop the
+                    // names that every sighting's placeID points at.
+                    { sortBy: 'createdAt', cap: Infinity, event: 'sightingsChanged' },
+                ),
+            }),
+            subscribeCollection(uid, 'sightings', {
+                getLocal: () => this.getSightings(),
+                applyRemote: (upserts, removals) => this._mergeRemoteRecords(
+                    KEY_SIGHTINGS, upserts, removals,
+                    { sortBy: 'timestamp', cap: MAX_SIGHTINGS, event: 'sightingsChanged' },
+                ),
+            }),
+            subscribeCollection(uid, 'liveSessions', {
+                getLocal: () => this.getLiveSessions(),
+                applyRemote: (upserts, removals) => this._mergeRemoteRecords(
+                    KEY_LIVE_SESSIONS, upserts, removals,
+                    { sortBy: 'startedAt', cap: Infinity, event: 'liveSessionsChanged' },
+                ),
+            }),
+        ];
+        return () => { for (const unsub of subs) unsub(); };
     }
 
     async exportUserData() {
         const payload = {
-            version: 4,
+            version: 5,
             exportedAt: Date.now(),
             userSettings: this.userSettings,
             historyItems: await this.getHistoryItems(),
             favouriteItems: await this.getFavourites(),
             // Sightings carry coordinates, so a shared backup file discloses
-            // where the user has played. They are included regardless: this is
-            // the only copy (they are never synced), and a backup that silently
-            // drops the one dataset that cannot be regenerated is not a backup.
+            // where the user has played. They are included regardless: a backup
+            // that silently drops the one dataset that cannot be regenerated is
+            // not a backup, and while these are synced to the signed-in user's
+            // own account now, that is a convenience and not an archive — it
+            // holds one live copy, which a mistaken "clear" removes everywhere.
             // The Settings panel warns before the file is written.
             tuneSightings: await this.getSightings(),
             places: await this.getPlaces(),
+            // Same reasoning as tuneSightings, and it may carry coordinates too
+            // when geoTagDetections is on.
+            liveSessions: await this.getLiveSessions(),
         };
         return JSON.stringify(payload, null, 2);
     }
@@ -1098,14 +1402,29 @@ class Store {
         } catch (e) {
             throw new Error('Could not parse import file: invalid JSON.');
         }
-        if (![1, 2, 3, 4].includes(payload.version)) {
+        if (![1, 2, 3, 4, 5].includes(payload.version)) {
             throw new Error(`Unsupported data version: ${payload.version}`);
         }
         await this._dbSet('historyItems', payload.historyItems || []);
-        // Absent in v1-v3 backups. Only written when the key is present, so
-        // restoring an older backup does not wipe sightings recorded since.
-        if (payload.tuneSightings) await this._dbSet(KEY_SIGHTINGS, payload.tuneSightings);
-        if (payload.places) await this._dbSet(KEY_PLACES, payload.places);
+        // Absent in older backups. Only written when the key is present, so
+        // restoring an older backup does not wipe data recorded since.
+        //
+        // Restored records are pushed up rather than left for the seeding pass,
+        // which only runs when a listener is first attached — an import made
+        // while already signed in would otherwise stay on this device until the
+        // next launch, looking as though half the restore had failed.
+        if (payload.tuneSightings) {
+            await this._dbSet(KEY_SIGHTINGS, payload.tuneSightings);
+            this._syncPushMany('sightings', payload.tuneSightings);
+        }
+        if (payload.places) {
+            await this._dbSet(KEY_PLACES, payload.places);
+            this._syncPushMany('places', payload.places);
+        }
+        if (payload.liveSessions) {
+            await this._dbSet(KEY_LIVE_SESSIONS, payload.liveSessions);
+            this._syncPushMany('liveSessions', payload.liveSessions);
+        }
         // v1/v2 exports may have folderId on items; getFavourites() will migrate them on next load
         await this._dbSet('favouriteItems', payload.favouriteItems || []);
         // Backups made after 3.9.0 carry AI summaries on favourited settings.
@@ -1130,8 +1449,15 @@ class Store {
             this._unsubscribeSync();
             this._unsubscribeSync = null;
         }
+        if (this._unsubscribeRecordSync) {
+            this._unsubscribeRecordSync();
+            this._unsubscribeRecordSync = null;
+        }
         this.currentUser = user;
         eventBus.$emit('authStateChanged', user);
+        // Set before the listeners, since seeding pushes local-only records and
+        // every push reads this.currentUser to address them.
+        this._unsubscribeRecordSync = this._subscribeRecordCollections(user.uid);
         this._unsubscribeSync = syncSubscribe(user.uid, () => this.getFavourites(), async (type, items) => {
             if (type === 'favourites') {
                 // The incoming array replaces the local one wholesale, so AI
@@ -1153,6 +1479,10 @@ class Store {
         if (this._unsubscribeSync) {
             this._unsubscribeSync();
             this._unsubscribeSync = null;
+        }
+        if (this._unsubscribeRecordSync) {
+            this._unsubscribeRecordSync();
+            this._unsubscribeRecordSync = null;
         }
         this.currentUser = null;
         eventBus.$emit('authStateChanged', null);

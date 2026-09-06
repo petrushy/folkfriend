@@ -2,14 +2,30 @@ import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import store from './store';
 
-// Build getUserMedia constraints. Echo cancellation stays off (it mangles
-// music). Auto gain control is opt-in via settings — it lets the OS boost quiet
-// input at capture time (better than post-capture digital gain, which can't
-// improve SNR), at the risk of level "pumping" on sustained notes.
+// Build getUserMedia constraints.
+//
+// All three of these are the browser's VOICE processing chain, tuned for
+// speech on a call, and this app is feeding music to a pitch tracker:
+//
+//  - echoCancellation mangles music outright.
+//  - noiseSuppression is a speech-band gate. It attacks exactly what a tune is
+//    made of — sustained tones, room reverb, the other instruments — and it is
+//    also the one plausible way a WORKING capture reaches digital silence, so
+//    it interacts badly with the silence watchdog below.
+//  - autoGainControl is opt-in via settings: it lets the OS boost quiet input
+//    at capture time (better than post-capture digital gain, which cannot
+//    improve SNR), at the risk of level "pumping" on sustained notes.
+//
+// Bare values are IDEAL constraints per the spec, not required ones, so a
+// browser that does not support one ignores it rather than failing
+// getUserMedia. Asking is therefore free; what actually gets applied is
+// recorded in appliedAudioSettings, because browsers differ and iOS in
+// particular decides much of this from its own audio session.
 function audioConstraints() {
     return {
         audio: {
             echoCancellation: false,
+            noiseSuppression: false,
             autoGainControl: !!store.userSettings.autoGainControl,
         }
     };
@@ -23,6 +39,27 @@ const HEALTH_CHECK_INTERVAL_MS = 2000;
 // No audio chunk for this long, while the context claims to be running and the
 // tab is visible, means the capture has silently died.
 const AUDIO_STALL_MS = 1500;
+
+// A capture can also die WITHOUT the buffers stopping. When another app takes
+// the microphone — a call, a video, anything that grabs the input — the OS
+// commonly hands back a track that is still 'live', still unmuted, feeding an
+// AudioContext that is still 'running', and every buffer is digital silence,
+// for ever. Every other check here passes: chunks arrive on schedule, so the
+// stall test is happy, and `track.muted` is the flag browsers set least
+// reliably. The session simply stops hearing anything and says it is listening.
+//
+// Anything above this RMS counts as signal. It is a "is this literally dead"
+// threshold, not a "is this quiet" one: a live microphone in a silent room
+// still has a noise floor two or three orders of magnitude above it, while a
+// dead capture is exact zeroes.
+const SILENT_RMS = 1e-6;
+
+// How long that has to persist before the capture is rebuilt, escalating each
+// time a rebuild fails to bring the sound back. Without the escalation, a
+// genuinely silent input (a muted external interface, an aggressive noise gate
+// in a quiet room) would be reacquired every ten seconds for ever. Any real
+// audio resets it.
+const SILENT_WINDOWS_MS = [10_000, 30_000, 60_000];
 
 // After resuming a suspended context, how long to wait for the first buffer
 // before concluding it is never coming. One ScriptProcessor buffer at 48 kHz is
@@ -65,6 +102,17 @@ class MicService {
         // is whether the count *advances*, not its value.
         this._chunkCount = 0;
         this._lastChunkAt = 0;
+        // Last time a chunk contained anything at all, and how many times a
+        // rebuild has failed to change that. See SILENT_RMS.
+        this._lastSoundAt = 0;
+        this._silenceStrikes = 0;
+        this._silenceReported = false;
+
+        // What the device ACTUALLY applied, from the track itself — asking for
+        // a constraint and getting it are different things, and on an iPhone
+        // PWA there is no console to check without a Mac and a cable. Surfaced
+        // in Settings so it can be read on the device that matters.
+        this.appliedAudioSettings = null;
 
         // Running RMS accumulator. Both startRecording() and startContinuous()
         // feed every chunk through _accumulateRms(); UI components call
@@ -116,6 +164,13 @@ class MicService {
         }
     }
 
+    // The rate the currently open capture is delivering. Analysis jobs declare
+    // this so a concurrent file analysis cannot change how their samples are
+    // interpreted — see backend._applySampleRateForJob.
+    get sampleRate() {
+        return (this.audioCtx && this.audioCtx.sampleRate) || this._recordingSampleRate || null;
+    }
+
     async resumeIfSuspended() {
         if (this.audioCtx && this.audioCtx.state === 'suspended') {
             try {
@@ -141,6 +196,29 @@ class MicService {
     }
 
     // Why the current capture is unusable, or null if it looks healthy.
+    // Records what the browser actually gave us. Safari reports a narrower set
+    // than Chrome, and a key that is simply absent means "this browser will not
+    // say" — which is different from "off" and must not be shown as off.
+    _recordAppliedSettings() {
+        const track = this._micTrack();
+        if (!track || typeof track.getSettings !== 'function') {
+            this.appliedAudioSettings = null;
+            return;
+        }
+        try {
+            const settings = track.getSettings() || {};
+            this.appliedAudioSettings = {
+                echoCancellation: settings.echoCancellation,
+                noiseSuppression: settings.noiseSuppression,
+                autoGainControl: settings.autoGainControl,
+                sampleRate: settings.sampleRate,
+            };
+            console.debug('Microphone audio processing applied:', this.appliedAudioSettings);
+        } catch (e) {
+            this.appliedAudioSettings = null;
+        }
+    }
+
     _captureFault() {
         if (!this.micStream) return 'no stream';
         const track = this._micTrack();
@@ -156,6 +234,21 @@ class MicService {
 
     _audioStalled() {
         return this._lastChunkAt > 0 && Date.now() - this._lastChunkAt > AUDIO_STALL_MS;
+    }
+
+    _silenceWindowMs() {
+        return SILENT_WINDOWS_MS[Math.min(this._silenceStrikes, SILENT_WINDOWS_MS.length - 1)];
+    }
+
+    // Buffers are arriving, and every one of them is empty.
+    //
+    // Not checked while backgrounded: a hidden tab may legitimately deliver
+    // nothing, and re-acquiring there would either fail or snatch the
+    // microphone back from whatever the user switched to.
+    _audioSilent() {
+        if (!this._mode || !this._lastSoundAt || this._isHidden()) return false;
+        if (this._audioStalled()) return false;   // that is the other fault
+        return Date.now() - this._lastSoundAt > this._silenceWindowMs();
     }
 
     // Resolves true as soon as a new audio chunk arrives, false if none does
@@ -183,17 +276,32 @@ class MicService {
     // same moment, and each one racing its own getUserMedia would leave
     // orphaned microphones open. `_healthCheck` is assigned before the first
     // await, so concurrent callers always join the one in flight.
-    ensureMicHealthy() {
+    // `force` is for an explicit user action ("Retry microphone"). The
+    // automatic backoff below exists to stop the watchdog spinning
+    // getUserMedia against a permanently denied microphone; applying it to a
+    // deliberate tap means the button silently does nothing for up to thirty
+    // seconds, which reads as broken. A tap is also new information — the user
+    // has probably just hung up the call that took the microphone.
+    ensureMicHealthy({ force = false } = {}) {
         if (!this._mode) return Promise.resolve(true);
         if (this._recovering) return this._recovering;
-        if (this._healthCheck) return this._healthCheck;
+        if (force) {
+            this._nextRecoveryAt = 0;
+            this._recoveryFailures = 0;
+            // Never join an in-flight passive check: it may already have
+            // decided to back off, and returning its answer would make the tap
+            // look ignored.
+            this._healthCheck = null;
+        } else if (this._healthCheck) {
+            return this._healthCheck;
+        }
 
-        this._healthCheck = this._runHealthCheck()
+        this._healthCheck = this._runHealthCheck(force)
             .finally(() => { this._healthCheck = null; });
         return this._healthCheck;
     }
 
-    async _runHealthCheck() {
+    async _runHealthCheck(force = false) {
         await this.resumeIfSuspended();
         if (!this._mode) return true;
 
@@ -209,6 +317,23 @@ class MicService {
             fault = flowing ? this._captureFault() : 'no audio delivered';
         }
 
+        if (!fault && this._audioSilent()) {
+            // Count the attempt before making it, so a rebuild that does not
+            // restore the sound waits longer before the next one.
+            this._silenceStrikes++;
+            fault = 'no signal';
+
+            // Rebuilding usually fixes this and the user never needs to know.
+            // Once a rebuild has already failed to bring the sound back, it is
+            // not going to fix itself, and an app sitting there claiming to
+            // listen while it hears nothing is the failure this whole path
+            // exists to end — so say so.
+            if (this._silenceStrikes > 1 && !this._silenceReported) {
+                this._silenceReported = true;
+                eventBus.$emit('micLost', { reason: 'no signal from the microphone' });
+            }
+        }
+
         if (!fault) {
             this._recoveryFailures = 0;
             this._nextRecoveryAt = 0;
@@ -216,8 +341,9 @@ class MicService {
         }
         // Honour the backoff here rather than only in the watchdog, so the
         // live-analysis loop's per-cycle check can't turn a permanently denied
-        // microphone into a getUserMedia call every few seconds.
-        if (Date.now() < this._nextRecoveryAt) return false;
+        // microphone into a getUserMedia call every few seconds. A forced
+        // check has already cleared it.
+        if (!force && Date.now() < this._nextRecoveryAt) return false;
         return this._recoverCapture(fault);
     }
 
@@ -304,7 +430,18 @@ class MicService {
         const channelData = audioProcessingEvent.inputBuffer.getChannelData(0);
         this._chunkCount++;
         this._lastChunkAt = Date.now();
-        this._accumulateRms(channelData);
+        const sumSquares = this._accumulateRms(channelData);
+
+        // Real audio: the capture is alive, and any escalated silence window is
+        // forgotten.
+        if (sumSquares > channelData.length * SILENT_RMS * SILENT_RMS) {
+            this._lastSoundAt = Date.now();
+            this._silenceStrikes = 0;
+            if (this._silenceReported) {
+                this._silenceReported = false;
+                eventBus.$emit('micRecovered');
+            }
+        }
 
         if (mode === 'continuous') {
             this._ringBuffer.push(new Float32Array(channelData)); // copy
@@ -343,7 +480,12 @@ class MicService {
         }
 
         this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+        this._recordAppliedSettings();
         this._watchMicTrack();
+        // A fresh capture gets a full window before anything judges it silent —
+        // otherwise the very first health check condemns a pipeline that has
+        // not had time to deliver a single buffer.
+        this._lastSoundAt = Date.now();
 
         // IMPORTANT NOTE: we can simply set
         //  { sampleRate: FFConfig.SAMPLE_RATE }
@@ -408,6 +550,9 @@ class MicService {
 
     async _teardownPipeline() {
         this._stopHealthWatchdog();
+        // Nothing is expected to arrive with no capture open, so a closed
+        // pipeline must not read as a silent one.
+        this._lastSoundAt = 0;
 
         if (this.micProcessor) {
             this.micProcessor.onaudioprocess = null;
@@ -432,6 +577,8 @@ class MicService {
         }
     }
 
+    // Returns this chunk's sum of squares, which _onAudioChunk uses to tell
+    // signal from digital silence without a second pass over the buffer.
     _accumulateRms(samples) {
         let sum = 0;
         for (let i = 0; i < samples.length; i++) {
@@ -439,6 +586,7 @@ class MicService {
         }
         this._rmsSquaredSum += sum;
         this._rmsSampleCount += samples.length;
+        return sum;
     }
 
     // Returns the integrated RMS level since the last call (linear amplitude,
@@ -488,6 +636,15 @@ class MicService {
         // rapid toggle cannot leave two AudioContexts alive at once.
         if (this._continuousTransition) await this._continuousTransition;
         if (store.isListening()) return;
+
+        // A one-shot recording holds its own pipeline. Opening a second one on
+        // top leaves two live AudioContexts on the same microphone, so the
+        // recording is torn down first — "Follow session" is reachable from the
+        // Search screen while a recording is running, and must not have to be
+        // disabled to stay safe.
+        if (this._mode === 'recording') {
+            await this._teardownPipeline();
+        }
 
         this._continuousTransition = (async () => {
             store.setSearchState(store.searchStates.LISTENING);

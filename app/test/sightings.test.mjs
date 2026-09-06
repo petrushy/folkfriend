@@ -64,9 +64,23 @@ export default { $emit: (name, payload) => __events.push({ name, payload }), $on
 `,
     'fake-sync.mjs': `
 export const __pushes = [];
+export const __records = [];
+export const __subs = [];
 export function pushFavourites(uid, items) { __pushes.push(items); }
 export function subscribe() { return () => {}; }
-export function __reset() { __pushes.length = 0; }
+export function subscribeCollection(uid, name, handlers) {
+    __subs.push({ uid, name, handlers });
+    return () => {};
+}
+export function pushRecord(uid, name, record) { __records.push({ op: 'push', name, record }); }
+export function pushRecords(uid, name, records) {
+    for (const record of records) __records.push({ op: 'push', name, record });
+}
+export function deleteRecord(uid, name, id) { __records.push({ op: 'delete', name, id }); }
+export function deleteRecords(uid, name, ids) {
+    for (const id of ids) __records.push({ op: 'delete', name, id });
+}
+export function __reset() { __pushes.length = 0; __records.length = 0; __subs.length = 0; }
 `,
     'fake-ai.mjs': `
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
@@ -424,7 +438,7 @@ async function run() {
         await store.addSighting({ tuneID: '42', fix: COBBLESTONE });
 
         const exported = JSON.parse(await store.exportUserData());
-        assert.equal(exported.version, 4);
+        assert.equal(exported.version, 5);
         assert.equal(exported.tuneSightings.length, 1);
         assert.equal(exported.places.length, 1);
 

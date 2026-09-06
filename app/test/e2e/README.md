@@ -96,3 +96,19 @@ the user restarting anything.
   navigation; check `navigator.serviceWorker.controller` before going offline.
 - After `Page.navigate` the old DOM lingers briefly — wait for a marker on the
   new document before asserting on readiness selectors.
+
+### session-workspace.mjs — saved and live sessions share the editor
+
+```sh
+cd app
+npm run build
+npm run test:session-workspace
+```
+
+This test starts its own local server and isolated headless Chrome profile. It
+seeds 240 historical sessions, opens one through the searchable picker, checks
+mobile layout, renames and exports it, removes a tune, clears the list, reloads,
+and deletes the selected session. It verifies IndexedDB after each edit and
+fails on Vue warnings. It does not use a real microphone or your browser data.
+A mobile screenshot is written to the system temporary directory as
+`folkfriend-session-workspace-mobile.png`.
