@@ -182,7 +182,20 @@ export async function headroomBytes() {
 
 const chains = new Map();
 
-function withSession(sessionId, fn) {
+// Held while reclaimOrphans() is deciding what nothing claims.
+//
+// The sweep and an append are directly incompatible: appendSegment writes the
+// PAYLOAD first and the manifest second, so between the two there is a real
+// segment on disk that no manifest names yet. A sweep landing in that window
+// deletes it, and the manifest write then lands naming audio that is gone —
+// producing the exact "manifest points at missing segments" state the
+// payload-first ordering exists to prevent.
+let sweeping = null;
+
+async function withSession(sessionId, fn) {
+    // Waited BEFORE joining the chain, never inside it: the sweep waits on the
+    // chains, so a chain entry waiting on the sweep would deadlock.
+    if (sweeping) { try { await sweeping; } catch (e) { /* sweep failures are its own */ } }
     const previous = chains.get(sessionId) || Promise.resolve();
     const next = previous.then(fn, fn);
     chains.set(sessionId, next.catch(() => {}));
@@ -297,28 +310,77 @@ export async function deleteSessionAudio(sessionId) {
     });
 }
 
+// What every manifest on disk currently claims, read STRICTLY.
+//
+// Rethrows rather than skipping: this is the input to a delete, and a manifest
+// that merely failed to read looks identical to one that does not exist —
+// which would make the sweep destroy a whole recording over one transient
+// error. Returns the claimed segment keys plus the sessions whose manifests
+// could be read but not understood, which are protected wholesale.
+async function claimedSegments() {
+    const all = await keys();
+    const claimed = new Set();
+    const protectedSessions = new Set();
+
+    for (const key of all) {
+        if (typeof key !== 'string' || !key.startsWith(MANIFEST_PREFIX)) continue;
+        const manifest = await get(key);        // throws → the sweep is abandoned
+        if (!manifest) continue;                // genuinely absent
+        const sessionId = key.slice(MANIFEST_PREFIX.length);
+
+        // A manifest this build does not recognise may be a NEWER format a
+        // later release wrote. It is not used, but its audio is certainly not
+        // rubbish — same rule as the tune index's read-side delete. Retain
+        // everything under that session rather than guessing at its shape.
+        if (manifest.schema !== AUDIO_SCHEMA_VERSION || !Array.isArray(manifest.segments)) {
+            protectedSessions.add(sessionId);
+            continue;
+        }
+        for (const segment of manifest.segments) {
+            claimed.add(segmentKey(sessionId, segment.index));
+        }
+    }
+    return { all, claimed, protectedSessions };
+}
+
 // Deletes segment records no manifest claims: what an interrupted append or an
 // interrupted delete leaves behind. Cheap enough to run whenever the session
 // list is opened.
+//
+// Abandons itself rather than guessing. Every read here feeds a delete, so
+// "could not tell" must mean "delete nothing", never "delete everything".
 export async function reclaimOrphans() {
-    let all;
-    try { all = await keys(); } catch (e) { return 0; }
+    if (sweeping) return sweeping;
 
-    const claimed = new Set();
-    const manifests = await listManifests();
-    for (const manifest of manifests) {
-        for (const segment of manifest.segments) {
-            claimed.add(segmentKey(manifest.sessionId, segment.index));
+    let release;
+    sweeping = new Promise(resolve => { release = resolve; });
+    try {
+        // Let writes already past the gate finish, so a payload whose manifest
+        // is still on its way is not mistaken for an orphan.
+        await Promise.allSettled([...chains.values()]);
+
+        let view;
+        try {
+            view = await claimedSegments();
+        } catch (e) {
+            console.warn('Not reclaiming session audio — could not read what is claimed:',
+                e && e.message);
+            return 0;
         }
-    }
 
-    let reclaimed = 0;
-    for (const key of all) {
-        if (typeof key !== 'string' || !key.startsWith(SEGMENT_PREFIX)) continue;
-        if (claimed.has(key)) continue;
-        try { await del(key); reclaimed++; } catch (e) { /* best effort */ }
+        let reclaimed = 0;
+        for (const key of view.all) {
+            if (typeof key !== 'string' || !key.startsWith(SEGMENT_PREFIX)) continue;
+            if (view.claimed.has(key)) continue;
+            const sessionId = key.slice(SEGMENT_PREFIX.length).split(':')[0];
+            if (view.protectedSessions.has(sessionId)) continue;
+            try { await del(key); reclaimed++; } catch (e) { /* best effort */ }
+        }
+        return reclaimed;
+    } finally {
+        sweeping = null;
+        release();
     }
-    return reclaimed;
 }
 
 // Audio belonging to sessions that no longer exist. Deleting a session deletes

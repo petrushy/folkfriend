@@ -1312,6 +1312,39 @@ for the old reader.
     which costs nothing, since a clip never spans a track and export is already
     one file per track. The session-level value is only ever the first track's.
 
+**A third round found two more, and both are the same two mistakes again.**
+Worth stating as rules rather than incidents:
+
+11. **`reclaimOrphans()` was lenient in exactly the way (7) was.** It read
+    manifests through `listManifests()`, which turns a failed read into a
+    *missing* manifest — and then deletes every segment no manifest claims. One
+    transient error destroys a whole recording, from a screen the user opened
+    to look at their sessions. It now reads strictly and abandons the sweep if
+    anything fails, and a manifest whose schema it does not recognise
+    **protects** that session's audio rather than condemning it (it may be a
+    newer format — the tune index's read-side rule). It also could **race the
+    payload-first/manifest-second window**: a sweep between the two deletes the
+    new payload, and the manifest then lands naming audio that is gone, which is
+    precisely the state that ordering exists to prevent. Sweeps and writes are
+    now serialised, with the gate taken *before* joining the per-session chain
+    so the sweep waiting on those chains cannot deadlock.
+
+    > **Rule: a read that feeds a delete must be strict.** "Could not tell" has
+    > to mean "delete nothing", never "delete everything". This is the second
+    > time it was got wrong in this feature.
+
+12. **`_fail()` ended a track without committing the clock.** `_stopTrack()`
+    advances `_committedSeconds`; `_fail()` did not, so after a storage stop the
+    next track restarted at the *failed* track's start and laid new audio over
+    segments already written at those offsets. Two segments then claim the same
+    seconds and every later detection seeks into the wrong one. The existing
+    test ran out of space on the FIRST segment, where restarting at zero is
+    invisible — the bug lived entirely in the case the test did not cover.
+
+    `_adoptStoredClock()` is a second, independent guard on the resume path
+    ("never start behind what is stored"). Because the two are redundant, each
+    is pinned by its own test: with both present, either can regress unnoticed.
+
 ⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
 test is for: which container iOS actually records, whether `[init, ...midChunks]`
 plays standalone and seeks there, and whether an 86 MB `navigator.share` is
