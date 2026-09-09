@@ -371,6 +371,20 @@ async function mountView({
     };
     for (const [name, fn] of Object.entries(component.methods)) vm[name] = fn.bind(vm);
     Object.assign(vm, component.data.call(vm));
+    // ⚠️ Computeds are installed as PLAIN GETTERS, evaluated on every read.
+    //
+    // Vue's are cached against their reactive dependencies, and a computed that
+    // reads a non-reactive object (store.userSettings is a plain object
+    // assigned in the store's constructor) has NO dependencies — so Vue
+    // evaluates it once and freezes that value for the life of the component.
+    // This harness cannot reproduce that: an uncached getter always looks
+    // correct. A stale record-audio switch shipped past these tests for exactly
+    // that reason.
+    //
+    // So: anything whose value must track a change to a non-reactive source
+    // belongs in `data`, refreshed explicitly — and its test must assert on the
+    // data field, not on a computed. A green test here is not evidence that a
+    // computed updates in a real Vue runtime.
     for (const [name, fn] of Object.entries(component.computed || {})) {
         Object.defineProperty(vm, name, { get: fn.bind(vm), configurable: true });
     }
@@ -1154,11 +1168,9 @@ await test('the switch does not go stale when the setting changes', async () => 
 
     await vm.setRecordAudio(true);
     assert.equal(vm.recordAudio, true);
-    assert.match(vm.recordAudioLabel, /^Recording/);
 
     await vm.setRecordAudio(false);
     assert.equal(vm.recordAudio, false, 'it follows the change, not the first render');
-    assert.match(vm.recordAudioLabel, /^Record this/);
 
     // And a change made anywhere else still reaches it.
     store.userSettings.recordSessionAudio = true;

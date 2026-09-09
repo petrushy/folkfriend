@@ -1255,6 +1255,29 @@ deep-observes it there. **Any view binding a `userSettings` field needs local
 `data` refreshed explicitly**, the same pattern `store.currentUser` already
 forces.
 
+⚠️ **The SFC test harnesses cannot catch this.** They install computeds as
+plain getters, evaluated on every read, so an uncached getter always looks
+correct — the stale switch passed every test. Anything that must track a change
+to a non-reactive source belongs in `data`, and its test must assert on the data
+field. A green harness test is not evidence that a computed updates under a real
+Vue runtime.
+
+**The switch's LABEL is neutral and never says "Recording…".** A session merely
+existing is not recording: it can be paused, out of storage, or its encoder can
+have failed. The switch is a control; what is actually happening is reported in
+exactly one place, the session bar's REC/MUTED chip, which is on every route.
+Two places claiming it is how they come to disagree.
+
+**Reconciling the recorder against the setting is SERIALISED, and the setting is
+read late — inside the queued body, and again after every await.** `resume()`
+awaits a manifest read, and an OFF landing inside that window saw `isActive`
+false (resume has not claimed the session yet), concluded there was nothing to
+stop, and returned; the older ON then completed and started recording *after an
+explicit opt-out*, until the loop's next cycle noticed. The two guards cover
+each other, so each has a test that isolates it: the re-read by flipping the
+setting only once the job is inside `resume()`, and serialisation by asserting
+two reconciles never overlap — which the end state alone cannot show.
+
 **The switch reads the RECORDER while a session is open**, not the stored
 preference — so it can never claim to be recording something that is not being
 recorded. A start that fails (no storage, an unreadable manifest) snaps it back

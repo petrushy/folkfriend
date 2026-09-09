@@ -283,30 +283,68 @@ export function __reset() {
     recorder.isActive = false;
     recorder.isRecording = false;
     recorder.stoppedReason = null;
+    __resumeDelayMs = 0;
+    __maxConcurrent = 0;
+    __inFlight = 0;
 }
+export let __resumeDelayMs = 0;
+export function __setResumeDelay(ms) { __resumeDelayMs = ms; }
+// How many reconcile operations were ever in flight at once. Serialisation is
+// not observable from the end state alone — the late read and the re-read each
+// cover the other — so this is what pins it.
+export let __maxConcurrent = 0;
+let __inFlight = 0;
+export function __resetConcurrency() { __maxConcurrent = 0; __inFlight = 0; }
+function __enter() { __inFlight++; __maxConcurrent = Math.max(__maxConcurrent, __inFlight); }
+function __exit() { __inFlight--; }
 const recorder = {
     isRecording: false, isActive: false, audioSeconds: null, stoppedReason: null,
     // A resume/begin makes the recorder ACTIVE, which is what the "carries on
     // recording after an opt-out" case turns on: a paused recorder still holds
     // its session, so anything guarding on isActive alone restarts it.
     async begin() { __calls.push('begin'); recorder.isActive = true; return true; },
+    // resume() reads the manifest in the real one, so it does NOT settle
+    // synchronously. That gap IS the race: an OFF arriving inside it sees
+    // isActive false, concludes there is nothing to stop, and the older ON then
+    // finishes and starts recording anyway. A fake that resolves immediately
+    // has no such window and certifies the bug as fixed.
     async resume() {
         __calls.push('resume');
-        recorder.isActive = true;
-        if (recorder.stoppedReason === 'storage') recorder.stoppedReason = null;
-        return true;
+        __enter();
+        try {
+            if (__resumeDelayMs) await new Promise(r => setTimeout(r, __resumeDelayMs));
+            recorder.isActive = true;
+            if (recorder.stoppedReason === 'storage') recorder.stoppedReason = null;
+            return true;
+        } finally { __exit(); }
     },
     async stop() { __calls.push('stop'); recorder.isRecording = false; },
-    async end() { __calls.push('end'); recorder.isActive = false; recorder.isRecording = false; },
+    async end() {
+        __calls.push('end');
+        __enter();
+        try {
+            if (__resumeDelayMs) await new Promise(r => setTimeout(r, __resumeDelayMs));
+            recorder.isActive = false;
+            recorder.isRecording = false;
+        } finally { __exit(); }
+    },
     async discard(id) { __calls.push(['discard', id]); recorder.isActive = false; },
     // Refuses while stopped, exactly as the real one does. Without that a test
     // of "an ordinary Resume recovers from a full disk" passes against code
     // that never clears the stop.
-    ensureRecording() {
+    // Spans a tick like the real one, which opens a MediaRecorder behind a
+    // transition promise. That matters for the overlap test: the crossed state
+    // this guards against is an ensureRecording() landing while an end() is
+    // still tearing the recorder down.
+    async ensureRecording() {
         __calls.push('ensureRecording');
-        if (recorder.stoppedReason) return Promise.resolve(false);
-        if (recorder.isActive) recorder.isRecording = true;
-        return Promise.resolve(recorder.isActive);
+        if (recorder.stoppedReason) return false;
+        __enter();
+        try {
+            if (__resumeDelayMs) await new Promise(r => setTimeout(r, __resumeDelayMs));
+            if (recorder.isActive) recorder.isRecording = true;
+            return recorder.isActive;
+        } finally { __exit(); }
     },
     // Only resume() clears it, mirroring _clearStorageStop().
     __stopForStorage() { recorder.stoppedReason = 'storage'; recorder.isRecording = false; },
@@ -1262,6 +1300,78 @@ async function run() {
         store.userSettings.recordSessionAudio = true;
         await service._syncRecorderToSetting();
         assert.equal(recorder.default.isActive, true);
+        await service.finish();
+    });
+
+    await test('a rapid ON then OFF does not finish with recording ON', async () => {
+        // resume() awaits a manifest read. An OFF landing inside that window
+        // saw isActive false — resume has not claimed the session yet — did
+        // nothing and returned; the older ON then completed and called
+        // ensureRecording(), so recording started AFTER an explicit opt-out and
+        // ran until the analysis loop's next cycle noticed. Several seconds of
+        // a conversation the user had just asked not to record.
+        const { service, store, recorder } = await loadService();
+        store.userSettings.recordSessionAudio = false;
+        await service.start(10, 5);
+        recorder.__setResumeDelay(20);
+
+        store.userSettings.recordSessionAudio = true;
+        const on = service._syncRecorderToSetting();
+        store.userSettings.recordSessionAudio = false;
+        const off = service._syncRecorderToSetting();
+        await Promise.all([on, off]);
+
+        assert.equal(recorder.default.isActive, false,
+            'the last thing the user asked for is what holds');
+        await service.finish();
+    });
+
+    await test('an opt-out DURING resume is honoured when resume lands', async () => {
+        // The same window from the other side: the setting flips while resume()
+        // is still reading, with no second reconcile call at all. The job that
+        // started it has to re-read rather than act on what was true when it
+        // began.
+        const { service, store, recorder } = await loadService();
+        store.userSettings.recordSessionAudio = false;
+        await service.start(10, 5);
+        recorder.__setResumeDelay(20);
+
+        store.userSettings.recordSessionAudio = true;
+        const pending = service._syncRecorderToSetting();
+        // Let the job get PAST its own check and into resume(). Flipping the
+        // setting before that is caught by reading late, which is a different
+        // guard — this one is about the answer changing mid-flight.
+        await new Promise(resolve => setTimeout(resolve, 5));
+        store.userSettings.recordSessionAudio = false;
+        await pending;
+
+        assert.equal(recorder.default.isActive, false);
+        await service.finish();
+    });
+
+    await test('reconciles cannot overlap', async () => {
+        // The end state alone cannot show this: reading late and re-reading
+        // after the await each cover the other. What serialisation uniquely
+        // buys is that an ON never runs its resume() while an OFF is still
+        // tearing the recorder down, which is how the two end up crossed.
+        const { service, store, recorder } = await loadService();
+        store.userSettings.recordSessionAudio = true;
+        await service.start(10, 5);
+        recorder.__setResumeDelay(20);
+        recorder.__resetConcurrency();
+
+        store.userSettings.recordSessionAudio = false;
+        const off = service._syncRecorderToSetting();
+        // Let the OFF get into end(). isActive stays true until end() finishes,
+        // exactly as the real recorder does, so an unserialised ON arriving now
+        // takes the "already active" branch and calls ensureRecording() into a
+        // recorder that is mid-teardown.
+        await new Promise(resolve => setTimeout(resolve, 5));
+        store.userSettings.recordSessionAudio = true;
+        const on = service._syncRecorderToSetting();
+        await Promise.all([off, on]);
+
+        assert.equal(recorder.__maxConcurrent, 1, 'one at a time');
         await service.finish();
     });
 
