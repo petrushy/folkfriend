@@ -6,7 +6,7 @@ import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
 import {estimateCostUsd, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
 import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '@/js/places.mjs';
-import {deleteSessionAudio} from './sessionAudioStore.js';
+import {deleteSessionAudio, reclaimAudioForMissingSessions} from './sessionAudioStore.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
 import {
     subscribe as syncSubscribe, pushFavourites,
@@ -1383,13 +1383,41 @@ class Store {
             }),
             subscribeCollection(uid, 'liveSessions', {
                 getLocal: () => this.getLiveSessions(),
-                applyRemote: (upserts, removals) => this._mergeRemoteRecords(
-                    KEY_LIVE_SESSIONS, upserts, removals,
-                    { sortBy: 'startedAt', cap: Infinity, event: 'liveSessionsChanged' },
-                ),
+                applyRemote: async (upserts, removals) => {
+                    await this._mergeRemoteRecords(
+                        KEY_LIVE_SESSIONS, upserts, removals,
+                        { sortBy: 'startedAt', cap: Infinity, event: 'liveSessionsChanged' },
+                    );
+                    // A session deleted on another device arrives as a removal
+                    // here, never through deleteLiveSession() — so without this
+                    // its recording stays on the device that made it, for ever.
+                    // That is the largest orphan the app can leave and, being
+                    // three hours of a room full of people, the one it has least
+                    // business keeping.
+                    await this._reclaimOrphanSessionAudio();
+                },
             }),
         ];
         return () => { for (const unsub of subs) unsub(); };
+    }
+
+    // Drops audio for sessions this device no longer has. Best-effort, and
+    // never allowed to break a sync merge.
+    //
+    // The OPEN session is protected explicitly. Its record is written moments
+    // after the recorder creates the manifest, so a remote merge landing in
+    // that window would otherwise delete the recording of the session that is
+    // running right now.
+    async _reclaimOrphanSessionAudio() {
+        try {
+            const sessions = await this.getLiveSessions();
+            const alive = sessions.map(s => s.id);
+            const open = await this.getOpenLiveSession();
+            if (open && open.sessionId) alive.push(open.sessionId);
+            await reclaimAudioForMissingSessions(alive);
+        } catch (e) {
+            console.warn('Could not reclaim orphaned session audio:', e && e.message);
+        }
     }
 
     async exportUserData() {

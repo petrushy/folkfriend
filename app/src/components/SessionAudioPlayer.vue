@@ -302,18 +302,39 @@ export default {
             }
         },
 
+        // The stored segment covering this moment, or null if none does.
+        //
+        // Deliberately NOT "the nearest" or "the last one". A tune detected in
+        // the segment still being recorded has an offset past everything on
+        // disk — segments are only written every SEGMENT_SECONDS — and falling
+        // back to the last stored segment plays unrelated audio from minutes
+        // earlier while looking like it worked. The same gap is permanent for
+        // anything after a crash or a refused quota write.
         _segmentFor(seconds) {
             if (!this.manifest) return null;
             const segments = this.manifest.segments.slice().sort((a, b) => a.index - b.index);
-            return segments.find(s => s.startSeconds + s.durationSeconds > seconds) ||
-                segments[segments.length - 1] || null;
+            return segments.find(s =>
+                s.startSeconds <= seconds && s.startSeconds + s.durationSeconds > seconds) || null;
+        },
+
+        // Whether a given moment is actually on disk yet. The view asks before
+        // offering a ▶, so a row whose audio is still in the pending segment
+        // shows no button rather than a button that plays the wrong tune.
+        covers(seconds) {
+            return !!this._segmentFor(Math.max(0, seconds));
         },
 
         // Public: the ▶ on a tune row calls this.
         async playFrom(seconds, { autoplay = true } = {}) {
-            const target = Math.max(0, Math.min(seconds, Math.max(0, this.totalSeconds - 0.5)));
+            const target = Math.max(0, seconds);
             const segment = this._segmentFor(target);
-            if (!segment) return;
+            if (!segment) {
+                this.error = target >= this.totalSeconds
+                    ? 'That part of the session has not been saved yet — it is written every few minutes.'
+                    : 'That part of the recording is missing.';
+                return;
+            }
+            this.error = '';
 
             if (this.segmentIndex === segment.index) {
                 this._seekWithin(target);
@@ -397,7 +418,13 @@ export default {
             const audio = this.$refs.audio;
             if (!audio) return;
             if (this.playing) { audio.pause(); return; }
-            if (this.segmentIndex === null) return this.playFrom(this.currentSeconds);
+            if (this.segmentIndex === null) {
+                const first = this.manifest.segments.slice()
+                    .sort((a, b) => a.index - b.index)[0];
+                return this.playFrom(this.covers(this.currentSeconds)
+                    ? this.currentSeconds
+                    : (first ? first.startSeconds : 0));
+            }
             this._play();
         },
 
@@ -433,7 +460,9 @@ export default {
             const rect = strip.getBoundingClientRect();
             if (!rect.width) return;
             const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-            this.playFrom(ratio * this.totalSeconds, { autoplay: this.playing });
+            const target = ratio * this.totalSeconds;
+            if (!this.covers(target)) return;
+            this.playFrom(target, { autoplay: this.playing });
         },
 
         async exportTrack(track) {

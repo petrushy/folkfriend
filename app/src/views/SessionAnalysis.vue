@@ -662,6 +662,9 @@ export default {
             // records: audio is local-only, so a synced record from another
             // device must never claim audio this device does not have.
             audioSessionIDs: [],
+            // How many seconds of the active session's audio are committed to
+            // disk. See hasAudioFor().
+            audioCoveredSeconds: 0,
         };
     },
     watch: {
@@ -672,6 +675,11 @@ export default {
         '$route.query.live'(value) {
             if (value === '1') this.viewMode = 'live';
         },
+        // Which session is on screen decides which manifest answers "is this
+        // moment on disk", so the coverage has to be recomputed when it
+        // changes — otherwise opening a past session inherits the live one's
+        // figure and offers ▶ on rows whose audio is not there.
+        audioSessionId() { this.refreshAudioSessions(); },
         viewMode(newVal) {
             if (newVal !== 'file') this.lastSessionView = newVal;
             if (newVal !== 'live') this.followMode = false;
@@ -1363,12 +1371,21 @@ export default {
                 this._buildDetectionRow({ ...tune, id: `saved-${index}` }));
             this.viewMode = 'history';
         },
+        // Re-serialises the whole stored tune list after an edit, so every
+        // field a row carries has to be listed here. The audio offsets are the
+        // easy ones to forget: they are not rendered as text anywhere, so
+        // dropping them looks like nothing until every ▶ and every block on the
+        // timeline quietly disappears — and the loss then syncs to the user's
+        // other devices, where the recording never existed to re-derive them
+        // from.
         savedTunes() {
             return this.savedDetections.map(d => ({
                 tuneId: d.selectedTuneId, settingId: d.selectedSettingId,
                 title: d.selectedTitle, sourceUrl: d.selectedSourceUrl,
                 dataset: d.dataset || '', startSeconds: d.startSeconds,
                 endSeconds: d.endSeconds, bestScore: d.bestScore || 0,
+                audioStartSeconds: typeof d.audioStartSeconds === 'number' ? d.audioStartSeconds : null,
+                audioEndSeconds: typeof d.audioEndSeconds === 'number' ? d.audioEndSeconds : null,
                 alternatives: d.alternatives || [],
             }));
         },
@@ -1451,8 +1468,14 @@ export default {
 
         // ---- Past Sessions --------------------------------------------------
 
+        // A ▶ is offered only when the audio for that moment is actually on
+        // disk. Segments are written every few minutes, so a tune recognised
+        // just now is real, stamped and NOT yet playable — and a button that
+        // silently plays audio from minutes earlier is worse than no button.
+        // It appears on its own once the segment lands.
         hasAudioFor(detection) {
-            return !!this.audioSessionId && typeof detection.audioStartSeconds === 'number';
+            if (!this.audioSessionId || typeof detection.audioStartSeconds !== 'number') return false;
+            return detection.audioStartSeconds < this.audioCoveredSeconds;
         },
 
         playDetection(detection) {
@@ -1466,7 +1489,23 @@ export default {
                 this.audioSessionIDs = manifests
                     .filter(m => m.segments && m.segments.length)
                     .map(m => m.sessionId);
+                // How much of the ACTIVE session's audio is committed, which is
+                // what decides whether a row gets a ▶. Recomputed on every
+                // segment write, so the buttons appear as the audio lands.
+                this.audioCoveredSeconds = this._coveredSecondsFor(manifests);
             } catch (e) { /* no player, rather than a broken view */ }
+        },
+
+        _coveredSecondsFor(manifests) {
+            const session = this.activeSession;
+            if (!session || !session.id) return 0;
+            const manifest = manifests.find(m => m.sessionId === session.id);
+            if (!manifest || !manifest.segments.length) return 0;
+            // The end of the last COMMITTED segment, not manifest.totalSeconds
+            // — they agree today, but the question being asked is "is this
+            // moment on disk", and only the segments answer it.
+            return manifest.segments.reduce(
+                (end, s) => Math.max(end, s.startSeconds + s.durationSeconds), 0);
         },
 
         async refreshPastSessions() {

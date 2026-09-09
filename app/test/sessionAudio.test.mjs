@@ -161,12 +161,22 @@ const recorders = [];
 
 class FakeMediaRecorder {
     static supported = ['audio/mp4;codecs=mp4a.40.2'];
+    // Set by a test to make the encoder disagree with the request.
+    static actualMimeType = null;
+    static actualBitsPerSecond = 0;
     static isTypeSupported(type) { return FakeMediaRecorder.supported.includes(type); }
 
     constructor(stream, options = {}) {
         this.stream = stream;
-        this.mimeType = options.mimeType || 'audio/mp4';
-        this.audioBitsPerSecond = options.audioBitsPerSecond || 0;
+        // A real MediaRecorder reports the container it will ACTUALLY produce,
+        // which need not be the one requested — a browser may fall back to its
+        // own. Modelling that is what makes the manifest-format test real:
+        // without it the fake echoes the request back and the test passes
+        // against code that never records what the encoder chose.
+        this.mimeType = FakeMediaRecorder.actualMimeType ||
+            options.mimeType || 'audio/mp4';
+        this.audioBitsPerSecond = FakeMediaRecorder.actualBitsPerSecond ||
+            options.audioBitsPerSecond || 0;
         this.state = 'inactive';
         this.ondataavailable = null;
         this.onstop = null;
@@ -229,6 +239,8 @@ function resetAll() {
     recorders.length = 0;
     fakeNow = 0;
     FakeMediaRecorder.supported = ['audio/mp4;codecs=mp4a.40.2'];
+    FakeMediaRecorder.actualMimeType = null;
+    FakeMediaRecorder.actualBitsPerSecond = 0;
     setQuota(10 * 1024 * 1024 * 1024, 0);
 }
 
@@ -1184,6 +1196,89 @@ await test('muted time is reported while the mute is still open', async () => {
     recorder.setMuted(true);
     feed(recorders[recorders.length - 1], 25);
     assert.equal(Math.round(recorder.mutedSeconds), 25);
+});
+
+// --- review findings ---------------------------------------------------------
+//
+// Six defects found in review, each of which looked correct and did the wrong
+// thing quietly. Every case here fails against the code as it was.
+
+console.log('\nsessionRecorder — honouring the setting and the encoder');
+
+await test('a storage stop is cleared by an ordinary Pause and Resume', async () => {
+    // The reset lived after resume()'s "already ours" early return, so the
+    // same in-memory session could never record again after running out of
+    // space — only a reload could clear it, which no user would guess.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    setQuota(1000, 999);
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    assert.equal(recorder.stoppedReason, 'storage');
+
+    await recorder.stop();                      // Pause
+    setQuota(10 * 1024 * 1024 * 1024, 0);       // the user frees space
+    await recorder.resume('s1');                // Resume, same instance
+    assert.equal(recorder.stoppedReason, null, 'it may try again');
+
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    assert.equal((await store.readManifest('s1')).segments.length, 1);
+});
+
+await test('an encoder stop is NOT cleared by a resume', async () => {
+    // 'storage' is a condition the user can change between two taps.
+    // 'unsupported' and 'encoder' say something about the browser, and
+    // retrying them every Resume would spin for the rest of the session.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    recorder._fail('encoder', 'no');
+    await recorder.resume('s1');
+    assert.equal(recorder.stoppedReason, 'encoder');
+});
+
+await test('the manifest names the container actually recorded', async () => {
+    // The requested mimeType was stored and never corrected, so a fallback to
+    // the browser's own container wrote WebM bytes that the export named .m4a
+    // and the player handed to a decoder as MP4 — a mislabelled file that
+    // presents as corrupt audio.
+    resetAll();
+    const recorder = await freshRecorder();
+    // The encoder will report a different container from the one requested.
+    FakeMediaRecorder.actualMimeType = 'audio/webm;codecs=opus';
+    FakeMediaRecorder.actualBitsPerSecond = 48000;
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.mimeType, 'audio/webm;codecs=opus');
+    assert.equal(store.fileExtensionFor(manifest.mimeType), 'webm');
+});
+
+console.log('\nsessionAudioStore — playback never guesses');
+
+await test('a moment past the last stored segment has no segment', async () => {
+    // Segments are written every few minutes, so a tune recognised just now is
+    // real, stamped, and NOT yet on disk. Falling back to the last stored
+    // segment played unrelated audio from minutes earlier.
+    resetAll();
+    await seedManifest();
+    await store.appendSegment('s1', segment(0, 0, 0, ['H0', 'a1'], { firstIsInit: true }),
+        { index: 0, startSeconds: 0, durationSeconds: 2, init: new Blob(['H0']) });
+
+    assert.equal(await store.buildClip('s1', 5, 7), null, 'nothing covers it');
+    const inside = await store.buildClip('s1', 0, 2);
+    assert.ok(inside, 'and what is stored still plays');
 });
 
 console.log('\nlinking detections to the recording');

@@ -88,6 +88,10 @@ class SessionRecorder {
 
         this.bytes = 0;
         this._writeChain = Promise.resolve();
+        // What the manifest currently claims, so _recordActualFormat() writes
+        // only when the encoder actually disagreed with the request.
+        this._manifestMimeType = null;
+        this._manifestBitsPerSecond = 0;
 
         // Stretches of the recording the user silenced, in audio-clock
         // seconds. The last entry has `to: null` while a mute is still open.
@@ -238,6 +242,8 @@ class SessionRecorder {
                 mimeType,
                 bitsPerSecond: this.bitsPerSecond,
             }));
+            this._manifestMimeType = mimeType;
+            this._manifestBitsPerSecond = this.bitsPerSecond;
         } catch (e) {
             this.sessionId = null;
             this.stoppedReason = 'storage';
@@ -255,7 +261,16 @@ class SessionRecorder {
     // restarting at zero and overwriting it.
     async resume(sessionId, { bitrateKbps = DEFAULT_BITRATE_KBPS } = {}) {
         if (!sessionId) return false;
-        if (this.sessionId === sessionId) return true;
+        // Already ours — an ordinary Pause → Resume, where stop() left the
+        // session open. Still clear a storage stop: the user has had a chance
+        // to free space, and leaving it latched means ensureRecording() refuses
+        // for the rest of the session with nothing on screen explaining why.
+        // The reset below is not reached on this path, which is what made the
+        // ordinary pause/resume case behave differently from a reload.
+        if (this.sessionId === sessionId) {
+            this._clearStorageStop();
+            return true;
+        }
 
         const manifest = await readManifest(sessionId);
         if (!manifest) return this.begin(sessionId, { bitrateKbps });
@@ -268,6 +283,8 @@ class SessionRecorder {
         // whose segments were half MP4 and half WebM could not be exported as
         // anything.
         this.mimeType = manifest.mimeType || mimeType;
+        this._manifestMimeType = manifest.mimeType || null;
+        this._manifestBitsPerSecond = manifest.bitsPerSecond || 0;
         this.bitsPerSecond = Math.round(bitrateKbps * 1000);
         // A new listening stretch gets a fresh chance, even after a stop for
         // storage: the user may well have deleted something in between, and the
@@ -300,6 +317,21 @@ class SessionRecorder {
 
         this._emit();
         return true;
+    }
+
+    // Gives a recording that ran out of space another go. Only 'storage' is
+    // cleared: 'unsupported' and 'encoder' say something about the browser, not
+    // about a condition the user can change between two taps.
+    _clearStorageStop() {
+        if (this.stoppedReason !== 'storage') return;
+        this.stoppedReason = null;
+        this.error = '';
+        const sessionId = this.sessionId;
+        if (sessionId) {
+            patchManifest(sessionId, { stopped: null })
+                .catch(e => console.warn('Could not clear audio stop marker:', e && e.message));
+        }
+        this._emit();
     }
 
     // Stops recording, keeping everything written so far. This is Pause: the
@@ -394,6 +426,13 @@ class SessionRecorder {
             this.bitsPerSecond = this._recorder.audioBitsPerSecond;
         }
         if (this._recorder.mimeType) this.mimeType = this._recorder.mimeType;
+        // What was ASKED for and what the encoder does are different things,
+        // and the manifest is what the export and the player read. Left
+        // unpatched, a fallback to the browser's own container writes WebM
+        // bytes that get exported as .m4a and handed to a decoder as MP4 —
+        // which fails in a way that looks like corrupt audio rather than a
+        // mislabelled file.
+        this._recordActualFormat();
 
         this._recorder.ondataavailable = (event) => this._onChunk(event, trackIndex);
         this._recorder.onerror = (event) => {
@@ -414,6 +453,19 @@ class SessionRecorder {
         this.isRecording = true;
         this._emit();
         return true;
+    }
+
+    _recordActualFormat() {
+        const sessionId = this.sessionId;
+        if (!sessionId) return;
+        if (this.mimeType === this._manifestMimeType &&
+            this.bitsPerSecond === this._manifestBitsPerSecond) return;
+        this._manifestMimeType = this.mimeType;
+        this._manifestBitsPerSecond = this.bitsPerSecond;
+        patchManifest(sessionId, {
+            mimeType: this.mimeType,
+            bitsPerSecond: this.bitsPerSecond,
+        }).catch(e => console.warn('Could not record audio format:', e && e.message));
     }
 
     async _stopTrack() {
