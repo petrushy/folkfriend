@@ -697,6 +697,18 @@ export default {
             // Which stretches of the active session's audio are on disk.
             // See _rangesFor() — a recording can have holes.
             audioRanges: [],
+            // Whether this session's audio is being kept.
+            //
+            // Deliberately local state refreshed from _recordAudioState(), NOT
+            // a computed over store.userSettings: that object is a plain object
+            // assigned in the store's constructor, so a computed reading it has
+            // no reactive dependency at all and Vue caches the first value for
+            // the life of the component. The switch then showed a stale
+            // position for ever — claiming to be recording while nothing was —
+            // and only appeared to work if Settings had been opened first,
+            // because Settings.vue puts the same object in its own data() and
+            // Vue deep-observes it there.
+            recordAudio: false,
         };
     },
     watch: {
@@ -736,18 +748,6 @@ export default {
         },
         activeListenedSeconds() {
             return this.activeSession ? this.listenedSeconds(this.activeSession) : 0;
-        },
-        // Whether the audio of this session is being kept. Lives here rather
-        // than in Settings because it is a per-SESSION decision — some evenings
-        // you want the recording and most you do not — and it takes effect on
-        // the session that is already running.
-        //
-        // The stored setting is what the NEXT session starts as, so the usual
-        // answer is remembered. That is safe to carry over only because an
-        // inherited "on" is never invisible: the session bar shows a REC chip
-        // on every route for as long as it is recording.
-        recordAudio() {
-            return !!store.userSettings.recordSessionAudio;
         },
         audioRecordingAvailable() {
             return sessionRecorder.available;
@@ -869,6 +869,10 @@ export default {
         // three minutes ever gained a button until the view was reloaded.
         // Cheap to re-run: this fires once per segment, not once per cycle.
         this._onAudioState = (payload) => {
+            // The switch tracks the recorder, so every state change it
+            // announces has to reach it — including one nothing on this page
+            // asked for, such as recording stopping because storage ran out.
+            this.recordAudio = this._recordAudioState();
             if (!payload || !payload.sessionId) return;
             this.refreshAudioSessions();
         };
@@ -908,6 +912,11 @@ export default {
         eventBus.$on('fileAnalysisProgress', this._onFileProgress);
         eventBus.$on('fileAnalysisUpdate', this._onFileUpdate);
         eventBus.$on('fileAnalysisError', this._onFileError);
+
+        // Set before the first render and not left to _syncLiveFromService():
+        // the fresh-start branch of _initialise() never calls it, and a switch
+        // that renders from a stale default is the whole failure this replaced.
+        this.recordAudio = this._recordAudioState();
 
         if (store.state.sessionWorkspace) {
             const saved = store.state.sessionWorkspace;
@@ -1045,8 +1054,23 @@ export default {
         // Mirrors liveAnalysisService's state into this component. Called on
         // mount and after any lifecycle change that the events do not fully
         // describe.
+        // What the switch shows.
+        //
+        // With a session open this is the RECORDER's own state, not the stored
+        // preference: the switch must never claim to be recording something
+        // that is not being recorded. So a start that fails — no storage, an
+        // unreadable manifest — snaps it back off, with the reason in the
+        // session bar, rather than leaving the user believing the evening is
+        // being kept. With no session open there is nothing running to report,
+        // and it shows what the next session will do.
+        _recordAudioState() {
+            if (liveAnalysisService.sessionId) return sessionRecorder.isActive;
+            return !!store.userSettings.recordSessionAudio;
+        },
+
         _syncLiveFromService() {
             const svc = liveAnalysisService;
+            this.recordAudio = this._recordAudioState();
             this.live.hasSession = !!svc.sessionId;
             this.live.sessionId = svc.sessionId;
             this.live.sessionName = svc.sessionName;
@@ -1544,6 +1568,9 @@ export default {
             } catch (e) {
                 this.workspaceError = `Could not change audio recording: ${e.message}`;
             }
+            // Read back rather than trusting the tap: if recording could not
+            // start, the switch returns to off instead of lying about it.
+            this.recordAudio = this._recordAudioState();
             this.refreshAudioSessions();
         },
 
