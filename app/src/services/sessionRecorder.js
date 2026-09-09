@@ -455,6 +455,16 @@ class SessionRecorder {
         return true;
     }
 
+    // The format is recorded PER TRACK, and the session-level one is only ever
+    // the first track's.
+    //
+    // A resumed session asks for the container its existing segments are in,
+    // but the encoder can still hand back a different one — a fallback after a
+    // failed construction, or simply a browser that reports its own. Rewriting
+    // the session-level mimeType then relabels segments that are genuinely MP4
+    // as WebM, and the export hands a decoder bytes that are neither. Tracks
+    // are already the unit a clip never spans, so labelling them individually
+    // is both correct and free: buildClip() prefers the track's own format.
     _recordActualFormat() {
         const sessionId = this.sessionId;
         if (!sessionId) return;
@@ -462,6 +472,11 @@ class SessionRecorder {
             this.bitsPerSecond === this._manifestBitsPerSecond) return;
         this._manifestMimeType = this.mimeType;
         this._manifestBitsPerSecond = this.bitsPerSecond;
+
+        // Nothing is stored yet, so this track's format IS the session's.
+        // Otherwise the session keeps the container its existing audio is in
+        // and only this track carries the difference (see _flushPending).
+        if (this._segmentIndex !== 0) return;
         patchManifest(sessionId, {
             mimeType: this.mimeType,
             bitsPerSecond: this.bitsPerSecond,
@@ -547,6 +562,8 @@ class SessionRecorder {
         const sessionId = this.sessionId;
         const initBlob = this._initBlob;
         const trackStartSeconds = this._trackStartSeconds;
+        const trackMimeType = this.mimeType;
+        const trackBitsPerSecond = this.bitsPerSecond;
         this._resetPending();
 
         this._writeChain = this._writeChain.then(async () => {
@@ -574,12 +591,16 @@ class SessionRecorder {
                         bytes: c.bytes,
                         ...(c.init ? { init: true } : {}),
                     })),
-                    blob: new Blob(chunks.map(c => c.blob), { type: this.mimeType || '' }),
+                    blob: new Blob(chunks.map(c => c.blob), { type: trackMimeType || '' }),
                 }, {
                     index: trackIndex,
                     startSeconds: trackStartSeconds,
                     durationSeconds: Math.max(0, endSeconds - trackStartSeconds),
                     init: initBlob,
+                    // What this track's bytes actually are, which need not match
+                    // the session's other tracks. See _recordActualFormat().
+                    mimeType: trackMimeType,
+                    bitsPerSecond: trackBitsPerSecond,
                 });
                 this.bytes = manifest.bytes;
                 this._emit();

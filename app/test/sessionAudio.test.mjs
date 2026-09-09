@@ -1281,6 +1281,46 @@ await test('a moment past the last stored segment has no segment', async () => {
     assert.ok(inside, 'and what is stored still plays');
 });
 
+await test('a resumed session that falls back to another container keeps its old segments honest', async () => {
+    // Rewriting the session-wide mimeType would relabel segments that really
+    // are MP4 as WebM, and the export would hand a decoder bytes that are
+    // neither. A clip never spans a track, so the track is the only level at
+    // which "what format is this" has one answer.
+    resetAll();
+    const first = await freshRecorder();
+    await first.begin('s1');
+    mic.__setStream();
+    await first.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await first._writeChain;
+    await first.end();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal((await store.readManifest('s1')).mimeType, 'audio/mp4;codecs=mp4a.40.2');
+
+    // A later listening stretch on a browser whose encoder answers differently.
+    FakeMediaRecorder.actualMimeType = 'audio/webm;codecs=opus';
+    const second = await freshRecorder();
+    await second.resume('s1');
+    mic.__setStream();
+    await second.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await second._writeChain;
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.mimeType, 'audio/mp4;codecs=mp4a.40.2',
+        'the session keeps the container its existing audio is in');
+    assert.equal(manifest.tracks[0].mimeType, 'audio/mp4;codecs=mp4a.40.2');
+    assert.equal(manifest.tracks[1].mimeType, 'audio/webm;codecs=opus');
+
+    // And each clip is labelled with what its own bytes actually are.
+    const early = await store.buildClip('s1', 0, 10, manifest);
+    const late = await store.buildClip('s1', store.SEGMENT_SECONDS + 5,
+        store.SEGMENT_SECONDS + 10, manifest);
+    assert.equal(store.fileExtensionFor(early.mimeType), 'm4a');
+    assert.equal(store.fileExtensionFor(late.mimeType), 'webm');
+});
+
 console.log('\nlinking detections to the recording');
 
 await test('a cluster carries where it sits in the recording', async () => {

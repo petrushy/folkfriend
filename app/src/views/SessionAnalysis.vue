@@ -804,13 +804,18 @@ export default {
             if (this.viewMode === 'history') this.refreshPastSessions();
         };
 
-        // A live session's recording only becomes playable once its first
-        // segment is on disk (three minutes in), so the player appears then
-        // rather than at start(). Cheap to re-check: this fires once per
-        // segment, not once per analysis cycle.
+        // A live session's recording becomes playable once its first segment is
+        // on disk (three minutes in), and then grows: EVERY segment extends how
+        // much of it a ▶ can seek into.
+        //
+        // This used to skip a session already in audioSessionIDs, which was
+        // right when the handler's only job was to make the player appear —
+        // and silently wrong once it also tracked coverage, because the
+        // coverage then froze at the first segment and no tune after the first
+        // three minutes ever gained a button until the view was reloaded.
+        // Cheap to re-run: this fires once per segment, not once per cycle.
         this._onAudioState = (payload) => {
             if (!payload || !payload.sessionId) return;
-            if (this.audioSessionIDs.includes(payload.sessionId)) return;
             this.refreshAudioSessions();
         };
 

@@ -420,9 +420,14 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     }
 
     if (clipStart === null) return null;
+    // The TRACK's own container, not the session's. A session resumed onto a
+    // browser that fell back to a different encoder has tracks that genuinely
+    // differ, and a clip never spans one — so the track is the only level at
+    // which "what format is this" has a single answer.
+    const mimeType = track.mimeType || manifest.mimeType || '';
     return {
-        blob: new Blob(parts, { type: manifest.mimeType || 'application/octet-stream' }),
-        mimeType: manifest.mimeType || '',
+        blob: new Blob(parts, { type: mimeType || 'application/octet-stream' }),
+        mimeType,
         startSeconds: clipStart,
         endSeconds: clipEnd,
         trackIndex,
