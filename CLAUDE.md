@@ -871,6 +871,9 @@ modes it was: never saved, or saved-then-evicted.
 - `'places'` — user-named locations, `{ id, name, lat, lon, radiusM, createdAt }`. Synced
 - `'liveSessions'` — saved Past Sessions, capped at 300,
   `{ id, startedAt, endedAt, tunes: [...], lat, lon, accuracy }`. Synced
+- `'sessionAudio:<id>'` / `'sessionAudioSeg:<id>:<n>'` — one session's audio
+  recording: the manifest (the commit marker) and its 180 s segments.
+  **Local-only, never synced, never exported in a backup**
 
 Not IndexedDB, but worth listing alongside — localStorage keys: `'userSettings'`,
 `'favouritesLocalUpdatedAt'`, `'anthropicApiKey'` (deliberately outside
@@ -1113,6 +1116,97 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 - The Results page shows a small debug line: transcriber (ML/DSP) + the contour string — compare against the CLI's `transcribe` output for the same clip.
 
 ## Recent changes
+
+### Session audio recording (September 2026 — v3.13.0)
+
+A live session can now keep its **audio**, so an evening can be played back,
+jumped into at any tune the app recognised, and exported to a player app. Off by
+default: Settings → *Session Recording*. Full design in `docs/session-audio.md`;
+`app/test/sessionAudio.test.mjs` (52 cases) is the contract.
+
+`MediaRecorder` attaches to the same `MediaStream` the analysis pipeline reads,
+so recording is parallel to detection and the encoding is the platform's. There
+is no MP3 in `MediaRecorder` anywhere: `pickMimeType()` prefers `audio/mp4`
+(AAC) because it opens in every player app and in iOS Files, falling back to
+WebM/Opus. Bitrate is 32–160 kbps, **default 64** — not the floor, because
+stored audio makes a session re-analysable later and below 64 that suffers.
+Three hours is 43 MB at 32, 86 MB at 64, 216 MB at 160.
+
+Five things are worth knowing before touching any of it.
+
+**1. Browsers evict per ORIGIN, so this can cost the user their tune index.**
+That is the plane incident arriving from a new direction, and it is why
+`headroomBytes()` is free space *minus* `STORAGE_RESERVE_BYTES` (150 MB) and is
+re-checked before **every** segment write, not just at the start. Everything
+above the reserve is the user's to spend — there is no cap and nothing is
+auto-pruned. When it runs out **the recording stops and the session carries
+on**: audio is the expendable half, and the manifest records `stopped: {reason,
+message, atSeconds}` so the player can say "audio covers the first 1 h 47 m"
+rather than appearing to have lost it. `headroomBytes()` returns `null`, never
+`0`, when the browser has no `storage.estimate()` — zero would read as "no room"
+and silently disable the feature everywhere it cannot measure.
+
+**2. The audio clock is NOT `elapsedSeconds`.** Detections are stamped with
+`audioSeconds` from `sessionRecorder`, because `elapsedSeconds` is a
+`setInterval` tick that drifts over three hours *and* keeps counting through a
+microphone outage during which nothing was recorded — which would shift every
+marker after the outage. The recorder's clock advances only while a track is
+recording and is a single subtraction from that track's origin, so time it did
+not capture is time the clock did not count. The stamp is taken **when the
+window's PCM is read**, not after the transcription returns (a backend call
+takes seconds), and it goes on the **window match, not the detection** — the
+same reason corrections do.
+
+**3. Segments, and payload-before-manifest.** One 86 MB blob would sit in memory
+all evening, commit in a single transaction at the moment the user believes it
+is safe, and be unseekable anyway: MediaRecorder output has no seek index (WebM
+no Cues, Safari's fMP4 no top-level index). So it is written in 180 s segments as
+they close, and the manifest — written LAST, exactly as `tuneIndexStore.js` does
+— names only segments already on disk. An interrupted append is "one segment
+shorter", never a manifest pointing at audio that is not there. A **delete drops
+the manifest first**, for the same reason from the other end. Both leave orphans,
+which `reclaimOrphans()` sweeps.
+
+**4. A clip never spans a TRACK.** A track is one continuous `MediaRecorder`
+run; Pause, Resume and a reacquired microphone each start a new one, and each
+carries its own container header, so two concatenated is not a playable file.
+Whole-session export is therefore one file per track. The **first chunk of a
+track carries the header AND its first second of audio**, so it is stored like
+any other chunk and marked `init` — prepending the init blob to a clip that
+already begins there writes the header twice and produces a file no decoder
+accepts. That wart is load-bearing; two tests pin it.
+
+**5. Where a clip's timeline starts is unknowable in advance.** A clip cut from
+mid-stream may keep its original timestamps or be rebased to zero, and which one
+differs between containers and browsers. The player reads
+`audio.seekable.start(0)` after `loadedmetadata` and seeks to
+`base + (target - segmentStart)`, which is right under both. If a browser
+refuses to seek inside a segment at all, `SEGMENT_SECONDS` bounds the damage:
+the ▶ lands up to three minutes early rather than anywhere in three hours.
+`PLAY_PREROLL_SECONDS` (12 s) is separate and also required — a cluster's start
+is the moment the *first matching window ended*, so seeking to the bare offset
+reliably lands past the opening phrase.
+
+**Privacy is why several of these choices are not configurable.** Three hours of
+a pub records everyone in it. Off by default; a **REC chip in the session bar**
+on every route; **never synced** (and no `hasAudio` flag on the session record —
+on another device that would be a lie); **not in `exportUserData`**, which stays
+version 5; and deleted with its session from every path, because that happens in
+`store.deleteLiveSession()` rather than at the call sites.
+
+Verified by reinstating each bug: writing the manifest before the payload fails
+3 tests, restarting the clock per track fails 2, always prepending the init blob
+fails 3, letting a clip cross a track boundary fails 1, mirroring the displayed
+`startSeconds` semantics in the collapse fails 1, dropping the audio fields from
+`_persistSession` fails 2, and dropping them from `clusterDetections` fails 6.
+
+⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
+test is for: which container iOS actually records, whether `[init, ...midChunks]`
+plays standalone and seeks there, and whether an 86 MB `navigator.share` is
+accepted. Each degrades rather than breaks. Also unchanged and now acute: **a web
+app stops running when the phone locks**, so recording pauses with detection —
+Settings says so.
+
 
 ### Resumable sessions, Past Sessions, and syncing the play log (September 2026)
 

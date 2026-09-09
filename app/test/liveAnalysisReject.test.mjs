@@ -44,6 +44,16 @@ const FAKE_MIC = `export default {
 };`;
 const FAKE_BACKEND = `export default { async transcribeAndQueryPCMSignal() { return { results: [] }; } };`;
 const FAKE_GEO = `export default { beginSession() {}, async getFix() { return null; } };`;
+const FAKE_RECORDER = `
+// Session audio is a separate concern from what these tests cover; the real
+// recorder needs a MediaRecorder and a quota API that node has neither of.
+export default {
+    isRecording: false, isActive: false, audioSeconds: null,
+    async begin() { return false; }, async resume() { return false; },
+    async stop() {}, async end() {}, async discard() {},
+    ensureRecording() { return Promise.resolve(false); },
+};`;
+
 const FAKE_STORE = `export default { userSettings: {}, async addSighting() {} };`;
 const FAKE_EVENTBUS = `
 export const __emits = [];
@@ -59,6 +69,7 @@ async function loadService() {
     await writeFile(path.join(tmpDir, 'fake-mic.mjs'), FAKE_MIC);
     await writeFile(path.join(tmpDir, 'fake-backend.mjs'), FAKE_BACKEND);
     await writeFile(path.join(tmpDir, 'fake-geo.mjs'), FAKE_GEO);
+    await writeFile(path.join(tmpDir, 'fake-recorder.mjs'), FAKE_RECORDER);
     await writeFile(path.join(tmpDir, 'fake-store.mjs'), FAKE_STORE);
     await writeFile(path.join(tmpDir, 'fake-eventbus.mjs'), FAKE_EVENTBUS);
 
@@ -69,6 +80,7 @@ async function loadService() {
         ["from './mic.js'", "from './fake-mic.mjs'"],
         ["from './backend.js'", "from './fake-backend.mjs'"],
         ["from './geo.js'", "from './fake-geo.mjs'"],
+        ["from './sessionRecorder.js'", "from './fake-recorder.mjs'"],
         ["from './store.js'", "from './fake-store.mjs'"],
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         // Deliberately the real modules: clustering and the short-detection

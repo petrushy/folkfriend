@@ -126,6 +126,12 @@ async function loadStore() {
     await mkdir(storeTmpDir, { recursive: true });
     for (const [name, source] of Object.entries(STORE_FAKES)) {
         await writeFile(path.join(storeTmpDir, name), source);
+    await writeFile(path.join(storeTmpDir, 'fake-audio-store.mjs'), `
+// store.js deletes a session's recording alongside the record. That path is
+// covered against the real store in sessionAudio.test.mjs; here it only has to
+// resolve.
+export async function deleteSessionAudio() {}
+`);
     }
     for (const name of ['schema.js', 'places.mjs']) {
         await writeFile(
@@ -141,6 +147,7 @@ async function loadStore() {
         ["from '@/js/schema'", "from './schema.mjs'"],
         ["from '@/js/places.mjs'", "from './places.mjs'"],
         ["from './aiSummary.js'", "from './fake-ai.mjs'"],
+        ["from './sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from 'firebase/auth'", "from './fake-firebase-auth.mjs'"],
         ["from './sync.js'", "from './fake-sync.mjs'"],
         ["from 'firebase/analytics'", "from './fake-firebase-analytics.mjs'"],
@@ -260,6 +267,21 @@ const FAKE_EVENTBUS = `
 export const __emits = [];
 export default { $emit(name, payload) { __emits.push({ name, payload }); }, $on() {}, $off() {} };
 `;
+const FAKE_RECORDER = `
+// Session audio is a separate concern from the session state machine these
+// tests cover, and the real recorder needs a MediaRecorder node does not have.
+// sessionAudio.test.mjs drives the real one.
+export const __calls = [];
+export function __reset() { __calls.length = 0; }
+export default {
+    isRecording: false, isActive: false, audioSeconds: null,
+    async begin() { __calls.push('begin'); return false; },
+    async resume() { __calls.push('resume'); return false; },
+    async stop() { __calls.push('stop'); },
+    async end() { __calls.push('end'); },
+    async discard(id) { __calls.push(['discard', id]); },
+    ensureRecording() { return Promise.resolve(false); },
+};`;
 
 async function loadService({ keepStore = false } = {}) {
     await mkdir(serviceTmpDir, { recursive: true });
@@ -270,6 +292,7 @@ async function loadService({ keepStore = false } = {}) {
     await writeFile(path.join(serviceTmpDir, 'fake-geo.mjs'), FAKE_GEO);
     await writeFile(path.join(serviceTmpDir, 'fake-store.mjs'), FAKE_STORE);
     await writeFile(path.join(serviceTmpDir, 'fake-eventbus.mjs'), FAKE_EVENTBUS);
+    await writeFile(path.join(serviceTmpDir, 'fake-recorder.mjs'), FAKE_RECORDER);
 
     let source = await readFile(path.join(srcDir, 'services', 'liveAnalysis.js'), 'utf8');
     const sessionAnalysisCopy = path.join(sessionAnalysisTmpDir, 'sessionAnalysis.mjs');
@@ -278,6 +301,7 @@ async function loadService({ keepStore = false } = {}) {
         ["from './mic.js'", "from './fake-mic.mjs'"],
         ["from './backend.js'", "from './fake-backend.mjs'"],
         ["from './geo.js'", "from './fake-geo.mjs'"],
+        ["from './sessionRecorder.js'", "from './fake-recorder.mjs'"],
         ["from './store.js'", "from './fake-store.mjs'"],
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from '@/js/sessionAnalysis.js'", `from '${sessionAnalysisCopy}'`],

@@ -91,6 +91,12 @@ class MicService {
         // Bumped by every stop, so a recovery that was in flight when the user
         // stopped can tell that its result is no longer wanted.
         this._captureGeneration = 0;
+        // Bumped every time a NEW MediaStream is opened, including by a
+        // recovery. Anything holding the stream itself — the session audio
+        // recorder — watches this: a MediaRecorder left attached to the stream
+        // the OS took away stays in state 'recording' and silently produces
+        // nothing for the rest of the evening.
+        this._streamGeneration = 0;
         this._recovering = null;
         this._healthCheck = null;
         this._healthInterval = null;
@@ -170,6 +176,13 @@ class MicService {
     get sampleRate() {
         return (this.audioCtx && this.audioCtx.sampleRate) || this._recordingSampleRate || null;
     }
+
+    // The live capture stream, for anything that needs to consume the audio
+    // independently of the analysis graph (the session audio recorder).
+    get stream() { return this.micStream; }
+
+    // Which stream that is. See _streamGeneration.
+    get streamGeneration() { return this._streamGeneration; }
 
     async resumeIfSuspended() {
         if (this.audioCtx && this.audioCtx.state === 'suspended') {
@@ -480,6 +493,7 @@ class MicService {
         }
 
         this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+        this._streamGeneration++;
         this._recordAppliedSettings();
         this._watchMicTrack();
         // A fresh capture gets a full window before anything judges it silent —

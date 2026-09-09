@@ -236,6 +236,7 @@ export const mdiMusicClefTreble = 'clef';
 export const mdiStar = 'star';
 export const mdiStarOutline = 'star-outline';
 export const mdiPause = 'pause';
+export const mdiPlay = 'play';
 export const mdiRecordCircleOutline = 'record';
 export const mdiAlertCircleOutline = 'alert';
 `;
@@ -270,6 +271,12 @@ async function writeFakes() {
     await writeFile(path.join(tmpDir, 'fake-session-analysis.mjs'), FAKE_SESSION_ANALYSIS);
     await writeFile(path.join(tmpDir, 'fake-follow.mjs'), FAKE_FOLLOW);
     await writeFile(path.join(tmpDir, 'fake-component.mjs'), FAKE_VUE_COMPONENT);
+    // Session audio is covered by sessionAudio.test.mjs against the real
+    // store; here it only has to resolve, and report that nothing is recorded.
+    await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), `
+export async function listManifests() { return []; }
+export async function reclaimOrphans() { return 0; }
+`);
 
     const sfc = await readFile(path.join(srcDir, 'views', 'SessionAnalysis.vue'), 'utf8');
     const open = sfc.indexOf('<script>');
@@ -286,6 +293,8 @@ async function writeFakes() {
         ["from '@/services/fileSessionAnalysis.js'", "from './fake-file-analysis.mjs'"],
         ["from '@/components/VolumeMeter.vue'", "from './fake-component.mjs'"],
         ["from '@/components/LiveScoreFollow.vue'", "from './fake-component.mjs'"],
+        ["from '@/components/SessionAudioPlayer.vue'", "from './fake-component.mjs'"],
+        ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from '@/js/liveScoreFollow.mjs'", "from './fake-follow.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
     ];

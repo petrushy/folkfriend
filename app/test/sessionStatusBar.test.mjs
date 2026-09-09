@@ -149,6 +149,39 @@ async function run() {
         assert.equal(vm.hasSession, false);
     });
 
+    await test('an app that is recording the room says so, on every route', async () => {
+        // The privacy half of the feature: the indicator has to follow the user
+        // off the page they started the session from, which is the whole reason
+        // this bar exists.
+        const { vm, component, bus } = await loadComponent({ route: { name: 'favourites' } });
+        component.created.call(vm);
+        assert.equal(vm.audioRecording, false);
+        bus.__fire('sessionAudioState', { recording: true, stoppedReason: null, error: '' });
+        assert.equal(vm.audioRecording, true);
+        bus.__fire('sessionAudioState', { recording: false, stoppedReason: null, error: '' });
+        assert.equal(vm.audioRecording, false);
+    });
+
+    await test('a recording that stopped early is reported, and says the session is safe', async () => {
+        const { vm, component, bus } = await loadComponent();
+        component.created.call(vm);
+        bus.__fire('sessionAudioState', {
+            recording: false, stoppedReason: 'storage', error: 'Ran out of free storage.',
+        });
+        assert.equal(vm.audioError, 'Ran out of free storage.');
+    });
+
+    await test('a browser that never could record is not an error to report', async () => {
+        // Nothing was promised, so there is nothing to warn about — and a
+        // permanent banner on such a browser would just be noise.
+        const { vm, component, bus } = await loadComponent();
+        component.created.call(vm);
+        bus.__fire('sessionAudioState', {
+            recording: false, stoppedReason: 'unsupported', error: 'This browser cannot record audio.',
+        });
+        assert.equal(vm.audioError, '');
+    });
+
     await test('a session opened elsewhere is picked up on any route', async () => {
         const { vm, component, live } = await loadComponent({ route: { name: 'tune' } });
         live.default.sessionId = 'session-1';

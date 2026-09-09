@@ -384,6 +384,20 @@
             </v-alert>
         </v-card>
 
+        <!-- The session recording, when there is one. Above the table because
+             the timeline strip is what makes the list navigable. -->
+        <v-card v-if="viewMode !== 'file' && audioSessionId" class="pa-5 my-3">
+            <h2 class="text-h6 mb-2">
+                Session recording
+            </h2>
+            <SessionAudioPlayer
+                ref="audioPlayer"
+                :session-id="audioSessionId"
+                :detections="activeDetections"
+                :listening="viewMode === 'live' && live.capturing"
+            />
+        </v-card>
+
         <!-- Results. One table, but the two modes keep their own list. -->
         <v-card v-if="activeDetections.length" class="pa-5 my-3">
             <div class="d-flex flex-wrap justify-space-between align-center" style="gap: 12px;">
@@ -457,6 +471,17 @@
                             </td>
                             <td>
                                 <div class="d-flex align-center" style="gap: 8px;">
+                                    <v-btn
+                                        v-if="hasAudioFor(detection)"
+                                        icon
+                                        small
+                                        aria-label="Listen to this tune in the recording"
+                                        @click="playDetection(detection)"
+                                    >
+                                        <v-icon small>
+                                            {{ icons.play }}
+                                        </v-icon>
+                                    </v-btn>
                                     <v-btn icon small :aria-label="isTuneFavourited(detection) ? 'Remove favourite' : 'Add favourite'"
                                         @click="toggleFavourite(detection)">
                                         <v-icon small :color="isTuneFavourited(detection) ? 'amber darken-2' : 'grey'">
@@ -523,13 +548,15 @@
 import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
 import {
-    mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble, mdiStar, mdiStarOutline,
+    mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble, mdiStar, mdiStarOutline, mdiPlay,
 } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
 import LiveScoreFollow from '@/components/LiveScoreFollow.vue';
+import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
+import { listManifests, reclaimOrphans } from '@/services/sessionAudioStore.js';
 import { clearLastShown } from '@/js/liveScoreFollow.mjs';
 import {
     buildTuneListText,
@@ -581,7 +608,7 @@ const emptyLiveState = () => ({
 
 export default {
     name: 'SessionAnalysisView',
-    components: { VolumeMeter, LiveScoreFollow },
+    components: { VolumeMeter, LiveScoreFollow, SessionAudioPlayer },
     data() {
         return {
             dragActive: false,
@@ -627,7 +654,14 @@ export default {
                 clef: mdiMusicClefTreble,
                 star: mdiStar,
                 starOutline: mdiStarOutline,
+                play: mdiPlay,
             },
+            // Session ids known to have a recording, so the picker can mark
+            // them and the player is only mounted when there is something to
+            // play. Read from the audio manifests rather than from the session
+            // records: audio is local-only, so a synced record from another
+            // device must never claim audio this device does not have.
+            audioSessionIDs: [],
         };
     },
     watch: {
@@ -662,6 +696,14 @@ export default {
         },
         activeListenedSeconds() {
             return this.activeSession ? this.listenedSeconds(this.activeSession) : 0;
+        },
+        // Empty unless this session actually has a recording on THIS device.
+        // Audio is never synced, so a session record that arrived from another
+        // device must not offer a player over audio that is not here.
+        audioSessionId() {
+            const session = this.activeSession;
+            if (!session || !session.id) return '';
+            return this.audioSessionIDs.includes(session.id) ? session.id : '';
         },
         activeAcceptedWindows() {
             if (this.viewMode === 'history') return 0;
@@ -754,6 +796,16 @@ export default {
             if (this.viewMode === 'history') this.refreshPastSessions();
         };
 
+        // A live session's recording only becomes playable once its first
+        // segment is on disk (three minutes in), so the player appears then
+        // rather than at start(). Cheap to re-check: this fires once per
+        // segment, not once per analysis cycle.
+        this._onAudioState = (payload) => {
+            if (!payload || !payload.sessionId) return;
+            if (this.audioSessionIDs.includes(payload.sessionId)) return;
+            this.refreshAudioSessions();
+        };
+
         // File analysis events
         this._onFileStage = (stage) => {
             this.file.stage = stage;
@@ -783,6 +835,7 @@ export default {
         eventBus.$on('liveAnalysisMicState', this._onLiveMicState);
         eventBus.$on('liveAnalysisSaveState', this._onLiveSaveState);
         eventBus.$on('liveSessionsChanged', this._onLiveSessionsChanged);
+        eventBus.$on('sessionAudioState', this._onAudioState);
         eventBus.$on('fileAnalysisStage', this._onFileStage);
         eventBus.$on('fileAnalysisOptions', this._onFileOptions);
         eventBus.$on('fileAnalysisProgress', this._onFileProgress);
@@ -825,6 +878,7 @@ export default {
         eventBus.$off('liveAnalysisMicState', this._onLiveMicState);
         eventBus.$off('liveAnalysisSaveState', this._onLiveSaveState);
         eventBus.$off('liveSessionsChanged', this._onLiveSessionsChanged);
+        eventBus.$off('sessionAudioState', this._onAudioState);
         eventBus.$off('fileAnalysisStage', this._onFileStage);
         eventBus.$off('fileAnalysisOptions', this._onFileOptions);
         eventBus.$off('fileAnalysisProgress', this._onFileProgress);
@@ -1397,7 +1451,31 @@ export default {
 
         // ---- Past Sessions --------------------------------------------------
 
+        hasAudioFor(detection) {
+            return !!this.audioSessionId && typeof detection.audioStartSeconds === 'number';
+        },
+
+        playDetection(detection) {
+            const player = this.$refs.audioPlayer;
+            if (player) player.playTune(detection);
+        },
+
+        async refreshAudioSessions() {
+            try {
+                const manifests = await listManifests();
+                this.audioSessionIDs = manifests
+                    .filter(m => m.segments && m.segments.length)
+                    .map(m => m.sessionId);
+            } catch (e) { /* no player, rather than a broken view */ }
+        },
+
         async refreshPastSessions() {
+            // Segment records that no manifest claims: what an interrupted
+            // append or delete leaves behind. Swept here because it is the one
+            // place the user is looking at the list of recordings anyway, and
+            // an orphan is pure wasted quota.
+            reclaimOrphans().catch(() => {});
+            this.refreshAudioSessions();
             try {
                 const [sessions, favourites] = await Promise.all([
                     store.getNamedLiveSessions(),

@@ -576,6 +576,12 @@ async function loadStore() {
     await writeSharedFakes();
     for (const [name, source] of Object.entries(STORE_FAKES)) {
         await writeFile(path.join(tmpDir, name), source);
+    await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), `
+// store.js deletes a session's recording alongside the record. That path is
+// covered against the real store in sessionAudio.test.mjs; here it only has to
+// resolve.
+export async function deleteSessionAudio() {}
+`);
     }
     for (const name of ['schema.js', 'places.mjs']) {
         await writeFile(
@@ -591,6 +597,7 @@ async function loadStore() {
         ["from '@/js/schema'", "from './schema.mjs'"],
         ["from '@/js/places.mjs'", "from './places.mjs'"],
         ["from './aiSummary.js'", "from './fake-ai.mjs'"],
+        ["from './sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from 'firebase/auth'", "from './fake-firebase-auth.mjs'"],
         ["from './sync.js'", "from './fake-sync.mjs'"],
         ["from 'firebase/analytics'", "from './fake-firebase-analytics.mjs'"],

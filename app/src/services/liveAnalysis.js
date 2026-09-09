@@ -2,9 +2,22 @@ import micService from './mic.js';
 import ffBackend from './backend.js';
 import geoService from './geo.js';
 import store from './store.js';
+import sessionRecorder from './sessionRecorder.js';
 import { normaliseQueryResults, clusterDetections, filterShortPastDetections } from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import eventBus from '@/eventBus.js';
+
+function minDefined(a, b) {
+    if (typeof a !== 'number') return typeof b === 'number' ? b : null;
+    if (typeof b !== 'number') return a;
+    return Math.min(a, b);
+}
+
+function maxDefined(a, b) {
+    if (typeof a !== 'number') return typeof b === 'number' ? b : null;
+    if (typeof b !== 'number') return a;
+    return Math.max(a, b);
+}
 
 // Merge consecutive rows with the same tuneId into one row.
 // The displayed startSeconds advances to the most recent cluster so the
@@ -16,6 +29,15 @@ function collapseConsecutiveSameTune(detections) {
         if (prev && prev.tuneId === det.tuneId) {
             prev.startSeconds = det.startSeconds;
             prev.endSeconds = det.endSeconds;
+            // The audio span, unlike the displayed time, keeps the EARLIEST
+            // start and the LATEST end across the merged clusters. The time
+            // column advances so the user can see it ticking; the audio offset
+            // answers "where can I hear this", and the answer is where the
+            // tune began — which also keeps the row playable when only part of
+            // it was recorded (audio can stop mid-session when storage runs
+            // out, leaving later clusters with no stamp at all).
+            prev.audioStartSeconds = minDefined(prev.audioStartSeconds, det.audioStartSeconds);
+            prev.audioEndSeconds = maxDefined(prev.audioEndSeconds, det.audioEndSeconds);
             if (det.bestScore > prev.bestScore) {
                 prev.bestScore = det.bestScore;
                 prev.settingId = det.settingId;
@@ -252,6 +274,17 @@ class LiveAnalysisService {
         if (!this.isRunning) return;
         this._sampleRate = micService.audioCtx ? micService.audioCtx.sampleRate : 48000;
 
+        // Opened after the microphone, because the recorder attaches to that
+        // stream, and never awaited for anything the session depends on:
+        // recording is the expendable half. A browser that cannot encode, or a
+        // disk with no room, must still let the user log their tunes.
+        if (store.userSettings.recordSessionAudio) {
+            await sessionRecorder.resume(this.sessionId, {
+                bitrateKbps: store.userSettings.sessionAudioBitrateKbps,
+            }).catch(e => console.warn('Could not start session recording:', e && e.message));
+            sessionRecorder.ensureRecording();
+        }
+
         this._startTimer();
 
         const generation = ++this._generation;
@@ -306,6 +339,12 @@ class LiveAnalysisService {
             return result;
         }
 
+        // Only once the tune list is safely stored: end() flushes the last
+        // segment, and a failure there must not be allowed to abort a finish
+        // that has already succeeded at the thing that matters.
+        await sessionRecorder.end()
+            .catch(e => console.warn('Could not finish session recording:', e && e.message));
+
         await this._clearResumeState();
         this._resetSessionState();
         eventBus.$emit('liveAnalysisFinished');
@@ -317,6 +356,11 @@ class LiveAnalysisService {
     // back, which is what makes a delete look like it silently failed.
     async abandon() {
         if (this.isRunning) await this.stop({ flush: false });
+        // Closes the audio side without deleting anything. The delete path
+        // discards the recording itself (see _deleteSession); a session
+        // abandoned for any other reason keeps whatever it recorded.
+        await sessionRecorder.end()
+            .catch(e => console.warn('Could not close session recording:', e && e.message));
         this._generation++;
         this._cancelCheckpoint();
         await this._clearResumeState();
@@ -374,6 +418,11 @@ class LiveAnalysisService {
         await this.stop({ flush: false });
         this._cancelCheckpoint();
         await this._saveChain;
+        // Before the record itself, so nothing can append another segment to a
+        // recording that is on its way out. store.deleteLiveSession() deletes
+        // the audio too, for the paths that never come through here.
+        await sessionRecorder.discard(this.sessionId)
+            .catch(e => console.warn('Could not delete session audio:', e && e.message));
         // Delete only after earlier checkpoints have settled.
         await store.deleteLiveSession(this.sessionId);
         await this.abandon();
@@ -530,6 +579,15 @@ class LiveAnalysisService {
         if (this._cancelSleep) { this._cancelSleep(); this._cancelSleep = null; }
         this._stopPromise = (async () => {
             try {
+                // Before the microphone, because the recorder's final chunk —
+                // the audio of whatever tune was playing when Pause was tapped
+                // — only arrives when MediaRecorder.stop() flushes it, and
+                // stopping the stream's tracks first can lose it. The WRITE of
+                // that chunk is not awaited, so this stays fast.
+                if (sessionRecorder.isActive) {
+                    await sessionRecorder.stop()
+                        .catch(e => console.warn('Could not stop session recording:', e && e.message));
+                }
                 // The microphone is released FIRST. Pause is a direct response
                 // to a tap — often "stop listening to me" — and making it wait
                 // on a storage write means slow or failing storage holds the
@@ -599,6 +657,13 @@ class LiveAnalysisService {
                 eventBus.$emit('liveAnalysisMicState', { healthy });
             }
 
+            // Checked every cycle for the same reason the microphone is: a
+            // recovery replaces the MediaStream, and a MediaRecorder left
+            // attached to the old one stays in state 'recording' while
+            // producing nothing at all. Not awaited — a slow encoder start must
+            // not delay detection.
+            if (healthy && sessionRecorder.isActive) sessionRecorder.ensureRecording();
+
             // A capture that could not be reacquired leaves the ring buffer
             // frozen on the last seconds it managed to record. Analysing those
             // again produces confident detections of audio from minutes ago —
@@ -606,6 +671,11 @@ class LiveAnalysisService {
             // played that were not. Skip the cycle and try again next time;
             // mic.js is backing off and retrying underneath.
             const pcm = healthy ? micService.getContinuousAudio() : new Float32Array(0);
+            // Read here rather than after the transcription: this is the moment
+            // the analysed window ends, and a backend call can take seconds. A
+            // stamp taken afterwards would place every tune that much late in
+            // the recording.
+            const audioSeconds = sessionRecorder.isRecording ? sessionRecorder.audioSeconds : null;
 
             if (pcm.length > 0) {
                 // Guard against a hung worker — generous ceiling well beyond
@@ -651,6 +721,11 @@ class LiveAnalysisService {
                     if (normalized) {
                         this._windowMatches.push({
                             startSeconds: this.elapsedSeconds,
+                            // Where this window sits in the recording, or null
+                            // when nothing is being recorded. From the
+                            // recorder's own clock, never derived from
+                            // elapsedSeconds — see sessionRecorder.
+                            audioSeconds,
                             tuneId: normalized.tuneId,
                             settingId: normalized.settingId,
                             sourceUrl: normalized.sourceUrl,
@@ -818,6 +893,12 @@ class LiveAnalysisService {
                 title: d.title,
                 startSeconds: d.startSeconds,
                 endSeconds: d.endSeconds,
+                // Where to find this tune in the session recording. Null when
+                // there is none, and null on every tune of a session recorded
+                // before this existed — both mean "no ▶ on this row", which is
+                // the only sane answer either way.
+                audioStartSeconds: typeof d.audioStartSeconds === 'number' ? d.audioStartSeconds : null,
+                audioEndSeconds: typeof d.audioEndSeconds === 'number' ? d.audioEndSeconds : null,
                 bestScore: d.bestScore,
                 alternatives: d.alternatives || [],
             })),
