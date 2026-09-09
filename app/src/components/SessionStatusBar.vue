@@ -11,6 +11,12 @@
                 {{ status.label }}
             </v-chip>
 
+            <!-- An app that is recording the room must say so wherever the
+                 user happens to be, not only on the page they started it from. -->
+            <v-chip v-if="audioRecording" x-small color="red darken-3" text-color="white">
+                <v-icon left x-small>{{ icons.recording }}</v-icon>
+                REC
+            </v-chip>
             <span v-if="sessionName" class="caption session-name" :title="sessionName">{{ sessionName }}</span>
             <span class="caption text--secondary">
                 {{ formatSecondsAsClock(elapsedSeconds) }}
@@ -55,7 +61,7 @@
         </div>
 
         <div
-            v-if="(capturing && !micHealthy) || saveState === 'error'"
+            v-if="(capturing && !micHealthy) || saveState === 'error' || audioError"
             class="d-flex flex-wrap align-center mt-1"
             style="gap: 8px;"
         >
@@ -71,6 +77,9 @@
             >
                 Retry
             </v-btn>
+            <span v-if="audioError" class="caption warning--text">
+                {{ audioError }} The session and its tune list are unaffected.
+            </span>
             <span v-if="saveState === 'error'" class="caption error--text">
                 This session could not be saved{{ saveError ? `: ${saveError}` : '' }}.
             </span>
@@ -120,6 +129,8 @@ export default {
             micIssue: '',
             saveState: 'idle',
             saveError: null,
+            audioRecording: false,
+            audioError: '',
             indexLoaded: store.state.indexLoaded,
             pausing: false,
             resuming: false,
@@ -167,6 +178,12 @@ export default {
         this._onTick = (secs) => { this.elapsedSeconds = secs; };
         this._onUpdate = (detections) => { this.tuneCount = detections.length; };
         this._onIndexLoaded = () => { this.indexLoaded = true; };
+        this._onAudioState = ({ recording, stoppedReason, error }) => {
+            this.audioRecording = !!recording;
+            // Only a stop the user needs to know about. 'unsupported' is not
+            // one: nothing was promised on a browser that cannot record.
+            this.audioError = stoppedReason && stoppedReason !== 'unsupported' ? (error || '') : '';
+        };
 
         for (const name of [
             'liveAnalysisStopped', 'liveAnalysisFinished', 'liveAnalysisRestored',
@@ -177,6 +194,7 @@ export default {
         eventBus.$on('liveAnalysisTimerTick', this._onTick);
         eventBus.$on('liveAnalysisUpdate', this._onUpdate);
         eventBus.$on('indexLoaded', this._onIndexLoaded);
+        eventBus.$on('sessionAudioState', this._onAudioState);
         // Deliberately NOT micLost/micRecovered: the service adopts those and
         // republishes them as liveAnalysisMicState, so it stays the single
         // source of truth for whether this session is actually hearing
@@ -194,6 +212,7 @@ export default {
         eventBus.$off('liveAnalysisTimerTick', this._onTick);
         eventBus.$off('liveAnalysisUpdate', this._onUpdate);
         eventBus.$off('indexLoaded', this._onIndexLoaded);
+        eventBus.$off('sessionAudioState', this._onAudioState);
     },
     methods: {
         formatSecondsAsClock,

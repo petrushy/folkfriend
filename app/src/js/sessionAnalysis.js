@@ -318,6 +318,14 @@ export function clusterDetections(windowMatches, options) {
         .map((cluster, index) => {
             const bestHit = cluster.hits.reduce((best, hit) => hit.score > best.score ? hit : best, cluster.hits[0]);
             const averageScore = cluster.hits.reduce((sum, hit) => sum + hit.score, 0) / cluster.hits.length;
+            // Where this cluster sits in the session's audio recording, when
+            // there is one. A separate clock from startSeconds/endSeconds on
+            // purpose: those come from a setInterval tick that drifts and that
+            // keeps counting through a microphone outage, so over three hours
+            // they cannot be used to seek. Matches recorded while audio was not
+            // being captured carry no stamp at all, and a cluster made only of
+            // those simply has no audio to offer.
+            const stamped = cluster.hits.filter(hit => typeof hit.audioSeconds === 'number');
             return {
                 id: `${cluster.tuneId}-${index}-${Math.round(cluster.firstWindowStart)}`,
                 tuneId: cluster.tuneId,
@@ -327,6 +335,10 @@ export function clusterDetections(windowMatches, options) {
                 title: bestHit.displayName,
                 startSeconds: cluster.firstWindowStart,
                 endSeconds: cluster.lastWindowStart + options.windowSeconds,
+                audioStartSeconds: stamped.length ? stamped[0].audioSeconds : null,
+                audioEndSeconds: stamped.length
+                    ? stamped[stamped.length - 1].audioSeconds + options.windowSeconds
+                    : null,
                 bestScore: bestHit.score,
                 averageScore,
                 hits: cluster.hits.length,

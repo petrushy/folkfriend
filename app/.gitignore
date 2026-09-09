@@ -7,6 +7,10 @@ public/res/*.mp3
 public/soundfont/
 src/wasm/*
 
+# Rewritten copies of source modules that the node tests import. Every test
+# that makes one recreates it, so a stale copy is worse than no copy.
+test/.tmp-*/
+
 # local env files
 .env.local
 .env.*.local

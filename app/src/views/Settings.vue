@@ -90,6 +90,88 @@
         </v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
+                Session Recording
+            </h1>
+            <p>
+                Keeps the audio of a listening session so you can play it back afterwards,
+                jump straight to any tune the app recognised, and export it to a player app.
+                A three-hour session is one file per continuous stretch of listening.
+            </p>
+            <p class="caption text--secondary">
+                <strong>Keep the screen on.</strong> A web app stops running when the phone
+                locks, so recording — like detection — pauses with it. Leave the phone awake
+                and plugged in for a long session.
+            </p>
+            <p class="caption text--secondary">
+                <strong>This records the room, not just the music.</strong> Everything said
+                near the phone is recorded too. It stays on this device — recordings are
+                never synced and are not included in exported backups — and it is deleted
+                with the session it belongs to.
+            </p>
+            <v-alert
+                v-if="!sessionAudioAvailable"
+                type="info"
+                dense
+                text
+            >
+                This browser cannot record audio, so this setting will have no effect here.
+            </v-alert>
+            <v-row>
+                <v-switch
+                    v-model="userSettings.recordSessionAudio"
+                    inset
+                    label="Record session audio"
+                    class="my-0 pl-2"
+                    @change="settingsChanged"
+                />
+            </v-row>
+            <v-row
+                v-if="userSettings.recordSessionAudio"
+                align="center"
+                class="pl-2 pr-4 mt-2"
+            >
+                <v-select
+                    v-model.number="userSettings.sessionAudioBitrateKbps"
+                    :items="bitrateChoices"
+                    label="Recording quality"
+                    style="max-width: 320px"
+                    :hint="bitrateHint"
+                    persistent-hint
+                    @change="settingsChanged"
+                />
+            </v-row>
+            <p class="caption text--secondary mt-3 mb-0">
+                <strong>Stored recordings:</strong>
+                {{ sessionAudioCount }} {{ sessionAudioCount === 1 ? 'session' : 'sessions' }},
+                {{ formatBytes(sessionAudioBytes) }}.
+                <span v-if="sessionAudioHeadroom !== null">
+                    Room for about {{ sessionAudioHeadroomLabel }} more.
+                </span>
+                <span v-else>
+                    This browser will not report how much space is free.
+                </span>
+            </p>
+            <p class="caption text--secondary mb-0">
+                Recording stops on its own before it can crowd out the offline tune index —
+                the session and its tune list carry on regardless.
+            </p>
+            <v-row
+                v-if="sessionAudioCount"
+                class="mt-3 pl-2"
+            >
+                <v-btn
+                    small
+                    color="error"
+                    text
+                    :loading="deletingSessionAudio"
+                    @click="deleteAllSessionAudio"
+                >
+                    Delete all recordings
+                </v-btn>
+            </v-row>
+        </v-card>
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
                 Sync
             </h1>
             <p>Sign in to keep your favourites and history in sync across devices.</p>
@@ -801,6 +883,12 @@ import { DATASET_LABELS, DATASET_DESCRIPTIONS } from '@/js/source.mjs';
 import ffBackend from '@/services/backend.js';
 import geoService from '@/services/geo.js';
 import micService from '@/services/mic.js';
+import sessionRecorder from '@/services/sessionRecorder.js';
+import {
+    BITRATE_CHOICES_KBPS, bytesPerHour, formatBytes as formatAudioBytes,
+    listManifests as listAudioManifests, deleteSessionAudio, headroomBytes,
+    reclaimOrphans,
+} from '@/services/sessionAudioStore.js';
 import eventBus from '@/eventBus.js';
 import utils from '@/js/utils.js';
 import { fetchDatasetsManifest } from '@/services/tuneIndexNetwork.js';
@@ -854,6 +942,13 @@ export default {
         // Read once: it only changes when a capture opens, and this panel is
         // not on screen then.
         appliedAudioSettings: micService.appliedAudioSettings,
+        sessionAudioAvailable: sessionRecorder.available,
+        sessionAudioCount: 0,
+        sessionAudioBytes: 0,
+        // null when the browser will not report quota, which is different from
+        // "no room" and must not be displayed as a number.
+        sessionAudioHeadroom: null,
+        deletingSessionAudio: false,
         currentUser: null,
         signingIn: false,
         signingOut: false,
@@ -930,6 +1025,27 @@ export default {
         clearAiDialog: false,
     }),
     computed: {
+        // The size figure is on the item itself, not in the hint, because the
+        // choice is really a storage decision and the number is the whole
+        // basis for making it.
+        bitrateChoices() {
+            return BITRATE_CHOICES_KBPS.map(kbps => ({
+                value: kbps,
+                text: `${kbps} kbps — ${formatAudioBytes(bytesPerHour(kbps))} per hour`,
+            }));
+        },
+        // Clamped at zero: a breached reserve is "no room", not a negative
+        // number the user has to interpret. (Templates cannot reach Math.)
+        sessionAudioHeadroomLabel() {
+            return formatAudioBytes(Math.max(0, this.sessionAudioHeadroom || 0));
+        },
+        bitrateHint() {
+            const kbps = this.userSettings.sessionAudioBitrateKbps || 64;
+            const threeHours = bytesPerHour(kbps) * 3;
+            return `About ${formatAudioBytes(threeHours)} for a three-hour session. ` +
+                'Below 64 kbps a recording is still good to listen to, but less useful ' +
+                'to re-analyse later.';
+        },
         aiModelItems() {
             return Object.entries(AI_MODELS).map(([value, spec]) => ({
                 value,
@@ -1126,6 +1242,7 @@ export default {
         this._fetchRemoteMetadata();
         this._refreshOfflineStatus();
         this._refreshAiSummaryCount();
+        this._refreshSessionAudio();
         // Ask for durable storage from a user-visible screen: some browsers
         // only grant it in response to engagement, and this is the page where
         // the user is explicitly thinking about offline use.
@@ -1146,6 +1263,39 @@ export default {
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
     },
     methods: {
+        formatBytes: formatAudioBytes,
+
+        async _refreshSessionAudio() {
+            try {
+                // Cheap, and this is a natural moment for it: an orphan segment
+                // is quota spent on audio nothing can play.
+                await reclaimOrphans().catch(() => {});
+                const manifests = await listAudioManifests();
+                this.sessionAudioCount = manifests.length;
+                this.sessionAudioBytes = manifests.reduce((sum, m) => sum + (m.bytes || 0), 0);
+                this.sessionAudioHeadroom = await headroomBytes();
+            } catch (e) {
+                this.sessionAudioCount = 0;
+                this.sessionAudioBytes = 0;
+            }
+        },
+
+        async deleteAllSessionAudio() {
+            if (!window.confirm(
+                'Delete every stored session recording? The sessions and their tune lists are kept. This cannot be undone.'
+            )) return;
+            this.deletingSessionAudio = true;
+            try {
+                const manifests = await listAudioManifests();
+                for (const manifest of manifests) {
+                    await deleteSessionAudio(manifest.sessionId);
+                }
+            } finally {
+                this.deletingSessionAudio = false;
+                await this._refreshSessionAudio();
+            }
+        },
+
         // An absent key means the browser will not say, which is different
         // from "off" and must not be shown as off.
         describeAudioSetting(value) {

@@ -6,6 +6,7 @@ import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
 import {estimateCostUsd, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
 import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '@/js/places.mjs';
+import {deleteSessionAudio} from './sessionAudioStore.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
 import {
     subscribe as syncSubscribe, pushFavourites,
@@ -28,6 +29,13 @@ const USER_SETTING_DEFAULTS = {
     aiSummariesEnabled: false, // show the (i) tune-background button; needs an API key
     aiSummaryModel: DEFAULT_AI_MODEL, // which Claude model writes the background note
     geoTagDetections: false, // record where each tune was heard; needs location permission
+    // Keep the audio of a live session so it can be listened back to and
+    // exported. Off by default and deliberately so: three hours of a pub
+    // records the conversations of everyone in it, and it is the largest thing
+    // this app will ever put in storage. Neither is something to opt someone
+    // into. See sessionAudioStore.js.
+    recordSessionAudio: false,
+    sessionAudioBitrateKbps: 64,
     // Which tune databases are downloaded, stored offline and searched.
     //
     // A FRESH install gets thesession only. folkwiki's detections are still
@@ -1242,6 +1250,14 @@ class Store {
             write: true,
             records: sessions.filter(s => s.id !== sessionID),
         }), 'liveSessionsChanged');
+        // Every delete path comes through here, which is why the audio is
+        // dropped here rather than at the call sites: a recording nothing
+        // references is both the largest orphan this app can leave behind and,
+        // being three hours of a room full of people, the one it has the least
+        // business keeping. Best-effort — a failure must not stop the session
+        // record itself being deleted.
+        await deleteSessionAudio(sessionID)
+            .catch(e => console.warn('Could not delete session audio:', e && e.message));
         this._syncDelete('liveSessions', sessionID);
     }
 
@@ -1252,6 +1268,10 @@ class Store {
             sessionIDs = sessions.map(s => s.id);
             return { write: true, records: [] };
         }, 'liveSessionsChanged');
+        for (const sessionID of sessionIDs) {
+            await deleteSessionAudio(sessionID)
+                .catch(e => console.warn('Could not delete session audio:', e && e.message));
+        }
         this._syncDeleteMany('liveSessions', sessionIDs);
     }
 
