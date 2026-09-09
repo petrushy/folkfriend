@@ -339,6 +339,23 @@ export function clusterDetections(windowMatches, options) {
                 audioEndSeconds: stamped.length
                     ? stamped[stamped.length - 1].audioSeconds + options.windowSeconds
                     : null,
+                // Where playback should START for this tune, computed here
+                // rather than as a fixed offset at playback time.
+                //
+                // audioStartSeconds is the moment the first matching window
+                // ENDED, so the audio that produced the match runs from a
+                // window earlier. The midpoint is the best single place to
+                // land: the tune is definitely playing there, whereas the
+                // window's start can still be the previous tune, and anything
+                // ahead of that is audio the detector never saw.
+                //
+                // Persisted with the detection because it depends on the
+                // window the session was recorded with — a fixed constant at
+                // playback time is wrong the moment that setting changes, and
+                // cannot be recovered for an already-saved session.
+                audioAnchorSeconds: stamped.length
+                    ? Math.max(0, stamped[0].audioSeconds - options.windowSeconds / 2)
+                    : null,
                 bestScore: bestHit.score,
                 averageScore,
                 hits: cluster.hits.length,

@@ -126,25 +126,56 @@ await test('the gap is drawn, not left looking like ordinary audio', async () =>
 });
 
 await test('a tune just after a hole is not sought INTO the hole', async () => {
-    // The preroll is 12 s, so a tune at 365 would be sought from 353 — inside
-    // the gap, where there is no segment, and the player would report the audio
-    // missing for a tune whose audio is right there.
+    // Anchored at 360 exactly here; the point is that nothing before the
+    // stretch's own start is ever requested.
     const vm = await mountPlayer(GAPPY);
-    await vm.playTune({ audioStartSeconds: 365 });
+    await vm.playTune({ audioStartSeconds: 365, audioAnchorSeconds: 360 });
     assert.deepEqual(vm.playRequests, [360], 'clamped to the start of its own stretch');
 });
 
-await test('a tune well inside a stretch still gets its full preroll', async () => {
-    // The clamp must not cost the preroll everywhere else: a cluster's start is
-    // the moment the first matching window ENDED, so seeking to the bare offset
-    // reliably lands past the opening phrase.
+await test('playback starts at the tune\'s stored anchor', async () => {
+    // The anchor is the analysed window's MIDPOINT, computed at detection time.
+    // audioStartSeconds is where that window ended, so the audio behind the
+    // match runs from a window earlier; the midpoint is the one place the tune
+    // is certainly playing, where the window's start can still be the tune
+    // before it.
+    const vm = await mountPlayer(GAPPY);
+    await vm.playTune({ audioStartSeconds: 450, audioAnchorSeconds: 445 });
+    assert.deepEqual(vm.playRequests, [445]);
+});
+
+await test('the anchor scales with the window the session was analysed with', async () => {
+    // Which is the whole reason it is stored rather than subtracted at
+    // playback: a fixed offset is wrong the moment that setting changes, and
+    // cannot be recovered for a session already saved.
+    const vm = await mountPlayer(GAPPY);
+    await vm.playTune({ audioStartSeconds: 450, audioAnchorSeconds: 435 });  // 30 s window
+    assert.deepEqual(vm.playRequests, [435]);
+});
+
+await test('a session saved before anchors existed falls back to half a window', async () => {
+    // Not the old 12 s: that landed ~2 s BEFORE the analysed window began,
+    // which is what made it feel early. Those sessions were almost all
+    // recorded at the 10 s default, so half of that is the right guess.
     const vm = await mountPlayer(GAPPY);
     await vm.playTune({ audioStartSeconds: 450 });
-    assert.deepEqual(vm.playRequests, [438]);
+    assert.deepEqual(vm.playRequests, [445]);
+});
+
+await test('an anchor is still clamped into the tune\'s own stretch', async () => {
+    // A long window puts the anchor before a hole that the tune sits just
+    // after. The clamp is what stops it seeking into audio that is not there.
+    const vm = await mountPlayer(GAPPY);
+    await vm.playTune({ audioStartSeconds: 365, audioAnchorSeconds: 350 });
+    assert.deepEqual(vm.playRequests, [360]);
 });
 
 await test('a tune at the very start of the recording is not sought below zero', async () => {
     const vm = await mountPlayer(GAPPY);
+    await vm.playTune({ audioStartSeconds: 4, audioAnchorSeconds: 0 });
+    assert.deepEqual(vm.playRequests, [0]);
+    // And with no anchor at all, where the fallback would go negative.
+    vm.playRequests.length = 0;
     await vm.playTune({ audioStartSeconds: 4 });
     assert.deepEqual(vm.playRequests, [0]);
 });
@@ -181,8 +212,8 @@ await test('a continuous recording has no gaps and no clamping', async () => {
     });
     assert.deepEqual(vm.recordedRanges, [{ from: 0, to: 360 }]);
     assert.deepEqual(vm.gapBlocks, []);
-    await vm.playTune({ audioStartSeconds: 200 });
-    assert.deepEqual(vm.playRequests, [188]);
+    await vm.playTune({ audioStartSeconds: 200, audioAnchorSeconds: 195 });
+    assert.deepEqual(vm.playRequests, [195]);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

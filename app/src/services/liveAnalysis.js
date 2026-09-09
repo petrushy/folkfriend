@@ -38,6 +38,9 @@ function collapseConsecutiveSameTune(detections) {
             // out, leaving later clusters with no stamp at all).
             prev.audioStartSeconds = minDefined(prev.audioStartSeconds, det.audioStartSeconds);
             prev.audioEndSeconds = maxDefined(prev.audioEndSeconds, det.audioEndSeconds);
+            // Follows audioStartSeconds: the row plays from where the tune
+            // began, so it takes the anchor of the earliest merged cluster.
+            prev.audioAnchorSeconds = minDefined(prev.audioAnchorSeconds, det.audioAnchorSeconds);
             if (det.bestScore > prev.bestScore) {
                 prev.bestScore = det.bestScore;
                 prev.settingId = det.settingId;
@@ -943,6 +946,7 @@ class LiveAnalysisService {
                 // the only sane answer either way.
                 audioStartSeconds: typeof d.audioStartSeconds === 'number' ? d.audioStartSeconds : null,
                 audioEndSeconds: typeof d.audioEndSeconds === 'number' ? d.audioEndSeconds : null,
+                audioAnchorSeconds: typeof d.audioAnchorSeconds === 'number' ? d.audioAnchorSeconds : null,
                 bestScore: d.bestScore,
                 alternatives: d.alternatives || [],
             })),
