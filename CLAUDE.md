@@ -1201,7 +1201,13 @@ keeping it running is nearly free and keeps every offset valid).
 An automatic music/speech classifier was considered and deferred: the error rate
 in a pub is real in both directions and the two errors are not symmetric —
 muting real music costs the user the recording they asked for. The audio from
-this feature is the corpus to calibrate one on, if it is ever built.
+this feature is the corpus to calibrate one on, if it is ever built. **If one is
+built, it must not gate on the tune MATCH**, tempting as that is given the score
+is already computed every cycle: its false negatives are systematically the
+unrecognised tunes — one not in the index, an unusual setting, a poor window —
+so it would delete exactly the audio the user most wants to go back to. The
+signal has to be "is this pitched, sustained, melodic sound", independent of
+whether anything matched.
 
 Four mute rules, each mutation-verified: **the recording keeps running while
 muted** (the timeline stays 1:1 with the evening); **a reacquired microphone and
@@ -1225,6 +1231,11 @@ Verified by reinstating each bug: writing the manifest before the payload fails
 fails 3, letting a clip cross a track boundary fails 1, mirroring the displayed
 `startSeconds` semantics in the collapse fails 1, dropping the audio fields from
 `_persistSession` fails 2, and dropping them from `clusterDetections` fails 6.
+For the mute: muting the capture track rather than the clone fails 3 in
+`mic.test.mjs` (and the fake must model a disabled track as silence, or one of
+those passes against the bug), un-muting on a pipeline rebuild fails 1, letting
+a double tap open a second range fails 1, and restoring a CLOSED range as muted
+fails 1.
 
 ⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
 test is for: which container iOS actually records, whether `[init, ...midChunks]`
