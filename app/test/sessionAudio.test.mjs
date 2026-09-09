@@ -56,10 +56,26 @@ const FAKE_IDB = `
 export const __db = new Map();
 export const __failWrites = new Set();
 export const __failDeletes = new Set();
-export function __reset() { __db.clear(); __failWrites.clear(); __failDeletes.clear(); }
-export async function get(key) { return __db.get(key); }
+// Read faults matter as much as write faults here: the orphan sweep feeds its
+// reads straight into a delete, so a read that fails must never look like a
+// manifest that does not exist.
+export const __failReads = new Set();
+export function __reset() {
+    __db.clear(); __failWrites.clear(); __failDeletes.clear();
+    __failReads.clear(); __slowWrites.clear();
+}
+export async function get(key) {
+    if (__failReads.has(key)) throw new Error('read failed');
+    return __db.get(key);
+}
+// Keys whose write takes a REAL tick, so the payload-then-manifest window is
+// wide enough for a sweep to land inside it. Without this the two writes finish
+// in one microtask drain and the race the gate exists to prevent never happens
+// — a fake too tidy to fail.
+export const __slowWrites = new Set();
 export async function set(key, value) {
     if (__failWrites.has(key)) throw new Error('QuotaExceededError');
+    if (__slowWrites.has(key)) await new Promise(r => setTimeout(r, 5));
     // A real transaction yields before committing; without this gap two
     // interleaved writers pass against code that has no serialisation at all.
     await Promise.resolve();
@@ -1319,6 +1335,183 @@ await test('a resumed session that falls back to another container keeps its old
         store.SEGMENT_SECONDS + 10, manifest);
     assert.equal(store.fileExtensionFor(early.mimeType), 'm4a');
     assert.equal(store.fileExtensionFor(late.mimeType), 'webm');
+});
+
+console.log('\nthe orphan sweep is never allowed to guess');
+
+await test('a failed manifest read abandons the sweep rather than deleting', async () => {
+    // listManifests() turns a failed read into a MISSING manifest, and the
+    // sweep deletes everything no manifest claims — so one transient error
+    // would destroy a whole recording, silently, from a screen the user opened
+    // to look at their sessions.
+    resetAll();
+    await seedManifest('s1');
+    await store.appendSegment('s1', segment(0, 0, 0, ['aaa'], { firstIsInit: true }),
+        { index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['H']) });
+
+    idb.__failReads.add(store.manifestKey('s1'));
+    const reclaimed = await store.reclaimOrphans();
+    idb.__failReads.clear();
+
+    assert.equal(reclaimed, 0);
+    assert.ok(await store.readSegment('s1', 0), 'the recording is still there');
+});
+
+await test('a manifest from a NEWER build protects its audio', async () => {
+    // Not recognised is not rubbish — it may be a later format this client
+    // cannot read. Same rule as the tune index's read-side delete.
+    resetAll();
+    await seedManifest('s1');
+    await store.appendSegment('s1', segment(0, 0, 0, ['aaa'], { firstIsInit: true }),
+        { index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['H']) });
+    const future = await idb.get(store.manifestKey('s1'));
+    await idb.set(store.manifestKey('s1'), { ...future, schema: store.AUDIO_SCHEMA_VERSION + 1 });
+
+    assert.equal(await store.reclaimOrphans(), 0);
+    assert.ok(await store.readSegment('s1', 0));
+});
+
+await test('the sweep cannot delete a payload whose manifest is still in flight', async () => {
+    // appendSegment writes the payload first and the manifest second. A sweep
+    // in that window deletes the new payload, and the manifest then lands
+    // naming audio that is gone — the precise state the ordering exists to
+    // prevent.
+    resetAll();
+    await seedManifest('s1');
+
+    // The manifest write is held open, so the sweep runs while the payload is
+    // on disk and unclaimed — the window the gate exists for.
+    idb.__slowWrites.add(store.manifestKey('s1'));
+    const append = store.appendSegment('s1', segment(0, 0, 0, ['aaa'], { firstIsInit: true }),
+        { index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['H']) });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const sweep = store.reclaimOrphans();
+    await Promise.all([append, sweep]);
+    idb.__slowWrites.clear();
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.segments.length, 1);
+    assert.ok(await store.readSegment('s1', 0),
+        'the segment the manifest names is still on disk');
+});
+
+await test('a genuine orphan is still reclaimed', async () => {
+    resetAll();
+    await seedManifest('s1');
+    await idb.set(store.segmentKey('s1', 99), { blob: new Blob(['x']), chunks: [] });
+    assert.equal(await store.reclaimOrphans(), 1);
+});
+
+console.log('\nsessionRecorder — recovering from a storage stop mid-recording');
+
+await test('a resumed recording never lays new audio over old segments', async () => {
+    // _fail() ends a track without going through _stopTrack(), so the clock was
+    // never committed and the next track restarted at the FAILED track's start
+    // — over segments already written there. The existing storage test runs out
+    // of space on the very first segment, where restarting at zero is invisible.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+
+    // One segment safely stored.
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    assert.equal((await store.readManifest('s1')).segments.length, 1);
+
+    // The next one runs out of space.
+    setQuota(1000, 999);
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    assert.equal(recorder.stoppedReason, 'storage');
+
+    // The user frees space and resumes the same session.
+    setQuota(10 * 1024 * 1024 * 1024, 0);
+    await recorder.stop();
+    await recorder.resume('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.segments.length, 2);
+    const [first, second] = manifest.segments.slice().sort((a, b) => a.index - b.index);
+    assert.ok(second.startSeconds >= first.startSeconds + first.durationSeconds,
+        `segment ${second.index} starts at ${second.startSeconds}, inside segment ` +
+        `${first.index} which runs to ${first.startSeconds + first.durationSeconds}`);
+});
+
+await test('a failure commits the clock, exactly as a normal stop does', async () => {
+    // Pinned on its own because the resume-side recovery below covers the same
+    // ground: with both in place either can regress unnoticed. This is the
+    // primary fix — _fail() ends a track without going through _stopTrack().
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    setQuota(1000, 999);
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+
+    assert.equal(recorder.stoppedReason, 'storage');
+    assert.equal(Math.round(recorder._committedSeconds), 2 * store.SEGMENT_SECONDS,
+        'the clock is where the audio stopped, not back at the failed track\'s start');
+});
+
+await test('a resume never starts behind what is already stored', async () => {
+    // The independent half: whatever left the clock behind, reading disk is the
+    // only authority on where new audio may safely begin.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    await recorder.stop();
+
+    // A clock left behind by some other path.
+    recorder._committedSeconds = 0;
+    recorder._chunkCursorSeconds = 0;
+    await recorder.resume('s1');
+
+    assert.equal(Math.round(recorder._committedSeconds), store.SEGMENT_SECONDS);
+});
+
+await test('two segments never claim the same second', async () => {
+    // The visible consequence of the rewind: _segmentFor picks whichever it
+    // finds first, so a tune seeks into audio from a different part of the
+    // evening.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    setQuota(1000, 999);
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    setQuota(10 * 1024 * 1024 * 1024, 0);
+    await recorder.stop();
+    await recorder.resume('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+
+    const spans = (await store.readManifest('s1')).segments
+        .map(s => [s.startSeconds, s.startSeconds + s.durationSeconds])
+        .sort((a, b) => a[0] - b[0]);
+    for (let i = 1; i < spans.length; i++) {
+        assert.ok(spans[i][0] >= spans[i - 1][1],
+            `overlap: ${JSON.stringify(spans[i - 1])} and ${JSON.stringify(spans[i])}`);
+    }
 });
 
 console.log('\nlinking detections to the recording');

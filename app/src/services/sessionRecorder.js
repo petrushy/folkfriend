@@ -268,6 +268,12 @@ class SessionRecorder {
         // The reset below is not reached on this path, which is what made the
         // ordinary pause/resume case behave differently from a reload.
         if (this.sessionId === sessionId) {
+            // Belt and braces against the clock having been left behind by any
+            // path that ended a track without committing it. Reading what is
+            // actually stored is the only authority on where new audio may
+            // safely begin: anything earlier overwrites the timeline of
+            // segments that already exist.
+            await this._adoptStoredClock(sessionId);
             this._clearStorageStop();
             return true;
         }
@@ -317,6 +323,15 @@ class SessionRecorder {
 
         this._emit();
         return true;
+    }
+
+    // Never lets the clock sit behind what is on disk.
+    async _adoptStoredClock(sessionId) {
+        const manifest = await readManifest(sessionId);
+        const stored = (manifest && manifest.totalSeconds) || 0;
+        const safe = Math.max(this._committedSeconds, this._chunkCursorSeconds, stored);
+        this._committedSeconds = safe;
+        this._chunkCursorSeconds = safe;
     }
 
     // Gives a recording that ran out of space another go. Only 'storage' is
@@ -634,6 +649,15 @@ class SessionRecorder {
         if (recorder) {
             try { if (recorder.state !== 'inactive') recorder.stop(); } catch (e) { /* ignore */ }
         }
+
+        // Commit the clock, exactly as _stopTrack() does. This path ends a
+        // track without going through it, and skipping this rewinds the clock:
+        // the next track would start at the position the FAILED one did, laying
+        // new audio over segments already written at those offsets. Two
+        // segments then claim the same seconds, and every detection after the
+        // failure seeks into the wrong one.
+        this._committedSeconds = this._chunkCursorSeconds;
+        this._trackIndexActive = -1;
 
         const sessionId = this.sessionId;
         const atSeconds = this._chunkCursorSeconds;
