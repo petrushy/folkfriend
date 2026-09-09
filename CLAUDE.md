@@ -1403,6 +1403,21 @@ Worth stating as rules rather than incidents:
     there, but it decides from state that can be a moment stale while a segment
     is being written, so the player has to hold the line itself.
 
+18. **`stoppedReason` values are a vocabulary, and one word meant two things.**
+    `'unsupported'` already meant "this BROWSER cannot record", which the
+    session bar deliberately does not report — nothing was ever promised. (16)
+    reused it for "this SESSION's recording was written by a newer build",
+    which is the opposite situation: recording works here, it is off for one
+    session, and the user can act on it. It was silently swallowed, so
+    recording just stayed off with nothing on screen — the exact failure the
+    REC chip and the error line exist to prevent.
+
+    `'manifest-unsupported'` is its own reason now, and the suppression matches
+    **exactly** rather than by prefix or substring. The full vocabulary is
+    listed on `stoppedReason` in `sessionRecorder.js`: only `'unsupported'` is
+    silent; `'storage'`, `'encoder'`, `'unreadable'`, `'manifest-unsupported'`
+    and `'exists'` are all things the user needs told.
+
 **A test-harness bug surfaced by (16):** several writes are deliberately
 fire-and-forget (mute ranges, the stop marker, the format patch), and
 `resetAll()` cleared the fake database synchronously — so one of those could

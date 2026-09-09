@@ -77,10 +77,20 @@ class SessionRecorder {
         this.mimeType = null;
         this.bitsPerSecond = 0;
         this.isRecording = false;
-        // Why recording ended early, when it did: 'storage' | 'encoder' |
-        // 'unsupported'. Surfaced in the session bar and stored in the
-        // manifest, because a recording that quietly stops halfway through an
-        // evening is indistinguishable from a bug.
+        // Why recording ended early, when it did:
+        //
+        //   'storage'             — ran out of room; retried on the next Resume
+        //   'encoder'             — the encoder failed or refused
+        //   'unsupported'         — this BROWSER cannot record at all
+        //   'manifest-unsupported'— this SESSION's recording was written by a
+        //                           newer build; recording works here
+        //   'unreadable'          — this session's recording could not be read
+        //   'exists'              — refused to create over an existing recording
+        //
+        // Only 'unsupported' is silent in the UI, because nothing was ever
+        // promised on a browser that cannot record. Every other value is
+        // something the user needs told: a recording that quietly stops
+        // halfway through an evening is indistinguishable from a bug.
         this.stoppedReason = null;
         this.error = '';
 
@@ -233,7 +243,8 @@ class SessionRecorder {
         // reintroduce it: anything but genuine absence is refused.
         const probe = await probeManifest(sessionId);
         if (probe.state !== 'absent') {
-            this.stoppedReason = probe.state === 'ok' ? 'exists' : probe.state;
+            this.stoppedReason = { ok: 'exists', unsupported: 'manifest-unsupported' }[probe.state]
+                || probe.state;
             this.error = 'This session already has a recording; not starting a new one over it.';
             this._emit();
             return false;
@@ -316,7 +327,14 @@ class SessionRecorder {
         // written over: begin() would replace it with an empty one and orphan
         // every segment of an existing recording.
         if (probe.state === 'unreadable' || probe.state === 'unsupported') {
-            this.stoppedReason = probe.state;
+            // NOT 'unsupported' — that reason already means "this browser
+            // cannot record at all", which the session bar deliberately does
+            // not report because nothing was ever promised. This is a
+            // different claim entirely: recording works here, and is off for
+            // this one session for a reason the user can act on.
+            this.stoppedReason = probe.state === 'unsupported'
+                ? 'manifest-unsupported'
+                : probe.state;
             this.error = probe.state === 'unreadable'
                 ? 'Could not read this session\'s existing recording, so nothing further is being recorded.'
                 : 'This session\'s recording was made by a newer version of the app, so nothing further is being recorded.';

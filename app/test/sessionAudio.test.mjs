@@ -1633,7 +1633,9 @@ await test('a manifest from a NEWER build is not written over either', async () 
 
     const second = await freshRecorder();
     assert.equal(await second.resume('s1'), false);
-    assert.equal(second.stoppedReason, 'unsupported');
+    // Deliberately NOT 'unsupported': that reason is silent in the UI because
+    // it means the browser cannot record at all, and this one has to be said.
+    assert.equal(second.stoppedReason, 'manifest-unsupported');
     assert.match(second.error, /newer version/);
     const after = await idb.get(store.manifestKey('s1'));
     assert.equal(after.schema, store.AUDIO_SCHEMA_VERSION + 1, 'left exactly as it was');
