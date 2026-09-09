@@ -215,6 +215,10 @@ export function createManifest({ sessionId, mimeType, bitsPerSecond }) {
         segments: [],
         totalSeconds: 0,
         bytes: 0,
+        // The earliest position at which new audio may begin. Advanced past a
+        // segment that could not be stored, monotone, and never cleared — see
+        // storedClockFloor() in sessionRecorder.js.
+        clockFloor: 0,
         // Set when recording ended for a reason the user needs to know about —
         // storage exhausted, the encoder failing. A player that silently runs
         // out of audio partway through an evening is indistinguishable from a

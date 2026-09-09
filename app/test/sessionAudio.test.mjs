@@ -1514,6 +1514,65 @@ await test('two segments never claim the same second', async () => {
     }
 });
 
+await test('a reload after a storage failure does not fill the hole', async () => {
+    // The in-memory recovery keeps the failed segment's elapsed time, but a new
+    // recorder restores from the manifest — and manifest.totalSeconds is the end
+    // of the last SAVED segment, which is where the hole begins. Starting there
+    // hands the lost interval's timestamps to audio recorded after the reload,
+    // so every tune from that interval plays something unrelated.
+    resetAll();
+    const before = await freshRecorder();
+    await before.begin('s1');
+    mic.__setStream();
+    await before.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await before._writeChain;
+    setQuota(1000, 999);
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await before._writeChain;
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(before.stoppedReason, 'storage');
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(Math.round(manifest.totalSeconds), store.SEGMENT_SECONDS);
+    assert.equal(Math.round(manifest.clockFloor), 2 * store.SEGMENT_SECONDS,
+        'the manifest records where the recording actually reached');
+
+    // A reload: a brand new recorder over the same storage.
+    setQuota(10 * 1024 * 1024 * 1024, 0);
+    const after = await freshRecorder();
+    await after.resume('s1');
+    assert.equal(Math.round(after._committedSeconds), 2 * store.SEGMENT_SECONDS,
+        'new audio starts past the hole, not on top of it');
+});
+
+await test('the clock floor survives a retry that records nothing', async () => {
+    // resume() clears the `stopped` marker so recording can be tried again, so
+    // the marker cannot be the durable record. A second reload after a retry
+    // that stored nothing would otherwise lose the hole entirely.
+    resetAll();
+    const first = await freshRecorder();
+    await first.begin('s1');
+    mic.__setStream();
+    await first.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await first._writeChain;
+    setQuota(1000, 999);
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await first._writeChain;
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    setQuota(10 * 1024 * 1024 * 1024, 0);
+    const second = await freshRecorder();
+    await second.resume('s1');            // clears `stopped`
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal((await store.readManifest('s1')).stopped, null);
+
+    const third = await freshRecorder();  // a second reload
+    await third.resume('s1');
+    assert.equal(Math.round(third._committedSeconds), 2 * store.SEGMENT_SECONDS);
+});
+
 console.log('\nlinking detections to the recording');
 
 await test('a cluster carries where it sits in the recording', async () => {

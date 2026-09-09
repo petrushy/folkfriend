@@ -1359,6 +1359,27 @@ Worth stating as rules rather than incidents:
     > true for the old one.** Here the assumption — "coverage is one contiguous
     > run from zero" — was true right up until the previous fix made it false.
 
+14. **The hole has to survive a reload, and the stop marker cannot carry it.**
+    A new recorder restored `manifest.totalSeconds`, which is the end of the
+    last SAVED segment — i.e. where the hole begins — so audio recorded after a
+    reload took the timestamps detections from the lost interval already had.
+    `manifest.clockFloor` is the durable record: monotone, written by `_fail()`
+    beside the stop marker, and **never cleared**, because `stopped` is cleared
+    on the next resume so that recording can be retried and a second reload
+    would otherwise lose the hole entirely. `storedClockFloor()` is the single
+    rule both resume paths use.
+
+15. **The 12 s preroll had to be clamped to the tune's own recorded stretch.**
+    A tune 5 s after a hole was sought from 7 s inside it, found no segment, and
+    reported the audio missing — for a tune whose audio was right there. The
+    clamp also removes the negative-seek case at the start of a recording. Full
+    preroll everywhere else, which is the point of it: a cluster's start is the
+    moment its first matching window *ended*, so the bare offset lands past the
+    opening phrase.
+
+    `app/test/sessionAudioPlayer.test.mjs` (7 cases) exists for this — the
+    player had no tests of its own, and both of these live entirely in it.
+
 ⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
 test is for: which container iOS actually records, whether `[init, ...midChunks]`
 plays standalone and seeks there, and whether an 86 MB `navigator.share` is
