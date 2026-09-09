@@ -161,11 +161,35 @@ If a browser refuses to seek inside a segment at all, the worst case is bounded
 by `SEGMENT_SECONDS`: the ▶ lands up to three minutes early, rather than
 anywhere in a three-hour file.
 
-`PLAY_PREROLL_SECONDS` (12 s) is why ▶ does not land mid-tune. A cluster's start
-is the moment the *first matching window ended*, so the tune has already been
-playing for at least a window by then; seeking to the bare offset reliably lands
-past the opening phrase, which reads as a bug even though the detector is
-working exactly as designed.
+### Where ▶ starts
+
+`audioStartSeconds` is the moment the *first matching window ended*, so the
+audio that produced the match runs from a window earlier. Seeking to the bare
+offset lands past the opening; the first attempt at fixing that subtracted a
+fixed 12 s, which on a device turned out to start roughly **two seconds before
+the analysed window had even opened**.
+
+So each detection carries its own **`audioAnchorSeconds`**, computed when it is
+clustered:
+
+```text
+audioAnchorSeconds = audioStartSeconds − windowSeconds / 2
+```
+
+The window's midpoint is the one place the tune is certainly playing: its
+*start* can still be the tune before it, and anything earlier is audio the
+detector never saw. It can clip an opening phrase, which is the right trade for
+confirming a detection quickly.
+
+It is computed at detection time and **persisted with the tune**, because the
+right distance back depends on the window the session was analysed with — a
+constant applied at playback is wrong as soon as that setting changes, and
+cannot be recovered for a session already saved. Records written before anchors
+existed fall back to half the 10 s default window, which is what the anchor
+works out to for anything recorded at that setting.
+
+The anchor is still clamped into the tune's own recorded stretch, so a long
+window cannot seek back across a hole in the recording.
 
 ## Muting: recording without recording the conversation
 
