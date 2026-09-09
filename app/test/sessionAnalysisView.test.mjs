@@ -50,8 +50,11 @@ export const __favourites = [];
 export const __calls = [];
 export let __failEdit = false;
 export function __setFailEdit(value) { __failEdit = value; }
+export const userSettings = { recordSessionAudio: false, sessionAudioBitrateKbps: 64 };
 export default {
     state,
+    userSettings,
+    updateUserSettings(next) { __calls.push(['updateUserSettings', next.recordSessionAudio]); },
     setSessionAnalysisState(s) { state.sessionAnalysis = s; },
     clearSessionAnalysisState() { state.sessionAnalysis = null; },
     async getLiveSessions() { return __liveSessions.slice(); },
@@ -128,7 +131,11 @@ export function __setRecentEnough(v) { __recentEnough = v; }
 export function __setFailNextStart(v) { __failNextStart = v; }
 export function __setFailNextFinish(v) { __failNextFinish = v; }
 export function __setRestorable(v) { __restorable = v; }
+export const __syncs = [];
 const service = {
+    // Records what the setting was each time the view asked it to reconcile —
+    // the point of moving the control is that it reaches the RUNNING session.
+    syncAudioRecording() { __syncs.push(true); return Promise.resolve(); },
     isRunning: false,
     isPaused: false,
     sessionId: null,
@@ -194,6 +201,7 @@ const service = {
 };
 export function __reset() {
     __starts.length = 0;
+    __syncs.length = 0;
     __calls.length = 0;
     __failNextStart = false;
     __failNextFinish = false;
@@ -273,6 +281,10 @@ async function writeFakes() {
     await writeFile(path.join(tmpDir, 'fake-component.mjs'), FAKE_VUE_COMPONENT);
     // Session audio is covered by sessionAudio.test.mjs against the real
     // store; here it only has to resolve, and report that nothing is recorded.
+    await writeFile(path.join(tmpDir, 'fake-recorder.mjs'), `
+export const __state = { available: true };
+export default { get available() { return __state.available; } };
+`);
     await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), `
 export let __manifests = [];
 export function __setManifests(m) { __manifests = m; }
@@ -297,6 +309,7 @@ export async function reclaimOrphans() { return 0; }
         ["from '@/components/LiveScoreFollow.vue'", "from './fake-component.mjs'"],
         ["from '@/components/SessionAudioPlayer.vue'", "from './fake-component.mjs'"],
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
+        ["from '@/services/sessionRecorder.js'", "from './fake-recorder.mjs'"],
         ["from '@/js/liveScoreFollow.mjs'", "from './fake-follow.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
     ];
@@ -358,9 +371,11 @@ async function mountView({
         }
     };
 
+    const recorder = await import(path.join(tmpDir, 'fake-recorder.mjs'));
+    recorder.__state.available = true;
     const audio = await import(path.join(tmpDir, 'fake-audio-store.mjs'));
     audio.__setManifests([]);
-    return { vm, component, settle, bus, live, file, store, audio };
+    return { vm, component, settle, bus, live, file, store, audio, recorder };
 }
 
 await writeFakes();
@@ -1068,6 +1083,48 @@ await test('contiguous segments are one range, not many', async () => {
 
     assert.equal(vm.audioRanges.length, 1);
     assert.equal(vm.hasAudioFor(vm.activeDetections[0]), true);
+});
+
+await test('the record-audio switch reaches the RUNNING session', async () => {
+    // The whole reason it moved off the Settings page: whether tonight is one
+    // to record is a per-session decision, and a session keeps listening while
+    // the user is on another route. Writing the preference alone would only
+    // affect the NEXT session.
+    const { vm, settle, store, live } = await mountView({ running: true });
+    await settle();
+    assert.equal(vm.recordAudio, false);
+
+    await vm.setRecordAudio(true);
+    assert.equal(vm.recordAudio, true);
+    assert.deepEqual(store.__calls.filter(c => c[0] === 'updateUserSettings'),
+        [['updateUserSettings', true]], 'remembered as the default for next time');
+    assert.equal(live.__syncs.length, 1, 'and applied to the session already running');
+
+    await vm.setRecordAudio(false);
+    assert.equal(vm.recordAudio, false);
+    assert.equal(live.__syncs.length, 2);
+});
+
+await test('it can be decided before a session is started', async () => {
+    // Whether an evening is one to record is usually known walking in, so the
+    // switch is on the start card too — with no session open it simply sets
+    // what the next one does.
+    const { vm, settle, live } = await mountView();
+    await settle();
+    assert.equal(vm.live.hasSession, false);
+    await vm.setRecordAudio(true);
+    assert.equal(vm.recordAudio, true);
+    assert.equal(live.__syncs.length, 1, 'harmless with nothing running');
+});
+
+await test('the switch is disabled where recording is impossible', async () => {
+    const { vm, settle, recorder } = await mountView();
+    await settle();
+    assert.equal(vm.audioRecordingAvailable, true);
+    recorder.__state.available = false;
+    assert.equal(vm.audioRecordingAvailable, false);
+    assert.match(vm.recordAudioLabel, /unavailable/);
+    recorder.__state.available = true;
 });
 
 await rm(tmpDir, { recursive: true, force: true });

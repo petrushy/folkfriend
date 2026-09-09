@@ -769,6 +769,12 @@ class LiveAnalysisService {
     // nothing else is going to notice.
     //
     // Never throws and never blocks the caller: audio is the expendable half.
+    // Public: the session page's "Record audio" switch. Whether recording is
+    // wanted is a per-session decision — some evenings you want the audio, most
+    // you do not — so the control lives beside the session rather than in
+    // Settings, and takes effect on the session that is running.
+    syncAudioRecording() { return this._syncRecorderToSetting(); }
+
     // `resuming` marks an actual lifecycle transition — start() or Resume — as
     // opposed to the loop's periodic check. Only a transition goes through
     // sessionRecorder.resume(), which is what clears a stop for lack of
