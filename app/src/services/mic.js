@@ -97,6 +97,23 @@ class MicService {
         // the OS took away stays in state 'recording' and silently produces
         // nothing for the rest of the evening.
         this._streamGeneration = 0;
+
+        // The branch the session audio recorder reads: a CLONE of the capture
+        // track, in its own MediaStream.
+        //
+        // Cloning is what makes a mute button possible at all. A cloned track
+        // shares the microphone but carries its own `enabled` flag, and a
+        // disabled audio track emits silence by spec — so the recording can be
+        // silenced while the analysis path, which reads the original track
+        // through the AudioContext, keeps hearing everything and keeps
+        // detecting tunes. Muting the capture itself would stop detection too,
+        // which is not what a "don't record this conversation" button means.
+        this._recordingStream = null;
+        // Survives a pipeline rebuild on purpose. A microphone reacquired
+        // mid-conversation must come back MUTED: silently un-muting would
+        // record something the user believes is private, which is the one
+        // failure here that cannot be undone.
+        this._recordingMuted = false;
         this._recovering = null;
         this._healthCheck = null;
         this._healthInterval = null;
@@ -183,6 +200,64 @@ class MicService {
 
     // Which stream that is. See _streamGeneration.
     get streamGeneration() { return this._streamGeneration; }
+
+    // The stream the session audio recorder should record: the muteable clone
+    // when one could be made, and the raw capture otherwise.
+    get recordingStream() { return this._recordingStream || this.micStream; }
+
+    // Whether the recording branch can actually be silenced independently.
+    // False on a browser with no MediaStreamTrack.clone(), where the mute
+    // control must not be offered rather than quietly doing nothing.
+    get recordingMuteSupported() { return !!this._recordingStream; }
+
+    get recordingMuted() { return this._recordingMuted; }
+
+    // Silences (or restores) the recorded audio without touching capture.
+    // Returns what the state actually is afterwards, which is not necessarily
+    // what was asked for: on a browser that cannot clone, mute is unavailable
+    // and the caller must be told rather than left believing it worked.
+    setRecordingMuted(muted) {
+        const wanted = !!muted;
+        if (!this.recordingMuteSupported) return false;
+        this._recordingMuted = wanted;
+        this._applyRecordingMute();
+        return this._recordingMuted;
+    }
+
+    _applyRecordingMute() {
+        if (!this._recordingStream) return;
+        for (const track of this._recordingStream.getTracks()) {
+            track.enabled = !this._recordingMuted;
+        }
+    }
+
+    // Builds the recording branch. Best-effort: a browser that will not clone
+    // simply loses the mute control, not the recording.
+    _openRecordingBranch() {
+        this._recordingStream = null;
+        const track = this._micTrack();
+        if (!track || typeof track.clone !== 'function') return;
+        try {
+            const clone = track.clone();
+            const Stream = globalThis.MediaStream;
+            this._recordingStream = Stream ? new Stream([clone]) : null;
+            if (!this._recordingStream) { clone.stop(); return; }
+            this._applyRecordingMute();
+        } catch (e) {
+            console.warn('Could not open a muteable recording branch:', e && e.message);
+            this._recordingStream = null;
+        }
+    }
+
+    _closeRecordingBranch() {
+        if (!this._recordingStream) return;
+        for (const track of this._recordingStream.getTracks()) {
+            // The clone holds its own reference to the microphone; leaving it
+            // running keeps the OS recording indicator lit after a stop.
+            try { track.stop(); } catch (e) { /* already stopped */ }
+        }
+        this._recordingStream = null;
+    }
 
     async resumeIfSuspended() {
         if (this.audioCtx && this.audioCtx.state === 'suspended') {
@@ -496,6 +571,9 @@ class MicService {
         this._streamGeneration++;
         this._recordAppliedSettings();
         this._watchMicTrack();
+        // Re-applies the current mute state, so a microphone reacquired during
+        // a muted stretch does not come back recording.
+        this._openRecordingBranch();
         // A fresh capture gets a full window before anything judges it silent —
         // otherwise the very first health check condemns a pipeline that has
         // not had time to deliver a single buffer.
@@ -577,6 +655,7 @@ class MicService {
             this.micSource.disconnect();
             this.micSource = null;
         }
+        this._closeRecordingBranch();
         if (this.micStream) {
             this.micStream.getTracks().forEach((track) => track.stop());
             this.micStream = null;

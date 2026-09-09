@@ -78,16 +78,42 @@ export function __reset() { __emits.length = 0; }
 export default { $emit(name, payload) { __emits.push({ name, payload }); }, $on() {}, $off() {} };
 `;
 
+// Models the real mechanism rather than a boolean: the recording branch is a
+// CLONE of the capture track with its own \`enabled\` flag, and the tests below
+// assert on the two tracks separately. A fake that merely remembered "muted"
+// could not tell a mute that silences the recording from one that also
+// silences detection, which is the entire distinction being built.
 const FAKE_MIC = `
-export const __state = { stream: null, generation: 0 };
-export function __setStream(stream) {
-    __state.stream = stream;
+export const __state = { stream: null, recordingStream: null, generation: 0, cloneable: true };
+let __muted = false;
+export function __setStream() {
+    __state.stream = { __track: { enabled: true } };
+    __state.recordingStream = __state.cloneable
+        ? { __track: { enabled: !__muted }, getTracks() { return [this.__track]; } }
+        : null;
     __state.generation++;
 }
-export function __reset() { __state.stream = null; __state.generation = 0; }
+export function __reset() {
+    __state.stream = null; __state.recordingStream = null;
+    __state.generation = 0; __state.cloneable = true; __muted = false;
+}
+export function __setCloneable(v) { __state.cloneable = v; }
+// The track the ANALYSIS path reads. Mute must never touch it.
+export function __captureTrack() { return __state.stream && __state.stream.__track; }
+export function __recordingTrack() { return __state.recordingStream && __state.recordingStream.__track; }
 export default {
     get stream() { return __state.stream; },
+    get recordingStream() { return __state.recordingStream || __state.stream; },
+    get recordingMuteSupported() { return !!__state.recordingStream; },
+    get recordingMuted() { return !!__state.recordingStream && __muted; },
     get streamGeneration() { return __state.generation; },
+    setRecordingMuted(muted) {
+        __muted = !!muted;
+        if (__state.recordingStream) {
+            for (const track of __state.recordingStream.getTracks()) track.enabled = !__muted;
+        }
+        return this.recordingMuted;
+    },
 };
 `;
 
@@ -182,6 +208,10 @@ function setQuota(quota, usage) {
 }
 
 function noQuotaApi() { installNavigator({}); }
+
+// Mutes at the microphone layer, bypassing the recorder — models the flag
+// having been left set by anything other than the session about to start.
+function micMuteDirectly(muted) { mic.default.setRecordingMuted(muted); }
 
 // Feeds `count` one-second chunks named c0, c1, ... to the active recorder.
 function feed(recorder, count, prefix = 'c') {
@@ -511,7 +541,7 @@ await test('the clock advances with the recording, not with wall clock', async (
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     const media = recorders[recorders.length - 1];
     feed(media, 10);
@@ -524,7 +554,7 @@ await test('a pause and resume CONTINUES the clock rather than restarting it', a
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], 10);
     await recorder.stop();
@@ -533,7 +563,7 @@ await test('a pause and resume CONTINUES the clock rather than restarting it', a
     fakeNow += 120_000;
     assert.equal(Math.round(recorder.audioSeconds), 10, 'a paused clock does not tick');
 
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], 5);
     assert.equal(Math.round(recorder.audioSeconds), 15);
@@ -545,13 +575,13 @@ await test('a microphone outage does not put time into the recording that is not
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], 20);
 
     // The OS takes the microphone; mic.js reacquires and publishes a new stream.
     fakeNow += 45_000;
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], 10);
 
@@ -563,12 +593,12 @@ await test('a reacquired stream opens a NEW track', async () => {
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     const before = recorders.length;
     feed(recorders[recorders.length - 1], 5);
 
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     assert.equal(recorders.length, before + 1, 'a new MediaRecorder for the new stream');
 });
@@ -577,7 +607,7 @@ await test('a recorder still on the live stream is left alone', async () => {
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     const count = recorders.length;
     await recorder.ensureRecording();
@@ -591,7 +621,7 @@ await test('a segment is written once it holds SEGMENT_SECONDS of audio', async 
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await recorder._writeChain;
@@ -606,7 +636,7 @@ await test('the first chunk of a track is marked as the header', async () => {
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await recorder._writeChain;
@@ -622,7 +652,7 @@ await test('the tail of a track is not lost when the session pauses', async () =
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     const media = recorders[recorders.length - 1];
     feed(media, 3);
@@ -638,7 +668,7 @@ await test('a resumed session appends rather than overwriting its stored segment
     resetAll();
     const first = await freshRecorder();
     await first.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await first.ensureRecording();
     feed(recorders[recorders.length - 1], 5);
     await first.stop();
@@ -649,7 +679,7 @@ await test('a resumed session appends rather than overwriting its stored segment
     await second.resume('s1');
     assert.equal(Math.round(second.audioSeconds), 5, 'the clock continues from what is stored');
 
-    mic.__setStream({});
+    mic.__setStream();
     await second.ensureRecording();
     feed(recorders[recorders.length - 1], 4);
     await second.stop();
@@ -667,7 +697,7 @@ await test('a full disk stops the recording and keeps what was already written',
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await recorder._writeChain;
@@ -690,7 +720,7 @@ await test('the manifest records WHY recording stopped, and where', async () => 
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await recorder._writeChain;
@@ -719,7 +749,7 @@ await test('a browser with no quota API still records', async () => {
     noQuotaApi();
     const recorder = await freshRecorder();
     assert.equal(await recorder.begin('s1'), true);
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await recorder._writeChain;
@@ -731,7 +761,7 @@ await test('a write that fails anyway stops cleanly instead of throwing', async 
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     idb.__failWrites.add(store.segmentKey('s1', 0));
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
@@ -749,7 +779,7 @@ await test('resuming after a storage stop tries again rather than latching off',
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     setQuota(1000, 999);
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
@@ -761,7 +791,7 @@ await test('resuming after a storage stop tries again rather than latching off',
     const next = await freshRecorder();
     await next.resume('s1');
     assert.equal(next.stoppedReason, null);
-    mic.__setStream({});
+    mic.__setStream();
     await next.ensureRecording();
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await next._writeChain;
@@ -785,7 +815,7 @@ await test('discard() deletes the recording', async () => {
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await recorder._writeChain;
@@ -800,7 +830,7 @@ await test('end() flushes the last segment before closing', async () => {
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     feed(recorders[recorders.length - 1], 20);
     await recorder.end();
@@ -814,7 +844,7 @@ await test('the recorder announces its state so the UI cannot disagree with it',
     resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
-    mic.__setStream({});
+    mic.__setStream();
     await recorder.ensureRecording();
     const events = bus.__emits.filter(e => e.name === 'sessionAudioState');
     assert.ok(events.length >= 2);
@@ -930,6 +960,231 @@ function windowMatch(tuneId, startSeconds, audioSeconds) {
 }
 
 const CLUSTER_OPTIONS = { windowSeconds: 10, stepSeconds: 10, minClusterHits: 2, minTopScore: 0.4 };
+
+console.log('\nsessionRecorder — the mute control');
+
+await test('muting silences the RECORDING and leaves capture alone', async () => {
+    // The whole point of the control: detection carries on through the
+    // conversation being muted. Muting the capture track instead would stop
+    // the tune list dead, which is not what "do not record this" means.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+
+    recorder.setMuted(true);
+    assert.equal(mic.__recordingTrack().enabled, false, 'the recorded branch is silenced');
+    assert.equal(mic.__captureTrack().enabled, true, 'the analysis branch is untouched');
+
+    recorder.setMuted(false);
+    assert.equal(mic.__recordingTrack().enabled, true);
+    assert.equal(mic.__captureTrack().enabled, true);
+});
+
+await test('the recording keeps running while muted, so the timeline stays intact', async () => {
+    // Stopping instead would compress the timeline, and every tune offset
+    // after a mute would point at the wrong moment in the recording.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], 60);
+    recorder.setMuted(true);
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+
+    assert.equal(recorder.isRecording, true);
+    assert.equal((await store.readManifest('s1')).segments.length, 1);
+    assert.equal(Math.round(recorder.audioSeconds), 240, 'the clock ran through the mute');
+});
+
+await test('muted stretches are recorded, so the player can explain the silence', async () => {
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], 30);
+    recorder.setMuted(true);
+    feed(recorders[recorders.length - 1], 20);
+    recorder.setMuted(false);
+    feed(recorders[recorders.length - 1], 10);
+    await recorder._writeChain;
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.mutedRanges.length, 1);
+    assert.equal(Math.round(manifest.mutedRanges[0].from), 30);
+    assert.equal(Math.round(manifest.mutedRanges[0].to), 50);
+});
+
+await test('a mute still open when the session ends is closed, not left running for ever', async () => {
+    // An open-ended range greys out everything after it, including audio a
+    // later resumed stretch recorded.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], 20);
+    recorder.setMuted(true);
+    feed(recorders[recorders.length - 1], 10);
+    await recorder.end();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.mutedRanges.length, 1);
+    assert.notEqual(manifest.mutedRanges[0].to, null);
+    assert.equal(Math.round(manifest.mutedRanges[0].to), 30);
+});
+
+await test('a microphone reacquired while muted comes back MUTED', async () => {
+    // The asymmetry that decides this: silently un-muting records something
+    // the user believes is private and cannot be undone, while staying muted
+    // loses audio the user can see is being lost.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    recorder.setMuted(true);
+
+    // The OS takes the microphone; mic.js reacquires and rebuilds the branch.
+    mic.__setStream();
+    await recorder.ensureRecording();
+
+    assert.equal(recorder.muted, true);
+    assert.equal(mic.__recordingTrack().enabled, false);
+});
+
+await test('a session resumed after a reload comes back muted if it was muted', async () => {
+    resetAll();
+    const first = await freshRecorder();
+    await first.begin('s1');
+    mic.__setStream();
+    await first.ensureRecording();
+    feed(recorders[recorders.length - 1], 10);
+    first.setMuted(true);
+    await first.stop();
+    await first._writeChain;
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    // A reload. The order mirrors _startCapture: the microphone opens, then
+    // the recorder resumes onto it.
+    mic.__reset();
+    const second = await freshRecorder();
+    mic.__setStream();
+    await second.resume('s1');
+    assert.equal(second.muted, true, 'the open muted range is honoured');
+});
+
+await test('a NEW session starts recording, whatever the last one was doing', async () => {
+    // Not a contradiction of the rule above: a resumed session is visibly the
+    // same one, with the muted counter on screen. A new session has nothing
+    // on screen connecting it to a button pressed hours earlier.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    recorder.setMuted(true);
+    await recorder.end();
+
+    await recorder.begin('s2');
+    assert.equal(recorder.muted, false);
+    assert.deepEqual(recorder.mutedRanges, []);
+
+    // The microphone's mute flag is global and outlives any one session, so a
+    // new session has to clear it rather than assume the previous end() did.
+    await recorder.end();
+    mic.__setStream();
+    micMuteDirectly(true);
+    await recorder.begin('s3');
+    assert.equal(recorder.muted, false, 'a stale mute never carries into a new session');
+});
+
+await test('mute reports failure rather than pretending, on a browser that cannot clone', async () => {
+    // Silently doing nothing would leave the user believing the room is not
+    // being recorded when it is — the worst outcome this control can produce.
+    resetAll();
+    mic.__setCloneable(false);
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+
+    assert.equal(recorder.muteSupported, false);
+    assert.equal(recorder.setMuted(true), false);
+    assert.equal(recorder.muted, false);
+});
+
+await test('muting twice does not open a second range', async () => {
+    // Double-tapping a control on a phone in a pub is normal. Two overlapping
+    // ranges would double-count the muted total and draw the strip twice.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    recorder.setMuted(true);
+    feed(recorders[recorders.length - 1], 5);
+    recorder.setMuted(true);
+    assert.equal(recorder.mutedRanges.length, 1);
+});
+
+await test('a session that ended UNMUTED resumes unmuted', async () => {
+    // The other half of the restore rule: honouring a CLOSED range would leave
+    // a session permanently muted after one mute earlier in the evening.
+    resetAll();
+    const first = await freshRecorder();
+    await first.begin('s1');
+    mic.__setStream();
+    await first.ensureRecording();
+    feed(recorders[recorders.length - 1], 5);
+    first.setMuted(true);
+    feed(recorders[recorders.length - 1], 5);
+    first.setMuted(false);
+    await first.end();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    mic.__reset();
+    const second = await freshRecorder();
+    mic.__setStream();
+    await second.resume('s1');
+    assert.equal(second.muted, false);
+});
+
+await test('the mute state is announced, so the session bar cannot disagree', async () => {
+    // The bar renders from this event alone; if the state did not ride it, the
+    // chip would keep saying REC over a silenced recording.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    bus.__reset();
+    recorder.setMuted(true);
+    const last = bus.__emits.filter(e => e.name === 'sessionAudioState').pop();
+    assert.equal(last.payload.muted, true);
+    assert.equal(last.payload.muteSupported, true);
+    assert.ok(last.payload.mutedSeconds >= 0);
+});
+
+await test('muted time is reported while the mute is still open', async () => {
+    // A mute the user forgot about is how a manual control loses an evening,
+    // and a running counter is the only defence.
+    resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], 10);
+    recorder.setMuted(true);
+    feed(recorders[recorders.length - 1], 25);
+    assert.equal(Math.round(recorder.mutedSeconds), 25);
+});
 
 console.log('\nlinking detections to the recording');
 

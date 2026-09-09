@@ -23,10 +23,32 @@
                 :style="block.style"
                 :title="block.title"
             />
+            <!-- Drawn OVER the tune blocks: a muted stretch still has tunes
+                 detected in it (detection never stops), so the two overlap and
+                 the mute is the fact that needs to win visually. -->
+            <div
+                v-for="(block, index) in mutedBlocks"
+                :key="`muted-${index}`"
+                class="audioStripMuted"
+                :style="block"
+                title="Audio muted here"
+            />
+            <!-- Drawn OVER the tune blocks: a stretch the user muted contains
+                 no audio, so a row that looks playable there is a lie. Seeking
+                 into unexplained silence is indistinguishable from a bug. -->
+            <div
+                v-for="(band, i) in mutedBands"
+                :key="`muted-${i}`"
+                class="audioStripMuted"
+                :style="band"
+                title="Audio muted here"
+            />
             <div class="audioStripCursor" :style="{ left: cursorPercent + '%' }" />
         </div>
         <div class="d-flex justify-space-between caption text--secondary">
             <span>{{ nowPlayingLabel }}</span>
+            <span v-if="mutedSeconds > 0">{{ formatSecondsAsDuration(mutedSeconds) }} muted</span>
+            <span v-if="mutedBlocks.length">{{ mutedSummary }}</span>
             <span v-if="manifest.stopped">Recording stopped early</span>
         </div>
 
@@ -137,6 +159,29 @@ export default {
             const bps = this.manifest && this.manifest.bitsPerSecond;
             return bps ? `${Math.round(bps / 1000)} kbps` : '';
         },
+        // Ranges the user muted, as strip geometry. An unclosed range (the
+        // session is still muted, or ended while muted) runs to the end of
+        // what was recorded.
+        mutedBands() {
+            const ranges = (this.manifest && this.manifest.mutedRanges) || [];
+            if (!this.totalSeconds) return [];
+            return ranges.map(range => {
+                const from = Math.max(0, range.from);
+                const to = Math.min(this.totalSeconds, range.to == null ? this.totalSeconds : range.to);
+                const left = (from / this.totalSeconds) * 100;
+                return {
+                    left: `${left}%`,
+                    width: `${Math.max(0, Math.min((to - from) / this.totalSeconds * 100, 100 - left))}%`,
+                };
+            }).filter(band => parseFloat(band.width) > 0);
+        },
+        mutedSeconds() {
+            const ranges = (this.manifest && this.manifest.mutedRanges) || [];
+            return ranges.reduce((total, range) => {
+                const to = range.to == null ? this.totalSeconds : range.to;
+                return total + Math.max(0, Math.min(to, this.totalSeconds) - range.from);
+            }, 0);
+        },
         cursorPercent() {
             if (!this.totalSeconds) return 0;
             return Math.min(100, Math.max(0, (this.currentSeconds / this.totalSeconds) * 100));
@@ -162,6 +207,32 @@ export default {
                     },
                 };
             });
+        },
+        // Stretches the user silenced with the mute button. Tunes detected
+        // during one are still listed and still seekable — they just play
+        // silence, and the strip has to say so.
+        mutedBlocks() {
+            if (!this.manifest || !this.totalSeconds) return [];
+            const ranges = Array.isArray(this.manifest.mutedRanges) ? this.manifest.mutedRanges : [];
+            return ranges.map(range => {
+                const from = Math.max(0, range.from);
+                // A range left open by a session that ended while muted runs to
+                // the end of the recorded audio.
+                const to = Math.min(this.totalSeconds,
+                    typeof range.to === 'number' ? range.to : this.totalSeconds);
+                if (!(to > from)) return null;
+                const left = (from / this.totalSeconds) * 100;
+                return {
+                    left: `${left}%`,
+                    width: `${Math.min(((to - from) / this.totalSeconds) * 100, 100 - left)}%`,
+                };
+            }).filter(Boolean);
+        },
+        mutedSummary() {
+            const ranges = Array.isArray(this.manifest.mutedRanges) ? this.manifest.mutedRanges : [];
+            const total = ranges.reduce((sum, range) => sum +
+                Math.max(0, (typeof range.to === 'number' ? range.to : this.totalSeconds) - range.from), 0);
+            return `${formatSecondsAsDuration(total)} muted`;
         },
         nowPlayingLabel() {
             const current = this.playableDetections.filter(d =>
@@ -421,6 +492,34 @@ export default {
     top: 0;
     bottom: 0;
     opacity: 0.75;
+}
+
+/* Diagonal hatching rather than a flat block: it has to read as "nothing
+   here" over the coloured tune blocks underneath, at phone size. */
+.audioStripMuted {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: repeating-linear-gradient(
+        45deg,
+        rgba(120, 120, 120, 0.95),
+        rgba(120, 120, 120, 0.95) 4px,
+        rgba(80, 80, 80, 0.95) 4px,
+        rgba(80, 80, 80, 0.95) 8px
+    );
+}
+
+.audioStripMuted {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: repeating-linear-gradient(
+        45deg,
+        rgba(128, 128, 128, 0.85),
+        rgba(128, 128, 128, 0.85) 4px,
+        rgba(160, 160, 160, 0.85) 4px,
+        rgba(160, 160, 160, 0.85) 8px
+    );
 }
 
 .audioStripCursor {

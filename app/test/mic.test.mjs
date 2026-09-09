@@ -40,7 +40,7 @@ const fakeBackendSource = `
 export const calls = [];
 export default {
     async setSampleRate(rate) { calls.push(['setSampleRate', rate]); },
-    async feedSinglePCMWindow(w) { calls.push(['feedSinglePCMWindow', w.length]); },
+    async feedSinglePCMWindow(w) { calls.push(['feedSinglePCMWindow', w.length, w[0]]); },
 };
 `;
 
@@ -86,8 +86,22 @@ class FakeTrack {
     constructor(applied = {}) {
         this.readyState = 'live';
         this.muted = false;
+        // What a mute button actually sets. A disabled audio track emits
+        // silence by spec, which is what silences the recording branch while
+        // the capture the analysis reads carries on.
+        this.enabled = true;
         this._listeners = {};
         this._applied = applied;
+        this.clones = [];
+    }
+    // A cloned track shares the microphone but carries its OWN enabled flag.
+    // That independence is the entire mechanism behind muting the recording
+    // without muting detection.
+    clone() {
+        const copy = new FakeTrack(this._applied);
+        copy.origin = this;
+        this.clones.push(copy);
+        return copy;
     }
     getSettings() { return this._applied; }
     addEventListener(name, fn) {
@@ -106,9 +120,12 @@ class FakeTrack {
 }
 
 class FakeStream {
-    constructor() { this.track = new FakeTrack(env.appliedSettings); }
-    getAudioTracks() { return [this.track]; }
-    getTracks() { return [this.track]; }
+    constructor(tracks) {
+        this.track = tracks && tracks.length ? tracks[0] : new FakeTrack(env.appliedSettings);
+        this._tracks = tracks || [this.track];
+    }
+    getAudioTracks() { return this._tracks; }
+    getTracks() { return this._tracks; }
 }
 
 class FakeAudioContext {
@@ -123,7 +140,10 @@ class FakeAudioContext {
         this.processor = { bufferSize, onaudioprocess: null, connect() {}, disconnect() {} };
         return this.processor;
     }
-    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createMediaStreamSource(stream) {
+        this.sourceTrack = stream && stream.getAudioTracks ? stream.getAudioTracks()[0] : null;
+        return { connect() {}, disconnect() {} };
+    }
     async resume() { if (this.state !== 'closed') this.state = 'running'; }
     async close() { this.state = 'closed'; }
 
@@ -131,7 +151,13 @@ class FakeAudioContext {
     deliver(count = 1, value = 0.5) {
         if (!this.processor || !this.processor.onaudioprocess) return 0;
         if (this.state !== 'running') return 0;
-        const data = new Float32Array(this.processor.bufferSize).fill(value);
+        // A disabled MediaStreamTrack emits silence by spec. Modelling that is
+        // load-bearing: without it a fake happily delivers real audio through a
+        // muted capture track, and a test asserting "detection still hears
+        // things" passes against code that silenced the wrong branch.
+        const captureTrack = this.sourceTrack;
+        const level = (captureTrack && captureTrack.enabled === false) ? 0 : value;
+        const data = new Float32Array(this.processor.bufferSize).fill(level);
         for (let i = 0; i < count; i++) {
             this.processor.onaudioprocess({ inputBuffer: { getChannelData: () => data } });
         }
@@ -141,6 +167,7 @@ class FakeAudioContext {
 
 function installGlobals() {
     globalThis.AudioContext = FakeAudioContext;
+    globalThis.MediaStream = FakeStream;
     globalThis.alert = () => {};
     // Node exposes a getter-only `navigator`, so plain assignment throws.
     Object.defineProperty(globalThis, 'navigator', {
@@ -638,6 +665,109 @@ await test('stopping clears state so the next session starts clean', async () =>
 });
 
 console.warn = realWarn;
+// --- muting the recording without muting detection ---------------------------
+//
+// The whole point of the mute button is that it is NOT a pause: the microphone
+// stays open, the analysis loop keeps getting audio, and tunes keep being
+// recognised — only what reaches the recorder is silenced. Every test here
+// exists to hold that line, because the obvious implementations (stopping the
+// track, disabling the capture track itself) all break detection silently.
+
+console.log('\nmic.js — the muteable recording branch');
+
+await test('the recorder gets a CLONE, not the capture stream itself', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    assert.notEqual(mic.recordingStream, mic.micStream);
+    assert.equal(mic.recordingMuteSupported, true);
+    await mic.stopContinuous();
+});
+
+await test('muting silences the recording branch ONLY', async () => {
+    // The failure this forbids: disabling the capture track, which silences
+    // the ScriptProcessor too and stops tune detection dead — while the UI
+    // still says "Listening".
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    const captureTrack = mic.micStream.getAudioTracks()[0];
+    const recordTrack = mic.recordingStream.getAudioTracks()[0];
+
+    mic.setRecordingMuted(true);
+    assert.equal(recordTrack.enabled, false, 'the recording branch is silenced');
+    assert.equal(captureTrack.enabled, true, 'capture is untouched, so detection continues');
+    await mic.stopContinuous();
+});
+
+await test('detection keeps receiving audio while muted', async () => {
+    // Directly: the analysis path is fed by the AudioContext, and muting must
+    // not interrupt a single buffer of it.
+    const { mic, backend } = await loadMic();
+    await mic.startRecording();
+    const before = backend.calls.filter(c => c[0] === 'feedSinglePCMWindow').length;
+    mic.setRecordingMuted(true);
+    env.contexts[env.contexts.length - 1].deliver(4);
+    const fed = backend.calls.filter(c => c[0] === 'feedSinglePCMWindow');
+    assert.equal(fed.length - before, 4, 'every buffer still reached the backend');
+    // And carrying real audio, not silence — the sample value is what
+    // distinguishes "detection continued" from "detection was silenced too".
+    assert.ok(fed.slice(before).every(c => c[2] !== 0),
+        'the analysis path is still hearing the room');
+    await mic.stopRecording();
+});
+
+await test('unmuting restores the recording branch', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    const recordTrack = mic.recordingStream.getAudioTracks()[0];
+    mic.setRecordingMuted(true);
+    mic.setRecordingMuted(false);
+    assert.equal(recordTrack.enabled, true);
+    assert.equal(mic.recordingMuted, false);
+    await mic.stopContinuous();
+});
+
+await test('a microphone reacquired while muted comes back MUTED', async () => {
+    // The one failure here that cannot be undone. If a recovery silently
+    // un-mutes, the app records a conversation the user believes is private,
+    // and they have no way to know it happened.
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    mic.setRecordingMuted(true);
+
+    env.streams[env.streams.length - 1].track.endFromOs();
+    await mic.ensureMicHealthy();
+
+    assert.equal(mic.recordingMuted, true, 'the mute survived the rebuild');
+    assert.equal(mic.recordingStream.getAudioTracks()[0].enabled, false);
+    await mic.stopContinuous();
+});
+
+await test('the clone is stopped on teardown', async () => {
+    // The clone holds its own reference to the microphone, so leaving it
+    // running keeps the OS recording indicator lit after the session stops.
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    const recordTrack = mic.recordingStream.getAudioTracks()[0];
+    await mic.stopContinuous();
+    assert.equal(recordTrack.readyState, 'ended');
+});
+
+await test('a browser that cannot clone loses the CONTROL, not the recording', async () => {
+    const { mic } = await loadMic();
+    const saved = FakeTrack.prototype.clone;
+    delete FakeTrack.prototype.clone;
+    try {
+        await mic.startContinuous(10);
+        assert.equal(mic.recordingMuteSupported, false);
+        assert.equal(mic.setRecordingMuted(true), false, 'never claims to have muted');
+        assert.ok(mic.recordingStream, 'recording still has a stream to use');
+        assert.equal(mic.recordingStream, mic.micStream);
+    } finally {
+        FakeTrack.prototype.clone = saved;
+        await mic.stopContinuous();
+    }
+});
+
 await rm(tmpDir, { recursive: true, force: true });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

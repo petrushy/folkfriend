@@ -88,6 +88,69 @@ class SessionRecorder {
 
         this.bytes = 0;
         this._writeChain = Promise.resolve();
+
+        // Stretches of the recording the user silenced, in audio-clock
+        // seconds. The last entry has `to: null` while a mute is still open.
+        // Stored so the player can show them: seeking to a tune and getting
+        // silence with no explanation is indistinguishable from a bug.
+        this.mutedRanges = [];
+    }
+
+    // ---- mute --------------------------------------------------------------
+    //
+    // Silences what is RECORDED while leaving capture — and therefore tune
+    // detection — running. See micService's recording branch for how.
+
+    get muteSupported() { return micService.recordingMuteSupported; }
+
+    get muted() { return micService.recordingMuted; }
+
+    // Audio-clock seconds spent muted so far, so the UI can show how long a
+    // mute has been running. A mute the user forgot about is the failure mode
+    // of a manual control, and the only defence is making it visible.
+    get mutedSeconds() {
+        const now = this.audioSeconds || 0;
+        return this.mutedRanges.reduce(
+            (total, range) => total + (Math.min(range.to ?? now, now) - range.from), 0);
+    }
+
+    // Returns the state actually reached: false on a browser that cannot clone
+    // the capture track, where the control is unavailable and the caller must
+    // say so rather than appear to have muted.
+    setMuted(muted) {
+        if (!this.sessionId || !this.muteSupported) return false;
+        const applied = micService.setRecordingMuted(muted);
+        this._markMuteRange(applied);
+        this._emit();
+        return applied;
+    }
+
+    _markMuteRange(muted) {
+        const at = this.audioSeconds || 0;
+        const open = this.mutedRanges[this.mutedRanges.length - 1];
+        if (muted) {
+            if (open && open.to === null) return;   // already open
+            this.mutedRanges.push({ from: at, to: null });
+        } else if (open && open.to === null) {
+            open.to = Math.max(at, open.from);
+        }
+        this._persistMuteRanges();
+    }
+
+    // Closes a mute that is still open, at the end of the recorded audio.
+    // Without this a session finished while muted stores an open-ended range,
+    // and the player would grey out everything after it for ever.
+    _closeOpenMuteRange() {
+        const open = this.mutedRanges[this.mutedRanges.length - 1];
+        if (!open || open.to !== null) return;
+        open.to = Math.max(this._chunkCursorSeconds, open.from);
+        this._persistMuteRanges();
+    }
+
+    _persistMuteRanges() {
+        if (!this.sessionId) return;
+        patchManifest(this.sessionId, { mutedRanges: this.mutedRanges.map(r => ({ ...r })) })
+            .catch(e => console.warn('Could not record muted ranges:', e && e.message));
     }
 
     // Whether this browser can record at all. Null mime means no MediaRecorder;
@@ -116,6 +179,9 @@ class SessionRecorder {
             bytes: this.bytes,
             stoppedReason: this.stoppedReason,
             error: this.error,
+            muted: this.muted,
+            muteSupported: this.muteSupported,
+            mutedSeconds: this.mutedSeconds,
         });
     }
 
@@ -147,6 +213,12 @@ class SessionRecorder {
         this._trackIndex = 0;
         this._segmentIndex = 0;
         this.bytes = 0;
+        this.mutedRanges = [];
+        // A NEW session starts recording. Carrying a mute over from the
+        // previous one would silently lose an evening's audio to a button
+        // pressed hours earlier — and unlike the resume case below, nothing on
+        // screen would connect the two.
+        micService.setRecordingMuted(false);
         this._resetPending();
 
         // Refuse before spending anything if there is no room. Starting and
@@ -213,7 +285,19 @@ class SessionRecorder {
         this._trackIndex = manifest.tracks.reduce((max, t) => Math.max(max, t.index + 1), 0);
         this._segmentIndex = manifest.segments.reduce((max, s) => Math.max(max, s.index + 1), 0);
         this.bytes = manifest.bytes || 0;
+        this.mutedRanges = Array.isArray(manifest.mutedRanges)
+            ? manifest.mutedRanges.map(r => ({ ...r }))
+            : [];
         this._resetPending();
+
+        // A session that was muted when the app was closed comes back MUTED.
+        // The two errors are not symmetric: resuming un-muted records a
+        // conversation the user believes is private and cannot be undone,
+        // while resuming muted loses audio the user can see is being lost —
+        // the bar says so, with the elapsed muted time.
+        const open = this.mutedRanges[this.mutedRanges.length - 1];
+        micService.setRecordingMuted(!!(open && open.to === null));
+
         this._emit();
         return true;
     }
@@ -229,12 +313,15 @@ class SessionRecorder {
     async end() {
         if (!this.sessionId) return;
         await this._stopTrack();
+        this._closeOpenMuteRange();
         await this._writeChain.catch(() => {});
         this.sessionId = null;
         this.mimeType = null;
         this.stoppedReason = null;
         this.error = '';
         this.bytes = 0;
+        this.mutedRanges = [];
+        micService.setRecordingMuted(false);
         this._emit();
     }
 
@@ -258,7 +345,7 @@ class SessionRecorder {
         if (!this.sessionId || this.stoppedReason) return Promise.resolve(false);
         if (this._transition) return this._transition;
 
-        const stream = micService.stream;
+        const stream = micService.recordingStream;
         if (!stream) return Promise.resolve(false);
 
         const healthy = this._recorder &&

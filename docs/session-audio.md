@@ -167,13 +167,142 @@ playing for at least a window by then; seeking to the bare offset reliably lands
 past the opening phrase, which reads as a bug even though the detector is
 working exactly as designed.
 
+## Muting: recording without recording the conversation
+
+Three hours in a pub is not three hours of tunes. Between sets there are
+conversations that nobody agreed to have recorded, and the useful control there
+is not "stop the session" — the user still wants the tunes that follow
+identified. So **Mute audio** silences what is RECORDED while leaving capture,
+and therefore detection, entirely alone.
+
+### The mechanism: a cloned track
+
+`MediaStreamTrack.clone()` produces a track that shares the microphone but
+carries **its own `enabled` flag**, and a disabled audio track emits silence by
+spec. So `mic.js` opens a second, cloned stream next to the capture one:
+
+```text
+getUserMedia ─┬─ original track → AudioContext → ScriptProcessor → detection
+              └─ clone          → MediaStream  → MediaRecorder    → recording
+                                   ▲ enabled = false silences ONLY this branch
+```
+
+The obvious implementations are all wrong in the same way: disabling the capture
+track, stopping it, or pausing the microphone silences the ScriptProcessor too,
+so the tune list quietly stops growing while the app still says "Listening".
+`mic.test.mjs` asserts on the two tracks *separately*, and its fake models a
+disabled track as emitting silence — without that the fake happily delivers
+audio through a muted capture and the test passes against exactly that bug.
+
+A `GainNode` between the source and a `MediaStreamAudioDestinationNode` would
+also work and would allow a delay line (useful for an automatic music/speech
+gate, which this is not). It was not used: recording from a destination node is
+a different, historically flaky path through WebKit, and a manual control needs
+no lookbehind because the user decides in advance.
+
+### Silence is recorded, not skipped
+
+Muting does **not** stop the recorder. Skipping the audio would compress the
+timeline, and every tune offset after a mute would point at the wrong moment;
+recording silence keeps the recording 1:1 with the evening, and compressed
+silence costs almost nothing. The audio clock runs straight through.
+
+Muted stretches are written to the manifest as `mutedRanges`, and the player
+hatches them on the timeline strip. Seeking to a tune and getting silence with
+no explanation is indistinguishable from a bug, and tunes detected during a mute
+are still listed — detection never stopped.
+
+### Rules that are not obvious
+
+- **A mute survives a microphone rebuild and a reload.** A recovery that
+  silently un-muted would record something the user believes is private, and
+  they would never find out; that is the one unrecoverable failure this control
+  can produce. A *new* session starts unmuted, though — a resumed session has
+  the muted counter on screen, while a new one has nothing connecting it to a
+  button pressed hours ago.
+- **An open range is closed when the session ends**, or the player would grey
+  out everything after it for ever.
+- **The elapsed muted time is on screen.** A mute the user forgot is how a
+  manual control loses an evening, and a running counter is the only defence.
+- **A browser that cannot clone loses the CONTROL, not the recording.**
+  `setMuted()` returns the state actually reached, and the bar hides the button
+  rather than offering one that silently does nothing.
+
+### What this is not
+
+It is not a privacy guarantee, and the UI does not claim one. Talking over the
+tunes is recorded, because there is no separating them. Automatic music/speech
+detection was considered and deliberately not built: the literature's ~98% is on
+broadcast radio, a pub is far worse, and the two error directions trade the
+user's recording against their privacy with no setting that satisfies both. A
+manual control has perfect precision when used, and the honest framing is that
+it covers the conversation you *notice* wanting to keep.
+
+## The mute button
+
+An automatic music/speech classifier was considered and rejected for now: the
+error rate in a pub is real in both directions, and the two errors are not
+symmetric — muting real music costs the user the recording they asked for. A
+**manual mute** has none of that risk and perfect precision when used.
+
+The mechanism is `MediaStreamTrack.clone()`. A cloned track shares the
+microphone but carries its **own `enabled` flag**, and a disabled audio track
+emits silence by spec. So `mic.js` records from a clone and the analysis graph
+reads the original:
+
+```text
+getUserMedia track ─┬─ original → AudioContext → ScriptProcessor → detection
+                    └─ clone    → MediaStream  → MediaRecorder    (enabled=false to mute)
+```
+
+**Detection carries on through a mute.** That is the whole point: the user is
+silencing the recording of a conversation, not asking the app to stop
+identifying tunes. Muting the capture track instead would stop the tune list
+dead.
+
+This was chosen over the two obvious alternatives:
+
+- **A `GainNode` into a `MediaStreamAudioDestinationNode`** would work, and
+  would also allow a delay line for a future classifier — but it routes the
+  recorded audio through the Web Audio graph, which is a different and
+  historically flakier path through WebKit. Cloning needs no graph at all.
+- **Stopping the recorder** removes the audio rather than silencing it, which
+  compresses the timeline. Keeping the recorder running means the audio clock
+  is unaffected and every tune offset after a mute still points at the right
+  moment. Silence also costs almost nothing to encode.
+
+Four rules, each mutation-verified:
+
+1. **The recording keeps running while muted.** The timeline stays 1:1 with the
+   evening.
+2. **A microphone reacquired while muted comes back MUTED**, and so does a
+   session resumed after a reload while a muted range was still open. The two
+   errors are not symmetric: silently un-muting records something the user
+   believes is private and cannot be undone, while staying muted loses audio
+   the user can see is being lost — the bar shows the muted state and a running
+   counter.
+3. **A NEW session starts recording**, whatever the last one was doing. Not a
+   contradiction of (2): a resumed session is visibly the same one, with the
+   counter on screen, whereas a new session has nothing connecting it to a
+   button pressed hours earlier.
+4. **Mute reports failure rather than pretending.** On a browser with no
+   `MediaStreamTrack.clone()` the control is not offered, and `recordingMuted`
+   reads false — a bar claiming the room is not being recorded while it is
+   would be the worst thing this control could do.
+
+Muted stretches are stored in the manifest as `mutedRanges` and drawn as hatched
+bands on the player's timeline, because seeking to a tune and getting
+unexplained silence is indistinguishable from a bug. An open range is closed at
+`end()`, or it would grey out everything after it for ever.
+
 ## Privacy
 
 Three hours of a pub records the conversations of everyone in it.
 
 - Off by default, and a **REC chip in the session bar** wherever the user
   navigates — the bar exists precisely because a session outlives the page that
-  started it.
+  started it. The chip shows the MUTED state too, with the elapsed muted time:
+  that is the claim the user most needs to be able to check at a glance.
 - **Local-only.** Nothing here is synced. `sync.js` never sees it, and the
   session record carries no "has audio" flag — on another device that would be a
   lie.
@@ -188,6 +317,8 @@ Three hours of a pub records the conversations of everyone in it.
   detection. Settings says so. This is pre-existing for live sessions; the
   feature makes it acute.
 - Turning the setting on mid-session takes effect at the next Resume.
+- Muting is manual. There is no automatic gate on music vs speech — see above
+  for why that was rejected rather than deferred.
 - Whole-session export is one file per track. Remuxing several tracks into one
   file would need a muxer this repo does not have.
 - **Not yet measured on a real device**: which container iOS records, whether
