@@ -1237,6 +1237,48 @@ those passes against the bug), un-muting on a pipeline rebuild fails 1, letting
 a double tap open a second range fails 1, and restoring a CLOSED range as muted
 fails 1.
 
+**Six defects found in review, each of which looked right and did nothing
+visible.** They are worth listing because five of the six share a shape — a
+guard that reads the wrong half of a two-part state:
+
+1. **The recording setting was read once, at start.** A paused recorder still
+   holds its session, so `isActive` stays true; turning the setting off and
+   resuming skipped `resume()` while the analysis loop restarted the recorder
+   anyway — recording after an explicit opt-out. `_syncRecorderToSetting()` now
+   runs every cycle and reconciles in BOTH directions, so the toggle also takes
+   effect mid-session without a Pause (Settings is a different route, and the
+   session keeps running while the user is on it).
+2. **Playback guessed when it did not know.** Detections are stamped
+   immediately; segments are written every 180 s. `_segmentFor` fell back to the
+   *last stored* segment, so a tune from the pending segment played unrelated
+   audio from minutes earlier — indistinguishable from a working button, and
+   permanent after a crash or a refused quota write. It now returns null unless
+   a segment genuinely covers the moment, and the view gates the ▶ on
+   `audioCoveredSeconds` so the button appears when the audio lands.
+3. **`savedTunes()` dropped the audio offsets.** Editing a stored session
+   re-serialises every row, so a field it forgets is gone — and then synced, to
+   devices where the recording never existed to re-derive it from. Nothing on
+   screen showed the loss until every ▶ and every timeline block had vanished.
+4. **Only LOCAL deletes reclaimed audio.** A session deleted on another device
+   arrives through `_mergeRemoteRecords`, never `deleteLiveSession()`, so its
+   recording stayed on the device that made it indefinitely — contradicting the
+   delete-with-session promise, and leaving three hours of a room on disk.
+   `_reclaimOrphanSessionAudio()` runs after the merge and explicitly protects
+   the OPEN session, whose manifest exists moments before its record does.
+5. **The manifest kept the REQUESTED container.** `_startTrack` adopted what the
+   encoder actually reported but never wrote it down, so a fallback to the
+   browser's own container wrote WebM bytes that the export named `.m4a` and the
+   player handed to a decoder as MP4 — presenting as corrupt audio rather than a
+   mislabelled file.
+6. **A storage stop could not be retried by an ordinary Pause/Resume.** The
+   reset sat *after* `resume()`'s "already ours" early return, so only a reload
+   cleared it. Only `'storage'` is cleared — `'encoder'` and `'unsupported'`
+   describe the browser, not something the user can change between two taps.
+
+The test that would have caught (5) needed the fake to report a container
+different from the one requested; echoing the request back passes against the
+bug. Same lesson as the mute fake and the disabled-track silence.
+
 ⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
 test is for: which container iOS actually records, whether `[init, ...midChunks]`
 plays standalone and seeks there, and whether an 86 MB `navigator.share` is

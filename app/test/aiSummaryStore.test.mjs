@@ -113,6 +113,11 @@ async function loadStore({ storedSettings = null } = {}) {
 // covered against the real store in sessionAudio.test.mjs; here it only has to
 // resolve.
 export async function deleteSessionAudio() {}
+export const __reclaimCalls = [];
+export async function reclaimAudioForMissingSessions(ids) {
+    __reclaimCalls.push([...(ids || [])]);
+    return 0;
+}
 `);
     }
     await writeFile(

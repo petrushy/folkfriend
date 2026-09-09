@@ -278,12 +278,7 @@ class LiveAnalysisService {
         // stream, and never awaited for anything the session depends on:
         // recording is the expendable half. A browser that cannot encode, or a
         // disk with no room, must still let the user log their tunes.
-        if (store.userSettings.recordSessionAudio) {
-            await sessionRecorder.resume(this.sessionId, {
-                bitrateKbps: store.userSettings.sessionAudioBitrateKbps,
-            }).catch(e => console.warn('Could not start session recording:', e && e.message));
-            sessionRecorder.ensureRecording();
-        }
+        await this._syncRecorderToSetting();
 
         this._startTimer();
 
@@ -660,9 +655,12 @@ class LiveAnalysisService {
             // Checked every cycle for the same reason the microphone is: a
             // recovery replaces the MediaStream, and a MediaRecorder left
             // attached to the old one stays in state 'recording' while
-            // producing nothing at all. Not awaited — a slow encoder start must
+            // producing nothing at all. It also re-reads the SETTING, because
+            // Settings is a different route and the session keeps running
+            // while the user is on it — so the toggle has to take effect
+            // without needing a Pause. Not awaited: a slow encoder start must
             // not delay detection.
-            if (healthy && sessionRecorder.isActive) sessionRecorder.ensureRecording();
+            if (healthy) this._syncRecorderToSetting();
 
             // A capture that could not be reacquired leaves the ring buffer
             // frozen on the last seconds it managed to record. Analysing those
@@ -754,6 +752,41 @@ class LiveAnalysisService {
             const remainingMs = Math.max(0, options.stepSeconds * 1000 - analysisMs);
             await this._sleepCancellable(remainingMs);
         }
+    }
+
+    // Brings the recorder into line with `recordSessionAudio`, in both
+    // directions.
+    //
+    // The setting cannot be read once at start(). Turning it OFF has to stop a
+    // recording that is already running — a paused recorder still holds its
+    // session, so a guard of "is the recorder active" happily restarted it
+    // after an explicit opt-out, which is the one thing this setting exists to
+    // prevent. Turning it ON mid-session has to start one, for the same reason
+    // in reverse: the user changed it while the session was listening, and
+    // nothing else is going to notice.
+    //
+    // Never throws and never blocks the caller: audio is the expendable half.
+    _syncRecorderToSetting() {
+        if (!this.sessionId) return Promise.resolve();
+        const wanted = !!store.userSettings.recordSessionAudio;
+
+        if (!wanted) {
+            // end() rather than stop(): stop() is a Pause, and leaves the
+            // session open for the loop to pick straight back up.
+            if (!sessionRecorder.isActive) return Promise.resolve();
+            return sessionRecorder.end()
+                .catch(e => console.warn('Could not stop session recording:', e && e.message));
+        }
+
+        if (sessionRecorder.isActive) {
+            sessionRecorder.ensureRecording();
+            return Promise.resolve();
+        }
+        return sessionRecorder.resume(this.sessionId, {
+            bitrateKbps: store.userSettings.sessionAudioBitrateKbps,
+        })
+            .then(() => { sessionRecorder.ensureRecording(); })
+            .catch(e => console.warn('Could not start session recording:', e && e.message));
     }
 
     // Logs "this tune was heard here" when the recognised tune changes.

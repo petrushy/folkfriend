@@ -481,6 +481,40 @@ async function run() {
         assert.equal(sessions[0].tunes[0].title, 'The Kesh');
     });
 
+    await test('a session deleted on another device takes its recording with it', async () => {
+        // Audio cleanup lived only in deleteLiveSession(). A remote removal
+        // arrives through _mergeRemoteRecords instead, so the recording — the
+        // largest thing this app stores, and three hours of a room full of
+        // people — stayed on the device that made it, indefinitely, with the
+        // session it belonged to already gone.
+        const { store, sync, audio } = await signedInStore();
+        await applyRemote(sync, 'liveSessions', [
+            { id: 'keep', startedAt: 5000, tunes: [] },
+            { id: 'goes', startedAt: 6000, tunes: [] },
+        ], []);
+        audio.__reclaimCalls.length = 0;
+
+        await applyRemote(sync, 'liveSessions', [], ['goes']);
+
+        assert.equal(audio.__reclaimCalls.length, 1, 'the sweep ran after the merge');
+        const alive = audio.__reclaimCalls[0];
+        assert.ok(alive.includes('keep'));
+        assert.ok(!alive.includes('goes'), 'the deleted session is not protected');
+    });
+
+    await test('the sweep never touches the session being recorded right now', async () => {
+        // A session's audio manifest is created moments BEFORE its record is
+        // written, so a remote merge landing in that window would otherwise
+        // delete the recording of the session currently running.
+        const { store, sync, audio } = await signedInStore();
+        await store.setOpenLiveSession({ sessionId: 'in-progress', startedAt: 1 });
+        audio.__reclaimCalls.length = 0;
+
+        await applyRemote(sync, 'liveSessions', [], ['whatever']);
+
+        assert.ok(audio.__reclaimCalls[0].includes('in-progress'));
+    });
+
     console.log('\nstore.js — overlapping writes to one collection');
 
     await test('two saves at the same moment do not lose one', async () => {
@@ -576,13 +610,20 @@ async function loadStore() {
     await writeSharedFakes();
     for (const [name, source] of Object.entries(STORE_FAKES)) {
         await writeFile(path.join(tmpDir, name), source);
-    await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), `
-// store.js deletes a session's recording alongside the record. That path is
-// covered against the real store in sessionAudio.test.mjs; here it only has to
-// resolve.
-export async function deleteSessionAudio() {}
-`);
     }
+    // store.js deletes a session's recording alongside the record, and sweeps
+    // audio for sessions a remote merge removed. Both are covered against the
+    // real store in sessionAudio.test.mjs; here the calls are recorded so the
+    // sync path can assert that the sweep actually runs.
+    await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), `
+export const __deleted = [];
+export const __reclaimCalls = [];
+export async function deleteSessionAudio(id) { __deleted.push(id); }
+export async function reclaimAudioForMissingSessions(ids) {
+    __reclaimCalls.push([...(ids || [])]);
+    return 0;
+}
+`);
     for (const name of ['schema.js', 'places.mjs']) {
         await writeFile(
             path.join(tmpDir, name.replace('.js', '.mjs')),
@@ -617,15 +658,19 @@ export async function deleteSessionAudio() {}
     sync.__reset();
     sync.__subs.length = 0;
 
+    const audio = await import(path.join(tmpDir, 'fake-audio-store.mjs'));
+    audio.__reclaimCalls.length = 0;
+    audio.__deleted.length = 0;
+
     const mod = await import(`${path.join(tmpDir, 'store.mjs')}?v=${Math.random()}`);
-    return { store: mod.default, sync, idb };
+    return { store: mod.default, sync, idb, audio };
 }
 
 async function signedInStore() {
-    const { store, sync, idb } = await loadStore();
+    const { store, sync, idb, audio } = await loadStore();
     await store.onSignedIn({ uid: 'u1' });
     sync.__reset();
-    return { store, sync, idb };
+    return { store, sync, idb, audio };
 }
 
 // Drives the handler the store registered for one collection, as a snapshot

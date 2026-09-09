@@ -131,6 +131,11 @@ async function loadStore() {
 // covered against the real store in sessionAudio.test.mjs; here it only has to
 // resolve.
 export async function deleteSessionAudio() {}
+export const __reclaimCalls = [];
+export async function reclaimAudioForMissingSessions(ids) {
+    __reclaimCalls.push([...(ids || [])]);
+    return 0;
+}
 `);
     }
     for (const name of ['schema.js', 'places.mjs']) {
@@ -228,7 +233,7 @@ export function __setDelays(ds) { __delays = ds.slice(); }
 // Makes the next N writes reject, for the save-failure paths.
 export let __failUpserts = 0;
 export function __failNextUpserts(n) { __failUpserts = n; }
-export const userSettings = { geoTagDetections: false };
+export const userSettings = { geoTagDetections: false, recordSessionAudio: false, sessionAudioBitrateKbps: 64 };
 export default {
     userSettings,
     async addSighting() {},
@@ -261,6 +266,7 @@ export function __reset() {
     __failUpserts = 0;
     __openSession = null;
     userSettings.geoTagDetections = false;
+    userSettings.recordSessionAudio = false;
 }
 `;
 const FAKE_EVENTBUS = `
@@ -272,16 +278,24 @@ const FAKE_RECORDER = `
 // tests cover, and the real recorder needs a MediaRecorder node does not have.
 // sessionAudio.test.mjs drives the real one.
 export const __calls = [];
-export function __reset() { __calls.length = 0; }
-export default {
+export function __reset() { __calls.length = 0; recorder.isActive = false; recorder.isRecording = false; }
+const recorder = {
     isRecording: false, isActive: false, audioSeconds: null,
-    async begin() { __calls.push('begin'); return false; },
-    async resume() { __calls.push('resume'); return false; },
-    async stop() { __calls.push('stop'); },
-    async end() { __calls.push('end'); },
-    async discard(id) { __calls.push(['discard', id]); },
-    ensureRecording() { return Promise.resolve(false); },
-};`;
+    // A resume/begin makes the recorder ACTIVE, which is what the "carries on
+    // recording after an opt-out" case turns on: a paused recorder still holds
+    // its session, so anything guarding on isActive alone restarts it.
+    async begin() { __calls.push('begin'); recorder.isActive = true; return true; },
+    async resume() { __calls.push('resume'); recorder.isActive = true; return true; },
+    async stop() { __calls.push('stop'); recorder.isRecording = false; },
+    async end() { __calls.push('end'); recorder.isActive = false; recorder.isRecording = false; },
+    async discard(id) { __calls.push(['discard', id]); recorder.isActive = false; },
+    ensureRecording() {
+        __calls.push('ensureRecording');
+        if (recorder.isActive) recorder.isRecording = true;
+        return Promise.resolve(recorder.isActive);
+    },
+};
+export default recorder;`;
 
 async function loadService({ keepStore = false } = {}) {
     await mkdir(serviceTmpDir, { recursive: true });
@@ -329,7 +343,9 @@ async function loadService({ keepStore = false } = {}) {
     const mod = await import(`${path.join(serviceTmpDir, 'liveAnalysis.mjs')}?v=${Math.random()}`);
     const service = mod.default;
 
-    return { service, store, geo, bus, mic, backend };
+    const recorder = await import(path.join(serviceTmpDir, 'fake-recorder.mjs'));
+    recorder.__reset();
+    return { service, store, geo, bus, mic, backend, recorder };
 }
 
 // One window match, as _runLoop would push it.
@@ -1175,6 +1191,51 @@ async function run() {
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);
+    console.log('\nsession audio follows the setting, in both directions');
+
+    await test('turning recording OFF stops a recorder that is already going', async () => {
+        // The bug: a paused recorder still holds its session, so isActive stays
+        // true. Resuming with the setting off skipped resume(), but the analysis
+        // loop restarted the recorder anyway — recording after an explicit
+        // opt-out, which is the one thing this setting exists to prevent.
+        const { service, store, recorder } = await loadService();
+        store.userSettings.recordSessionAudio = true;
+        await service.start(10, 5);
+        await service._syncRecorderToSetting();
+        assert.equal(recorder.default.isActive, true);
+
+        store.userSettings.recordSessionAudio = false;
+        await service._syncRecorderToSetting();
+        assert.equal(recorder.default.isActive, false, 'ended, not merely skipped');
+        assert.ok(recorder.__calls.includes('end'));
+        await service.finish();
+    });
+
+    await test('turning recording ON mid-session starts it without a Pause', async () => {
+        // Settings is a different route and the session keeps running while the
+        // user is on it, so the toggle has to take effect on its own.
+        const { service, store, recorder } = await loadService();
+        store.userSettings.recordSessionAudio = false;
+        await service.start(10, 5);
+        await service._syncRecorderToSetting();
+        assert.equal(recorder.default.isActive, false);
+
+        store.userSettings.recordSessionAudio = true;
+        await service._syncRecorderToSetting();
+        assert.equal(recorder.default.isActive, true);
+        await service.finish();
+    });
+
+    await test('an opted-out session never opens a recorder at all', async () => {
+        const { service, store, recorder } = await loadService();
+        store.userSettings.recordSessionAudio = false;
+        await service.start(10, 5);
+        await service._syncRecorderToSetting();
+        assert.ok(!recorder.__calls.includes('resume'));
+        assert.ok(!recorder.__calls.includes('begin'));
+        await service.finish();
+    });
+
     await rm(storeTmpDir, { recursive: true, force: true });
     await rm(serviceTmpDir, { recursive: true, force: true });
     await rm(sessionAnalysisTmpDir, { recursive: true, force: true });

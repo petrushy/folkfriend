@@ -274,7 +274,9 @@ async function writeFakes() {
     // Session audio is covered by sessionAudio.test.mjs against the real
     // store; here it only has to resolve, and report that nothing is recorded.
     await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), `
-export async function listManifests() { return []; }
+export let __manifests = [];
+export function __setManifests(m) { __manifests = m; }
+export async function listManifests() { return __manifests; }
 export async function reclaimOrphans() { return 0; }
 `);
 
@@ -356,7 +358,9 @@ async function mountView({
         }
     };
 
-    return { vm, component, settle, bus, live, file, store };
+    const audio = await import(path.join(tmpDir, 'fake-audio-store.mjs'));
+    audio.__setManifests([]);
+    return { vm, component, settle, bus, live, file, store, audio };
 }
 
 await writeFakes();
@@ -882,6 +886,88 @@ await test('a failed historical edit keeps the edited list for retry', async () 
     await vm.retrySessionEdit();
     assert.deepEqual(store.__liveSessions[0].tunes, []);
     assert.equal(vm.pendingSessionPatch, null);
+});
+
+await test('editing a stored session keeps its audio offsets', async () => {
+    // savedTunes() re-serialises the whole list, so a field it forgets is
+    // permanently dropped — and then synced, to devices where the recording
+    // never existed to re-derive it from. Nothing on screen shows the loss
+    // until every ▶ and every timeline block has quietly gone.
+    const { vm, settle, store } = await mountView();
+    await settle();
+    store.__liveSessions.push({ id: 'old', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'Kept', startSeconds: 0, endSeconds: 60,
+            audioStartSeconds: 12, audioEndSeconds: 70 },
+        { tuneId: 3, settingId: '30', title: 'Dropped', startSeconds: 60, endSeconds: 120,
+            audioStartSeconds: 72, audioEndSeconds: 130 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('old');
+
+    await vm.removeDetection(vm.activeDetections[1].id);
+
+    const kept = store.__liveSessions[0].tunes;
+    assert.equal(kept.length, 1);
+    assert.equal(kept[0].audioStartSeconds, 12, 'the surviving row keeps its offset');
+    assert.equal(kept[0].audioEndSeconds, 70);
+});
+
+await test('a stored tune with no recording stores nulls, not undefined', async () => {
+    const { vm, settle, store } = await mountView();
+    await settle();
+    store.__liveSessions.push({ id: 'old', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'A', startSeconds: 0, endSeconds: 60 },
+        { tuneId: 3, settingId: '30', title: 'B', startSeconds: 60, endSeconds: 120 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('old');
+    await vm.removeDetection(vm.activeDetections[1].id);
+
+    const kept = store.__liveSessions[0].tunes[0];
+    assert.equal(kept.audioStartSeconds, null);
+    assert.ok('audioEndSeconds' in kept);
+});
+
+await test('a tune whose audio is not written yet gets no play button', async () => {
+    // Segments land every few minutes, so a tune recognised just now is real
+    // and stamped but NOT on disk. Offering ▶ meant clamping to the end of the
+    // last stored segment and playing unrelated audio from minutes earlier,
+    // which looks exactly like a working button.
+    const { vm, settle, store, audio } = await mountView();
+    await settle();
+    audio.__setManifests([{
+        sessionId: 'old', bytes: 1, segments: [{ index: 0, startSeconds: 0, durationSeconds: 180 }],
+    }]);
+    store.__liveSessions.push({ id: 'old', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'Stored', startSeconds: 0, endSeconds: 60,
+            audioStartSeconds: 30, audioEndSeconds: 90 },
+        { tuneId: 3, settingId: '30', title: 'Pending', startSeconds: 190, endSeconds: 240,
+            audioStartSeconds: 200, audioEndSeconds: 250 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('old');
+    await vm.refreshAudioSessions();
+
+    assert.equal(vm.hasAudioFor(vm.activeDetections[0]), true, 'inside a stored segment');
+    assert.equal(vm.hasAudioFor(vm.activeDetections[1]), false, 'past everything on disk');
+});
+
+await test('no play button at all for a session with no recording here', async () => {
+    // Audio is never synced, so a session record from another device must not
+    // offer a ▶ over a recording this device does not have.
+    const { vm, settle, store, audio } = await mountView();
+    await settle();
+    audio.__setManifests([]);
+    store.__liveSessions.push({ id: 'remote', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'From the phone', startSeconds: 0, endSeconds: 60,
+            audioStartSeconds: 10, audioEndSeconds: 70 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('remote');
+    await vm.refreshAudioSessions();
+
+    assert.equal(vm.audioSessionId, '');
+    assert.equal(vm.hasAudioFor(vm.activeDetections[0]), false);
 });
 
 await rm(tmpDir, { recursive: true, force: true });
