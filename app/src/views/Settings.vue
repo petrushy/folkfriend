@@ -97,6 +97,12 @@
                 jump straight to any tune the app recognised, and export it to a player app.
                 A three-hour session is one file per continuous stretch of listening.
             </p>
+            <p>
+                <strong>Whether to record is chosen per session</strong>, on the
+                <router-link to="/session-analysis">Session Analysis</router-link> page —
+                it is the sort of thing that changes from one evening to the next. What is
+                here is the part that does not: quality, and what is already stored.
+            </p>
             <p class="caption text--secondary">
                 <strong>Keep the screen on.</strong> A web app stops running when the phone
                 locks, so recording — like detection — pauses with it. Leave the phone awake
@@ -116,17 +122,7 @@
             >
                 This browser cannot record audio, so this setting will have no effect here.
             </v-alert>
-            <v-row>
-                <v-switch
-                    v-model="userSettings.recordSessionAudio"
-                    inset
-                    label="Record session audio"
-                    class="my-0 pl-2"
-                    @change="settingsChanged"
-                />
-            </v-row>
             <v-row
-                v-if="userSettings.recordSessionAudio"
                 align="center"
                 class="pl-2 pr-4 mt-2"
             >

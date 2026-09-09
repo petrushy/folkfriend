@@ -1235,6 +1235,20 @@ connects it to a button pressed hours earlier); and **mute reports failure
 rather than pretending** on a browser that cannot clone. `mutedRanges` are drawn
 as hatched bands on the timeline, and an open range is closed at `end()`.
 
+**Whether to record is a PER-SESSION decision, so the switch is on the Session
+Analysis page, not in Settings** (moved after the first device test). Some
+evenings are ones to record and most are not, and Settings is a different route
+that a session keeps listening through — so the control has to reach the
+session already running, which is what `liveAnalysisService.syncAudioRecording()`
+does. It is on the start card too, since whether tonight is one to record is
+usually known walking in.
+
+`userSettings.recordSessionAudio` still stores it, as what the NEXT session
+starts as, so the usual answer is remembered. That carry-over is only safe
+because an inherited "on" is never invisible: the session bar shows a REC chip
+on every route for as long as it is recording. Settings keeps the parts that
+genuinely are permanent — quality, storage used, and deleting recordings.
+
 **Privacy is why several of these choices are not configurable.** Three hours of
 a pub records everyone in it. Off by default; a **REC chip in the session bar**
 on every route; **never synced** (and no `hasAudio` flag on the session record —

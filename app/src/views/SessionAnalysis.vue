@@ -46,6 +46,17 @@
                 {{ formatSessionDate(activeSession.startedAt) }} · {{ formatSecondsAsDuration(activeListenedSeconds) }} listened.
                 Changes are saved automatically.
             </p>
+            <v-switch
+                v-if="viewMode === 'live'"
+                :input-value="recordAudio"
+                :disabled="!audioRecordingAvailable"
+                inset
+                dense
+                hide-details
+                class="mt-0 mb-3"
+                :label="recordAudioLabel"
+                @change="setRecordAudio"
+            />
             <div class="d-flex flex-wrap" style="gap: 8px;">
                 <v-btn v-if="viewMode === 'history' && live.hasSession" text color="primary" @click="viewMode = 'live'">Current session</v-btn>
                 <v-menu offset-y>
@@ -234,6 +245,26 @@
         <!-- Live controls: only the ones that START a session. Everything for
              a session already open lives in the app-level session bar. -->
         <v-card v-if="viewMode === 'live' && !live.hasSession" class="pa-5 my-3">
+            <!-- Decided before starting, because whether tonight is one to
+                 record is the sort of thing you know walking in. -->
+            <v-switch
+                :input-value="recordAudio"
+                :disabled="!audioRecordingAvailable"
+                inset
+                dense
+                hide-details
+                class="mt-0 mb-4"
+                :label="recordAudioLabel"
+                @change="setRecordAudio"
+            />
+            <p v-if="!audioRecordingAvailable" class="caption text--secondary">
+                This browser cannot record audio.
+            </p>
+            <p v-else class="caption text--secondary mb-4">
+                Keeps the audio so you can play the evening back and jump to any tune.
+                It records the whole room, stays on this device, and is deleted with the
+                session. Quality and stored recordings are in Settings.
+            </p>
             <div class="d-flex flex-wrap align-center" style="gap: 12px;">
                 <v-btn
                     color="primary"
@@ -556,6 +587,7 @@ import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
 import LiveScoreFollow from '@/components/LiveScoreFollow.vue';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
+import sessionRecorder from '@/services/sessionRecorder.js';
 import { listManifests, reclaimOrphans } from '@/services/sessionAudioStore.js';
 import { clearLastShown } from '@/js/liveScoreFollow.mjs';
 import {
@@ -704,6 +736,28 @@ export default {
         },
         activeListenedSeconds() {
             return this.activeSession ? this.listenedSeconds(this.activeSession) : 0;
+        },
+        // Whether the audio of this session is being kept. Lives here rather
+        // than in Settings because it is a per-SESSION decision — some evenings
+        // you want the recording and most you do not — and it takes effect on
+        // the session that is already running.
+        //
+        // The stored setting is what the NEXT session starts as, so the usual
+        // answer is remembered. That is safe to carry over only because an
+        // inherited "on" is never invisible: the session bar shows a REC chip
+        // on every route for as long as it is recording.
+        recordAudio() {
+            return !!store.userSettings.recordSessionAudio;
+        },
+        audioRecordingAvailable() {
+            return sessionRecorder.available;
+        },
+        recordAudioLabel() {
+            if (!this.audioRecordingAvailable) return 'Record this session\'s audio (unavailable)';
+            if (!this.recordAudio) return 'Record this session\'s audio';
+            return this.live.hasSession
+                ? 'Recording this session\'s audio'
+                : 'Record this session\'s audio';
         },
         // Empty unless this session actually has a recording on THIS device.
         // Audio is never synced, so a session record that arrived from another
@@ -1479,6 +1533,20 @@ export default {
         // just now is real, stamped and NOT yet playable — and a button that
         // silently plays audio from minutes earlier is worse than no button.
         // It appears on its own once the segment lands.
+        // Applies to the session that is running, not just to the next one.
+        // Settings is a different route and a session keeps listening while the
+        // user is on it, which is exactly why this control belongs here.
+        async setRecordAudio(value) {
+            store.userSettings.recordSessionAudio = !!value;
+            store.updateUserSettings(store.userSettings);
+            try {
+                await liveAnalysisService.syncAudioRecording();
+            } catch (e) {
+                this.workspaceError = `Could not change audio recording: ${e.message}`;
+            }
+            this.refreshAudioSessions();
+        },
+
         hasAudioFor(detection) {
             if (!this.audioSessionId || typeof detection.audioStartSeconds !== 'number') return false;
             return this.audioRanges.some(range =>
