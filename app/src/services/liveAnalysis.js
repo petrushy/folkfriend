@@ -3,21 +3,14 @@ import ffBackend from './backend.js';
 import geoService from './geo.js';
 import store from './store.js';
 import sessionRecorder from './sessionRecorder.js';
-import { normaliseQueryResults, clusterDetections, filterShortPastDetections } from '@/js/sessionAnalysis.js';
+import {
+    normaliseQueryResults, clusterDetections, filterShortPastDetections,
+    // One rule for combining an optional offset, shared with the other merge
+    // path (mergeAdjacentDetections) so the two cannot drift.
+    minDefined, maxDefined,
+} from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import eventBus from '@/eventBus.js';
-
-function minDefined(a, b) {
-    if (typeof a !== 'number') return typeof b === 'number' ? b : null;
-    if (typeof b !== 'number') return a;
-    return Math.min(a, b);
-}
-
-function maxDefined(a, b) {
-    if (typeof a !== 'number') return typeof b === 'number' ? b : null;
-    if (typeof b !== 'number') return a;
-    return Math.max(a, b);
-}
 
 // Merge consecutive rows with the same tuneId into one row.
 // The displayed startSeconds advances to the most recent cluster so the

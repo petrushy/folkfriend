@@ -1199,9 +1199,10 @@ differs between containers and browsers. The player reads
 `base + (target - segmentStart)`, which is right under both. If a browser
 refuses to seek inside a segment at all, `SEGMENT_SECONDS` bounds the damage:
 the ▶ lands up to three minutes early rather than anywhere in three hours.
-`PLAY_PREROLL_SECONDS` (12 s) is separate and also required — a cluster's start
-is the moment the *first matching window ended*, so seeking to the bare offset
-reliably lands past the opening phrase.
+Where playback STARTS is a separate question, answered by the persisted
+`audioAnchorSeconds` rather than by any constant here — see the anchor section
+above. Only a session recorded before that existed falls back to a fixed offset,
+and that fallback is half the default window, not the old 12 s.
 
 **A manual mute silences the RECORDING without stopping detection.** The
 mechanism is `MediaStreamTrack.clone()`: a cloned track shares the microphone
@@ -1447,6 +1448,20 @@ Worth stating as rules rather than incidents:
     listed on `stoppedReason` in `sessionRecorder.js`: only `'unsupported'` is
     silent; `'storage'`, `'encoder'`, `'unreadable'`, `'manifest-unsupported'`
     and `'exists'` are all things the user needs told.
+
+19. **There are TWO merge paths and they must combine offsets the same way.**
+    `collapseConsecutiveSameTune` (liveAnalysis) did; `mergeAdjacentDetections`
+    (sessionAnalysis, active only when `mergeGapSeconds` is set) kept the first
+    cluster's values. Recording can be turned on BETWEEN two nearby clusters of
+    the same tune — the switch is on the session page for exactly that reason —
+    so the earlier cluster has no offsets and the later one has real ones, and
+    the merge threw the real ones away, hiding playback for a tune whose audio
+    was recorded. `minDefined`/`maxDefined` now live in `sessionAnalysis.js` and
+    both paths import them, so the rule cannot drift.
+
+    The tests missed it because their `CLUSTER_OPTIONS` has no
+    `mergeGapSeconds`, which disables that path entirely — **an options object
+    that quietly skips a code path is as good as no test of it.**
 
 **A test-harness bug surfaced by (16):** several writes are deliberately
 fire-and-forget (mute ranges, the stop marker, the format patch), and

@@ -260,6 +260,22 @@ function mergeAlternatives(...alternativeLists) {
     return Array.from(byTuneId.values()).sort((a, b) => b.score - a.score);
 }
 
+// Combining an optional number from two clusters. Exported because BOTH merge
+// paths need exactly this rule — this one and collapseConsecutiveSameTune in
+// liveAnalysis.js — and they must not drift: a merge that keeps only the first
+// cluster's value discards a real offset whenever the earlier cluster has none.
+export function minDefined(a, b) {
+    if (typeof a !== 'number') return typeof b === 'number' ? b : null;
+    if (typeof b !== 'number') return a;
+    return Math.min(a, b);
+}
+
+export function maxDefined(a, b) {
+    if (typeof a !== 'number') return typeof b === 'number' ? b : null;
+    if (typeof b !== 'number') return a;
+    return Math.max(a, b);
+}
+
 function mergeAdjacentDetections(detections, options) {
     if (!detections.length) return [];
 
@@ -278,6 +294,16 @@ function mergeAdjacentDetections(detections, options) {
         }
 
         previous.endSeconds = Math.max(previous.endSeconds, detection.endSeconds);
+        // Audio offsets are combined, not inherited from the first cluster.
+        //
+        // Recording can start BETWEEN two nearby clusters of the same tune —
+        // the switch is on the session page precisely so it can be turned on
+        // mid-session — leaving the earlier cluster with no offsets and the
+        // later one with real ones. Keeping the first's values threw the real
+        // ones away and hid playback for a tune whose audio was recorded.
+        previous.audioStartSeconds = minDefined(previous.audioStartSeconds, detection.audioStartSeconds);
+        previous.audioAnchorSeconds = minDefined(previous.audioAnchorSeconds, detection.audioAnchorSeconds);
+        previous.audioEndSeconds = maxDefined(previous.audioEndSeconds, detection.audioEndSeconds);
         previous.hits += detection.hits;
         previous.bestScore = Math.max(previous.bestScore, detection.bestScore);
         previous.averageScore = (previous.averageScore + detection.averageScore) / 2;

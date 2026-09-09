@@ -1697,6 +1697,43 @@ await test('the anchor is never negative', async () => {
     assert.equal(detection.audioAnchorSeconds, 0);
 });
 
+await test('merging adjacent clusters keeps offsets from EITHER of them', async () => {
+    // Recording can start between two nearby clusters of the same tune — the
+    // switch is on the session page so it can be turned on mid-session — so the
+    // earlier cluster has no offsets and the later one has real ones. Keeping
+    // only the first cluster's values threw the real ones away and hid playback
+    // for a tune whose audio had been recorded.
+    //
+    // CLUSTER_OPTIONS deliberately has no mergeGapSeconds, so every other test
+    // here skips this path entirely. This one turns it on.
+    const merging = { ...CLUSTER_OPTIONS, mergeGapSeconds: 30 };
+    const detections = analysis.clusterDetections([
+        // Before recording started: no audioSeconds at all.
+        windowMatch(7, 10), windowMatch(7, 20),
+        // A short gap, then the same tune once recording is running.
+        windowMatch(7, 50, 200), windowMatch(7, 60, 210),
+    ], merging);
+
+    assert.equal(detections.length, 1, 'the two clusters merged');
+    const [detection] = detections;
+    assert.equal(detection.audioStartSeconds, 200, 'the offset that exists survives');
+    assert.equal(detection.audioEndSeconds, 220);
+    assert.equal(detection.audioAnchorSeconds, 195);
+});
+
+await test('merging takes the earliest start and the latest end', async () => {
+    const merging = { ...CLUSTER_OPTIONS, mergeGapSeconds: 30 };
+    const detections = analysis.clusterDetections([
+        windowMatch(7, 10, 100), windowMatch(7, 20, 110),
+        windowMatch(7, 50, 140), windowMatch(7, 60, 150),
+    ], merging);
+
+    assert.equal(detections.length, 1);
+    assert.equal(detections[0].audioStartSeconds, 100);
+    assert.equal(detections[0].audioAnchorSeconds, 95);
+    assert.equal(detections[0].audioEndSeconds, 160);
+});
+
 await test('a cluster with no recorded audio has no anchor', async () => {
     const [detection] = analysis.clusterDetections(
         [windowMatch(7, 10), windowMatch(7, 20)], CLUSTER_OPTIONS);
