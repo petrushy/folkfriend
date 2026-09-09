@@ -1345,6 +1345,20 @@ Worth stating as rules rather than incidents:
     ("never start behind what is stored"). Because the two are redundant, each
     is pinned by its own test: with both present, either can regress unnoticed.
 
+13. **A RECORDING IS NOT NECESSARILY CONTINUOUS**, which is what (12) made true
+    and the UI had not been told. Stepping the clock past a segment that could
+    not be stored leaves a real hole, and coverage was tracked as a single
+    "playable up to" figure — so a tune inside the hole got a ▶ that found no
+    segment and failed, and the timeline drew that stretch as recorded. Both
+    now work from actual segment RANGES (contiguous runs merged, with a 0.25 s
+    tolerance because segment ends are wall-clock measurements that meet within
+    microseconds rather than exactly), and the strip draws the gaps.
+
+    > This is the shape the whole review found five times over: **a fix adds a
+    > new reader of existing state and inherits an assumption that was only
+    > true for the old one.** Here the assumption — "coverage is one contiguous
+    > run from zero" — was true right up until the previous fix made it false.
+
 ⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
 test is for: which container iOS actually records, whether `[init, ...midChunks]`
 plays standalone and seeks there, and whether an 86 MB `navigator.share` is

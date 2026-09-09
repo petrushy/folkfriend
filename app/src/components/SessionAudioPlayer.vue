@@ -23,6 +23,16 @@
                 :style="block.style"
                 :title="block.title"
             />
+            <!-- Stretches with no audio at all: a segment that could not be
+                 stored. Detection carried on through them, so tunes are listed
+                 there and the strip has to say why they cannot be played. -->
+            <div
+                v-for="(block, index) in gapBlocks"
+                :key="`gap-${index}`"
+                class="audioStripGap"
+                :style="block"
+                title="Not recorded — storage was full"
+            />
             <!-- Drawn OVER the tune blocks: a muted stretch still has tunes
                  detected in it (detection never stops), so the two overlap and
                  the mute is the fact that needs to win visually. -->
@@ -48,6 +58,7 @@
         <div class="d-flex justify-space-between caption text--secondary">
             <span>{{ nowPlayingLabel }}</span>
             <span v-if="mutedSeconds > 0">{{ formatSecondsAsDuration(mutedSeconds) }} muted</span>
+            <span v-if="gapBlocks.length">Some audio was not saved</span>
             <span v-if="mutedBlocks.length">{{ mutedSummary }}</span>
             <span v-if="manifest.stopped">Recording stopped early</span>
         </div>
@@ -205,6 +216,44 @@ export default {
                         width: `${Math.min(width, 100 - left)}%`,
                         background: BLOCK_COLOURS[index % BLOCK_COLOURS.length],
                     },
+                };
+            });
+        },
+        // The stretches actually on disk, contiguous runs merged. A recording
+        // is not necessarily continuous: a segment that failed to store leaves
+        // a real hole, and the clock steps past it so later audio does not
+        // overwrite what came before.
+        recordedRanges() {
+            if (!this.manifest) return [];
+            const sorted = this.manifest.segments.slice()
+                .sort((a, b) => a.startSeconds - b.startSeconds);
+            const ranges = [];
+            for (const segment of sorted) {
+                const from = segment.startSeconds;
+                const to = segment.startSeconds + segment.durationSeconds;
+                const last = ranges[ranges.length - 1];
+                if (last && from - last.to <= 0.25) last.to = Math.max(last.to, to);
+                else ranges.push({ from, to });
+            }
+            return ranges;
+        },
+        // The complement of the above, which is what the strip draws: showing a
+        // hole as ordinary recorded audio makes a ▶ that cannot work look like
+        // a bug rather than like missing audio.
+        gapBlocks() {
+            if (!this.totalSeconds) return [];
+            const gaps = [];
+            let cursor = 0;
+            for (const range of this.recordedRanges) {
+                if (range.from > cursor) gaps.push({ from: cursor, to: range.from });
+                cursor = Math.max(cursor, range.to);
+            }
+            if (cursor < this.totalSeconds) gaps.push({ from: cursor, to: this.totalSeconds });
+            return gaps.map(gap => {
+                const left = (gap.from / this.totalSeconds) * 100;
+                return {
+                    left: `${left}%`,
+                    width: `${Math.min(((gap.to - gap.from) / this.totalSeconds) * 100, 100 - left)}%`,
                 };
             });
         },
@@ -521,6 +570,15 @@ export default {
     top: 0;
     bottom: 0;
     opacity: 0.75;
+}
+
+/* A hole in the recording. Flat and dim rather than hatched, so it reads as
+   "nothing here" against the muted bands, which are hatched. */
+.audioStripGap {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(90, 90, 90, 0.55);
 }
 
 /* Diagonal hatching rather than a flat block: it has to read as "nothing

@@ -1005,8 +1005,68 @@ await test('coverage keeps growing as segments land, not just for the first', as
     bus.__fire('sessionAudioState', { sessionId: 'live', recording: true });
     await settle();
 
-    assert.equal(vm.audioCoveredSeconds, 360);
+    assert.deepEqual(vm.audioRanges, [{ from: 0, to: 360 }]);
     assert.equal(vm.hasAudioFor(vm.activeDetections[1]), true, 'the button arrives with the audio');
+});
+
+await test('a tune inside a HOLE in the recording gets no play button', async () => {
+    // Recovering from a full disk deliberately steps the clock past the segment
+    // that could not be stored, so a resumed recording has a real gap. A single
+    // "covered up to" figure says everything before the last segment is
+    // playable, so a tune in the hole gets a ▶ that finds no segment and fails
+    // — which reads as a broken button rather than as missing audio.
+    const { vm, settle, store, audio } = await mountView();
+    await settle();
+    audio.__setManifests([{
+        sessionId: 'gappy', bytes: 2, totalSeconds: 540,
+        segments: [
+            { index: 0, startSeconds: 0, durationSeconds: 180 },
+            // 180–360 was lost to a full disk.
+            { index: 2, startSeconds: 360, durationSeconds: 180 },
+        ],
+    }]);
+    store.__liveSessions.push({ id: 'gappy', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'Before', startSeconds: 0, endSeconds: 60,
+            audioStartSeconds: 30, audioEndSeconds: 90 },
+        { tuneId: 3, settingId: '30', title: 'In the hole', startSeconds: 200, endSeconds: 260,
+            audioStartSeconds: 250, audioEndSeconds: 300 },
+        { tuneId: 4, settingId: '40', title: 'After', startSeconds: 400, endSeconds: 460,
+            audioStartSeconds: 400, audioEndSeconds: 460 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('gappy');
+    await vm.refreshAudioSessions();
+
+    assert.deepEqual(vm.audioRanges, [{ from: 0, to: 180 }, { from: 360, to: 540 }]);
+    assert.equal(vm.hasAudioFor(vm.activeDetections[0]), true);
+    assert.equal(vm.hasAudioFor(vm.activeDetections[1]), false, 'nothing was recorded there');
+    assert.equal(vm.hasAudioFor(vm.activeDetections[2]), true, 'and the audio after it still plays');
+});
+
+await test('contiguous segments are one range, not many', async () => {
+    // Segment ends are wall-clock measurements, so consecutive ones meet within
+    // microseconds rather than exactly. Treating that as a gap would fragment
+    // the whole recording and drop the button from most rows.
+    const { vm, settle, store, audio } = await mountView();
+    await settle();
+    audio.__setManifests([{
+        sessionId: 'live', bytes: 3, totalSeconds: 540,
+        segments: [
+            { index: 0, startSeconds: 0, durationSeconds: 180.004 },
+            { index: 1, startSeconds: 180.004, durationSeconds: 179.998 },
+            { index: 2, startSeconds: 360.002, durationSeconds: 180.01 },
+        ],
+    }]);
+    store.__liveSessions.push({ id: 'live', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'Late', startSeconds: 400, endSeconds: 460,
+            audioStartSeconds: 500, audioEndSeconds: 540 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('live');
+    await vm.refreshAudioSessions();
+
+    assert.equal(vm.audioRanges.length, 1);
+    assert.equal(vm.hasAudioFor(vm.activeDetections[0]), true);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

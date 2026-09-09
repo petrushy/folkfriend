@@ -662,9 +662,9 @@ export default {
             // records: audio is local-only, so a synced record from another
             // device must never claim audio this device does not have.
             audioSessionIDs: [],
-            // How many seconds of the active session's audio are committed to
-            // disk. See hasAudioFor().
-            audioCoveredSeconds: 0,
+            // Which stretches of the active session's audio are on disk.
+            // See _rangesFor() — a recording can have holes.
+            audioRanges: [],
         };
     },
     watch: {
@@ -1480,7 +1480,8 @@ export default {
         // It appears on its own once the segment lands.
         hasAudioFor(detection) {
             if (!this.audioSessionId || typeof detection.audioStartSeconds !== 'number') return false;
-            return detection.audioStartSeconds < this.audioCoveredSeconds;
+            return this.audioRanges.some(range =>
+                detection.audioStartSeconds >= range.from && detection.audioStartSeconds < range.to);
         },
 
         playDetection(detection) {
@@ -1494,23 +1495,44 @@ export default {
                 this.audioSessionIDs = manifests
                     .filter(m => m.segments && m.segments.length)
                     .map(m => m.sessionId);
-                // How much of the ACTIVE session's audio is committed, which is
-                // what decides whether a row gets a ▶. Recomputed on every
-                // segment write, so the buttons appear as the audio lands.
-                this.audioCoveredSeconds = this._coveredSecondsFor(manifests);
+                // WHICH parts of the active session's audio are committed —
+                // ranges, not a single maximum. Recomputed on every segment
+                // write, so the buttons appear as the audio lands.
+                this.audioRanges = this._rangesFor(manifests);
             } catch (e) { /* no player, rather than a broken view */ }
         },
 
-        _coveredSecondsFor(manifests) {
+        // The stretches of the active session's audio that are actually on
+        // disk, contiguous runs merged.
+        //
+        // Ranges rather than one "covered up to" figure, because a recording
+        // can have real HOLES in it: a segment that failed to store (a full
+        // disk) is skipped, and the clock deliberately steps past it so the
+        // next track does not overwrite what came before. A single maximum
+        // says every moment before the last segment is playable, so a tune
+        // inside the hole gets a ▶ that finds nothing and fails — which the
+        // user reads as a broken button rather than as missing audio.
+        _rangesFor(manifests) {
             const session = this.activeSession;
-            if (!session || !session.id) return 0;
+            if (!session || !session.id) return [];
             const manifest = manifests.find(m => m.sessionId === session.id);
-            if (!manifest || !manifest.segments.length) return 0;
-            // The end of the last COMMITTED segment, not manifest.totalSeconds
-            // — they agree today, but the question being asked is "is this
-            // moment on disk", and only the segments answer it.
-            return manifest.segments.reduce(
-                (end, s) => Math.max(end, s.startSeconds + s.durationSeconds), 0);
+            if (!manifest || !manifest.segments.length) return [];
+
+            const sorted = manifest.segments.slice()
+                .sort((a, b) => a.startSeconds - b.startSeconds);
+            const ranges = [];
+            for (const segment of sorted) {
+                const from = segment.startSeconds;
+                const to = segment.startSeconds + segment.durationSeconds;
+                const last = ranges[ranges.length - 1];
+                // A hair of tolerance: segment ends are wall-clock measurements,
+                // so consecutive ones meet within microseconds rather than
+                // exactly, and treating that as a gap would fragment the whole
+                // recording.
+                if (last && from - last.to <= 0.25) last.to = Math.max(last.to, to);
+                else ranges.push({ from, to });
+            }
+            return ranges;
         },
 
         async refreshPastSessions() {
