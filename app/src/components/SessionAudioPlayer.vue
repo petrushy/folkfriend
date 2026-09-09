@@ -393,9 +393,23 @@ export default {
             await this._loadSegment(segment, target, autoplay);
         },
 
+        // The recorded stretch a moment falls inside, or null.
+        _rangeContaining(seconds) {
+            return this.recordedRanges.find(r => seconds >= r.from && seconds < r.to) || null;
+        },
+
         async playTune(detection) {
             if (typeof detection.audioStartSeconds !== 'number') return;
-            return this.playFrom(detection.audioStartSeconds - PLAY_PREROLL_SECONDS);
+            // The preroll is CLAMPED to the recorded stretch the tune is in.
+            //
+            // A recording can have holes, and a tune just after one sits within
+            // a preroll of it: seeking blindly to start - 12 s lands in the gap,
+            // finds no segment, and reports the audio missing — for a tune
+            // whose audio is right there. The same clamp handles the start of
+            // the recording, where the preroll would go negative.
+            const range = this._rangeContaining(detection.audioStartSeconds);
+            const target = detection.audioStartSeconds - PLAY_PREROLL_SECONDS;
+            return this.playFrom(range ? Math.max(target, range.from) : target);
         },
 
         async _loadSegment(segment, seekSeconds, autoplay) {

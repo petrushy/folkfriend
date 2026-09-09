@@ -44,6 +44,26 @@ import {
     headroomBytes,
 } from './sessionAudioStore.js';
 
+// The earliest position at which new audio may safely begin.
+//
+// NOT simply manifest.totalSeconds. When a segment cannot be stored the clock
+// steps past it deliberately, so the recording has a hole — and detections were
+// stamped with timestamps INSIDE that hole. Restarting at the end of the last
+// saved segment would hand those timestamps to audio recorded afterwards, and
+// every tune from the lost interval would play something unrelated.
+//
+// `clockFloor` is the durable record of that, and it only ever increases. The
+// `stopped` marker cannot serve: it is cleared on the next resume so recording
+// can be retried, and a second reload would then lose the hole entirely.
+function storedClockFloor(manifest) {
+    if (!manifest) return 0;
+    return Math.max(
+        manifest.totalSeconds || 0,
+        manifest.clockFloor || 0,
+        (manifest.stopped && manifest.stopped.atSeconds) || 0,
+    );
+}
+
 function now() {
     return (typeof performance !== 'undefined' && performance.now)
         ? performance.now()
@@ -303,7 +323,7 @@ class SessionRecorder {
             patchManifest(sessionId, { stopped: null })
                 .catch(e => console.warn('Could not clear audio stop marker:', e && e.message));
         }
-        this._committedSeconds = manifest.totalSeconds || 0;
+        this._committedSeconds = storedClockFloor(manifest);
         this._chunkCursorSeconds = this._committedSeconds;
         this._trackIndex = manifest.tracks.reduce((max, t) => Math.max(max, t.index + 1), 0);
         this._segmentIndex = manifest.segments.reduce((max, s) => Math.max(max, s.index + 1), 0);
@@ -328,8 +348,8 @@ class SessionRecorder {
     // Never lets the clock sit behind what is on disk.
     async _adoptStoredClock(sessionId) {
         const manifest = await readManifest(sessionId);
-        const stored = (manifest && manifest.totalSeconds) || 0;
-        const safe = Math.max(this._committedSeconds, this._chunkCursorSeconds, stored);
+        const safe = Math.max(
+            this._committedSeconds, this._chunkCursorSeconds, storedClockFloor(manifest));
         this._committedSeconds = safe;
         this._chunkCursorSeconds = safe;
     }
@@ -343,6 +363,8 @@ class SessionRecorder {
         this.error = '';
         const sessionId = this.sessionId;
         if (sessionId) {
+            // `stopped` only. clockFloor records where the recording actually
+            // reached and must survive every retry.
             patchManifest(sessionId, { stopped: null })
                 .catch(e => console.warn('Could not clear audio stop marker:', e && e.message));
         }
@@ -662,8 +684,13 @@ class SessionRecorder {
         const sessionId = this.sessionId;
         const atSeconds = this._chunkCursorSeconds;
         if (sessionId) {
-            patchManifest(sessionId, { stopped: { reason, message, atSeconds } })
-                .catch(e => console.warn('Could not record audio stop reason:', e && e.message));
+            // clockFloor alongside the stop marker, because the marker is
+            // cleared on the next resume and this must outlive it — see
+            // storedClockFloor().
+            patchManifest(sessionId, {
+                stopped: { reason, message, atSeconds },
+                clockFloor: atSeconds,
+            }).catch(e => console.warn('Could not record audio stop reason:', e && e.message));
         }
         console.warn(`Session audio stopped (${reason}): ${message}`);
         this._emit();
