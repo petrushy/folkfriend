@@ -1244,6 +1244,24 @@ session already running, which is what `liveAnalysisService.syncAudioRecording()
 does. It is on the start card too, since whether tonight is one to record is
 usually known walking in.
 
+⚠️ **`store.userSettings` IS NOT VUE-REACTIVE.** It is a plain object assigned
+in the store's constructor, so a `computed` reading it has no reactive
+dependency at all — Vue evaluates it once and caches that value for the life of
+the component. The record switch was written that way and showed a frozen
+position: it read "Recording this session's audio" while nothing was being
+recorded, and only appeared to work at all if Settings had been opened first,
+because `Settings.vue` puts the same object in its own `data()` and Vue
+deep-observes it there. **Any view binding a `userSettings` field needs local
+`data` refreshed explicitly**, the same pattern `store.currentUser` already
+forces.
+
+**The switch reads the RECORDER while a session is open**, not the stored
+preference — so it can never claim to be recording something that is not being
+recorded. A start that fails (no storage, an unreadable manifest) snaps it back
+off with the reason in the session bar, and recording stopping on its own
+reaches it through `sessionAudioState`. With no session open there is nothing
+running to report and it shows what the next one will do.
+
 `userSettings.recordSessionAudio` still stores it, as what the NEXT session
 starts as, so the usual answer is remembered. That carry-over is only safe
 because an inherited "on" is never invisible: the session bar shows a REC chip

@@ -119,6 +119,8 @@ export function __reset() { for (const k of Object.keys(__handlers)) delete __ha
 // microphone refuse; __failNextFinish makes the final save fail, which is the
 // case where the session must NOT be thrown away.
 const FAKE_LIVE_ANALYSIS = `
+import store from './fake-store.mjs';
+import * as recorder from './fake-recorder.mjs';
 export const __starts = [];
 export const __calls = [];
 export let __failNextStart = false;
@@ -133,9 +135,16 @@ export function __setFailNextFinish(v) { __failNextFinish = v; }
 export function __setRestorable(v) { __restorable = v; }
 export const __syncs = [];
 const service = {
-    // Records what the setting was each time the view asked it to reconcile —
-    // the point of moving the control is that it reaches the RUNNING session.
-    syncAudioRecording() { __syncs.push(true); return Promise.resolve(); },
+    // Models the real chain: the view writes the setting, the service
+    // reconciles, and the RECORDER ends up active or not. __state.refuse
+    // stands in for a start that cannot succeed (no storage, an unreadable
+    // manifest), which is what the switch has to report honestly.
+    syncAudioRecording() {
+        __syncs.push(true);
+        const wanted = !!store.userSettings.recordSessionAudio;
+        recorder.__state.isActive = wanted && !recorder.__state.refuse && !!service.sessionId;
+        return Promise.resolve();
+    },
     isRunning: false,
     isPaused: false,
     sessionId: null,
@@ -282,9 +291,14 @@ async function writeFakes() {
     // Session audio is covered by sessionAudio.test.mjs against the real
     // store; here it only has to resolve, and report that nothing is recorded.
     await writeFile(path.join(tmpDir, 'fake-recorder.mjs'), `
-export const __state = { available: true };
-export default { get available() { return __state.available; } };
-`);
+// isActive is what the switch now reads while a session is open, so it has to
+// be here: the switch tracks the RECORDER, not the stored preference, and must
+// never claim to be recording something that is not being recorded.
+export const __state = { available: true, isActive: false, refuse: false };
+export default {
+    get available() { return __state.available; },
+    get isActive() { return __state.isActive; },
+};`);
     await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), `
 export let __manifests = [];
 export function __setManifests(m) { __manifests = m; }
@@ -1125,6 +1139,72 @@ await test('the switch is disabled where recording is impossible', async () => {
     assert.equal(vm.audioRecordingAvailable, false);
     assert.match(vm.recordAudioLabel, /unavailable/);
     recorder.__state.available = true;
+});
+
+await test('the switch does not go stale when the setting changes', async () => {
+    // store.userSettings is a PLAIN object assigned in the store's constructor,
+    // so a computed reading it has no reactive dependency and Vue caches the
+    // first value for the life of the component. The switch then showed a
+    // frozen position: it read "Recording this session's audio" while nothing
+    // was being recorded, and only ever appeared to work if Settings had been
+    // opened first, because Settings.vue puts the same object in its own data()
+    // and Vue deep-observes it there.
+    const { vm, settle, store } = await mountView({ running: true });
+    await settle();
+
+    await vm.setRecordAudio(true);
+    assert.equal(vm.recordAudio, true);
+    assert.match(vm.recordAudioLabel, /^Recording/);
+
+    await vm.setRecordAudio(false);
+    assert.equal(vm.recordAudio, false, 'it follows the change, not the first render');
+    assert.match(vm.recordAudioLabel, /^Record this/);
+
+    // And a change made anywhere else still reaches it.
+    store.userSettings.recordSessionAudio = true;
+    await vm.setRecordAudio(true);
+    assert.equal(vm.recordAudio, true);
+});
+
+await test('the switch cannot claim to be recording when it is not', async () => {
+    // With a session open it reads the RECORDER, not the stored preference, so
+    // a start that cannot succeed snaps it back off with the reason in the
+    // session bar — rather than leaving the user believing the evening is being
+    // kept. That is the honest direction of the two.
+    const { vm, settle, recorder } = await mountView({ running: true });
+    await settle();
+    recorder.__state.refuse = true;
+
+    await vm.setRecordAudio(true);
+    assert.equal(vm.recordAudio, false, 'the tap did not make it true');
+    recorder.__state.refuse = false;
+});
+
+await test('recording stopping on its own reaches the switch', async () => {
+    // Storage running out stops the recorder without anything on this page
+    // asking, and the switch has to follow — it announces its state on the
+    // event bus, which is where this listens.
+    const { vm, settle, bus, recorder } = await mountView({ running: true });
+    await settle();
+    await vm.setRecordAudio(true);
+    assert.equal(vm.recordAudio, true);
+
+    recorder.__state.isActive = false;
+    bus.__fire('sessionAudioState', {
+        sessionId: 'abc', recording: false, stoppedReason: 'storage',
+    });
+    assert.equal(vm.recordAudio, false);
+});
+
+await test('with no session open the switch shows what the next one will do', async () => {
+    // Nothing is running to report, so the stored preference is the honest
+    // answer — and it is what the next session starts as.
+    const { vm, settle, store } = await mountView();
+    await settle();
+    store.userSettings.recordSessionAudio = true;
+    assert.equal(vm._recordAudioState(), true);
+    store.userSettings.recordSessionAudio = false;
+    assert.equal(vm._recordAudioState(), false);
 });
 
 await rm(tmpDir, { recursive: true, force: true });
