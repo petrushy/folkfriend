@@ -12,11 +12,30 @@
             </v-chip>
 
             <!-- An app that is recording the room must say so wherever the
-                 user happens to be, not only on the page they started it from. -->
-            <v-chip v-if="audioRecording" x-small color="red darken-3" text-color="white">
-                <v-icon left x-small>{{ icons.recording }}</v-icon>
-                REC
+                 user happens to be, not only on the page they started it from.
+                 The chip carries the mute state too: "muted" is the claim the
+                 user most needs to be able to check at a glance, and a chip
+                 that still read REC while the audio was silenced would be
+                 worse than no chip at all. -->
+            <v-chip
+                v-if="audioRecording"
+                x-small
+                :color="audioMuted ? 'grey darken-2' : 'red darken-3'"
+                text-color="white"
+            >
+                <v-icon left x-small>{{ audioMuted ? icons.micOff : icons.recording }}</v-icon>
+                {{ audioMuted ? `MUTED ${formatSecondsAsClock(audioMutedSeconds)}` : 'REC' }}
             </v-chip>
+            <v-btn
+                v-if="audioRecording && audioMuteSupported"
+                x-small
+                :text="!audioMuted"
+                :color="audioMuted ? 'primary' : 'secondary'"
+                :aria-label="audioMuted ? 'Record audio again' : 'Stop recording audio'"
+                @click="toggleAudioMute"
+            >
+                {{ audioMuted ? 'Record audio' : 'Mute audio' }}
+            </v-btn>
             <span v-if="sessionName" class="caption session-name" :title="sessionName">{{ sessionName }}</span>
             <span class="caption text--secondary">
                 {{ formatSecondsAsClock(elapsedSeconds) }}
@@ -61,7 +80,7 @@
         </div>
 
         <div
-            v-if="(capturing && !micHealthy) || saveState === 'error' || audioError"
+            v-if="(capturing && !micHealthy) || saveState === 'error' || audioError || audioMuted"
             class="d-flex flex-wrap align-center mt-1"
             style="gap: 8px;"
         >
@@ -77,6 +96,9 @@
             >
                 Retry
             </v-btn>
+            <span v-if="audioMuted" class="caption text--secondary">
+                Audio muted — tunes are still being detected, but nothing is being recorded.
+            </span>
             <span v-if="audioError" class="caption warning--text">
                 {{ audioError }} The session and its tune list are unaffected.
             </span>
@@ -110,8 +132,9 @@
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
+import sessionRecorder from '@/services/sessionRecorder.js';
 import {
-    mdiPause, mdiRecordCircleOutline, mdiAlertCircleOutline,
+    mdiPause, mdiRecordCircleOutline, mdiAlertCircleOutline, mdiMicrophoneOff,
 } from '@mdi/js';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
 
@@ -131,6 +154,9 @@ export default {
             saveError: null,
             audioRecording: false,
             audioError: '',
+            audioMuted: false,
+            audioMuteSupported: false,
+            audioMutedSeconds: 0,
             indexLoaded: store.state.indexLoaded,
             pausing: false,
             resuming: false,
@@ -140,6 +166,7 @@ export default {
                 pause: mdiPause,
                 recording: mdiRecordCircleOutline,
                 alert: mdiAlertCircleOutline,
+                micOff: mdiMicrophoneOff,
             },
         };
     },
@@ -175,11 +202,23 @@ export default {
             this.saveState = svc.saveState;
             this.saveError = svc.saveError;
         };
-        this._onTick = (secs) => { this.elapsedSeconds = secs; };
+        this._onTick = (secs) => {
+            this.elapsedSeconds = secs;
+            // sessionAudioState only fires when a segment is written — every
+            // three minutes — so without this the muted counter sits still
+            // while the user watches it, which defeats the reassurance it
+            // exists to give.
+            if (this.audioMuted) this.audioMutedSeconds = sessionRecorder.mutedSeconds;
+        };
         this._onUpdate = (detections) => { this.tuneCount = detections.length; };
         this._onIndexLoaded = () => { this.indexLoaded = true; };
-        this._onAudioState = ({ recording, stoppedReason, error }) => {
+        this._onAudioState = ({
+            recording, stoppedReason, error, muted, muteSupported, mutedSeconds,
+        }) => {
             this.audioRecording = !!recording;
+            this.audioMuted = !!muted;
+            this.audioMuteSupported = !!muteSupported;
+            this.audioMutedSeconds = mutedSeconds || 0;
             // Only a stop the user needs to know about. 'unsupported' is not
             // one: nothing was promised on a browser that cannot record.
             this.audioError = stoppedReason && stoppedReason !== 'unsupported' ? (error || '') : '';
@@ -217,6 +256,17 @@ export default {
     methods: {
         formatSecondsAsClock,
         openCurrent() { eventBus.$emit('openCurrentSession'); },
+        // Silences what is recorded without touching capture, so detection
+        // carries on through the conversation the user is muting. The state
+        // comes back from the service rather than being assumed: on a browser
+        // that cannot clone the capture track there is nothing to mute, and
+        // the bar must not claim otherwise.
+        toggleAudioMute() {
+            const applied = sessionRecorder.setMuted(!this.audioMuted);
+            this.audioMuted = applied;
+            this.audioMuteSupported = sessionRecorder.muteSupported;
+            this.audioMutedSeconds = sessionRecorder.mutedSeconds;
+        },
         async pause() {
             this.pausing = true;
             try { await liveAnalysisService.pause(); } finally {

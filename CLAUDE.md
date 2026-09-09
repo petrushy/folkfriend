@@ -1187,6 +1187,32 @@ the ▶ lands up to three minutes early rather than anywhere in three hours.
 is the moment the *first matching window ended*, so seeking to the bare offset
 reliably lands past the opening phrase.
 
+**A manual mute silences the RECORDING without stopping detection.** The
+mechanism is `MediaStreamTrack.clone()`: a cloned track shares the microphone
+but carries its own `enabled` flag, and a disabled audio track emits silence by
+spec — so `mic.js` records from a clone while the analysis graph reads the
+original. Muting the capture track instead would stop the tune list dead, which
+is not what "do not record this conversation" means. Chosen over a `GainNode`
+into a `MediaStreamAudioDestinationNode` (which routes recorded audio through
+the Web Audio graph — a flakier path through WebKit) and over stopping the
+recorder (which compresses the timeline; silence encodes to almost nothing, so
+keeping it running is nearly free and keeps every offset valid).
+
+An automatic music/speech classifier was considered and deferred: the error rate
+in a pub is real in both directions and the two errors are not symmetric —
+muting real music costs the user the recording they asked for. The audio from
+this feature is the corpus to calibrate one on, if it is ever built.
+
+Four mute rules, each mutation-verified: **the recording keeps running while
+muted** (the timeline stays 1:1 with the evening); **a reacquired microphone and
+a resumed session come back MUTED** (silently un-muting records something the
+user believes is private and cannot be undone; staying muted loses audio the
+user can see is being lost, since the bar shows a running counter); **a NEW
+session starts recording** whatever the last one was doing (nothing on screen
+connects it to a button pressed hours earlier); and **mute reports failure
+rather than pretending** on a browser that cannot clone. `mutedRanges` are drawn
+as hatched bands on the timeline, and an open range is closed at `end()`.
+
 **Privacy is why several of these choices are not configurable.** Three hours of
 a pub records everyone in it. Off by default; a **REC chip in the session bar**
 on every route; **never synced** (and no `hasAudio` flag on the session record —

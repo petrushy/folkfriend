@@ -93,15 +93,39 @@ const FAKE_MDI = `
 export const mdiPause = 'pause';
 export const mdiRecordCircleOutline = 'record';
 export const mdiAlertCircleOutline = 'alert';
+export const mdiMicrophoneOff = 'mic-off';
 `;
 
 const FAKE_SESSION_ANALYSIS = `export function formatSecondsAsClock(s) { return String(s); }`;
+
+
+const FAKE_RECORDER = `
+export const __state = { muted: false, muteSupported: true, mutedSeconds: 0, calls: [] };
+export function __reset() {
+    __state.muted = false; __state.muteSupported = true;
+    __state.mutedSeconds = 0; __state.calls.length = 0;
+}
+export default {
+    get muted() { return __state.muted; },
+    get muteSupported() { return __state.muteSupported; },
+    get mutedSeconds() { return __state.mutedSeconds; },
+    setMuted(muted) {
+        __state.calls.push(muted);
+        // Mirrors the real contract: it returns the state actually REACHED,
+        // which on a browser that cannot mute is always false.
+        if (!__state.muteSupported) return false;
+        __state.muted = !!muted;
+        return __state.muted;
+    },
+};
+`;
 
 async function loadComponent({ route = { name: 'search' } } = {}) {
     await mkdir(tmpDir, { recursive: true });
     await writeFile(path.join(tmpDir, 'fake-eventbus.mjs'), FAKE_EVENTBUS);
     await writeFile(path.join(tmpDir, 'fake-store.mjs'), FAKE_STORE);
     await writeFile(path.join(tmpDir, 'fake-live.mjs'), FAKE_LIVE);
+    await writeFile(path.join(tmpDir, 'fake-recorder.mjs'), FAKE_RECORDER);
     await writeFile(path.join(tmpDir, 'fake-mdi.mjs'), FAKE_MDI);
     await writeFile(path.join(tmpDir, 'fake-session-analysis.mjs'), FAKE_SESSION_ANALYSIS);
 
@@ -113,6 +137,7 @@ async function loadComponent({ route = { name: 'search' } } = {}) {
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from '@/services/store.js'", "from './fake-store.mjs'"],
         ["from '@/services/liveAnalysis.js'", "from './fake-live.mjs'"],
+        ["from '@/services/sessionRecorder.js'", "from './fake-recorder.mjs'"],
         ["from '@mdi/js'", "from './fake-mdi.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
     ]) {
@@ -123,6 +148,8 @@ async function loadComponent({ route = { name: 'search' } } = {}) {
 
     const bus = await import(path.join(tmpDir, 'fake-eventbus.mjs'));
     const live = await import(path.join(tmpDir, 'fake-live.mjs'));
+    const recorder = await import(path.join(tmpDir, 'fake-recorder.mjs'));
+    recorder.__reset();
     bus.__reset();
     live.__reset();
 
@@ -135,7 +162,7 @@ async function loadComponent({ route = { name: 'search' } } = {}) {
     for (const [name, fn] of Object.entries(component.computed || {})) {
         Object.defineProperty(vm, name, { get: fn.bind(vm), configurable: true });
     }
-    return { vm, component, bus, live };
+    return { vm, component, bus, live, recorder };
 }
 
 async function run() {
@@ -289,6 +316,42 @@ async function run() {
         await vm.retryMicrophone();
         assert.ok(live.__calls.some(c => c.op === 'retryMicrophone'));
         assert.equal(vm.micHealthy, true);
+    });
+
+    await test('the chip stops saying REC once the audio is muted', async () => {
+        // A chip that still read REC over a silenced recording would be worse
+        // than no chip: it is the one claim the user checks at a glance.
+        const { vm, component, bus } = await loadComponent();
+        component.created.call(vm);
+        bus.__fire('sessionAudioState', {
+            recording: true, muted: true, muteSupported: true, mutedSeconds: 42,
+        });
+        assert.equal(vm.audioRecording, true);
+        assert.equal(vm.audioMuted, true);
+        assert.equal(vm.audioMutedSeconds, 42);
+    });
+
+    await test('tapping mute goes through the recorder and adopts what it reports', async () => {
+        const { vm, component, recorder } = await loadComponent();
+        component.created.call(vm);
+        vm.toggleAudioMute();
+        assert.deepEqual(recorder.__state.calls, [true]);
+        assert.equal(vm.audioMuted, true);
+        vm.toggleAudioMute();
+        assert.deepEqual(recorder.__state.calls, [true, false]);
+        assert.equal(vm.audioMuted, false);
+    });
+
+    await test('the bar never shows itself as muted when the mute did not take', async () => {
+        // On a browser that cannot clone the capture track there is nothing to
+        // mute. Showing "MUTED" there would tell the user the room is not being
+        // recorded while it is.
+        const { vm, component, recorder } = await loadComponent();
+        component.created.call(vm);
+        recorder.__state.muteSupported = false;
+        vm.toggleAudioMute();
+        assert.equal(vm.audioMuted, false);
+        assert.equal(vm.audioMuteSupported, false);
     });
 
     await test('unsubscribing on destroy stops it reacting to a later session', async () => {
