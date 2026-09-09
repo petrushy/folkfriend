@@ -1176,6 +1176,22 @@ any other chunk and marked `init` — prepending the init blob to a clip that
 already begins there writes the header twice and produces a file no decoder
 accepts. That wart is load-bearing; two tests pin it.
 
+**Playback starts at a PERSISTED anchor, not a fixed offset** (found on the
+first device test — playback felt noticeably early). `audioStartSeconds` is the
+moment the first matching window *ended*, so the audio behind the match runs
+from a window earlier; subtracting a fixed 12 s landed about 2 s **before that
+window even began**. `clusterDetections` therefore stores
+`audioAnchorSeconds = audioSeconds − windowSeconds / 2` — the window's
+midpoint, the one place the tune is certainly playing, where the window's
+*start* can still be the previous tune.
+
+It is computed at detection time and persisted with the tune because it depends
+on the window the session was analysed with: a constant at playback time is
+wrong the moment that setting changes and cannot be recovered for an
+already-saved session. Records written before it fall back to half the 10 s
+default window, not the old 12 s. It is still clamped into the tune's own
+recorded stretch (rule 17).
+
 **5. Where a clip's timeline starts is unknowable in advance.** A clip cut from
 mid-stream may keep its original timestamps or be rebased to zero, and which one
 differs between containers and browsers. The player reads

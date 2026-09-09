@@ -897,7 +897,7 @@ await test('editing a stored session keeps its audio offsets', async () => {
     await settle();
     store.__liveSessions.push({ id: 'old', startedAt: 1000, tunes: [
         { tuneId: 2, settingId: '20', title: 'Kept', startSeconds: 0, endSeconds: 60,
-            audioStartSeconds: 12, audioEndSeconds: 70 },
+            audioStartSeconds: 12, audioEndSeconds: 70, audioAnchorSeconds: 7 },
         { tuneId: 3, settingId: '30', title: 'Dropped', startSeconds: 60, endSeconds: 120,
             audioStartSeconds: 72, audioEndSeconds: 130 },
     ] });
@@ -910,6 +910,7 @@ await test('editing a stored session keeps its audio offsets', async () => {
     assert.equal(kept.length, 1);
     assert.equal(kept[0].audioStartSeconds, 12, 'the surviving row keeps its offset');
     assert.equal(kept[0].audioEndSeconds, 70);
+    assert.equal(kept[0].audioAnchorSeconds, 7, 'and where playback should start');
 });
 
 await test('a stored tune with no recording stores nulls, not undefined', async () => {

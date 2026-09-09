@@ -1391,6 +1391,7 @@ export default {
                 endSeconds: d.endSeconds, bestScore: d.bestScore || 0,
                 audioStartSeconds: typeof d.audioStartSeconds === 'number' ? d.audioStartSeconds : null,
                 audioEndSeconds: typeof d.audioEndSeconds === 'number' ? d.audioEndSeconds : null,
+                audioAnchorSeconds: typeof d.audioAnchorSeconds === 'number' ? d.audioAnchorSeconds : null,
                 alternatives: d.alternatives || [],
             }));
         },

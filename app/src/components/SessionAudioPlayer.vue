@@ -119,13 +119,15 @@ import {
     readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor,
 } from '@/services/sessionAudioStore.js';
 
-// How far before a tune's detected start to begin playback.
+// Fallback for a session recorded before detections carried their own playback
+// anchor. Half the live default window (10 s), which is what the anchor works
+// out to for anything recorded at that setting — i.e. very nearly all of them.
 //
-// A cluster's start is the moment the FIRST window that matched ended, so the
-// tune has already been playing for at least a window by then — seeking to the
-// bare offset reliably lands past the opening phrase, which reads as a bug even
-// though the detector is working exactly as designed. See clusterDetections().
-const PLAY_PREROLL_SECONDS = 12;
+// A fixed offset is only ever a guess: the right distance back depends on the
+// window the session was analysed with, which is why the anchor is computed at
+// detection time and persisted. See clusterDetections().
+const FALLBACK_WINDOW_SECONDS = 10;
+const FALLBACK_PREROLL_SECONDS = FALLBACK_WINDOW_SECONDS / 2;
 
 // A tiny palette for the timeline. Distinguishing adjacent tunes is all this
 // has to do, so it cycles rather than trying to be stable per tune.
@@ -398,15 +400,30 @@ export default {
             return this.recordedRanges.find(r => seconds >= r.from && seconds < r.to) || null;
         },
 
+        // Where playback starts for a given detection.
+        //
+        // The stored anchor when there is one: audioStartSeconds is the moment
+        // the first matching window ENDED, so the tune's audio runs from a
+        // window earlier, and the anchor is that window's midpoint — the one
+        // place the tune is certainly playing. A fixed offset cannot express
+        // that, because the right distance depends on the window the session
+        // was analysed with.
+        _anchorFor(detection) {
+            if (typeof detection.audioAnchorSeconds === 'number') {
+                return Math.max(0, detection.audioAnchorSeconds);
+            }
+            return Math.max(0, detection.audioStartSeconds - FALLBACK_PREROLL_SECONDS);
+        },
+
         async playTune(detection) {
             if (typeof detection.audioStartSeconds !== 'number') return;
-            // The preroll is CLAMPED to the recorded stretch the tune is in.
+            // CLAMPED to the recorded stretch the tune is in.
             //
-            // A recording can have holes, and a tune just after one sits within
-            // a preroll of it: seeking blindly to start - 12 s lands in the gap,
+            // A recording can have holes, and a tune just after one can sit
+            // within an anchor's reach of it: seeking blindly lands in the gap,
             // finds no segment, and reports the audio missing — for a tune
             // whose audio is right there. The same clamp handles the start of
-            // the recording, where the preroll would go negative.
+            // the recording, where the anchor would go negative.
             const range = this._rangeContaining(detection.audioStartSeconds);
             if (!range) {
                 // Nothing was recorded at this tune's position, so there is
@@ -417,8 +434,7 @@ export default {
                 this.error = 'That part of the session was not recorded.';
                 return;
             }
-            const target = detection.audioStartSeconds - PLAY_PREROLL_SECONDS;
-            return this.playFrom(Math.max(target, range.from));
+            return this.playFrom(Math.max(this._anchorFor(detection), range.from));
         },
 
         async _loadSegment(segment, seekSeconds, autoplay) {

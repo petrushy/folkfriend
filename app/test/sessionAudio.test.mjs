@@ -1670,6 +1670,39 @@ await test('a genuinely new session still starts normally', async () => {
 
 console.log('\nlinking detections to the recording');
 
+await test('a cluster carries a playback anchor at its window midpoint', async () => {
+    // audioStartSeconds is where the first matching window ENDED, so the audio
+    // that produced the match runs from a window earlier. Seeking to the bare
+    // offset lands past the opening; a fixed 12 s offset landed ~2 s BEFORE the
+    // window began, which is what made playback feel early on a device.
+    const matches = [
+        windowMatch(7, 10, 100),
+        windowMatch(7, 20, 110),
+    ];
+    const [detection] = analysis.clusterDetections(matches, CLUSTER_OPTIONS);
+    assert.equal(detection.audioStartSeconds, 100);
+    assert.equal(detection.audioAnchorSeconds, 95, 'half a window before the window end');
+});
+
+await test('the anchor follows the window size, not a constant', async () => {
+    const wide = { ...CLUSTER_OPTIONS, windowSeconds: 30 };
+    const [detection] = analysis.clusterDetections(
+        [windowMatch(7, 10, 100), windowMatch(7, 20, 110)], wide);
+    assert.equal(detection.audioAnchorSeconds, 85);
+});
+
+await test('the anchor is never negative', async () => {
+    const [detection] = analysis.clusterDetections(
+        [windowMatch(7, 10, 2), windowMatch(7, 20, 12)], CLUSTER_OPTIONS);
+    assert.equal(detection.audioAnchorSeconds, 0);
+});
+
+await test('a cluster with no recorded audio has no anchor', async () => {
+    const [detection] = analysis.clusterDetections(
+        [windowMatch(7, 10), windowMatch(7, 20)], CLUSTER_OPTIONS);
+    assert.equal(detection.audioAnchorSeconds, null);
+});
+
 await test('a cluster carries where it sits in the recording', async () => {
     const clusters = analysis.clusterDetections([
         windowMatch(1, 30, 30), windowMatch(1, 40, 40), windowMatch(1, 50, 50),
@@ -1759,6 +1792,9 @@ await test('the saved session record carries the audio offsets', async () => {
     assert.equal(saved.tunes.length, 1);
     assert.equal(saved.tunes[0].audioStartSeconds, 30);
     assert.equal(saved.tunes[0].audioEndSeconds, 50);
+    // The anchor too: it depends on the window the session was analysed with,
+    // so a saved session that lost it could never recover the right one.
+    assert.equal(saved.tunes[0].audioAnchorSeconds, 25);
 });
 
 await test('a session with no recording stores nulls, not undefined', async () => {
