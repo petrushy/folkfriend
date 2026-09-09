@@ -221,6 +221,11 @@ export default {
             this.audioMutedSeconds = mutedSeconds || 0;
             // Only a stop the user needs to know about. 'unsupported' is not
             // one: nothing was promised on a browser that cannot record.
+            //
+            // That is the ONLY silent reason, and the match is exact for a
+            // reason — 'manifest-unsupported' is a different claim (recording
+            // works here; it is off for this one session, actionably) and was
+            // swallowed while this read as a prefix.
             this.audioError = stoppedReason && stoppedReason !== 'unsupported' ? (error || '') : '';
         };
 

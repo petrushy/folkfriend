@@ -354,6 +354,37 @@ async function run() {
         assert.equal(vm.audioMuteSupported, false);
     });
 
+    await test('a browser that never could record is not reported', async () => {
+        // Nothing was promised, so there is nothing to tell the user about.
+        const { vm, component, bus } = await loadComponent();
+        component.created.call(vm);
+        bus.__fire('sessionAudioState', {
+            recording: false, stoppedReason: 'unsupported',
+            error: 'This browser cannot record audio.',
+        });
+        assert.equal(vm.audioError, '');
+    });
+
+    await test('a session whose recording cannot be read IS reported', async () => {
+        // A different claim entirely: recording works on this device and is off
+        // for this one session, for a reason the user can act on. Sharing the
+        // 'unsupported' reason left it silently swallowed — recording simply
+        // stayed off with nothing on screen.
+        const { vm, component, bus } = await loadComponent();
+        component.created.call(vm);
+        bus.__fire('sessionAudioState', {
+            recording: false, stoppedReason: 'manifest-unsupported',
+            error: 'This session\'s recording was made by a newer version of the app.',
+        });
+        assert.match(vm.audioError, /newer version/);
+
+        bus.__fire('sessionAudioState', {
+            recording: false, stoppedReason: 'unreadable',
+            error: 'Could not read this session\'s existing recording.',
+        });
+        assert.match(vm.audioError, /Could not read/);
+    });
+
     await test('unsubscribing on destroy stops it reacting to a later session', async () => {
         const { vm, component, bus, live } = await loadComponent();
         live.default.sessionId = 'session-1';
