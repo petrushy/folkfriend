@@ -143,6 +143,10 @@ class LiveAnalysisService {
         // lost. See _persistSession().
         this.saveState = 'idle';
         this.saveError = null;
+        // Serialises reconciliation of the recorder against the setting, so a
+        // rapid ON→OFF cannot finish with recording on. See
+        // _syncRecorderToSetting().
+        this._recorderSync = Promise.resolve();
         // Serialises session writes. Two saves racing (a checkpoint and a
         // finish, say) can otherwise land out of order and leave the older
         // snapshot as the stored one.
@@ -781,25 +785,63 @@ class LiveAnalysisService {
     // reset came to exist while remaining unreachable from the actual Resume.
     _syncRecorderToSetting({ resuming = false } = {}) {
         if (!this.sessionId) return Promise.resolve();
-        const wanted = !!store.userSettings.recordSessionAudio;
+        // SERIALISED, and the setting is read inside the queued body rather
+        // than captured here.
+        //
+        // resume() awaits a manifest read, and an OFF arriving inside that
+        // window saw isActive false — resume has not claimed the session yet —
+        // did nothing, and returned. The older ON then completed and called
+        // ensureRecording(), so recording started AFTER an explicit opt-out and
+        // kept going until the loop's next cycle noticed. Several seconds of a
+        // conversation the user had just asked not to record.
+        //
+        // Queuing alone is not enough: a job that captured `wanted` when it was
+        // enqueued would still act on a stale answer. Read late, and re-read
+        // after every await, so the last tap always wins.
+        this._recorderSync = this._recorderSync
+            .catch(() => {})
+            .then(() => this._reconcileRecorder(resuming));
+        return this._recorderSync;
+    }
 
-        if (!wanted) {
+    async _reconcileRecorder(resuming) {
+        if (!this.sessionId) return;
+        const wanted = () => !!store.userSettings.recordSessionAudio;
+
+        if (!wanted()) {
             // end() rather than stop(): stop() is a Pause, and leaves the
             // session open for the loop to pick straight back up.
-            if (!sessionRecorder.isActive) return Promise.resolve();
-            return sessionRecorder.end()
+            if (!sessionRecorder.isActive) return;
+            await sessionRecorder.end()
                 .catch(e => console.warn('Could not stop session recording:', e && e.message));
+            return;
         }
 
         if (sessionRecorder.isActive && !resuming) {
             sessionRecorder.ensureRecording();
-            return Promise.resolve();
+            return;
         }
-        return sessionRecorder.resume(this.sessionId, {
-            bitrateKbps: store.userSettings.sessionAudioBitrateKbps,
-        })
-            .then(() => { sessionRecorder.ensureRecording(); })
-            .catch(e => console.warn('Could not start session recording:', e && e.message));
+
+        try {
+            await sessionRecorder.resume(this.sessionId, {
+                bitrateKbps: store.userSettings.sessionAudioBitrateKbps,
+            });
+        } catch (e) {
+            console.warn('Could not start session recording:', e && e.message);
+            return;
+        }
+
+        // Re-read: the user may have turned it off while resume() was reading
+        // the manifest, and starting now would be recording against an explicit
+        // opt-out that already happened.
+        if (!this.sessionId || !wanted()) {
+            if (sessionRecorder.isActive) {
+                await sessionRecorder.end()
+                    .catch(e => console.warn('Could not stop session recording:', e && e.message));
+            }
+            return;
+        }
+        sessionRecorder.ensureRecording();
     }
 
     // Logs "this tune was heard here" when the recognised tune changes.

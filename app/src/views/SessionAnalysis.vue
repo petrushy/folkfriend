@@ -752,12 +752,17 @@ export default {
         audioRecordingAvailable() {
             return sessionRecorder.available;
         },
+        // Deliberately neutral, and never "Recording…".
+        //
+        // A session merely existing is not recording: it can be paused, its
+        // storage can have run out, its encoder can have failed. This is a
+        // CONTROL, and what is actually happening is reported in one place —
+        // the session bar's REC/MUTED chip, which is on every route. Two places
+        // claiming it is how they come to disagree.
         recordAudioLabel() {
-            if (!this.audioRecordingAvailable) return 'Record this session\'s audio (unavailable)';
-            if (!this.recordAudio) return 'Record this session\'s audio';
-            return this.live.hasSession
-                ? 'Recording this session\'s audio'
-                : 'Record this session\'s audio';
+            return this.audioRecordingAvailable
+                ? 'Record this session\'s audio'
+                : 'Record this session\'s audio (unavailable)';
         },
         // Empty unless this session actually has a recording on THIS device.
         // Audio is never synced, so a session record that arrived from another
