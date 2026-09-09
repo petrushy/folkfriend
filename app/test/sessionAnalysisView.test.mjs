@@ -970,6 +970,45 @@ await test('no play button at all for a session with no recording here', async (
     assert.equal(vm.hasAudioFor(vm.activeDetections[0]), false);
 });
 
+await test('coverage keeps growing as segments land, not just for the first', async () => {
+    // The handler skipped a session already known to have audio, which was
+    // right when its only job was to make the player appear — and silently
+    // wrong once it also tracked coverage. The coverage then froze at the first
+    // segment, so no tune after the first three minutes ever gained a ▶ until
+    // the view was reloaded: the whole of a three-hour session bar its opening.
+    const { vm, settle, store, bus, audio } = await mountView();
+    await settle();
+    store.__liveSessions.push({ id: 'live', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'Early', startSeconds: 0, endSeconds: 60,
+            audioStartSeconds: 30, audioEndSeconds: 90 },
+        { tuneId: 3, settingId: '30', title: 'Later', startSeconds: 200, endSeconds: 260,
+            audioStartSeconds: 200, audioEndSeconds: 260 },
+    ] });
+
+    audio.__setManifests([{
+        sessionId: 'live', bytes: 1,
+        segments: [{ index: 0, startSeconds: 0, durationSeconds: 180 }],
+    }]);
+    await vm.refreshPastSessions();
+    vm.selectSession('live');
+    await vm.refreshAudioSessions();
+    assert.equal(vm.hasAudioFor(vm.activeDetections[1]), false, 'not written yet');
+
+    // The second segment lands, and the session is ALREADY in audioSessionIDs.
+    audio.__setManifests([{
+        sessionId: 'live', bytes: 2,
+        segments: [
+            { index: 0, startSeconds: 0, durationSeconds: 180 },
+            { index: 1, startSeconds: 180, durationSeconds: 180 },
+        ],
+    }]);
+    bus.__fire('sessionAudioState', { sessionId: 'live', recording: true });
+    await settle();
+
+    assert.equal(vm.audioCoveredSeconds, 360);
+    assert.equal(vm.hasAudioFor(vm.activeDetections[1]), true, 'the button arrives with the audio');
+});
+
 await rm(tmpDir, { recursive: true, force: true });
 
 console.log(`\n${passed} passed, ${failed} failed`);

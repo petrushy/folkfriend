@@ -278,22 +278,38 @@ const FAKE_RECORDER = `
 // tests cover, and the real recorder needs a MediaRecorder node does not have.
 // sessionAudio.test.mjs drives the real one.
 export const __calls = [];
-export function __reset() { __calls.length = 0; recorder.isActive = false; recorder.isRecording = false; }
+export function __reset() {
+    __calls.length = 0;
+    recorder.isActive = false;
+    recorder.isRecording = false;
+    recorder.stoppedReason = null;
+}
 const recorder = {
-    isRecording: false, isActive: false, audioSeconds: null,
+    isRecording: false, isActive: false, audioSeconds: null, stoppedReason: null,
     // A resume/begin makes the recorder ACTIVE, which is what the "carries on
     // recording after an opt-out" case turns on: a paused recorder still holds
     // its session, so anything guarding on isActive alone restarts it.
     async begin() { __calls.push('begin'); recorder.isActive = true; return true; },
-    async resume() { __calls.push('resume'); recorder.isActive = true; return true; },
+    async resume() {
+        __calls.push('resume');
+        recorder.isActive = true;
+        if (recorder.stoppedReason === 'storage') recorder.stoppedReason = null;
+        return true;
+    },
     async stop() { __calls.push('stop'); recorder.isRecording = false; },
     async end() { __calls.push('end'); recorder.isActive = false; recorder.isRecording = false; },
     async discard(id) { __calls.push(['discard', id]); recorder.isActive = false; },
+    // Refuses while stopped, exactly as the real one does. Without that a test
+    // of "an ordinary Resume recovers from a full disk" passes against code
+    // that never clears the stop.
     ensureRecording() {
         __calls.push('ensureRecording');
+        if (recorder.stoppedReason) return Promise.resolve(false);
         if (recorder.isActive) recorder.isRecording = true;
         return Promise.resolve(recorder.isActive);
     },
+    // Only resume() clears it, mirroring _clearStorageStop().
+    __stopForStorage() { recorder.stoppedReason = 'storage'; recorder.isRecording = false; },
 };
 export default recorder;`;
 
@@ -1192,6 +1208,29 @@ async function run() {
 
     console.log(`\n${passed} passed, ${failed} failed`);
     console.log('\nsession audio follows the setting, in both directions');
+
+    await test('an ordinary Pause and Resume recovers a recording stopped for space', async () => {
+        // The reset lives in sessionRecorder.resume(), but the recorder still
+        // OWNS the session after a Pause — so a guard of "is it active" reached
+        // ensureRecording() directly and never called resume() at all. The
+        // previous test called resume() by hand, which is not the path the app
+        // takes, and so passed while the app stayed stuck.
+        const { service, store, recorder } = await loadService();
+        store.userSettings.recordSessionAudio = true;
+        await service.start(10, 5);
+        recorder.default.__stopForStorage();
+
+        // The loop's periodic check must NOT clear it: the user has not had a
+        // chance to free anything, and retrying costs a full segment each time.
+        await service._syncRecorderToSetting();
+        assert.equal(recorder.default.stoppedReason, 'storage');
+
+        await service.pause();
+        await service.start(10, 5);              // the real Resume
+        assert.equal(recorder.default.stoppedReason, null, 'a Resume tries again');
+        assert.ok(recorder.__calls.includes('resume'));
+        await service.finish();
+    });
 
     await test('turning recording OFF stops a recorder that is already going', async () => {
         // The bug: a paused recorder still holds its session, so isActive stays

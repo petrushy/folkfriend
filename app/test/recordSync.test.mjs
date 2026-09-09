@@ -515,6 +515,54 @@ async function run() {
         assert.ok(audio.__reclaimCalls[0].includes('in-progress'));
     });
 
+    await test('a failed read NEVER lets the sweep delete every recording', async () => {
+        // The worst thing this feature can do. getLiveSessions() answers a
+        // failed read with [], which is right for rendering a list and
+        // catastrophic here: "no sessions exist" is exactly the input that
+        // makes the sweep delete every recording on the device, irreversibly,
+        // during a routine sync merge, with nothing on screen.
+        //
+        // Driven directly rather than through applyRemote, because the merge
+        // ahead of it rejects on its own strict read and would mask this. The
+        // sweep has to be safe on its own terms — it is the destructive step.
+        const { store, idb, audio } = await signedInStore();
+        await store.upsertLiveSession({ id: 'keep', startedAt: 5000, tunes: [] });
+        audio.__reclaimCalls.length = 0;
+
+        idb.__failReadsOf('liveSessions');
+        try { await store._reclaimOrphanSessionAudio(); } finally { idb.__allowAll(); }
+
+        assert.equal(audio.__reclaimCalls.length, 0,
+            'abandoned, not run against an empty list');
+    });
+
+    await test('a failed open-session read also abandons the sweep', async () => {
+        // The open session is the one the sweep must never touch, so failing to
+        // find out which it is has to stop the sweep too — otherwise it deletes
+        // the recording of the session running right now.
+        const { store, idb, audio } = await signedInStore();
+        await store.upsertLiveSession({ id: 'keep', startedAt: 5000, tunes: [] });
+        audio.__reclaimCalls.length = 0;
+
+        idb.__failReadsOf('openLiveSession');
+        try { await store._reclaimOrphanSessionAudio(); } finally { idb.__allowAll(); }
+
+        assert.equal(audio.__reclaimCalls.length, 0);
+    });
+
+    await test('with healthy reads the sweep runs, and protects the open session', async () => {
+        const { store, audio } = await signedInStore();
+        await store.upsertLiveSession({ id: 'keep', startedAt: 5000, tunes: [] });
+        await store.setOpenLiveSession({ sessionId: 'in-progress', startedAt: 1 });
+        audio.__reclaimCalls.length = 0;
+
+        await store._reclaimOrphanSessionAudio();
+
+        assert.equal(audio.__reclaimCalls.length, 1);
+        assert.ok(audio.__reclaimCalls[0].includes('keep'));
+        assert.ok(audio.__reclaimCalls[0].includes('in-progress'));
+    });
+
     console.log('\nstore.js — overlapping writes to one collection');
 
     await test('two saves at the same moment do not lose one', async () => {
@@ -581,7 +629,17 @@ const STORE_FAKES = {
     'fake-idb.mjs': `
 const tick = () => new Promise(resolve => setTimeout(resolve, 0));
 export const __db = new Map();
-export async function get(key) { await tick(); return __db.get(key); }
+// Read faults are injected HERE, at the IndexedDB boundary, because that is
+// where a transient failure actually happens — and because the lenient getters
+// above it are exactly what turns one into a destructive empty answer.
+const __failReads = new Set();
+export function __failReadsOf(key) { __failReads.add(key); }
+export function __allowAll() { __failReads.clear(); }
+export async function get(key) {
+    await tick();
+    if (__failReads.has(key)) throw new Error('read failed');
+    return __db.get(key);
+}
 export async function set(key, value) { await tick(); __db.set(key, value); }
 export async function del(key) { await tick(); __db.delete(key); }
 `,
@@ -654,6 +712,7 @@ export async function reclaimAudioForMissingSessions(ids) {
 
     const idb = await import(path.join(tmpDir, 'fake-idb.mjs'));
     idb.__db.clear();
+    idb.__allowAll();
     const sync = await import(path.join(tmpDir, 'fake-sync.mjs'));
     sync.__reset();
     sync.__subs.length = 0;

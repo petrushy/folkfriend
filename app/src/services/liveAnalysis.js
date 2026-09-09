@@ -278,7 +278,7 @@ class LiveAnalysisService {
         // stream, and never awaited for anything the session depends on:
         // recording is the expendable half. A browser that cannot encode, or a
         // disk with no room, must still let the user log their tunes.
-        await this._syncRecorderToSetting();
+        await this._syncRecorderToSetting({ resuming: true });
 
         this._startTimer();
 
@@ -766,7 +766,18 @@ class LiveAnalysisService {
     // nothing else is going to notice.
     //
     // Never throws and never blocks the caller: audio is the expendable half.
-    _syncRecorderToSetting() {
+    // `resuming` marks an actual lifecycle transition — start() or Resume — as
+    // opposed to the loop's periodic check. Only a transition goes through
+    // sessionRecorder.resume(), which is what clears a stop for lack of
+    // storage: the user has had a chance to free space between two taps, while
+    // the loop running every few seconds has not, and clearing it there would
+    // retry a full segment's worth of encoding every three minutes for ever.
+    //
+    // Getting this wrong is invisible: the recorder still owns the session
+    // after a Pause, so a guard of "is it active" reaches ensureRecording()
+    // directly and never calls resume() at all — which is how the storage-stop
+    // reset came to exist while remaining unreachable from the actual Resume.
+    _syncRecorderToSetting({ resuming = false } = {}) {
         if (!this.sessionId) return Promise.resolve();
         const wanted = !!store.userSettings.recordSessionAudio;
 
@@ -778,7 +789,7 @@ class LiveAnalysisService {
                 .catch(e => console.warn('Could not stop session recording:', e && e.message));
         }
 
-        if (sessionRecorder.isActive) {
+        if (sessionRecorder.isActive && !resuming) {
             sessionRecorder.ensureRecording();
             return Promise.resolve();
         }

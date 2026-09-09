@@ -1279,6 +1279,39 @@ The test that would have caught (5) needed the fake to report a container
 different from the one requested; echoing the request back passes against the
 bug. Same lesson as the mute fake and the disabled-track silence.
 
+**A second review round found four more, three of them created by the first
+round's own fixes.** That is the pattern worth remembering: each fix added a
+new reader of existing state, and inherited an assumption that was true only
+for the old reader.
+
+7. **The sweep in (4) used LENIENT reads.** `getLiveSessions()` answers a failed
+   read with `[]` — correct for rendering a list, catastrophic as the input to a
+   delete: "no sessions exist" is precisely what makes it reclaim every
+   recording on the device, irreversibly, during a routine sync merge, with
+   nothing on screen. It uses `getLiveSessionsStrict()` and a strict open-session
+   read now, and abandons the sweep entirely if either fails. Exactly the rule
+   the store already learned for `_withRecords`; a destructive step needs it
+   most.
+8. **Coverage from (2) froze after the first segment.** The `sessionAudioState`
+   handler skipped a session already in `audioSessionIDs` — right when its only
+   job was to make the player appear, silently wrong once it also tracked how
+   much audio was committed. No tune after the first three minutes ever gained a
+   ▶ until the view was reloaded.
+9. **The storage-stop reset from (6) was unreachable from the real Resume.** It
+   lives in `sessionRecorder.resume()`, but the recorder still OWNS the session
+   after a Pause, so `_syncRecorderToSetting()` reached `ensureRecording()`
+   directly and never called `resume()` at all. The previous test called
+   `resume()` by hand — a path the app does not take — and so passed while the
+   app stayed stuck. `_syncRecorderToSetting({ resuming })` now distinguishes a
+   lifecycle transition from the loop's periodic check, which also stops the
+   loop retrying a full segment's encoding every three minutes for ever.
+10. **The format fix in (5) could mislabel a resumed session's older segments.**
+    An existing MP4 session whose encoder falls back to WebM had the
+    session-wide mimeType rewritten under segments that really were MP4. Format
+    is recorded **per track** now, and `buildClip` prefers the track's own —
+    which costs nothing, since a clip never spans a track and export is already
+    one file per track. The session-level value is only ever the first track's.
+
 ⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
 test is for: which container iOS actually records, whether `[init, ...midChunks]`
 plays standalone and seeks there, and whether an 86 MB `navigator.share` is

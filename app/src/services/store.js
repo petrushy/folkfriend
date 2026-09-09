@@ -1409,11 +1409,28 @@ class Store {
     // that window would otherwise delete the recording of the session that is
     // running right now.
     async _reclaimOrphanSessionAudio() {
+        let alive;
         try {
-            const sessions = await this.getLiveSessions();
-            const alive = sessions.map(s => s.id);
-            const open = await this.getOpenLiveSession();
+            // STRICT reads, and the whole sweep is abandoned if either fails.
+            //
+            // getLiveSessions() answers a failed read with [], which is the
+            // right answer for rendering a list and a catastrophic one here:
+            // "no sessions exist" is precisely the input that makes this delete
+            // every recording on the device. A transient IndexedDB error during
+            // a sync merge would have wiped the lot, irreversibly, with nothing
+            // on screen. Same rule the store already learned for _withRecords —
+            // a failed read is not an empty collection.
+            const sessions = await this.getLiveSessionsStrict();
+            alive = sessions.map(s => s.id);
+            const open = await get(KEY_OPEN_LIVE_SESSION);
             if (open && open.sessionId) alive.push(open.sessionId);
+        } catch (e) {
+            console.warn('Not reclaiming session audio — could not read what exists:',
+                e && e.message);
+            return;
+        }
+
+        try {
             await reclaimAudioForMissingSessions(alive);
         } catch (e) {
             console.warn('Could not reclaim orphaned session audio:', e && e.message);
