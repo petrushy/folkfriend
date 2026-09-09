@@ -127,6 +127,37 @@ export async function readManifest(sessionId) {
     }
 }
 
+// The three answers readManifest() collapses into null, kept apart.
+//
+// "There is no recording", "I could not read it" and "it was written by a
+// newer build" are the same value to a reader that only wants to play
+// something, and completely different to one that is about to WRITE. Treating
+// the last two as absence means creating a fresh manifest over an existing
+// recording, orphaning every segment it named — the same "could not tell means
+// it is gone" mistake as the orphan sweep, on the write path.
+//
+// Returns `{ state, manifest }` where state is:
+//   'ok'          — a manifest this build understands
+//   'absent'      — nothing stored, and it is safe to create one
+//   'unreadable'  — the read failed; nothing may be assumed
+//   'unsupported' — present but not this schema, i.e. possibly newer
+export async function probeManifest(sessionId) {
+    if (!sessionId) return { state: 'absent', manifest: null };
+    let raw;
+    try {
+        raw = await get(manifestKey(sessionId));
+    } catch (e) {
+        console.warn('Could not read session audio manifest:', e && e.message);
+        return { state: 'unreadable', manifest: null };
+    }
+    if (!raw) return { state: 'absent', manifest: null };
+    if (raw.schema !== AUDIO_SCHEMA_VERSION ||
+        !Array.isArray(raw.segments) || !Array.isArray(raw.tracks)) {
+        return { state: 'unsupported', manifest: null };
+    }
+    return { state: 'ok', manifest: raw };
+}
+
 export async function readSegment(sessionId, index) {
     try {
         return (await get(segmentKey(sessionId, index))) || null;

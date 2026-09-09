@@ -248,7 +248,13 @@ function feed(recorder, count, prefix = 'c') {
 
 const { idb, bus, mic, store } = await loadModules();
 
-function resetAll() {
+// Async because several writes are deliberately fire-and-forget (mute ranges,
+// the stop marker, the format patch). Clearing the database synchronously lets
+// one of those land AFTERWARDS, in the next test's supposedly empty store —
+// which surfaced the moment begin() started refusing to overwrite an existing
+// manifest. Draining first makes each test genuinely start from nothing.
+async function resetAll() {
+    await new Promise(resolve => setTimeout(resolve, 0));
     idb.__reset();
     bus.__reset();
     mic.__reset();
@@ -303,14 +309,14 @@ await test('file extension follows the container, so exports open elsewhere', ()
 console.log('\nsessionAudioStore — the reserve that protects the tune index');
 
 await test('headroom is what is free MINUS the reserve, never the raw free space', async () => {
-    resetAll();
+    await resetAll();
     setQuota(1000 * 1024 * 1024, 500 * 1024 * 1024);
     const headroom = await store.headroomBytes();
     assert.equal(headroom, (500 * 1024 * 1024) - store.STORAGE_RESERVE_BYTES);
 });
 
 await test('headroom goes negative once the reserve is breached', async () => {
-    resetAll();
+    await resetAll();
     setQuota(1000 * 1024 * 1024, 900 * 1024 * 1024);
     assert.ok((await store.headroomBytes()) < 0);
 });
@@ -319,7 +325,7 @@ await test('a browser that will not report quota answers null, not zero', async 
     // Zero would read as "no room" and disable recording outright on every
     // browser without estimate(); null means "cannot tell", and the recorder
     // proceeds and relies on catching the write failure instead.
-    resetAll();
+    await resetAll();
     noQuotaApi();
     assert.equal(await store.headroomBytes(), null);
     setQuota(10 * 1024 * 1024 * 1024, 0);
@@ -356,7 +362,7 @@ function segment(index, trackIndex, startSeconds, chunkTexts, { firstIsInit = fa
 }
 
 await test('a manifest names only segments already on disk', async () => {
-    resetAll();
+    await resetAll();
     await seedManifest();
     await store.appendSegment('s1', segment(0, 0, 0, ['aaa', 'bbb']), {
         index: 0, startSeconds: 0, durationSeconds: 2, init: new Blob(['INIT']),
@@ -372,7 +378,7 @@ await test('a failed manifest write leaves the PREVIOUS recording intact', async
     // The bug this forbids: writing the manifest first, so an interrupted
     // append leaves a manifest naming a segment that is not there — a player
     // that breaks partway through an evening, which the user cannot fix.
-    resetAll();
+    await resetAll();
     await seedManifest();
     await store.appendSegment('s1', segment(0, 0, 0, ['aaa']), {
         index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['INIT']),
@@ -394,7 +400,7 @@ await test('a failed PAYLOAD write never leaves the manifest naming missing audi
     // disk, wherever an append died. Writing the manifest first breaks it —
     // and the damage is invisible until the user tries to play the recording
     // back, which is days later and nowhere near a fix.
-    resetAll();
+    await resetAll();
     await seedManifest();
     idb.__failWrites.add(store.segmentKey('s1', 0));
     await assert.rejects(() => store.appendSegment('s1', segment(0, 0, 0, ['aaa']), {
@@ -410,7 +416,7 @@ await test('a failed PAYLOAD write never leaves the manifest naming missing audi
 });
 
 await test('the orphan a failed append leaves behind is reclaimed', async () => {
-    resetAll();
+    await resetAll();
     await seedManifest();
     await store.appendSegment('s1', segment(0, 0, 0, ['aaa']), {
         index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['INIT']),
@@ -426,7 +432,7 @@ await test('the orphan a failed append leaves behind is reclaimed', async () => 
 });
 
 await test('a delete drops the manifest first, so nothing can reference a vanishing segment', async () => {
-    resetAll();
+    await resetAll();
     await seedManifest();
     await store.appendSegment('s1', segment(0, 0, 0, ['aaa']), {
         index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['INIT']),
@@ -443,7 +449,7 @@ await test('a delete drops the manifest first, so nothing can reference a vanish
 });
 
 await test('deleting one session never touches another', async () => {
-    resetAll();
+    await resetAll();
     await seedManifest('s1');
     await seedManifest('s2');
     await store.appendSegment('s1', segment(0, 0, 0, ['aaa']), { index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['I1']) });
@@ -457,7 +463,7 @@ await test('deleting one session never touches another', async () => {
 });
 
 await test('audio for sessions that no longer exist is reclaimed', async () => {
-    resetAll();
+    await resetAll();
     await seedManifest('gone');
     await seedManifest('alive');
     await store.appendSegment('gone', segment(0, 0, 0, ['x']), { index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['I']) });
@@ -471,7 +477,7 @@ await test('audio for sessions that no longer exist is reclaimed', async () => {
 console.log('\nsessionAudioStore — clip assembly');
 
 async function seedTwoSegments() {
-    resetAll();
+    await resetAll();
     await seedManifest();
     // Chunk 0 of a track carries the container header AND its first second of
     // audio, so it is stored like any other chunk and marked init.
@@ -515,7 +521,7 @@ await test('a clip spans segments within one track', async () => {
 await test('a clip never crosses a track boundary', async () => {
     // Each track is its own MediaRecorder run with its own header; two of them
     // concatenated is not a playable file, so the range is clipped instead.
-    resetAll();
+    await resetAll();
     await seedManifest();
     await store.appendSegment('s1', segment(0, 0, 0, ['H0', 'a1']),
         { index: 0, startSeconds: 0, durationSeconds: 2, init: new Blob(['H0']) });
@@ -544,7 +550,7 @@ await test('a clip stops at a missing segment rather than splicing a hole', asyn
 });
 
 await test('export ranges are one per track', async () => {
-    resetAll();
+    await resetAll();
     await seedManifest();
     await store.appendSegment('s1', segment(0, 0, 0, ['H0'], { firstIsInit: true }),
         { index: 0, startSeconds: 0, durationSeconds: 60, init: new Blob(['H0']) });
@@ -558,7 +564,7 @@ await test('export ranges are one per track', async () => {
 console.log('\nsessionRecorder — the audio clock');
 
 await test('the clock does not advance before a track starts', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1', { bitrateKbps: 64 });
     fakeNow += 5000;
@@ -566,7 +572,7 @@ await test('the clock does not advance before a track starts', async () => {
 });
 
 await test('the clock advances with the recording, not with wall clock', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -579,7 +585,7 @@ await test('the clock advances with the recording, not with wall clock', async (
 await test('a pause and resume CONTINUES the clock rather than restarting it', async () => {
     // Restarting at zero would overwrite the first stretch's timeline, so every
     // tune from before the pause would seek into audio recorded after it.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -600,7 +606,7 @@ await test('a pause and resume CONTINUES the clock rather than restarting it', a
 await test('a microphone outage does not put time into the recording that is not there', async () => {
     // The failure this forbids: counting the outage as recorded time, which
     // shifts every tune after it by however long the microphone was gone.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -618,7 +624,7 @@ await test('a microphone outage does not put time into the recording that is not
 });
 
 await test('a reacquired stream opens a NEW track', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -632,7 +638,7 @@ await test('a reacquired stream opens a NEW track', async () => {
 });
 
 await test('a recorder still on the live stream is left alone', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -646,7 +652,7 @@ await test('a recorder still on the live stream is left alone', async () => {
 console.log('\nsessionRecorder — writing');
 
 await test('a segment is written once it holds SEGMENT_SECONDS of audio', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -661,7 +667,7 @@ await test('a segment is written once it holds SEGMENT_SECONDS of audio', async 
 });
 
 await test('the first chunk of a track is marked as the header', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -677,7 +683,7 @@ await test('the first chunk of a track is marked as the header', async () => {
 await test('the tail of a track is not lost when the session pauses', async () => {
     // MediaRecorder only flushes its last chunk during stop(), and that chunk
     // is the audio of whatever tune was playing when Pause was tapped.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -693,7 +699,7 @@ await test('the tail of a track is not lost when the session pauses', async () =
 });
 
 await test('a resumed session appends rather than overwriting its stored segments', async () => {
-    resetAll();
+    await resetAll();
     const first = await freshRecorder();
     await first.begin('s1');
     mic.__setStream();
@@ -722,7 +728,7 @@ await test('a resumed session appends rather than overwriting its stored segment
 console.log('\nsessionRecorder — running out of storage');
 
 await test('a full disk stops the recording and keeps what was already written', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -745,7 +751,7 @@ await test('a full disk stops the recording and keeps what was already written',
 await test('the manifest records WHY recording stopped, and where', async () => {
     // A player that silently runs out of audio halfway through an evening is
     // indistinguishable from a bug.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -763,7 +769,7 @@ await test('the manifest records WHY recording stopped, and where', async () => 
 });
 
 await test('begin() refuses up front when there is already no room', async () => {
-    resetAll();
+    await resetAll();
     setQuota(1000, 999);
     const recorder = await freshRecorder();
     const ok = await recorder.begin('s1');
@@ -773,7 +779,7 @@ await test('begin() refuses up front when there is already no room', async () =>
 });
 
 await test('a browser with no quota API still records', async () => {
-    resetAll();
+    await resetAll();
     noQuotaApi();
     const recorder = await freshRecorder();
     assert.equal(await recorder.begin('s1'), true);
@@ -786,7 +792,7 @@ await test('a browser with no quota API still records', async () => {
 });
 
 await test('a write that fails anyway stops cleanly instead of throwing', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -804,7 +810,7 @@ await test('resuming after a storage stop tries again rather than latching off',
     // Latching would mean a session that once filled the disk could never
     // record again even after the user freed space, with nothing on screen to
     // explain why.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -829,7 +835,7 @@ await test('resuming after a storage stop tries again rather than latching off',
 console.log('\nsessionRecorder — availability and teardown');
 
 await test('a browser that cannot record reports it instead of failing later', async () => {
-    resetAll();
+    await resetAll();
     const saved = globalThis.MediaRecorder;
     globalThis.MediaRecorder = undefined;
     const recorder = await freshRecorder();
@@ -840,7 +846,7 @@ await test('a browser that cannot record reports it instead of failing later', a
 });
 
 await test('discard() deletes the recording', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -855,7 +861,7 @@ await test('discard() deletes the recording', async () => {
 });
 
 await test('end() flushes the last segment before closing', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -869,7 +875,7 @@ await test('end() flushes the last segment before closing', async () => {
 });
 
 await test('the recorder announces its state so the UI cannot disagree with it', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -995,7 +1001,7 @@ await test('muting silences the RECORDING and leaves capture alone', async () =>
     // The whole point of the control: detection carries on through the
     // conversation being muted. Muting the capture track instead would stop
     // the tune list dead, which is not what "do not record this" means.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1013,7 +1019,7 @@ await test('muting silences the RECORDING and leaves capture alone', async () =>
 await test('the recording keeps running while muted, so the timeline stays intact', async () => {
     // Stopping instead would compress the timeline, and every tune offset
     // after a mute would point at the wrong moment in the recording.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1029,7 +1035,7 @@ await test('the recording keeps running while muted, so the timeline stays intac
 });
 
 await test('muted stretches are recorded, so the player can explain the silence', async () => {
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1051,7 +1057,7 @@ await test('muted stretches are recorded, so the player can explain the silence'
 await test('a mute still open when the session ends is closed, not left running for ever', async () => {
     // An open-ended range greys out everything after it, including audio a
     // later resumed stretch recorded.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1072,7 +1078,7 @@ await test('a microphone reacquired while muted comes back MUTED', async () => {
     // The asymmetry that decides this: silently un-muting records something
     // the user believes is private and cannot be undone, while staying muted
     // loses audio the user can see is being lost.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1088,7 +1094,7 @@ await test('a microphone reacquired while muted comes back MUTED', async () => {
 });
 
 await test('a session resumed after a reload comes back muted if it was muted', async () => {
-    resetAll();
+    await resetAll();
     const first = await freshRecorder();
     await first.begin('s1');
     mic.__setStream();
@@ -1112,7 +1118,7 @@ await test('a NEW session starts recording, whatever the last one was doing', as
     // Not a contradiction of the rule above: a resumed session is visibly the
     // same one, with the muted counter on screen. A new session has nothing
     // on screen connecting it to a button pressed hours earlier.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1136,7 +1142,7 @@ await test('a NEW session starts recording, whatever the last one was doing', as
 await test('mute reports failure rather than pretending, on a browser that cannot clone', async () => {
     // Silently doing nothing would leave the user believing the room is not
     // being recorded when it is — the worst outcome this control can produce.
-    resetAll();
+    await resetAll();
     mic.__setCloneable(false);
     const recorder = await freshRecorder();
     await recorder.begin('s1');
@@ -1151,7 +1157,7 @@ await test('mute reports failure rather than pretending, on a browser that canno
 await test('muting twice does not open a second range', async () => {
     // Double-tapping a control on a phone in a pub is normal. Two overlapping
     // ranges would double-count the muted total and draw the strip twice.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1165,7 +1171,7 @@ await test('muting twice does not open a second range', async () => {
 await test('a session that ended UNMUTED resumes unmuted', async () => {
     // The other half of the restore rule: honouring a CLOSED range would leave
     // a session permanently muted after one mute earlier in the evening.
-    resetAll();
+    await resetAll();
     const first = await freshRecorder();
     await first.begin('s1');
     mic.__setStream();
@@ -1187,7 +1193,7 @@ await test('a session that ended UNMUTED resumes unmuted', async () => {
 await test('the mute state is announced, so the session bar cannot disagree', async () => {
     // The bar renders from this event alone; if the state did not ride it, the
     // chip would keep saying REC over a silenced recording.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1203,7 +1209,7 @@ await test('the mute state is announced, so the session bar cannot disagree', as
 await test('muted time is reported while the mute is still open', async () => {
     // A mute the user forgot about is how a manual control loses an evening,
     // and a running counter is the only defence.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1225,7 +1231,7 @@ await test('a storage stop is cleared by an ordinary Pause and Resume', async ()
     // The reset lived after resume()'s "already ours" early return, so the
     // same in-memory session could never record again after running out of
     // space — only a reload could clear it, which no user would guess.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1251,7 +1257,7 @@ await test('an encoder stop is NOT cleared by a resume', async () => {
     // 'storage' is a condition the user can change between two taps.
     // 'unsupported' and 'encoder' say something about the browser, and
     // retrying them every Resume would spin for the rest of the session.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1266,7 +1272,7 @@ await test('the manifest names the container actually recorded', async () => {
     // the browser's own container wrote WebM bytes that the export named .m4a
     // and the player handed to a decoder as MP4 — a mislabelled file that
     // presents as corrupt audio.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     // The encoder will report a different container from the one requested.
     FakeMediaRecorder.actualMimeType = 'audio/webm;codecs=opus';
@@ -1287,7 +1293,7 @@ await test('a moment past the last stored segment has no segment', async () => {
     // Segments are written every few minutes, so a tune recognised just now is
     // real, stamped, and NOT yet on disk. Falling back to the last stored
     // segment played unrelated audio from minutes earlier.
-    resetAll();
+    await resetAll();
     await seedManifest();
     await store.appendSegment('s1', segment(0, 0, 0, ['H0', 'a1'], { firstIsInit: true }),
         { index: 0, startSeconds: 0, durationSeconds: 2, init: new Blob(['H0']) });
@@ -1302,7 +1308,7 @@ await test('a resumed session that falls back to another container keeps its old
     // are MP4 as WebM, and the export would hand a decoder bytes that are
     // neither. A clip never spans a track, so the track is the only level at
     // which "what format is this" has one answer.
-    resetAll();
+    await resetAll();
     const first = await freshRecorder();
     await first.begin('s1');
     mic.__setStream();
@@ -1344,7 +1350,7 @@ await test('a failed manifest read abandons the sweep rather than deleting', asy
     // sweep deletes everything no manifest claims — so one transient error
     // would destroy a whole recording, silently, from a screen the user opened
     // to look at their sessions.
-    resetAll();
+    await resetAll();
     await seedManifest('s1');
     await store.appendSegment('s1', segment(0, 0, 0, ['aaa'], { firstIsInit: true }),
         { index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['H']) });
@@ -1360,7 +1366,7 @@ await test('a failed manifest read abandons the sweep rather than deleting', asy
 await test('a manifest from a NEWER build protects its audio', async () => {
     // Not recognised is not rubbish — it may be a later format this client
     // cannot read. Same rule as the tune index's read-side delete.
-    resetAll();
+    await resetAll();
     await seedManifest('s1');
     await store.appendSegment('s1', segment(0, 0, 0, ['aaa'], { firstIsInit: true }),
         { index: 0, startSeconds: 0, durationSeconds: 1, init: new Blob(['H']) });
@@ -1376,7 +1382,7 @@ await test('the sweep cannot delete a payload whose manifest is still in flight'
     // in that window deletes the new payload, and the manifest then lands
     // naming audio that is gone — the precise state the ordering exists to
     // prevent.
-    resetAll();
+    await resetAll();
     await seedManifest('s1');
 
     // The manifest write is held open, so the sweep runs while the payload is
@@ -1396,7 +1402,7 @@ await test('the sweep cannot delete a payload whose manifest is still in flight'
 });
 
 await test('a genuine orphan is still reclaimed', async () => {
-    resetAll();
+    await resetAll();
     await seedManifest('s1');
     await idb.set(store.segmentKey('s1', 99), { blob: new Blob(['x']), chunks: [] });
     assert.equal(await store.reclaimOrphans(), 1);
@@ -1409,7 +1415,7 @@ await test('a resumed recording never lays new audio over old segments', async (
     // never committed and the next track restarted at the FAILED track's start
     // — over segments already written there. The existing storage test runs out
     // of space on the very first segment, where restarting at zero is invisible.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1447,7 +1453,7 @@ await test('a failure commits the clock, exactly as a normal stop does', async (
     // Pinned on its own because the resume-side recovery below covers the same
     // ground: with both in place either can regress unnoticed. This is the
     // primary fix — _fail() ends a track without going through _stopTrack().
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1466,7 +1472,7 @@ await test('a failure commits the clock, exactly as a normal stop does', async (
 await test('a resume never starts behind what is already stored', async () => {
     // The independent half: whatever left the clock behind, reading disk is the
     // only authority on where new audio may safely begin.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1487,7 +1493,7 @@ await test('two segments never claim the same second', async () => {
     // The visible consequence of the rewind: _segmentFor picks whichever it
     // finds first, so a tune seeks into audio from a different part of the
     // evening.
-    resetAll();
+    await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
     mic.__setStream();
@@ -1520,7 +1526,7 @@ await test('a reload after a storage failure does not fill the hole', async () =
     // of the last SAVED segment, which is where the hole begins. Starting there
     // hands the lost interval's timestamps to audio recorded after the reload,
     // so every tune from that interval plays something unrelated.
-    resetAll();
+    await resetAll();
     const before = await freshRecorder();
     await before.begin('s1');
     mic.__setStream();
@@ -1550,7 +1556,7 @@ await test('the clock floor survives a retry that records nothing', async () => 
     // resume() clears the `stopped` marker so recording can be tried again, so
     // the marker cannot be the durable record. A second reload after a retry
     // that stored nothing would otherwise lose the hole entirely.
-    resetAll();
+    await resetAll();
     const first = await freshRecorder();
     await first.begin('s1');
     mic.__setStream();
@@ -1571,6 +1577,93 @@ await test('the clock floor survives a retry that records nothing', async () => 
     const third = await freshRecorder();  // a second reload
     await third.resume('s1');
     assert.equal(Math.round(third._committedSeconds), 2 * store.SEGMENT_SECONDS);
+});
+
+console.log('\nan existing recording is never written over');
+
+await test('a failed manifest read does NOT start a fresh recording over it', async () => {
+    // readManifest() answers null for three different things: nothing stored,
+    // the read failed, and a schema this build does not know. resume() read
+    // that as "no recording exists" and called begin(), which writes an empty
+    // manifest over the real one and orphans every segment it named. Same
+    // "could not tell means it is gone" mistake as the orphan sweep, on the
+    // write path this time.
+    await resetAll();
+    const first = await freshRecorder();
+    await first.begin('s1');
+    mic.__setStream();
+    await first.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await first._writeChain;
+    await first.end();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    idb.__failReads.add(store.manifestKey('s1'));
+    const second = await freshRecorder();
+    const ok = await second.resume('s1');
+    idb.__failReads.clear();
+
+    assert.equal(ok, false, 'it refuses rather than guessing');
+    assert.equal(second.stoppedReason, 'unreadable');
+    // The MESSAGE is what pins resume's own guard: begin() refuses too (it
+    // holds the invariant on its own terms), but it can only say "this session
+    // already has a recording", which is wrong and unactionable for a
+    // transient read failure. With both guards in place either could regress
+    // unnoticed, so each is asserted by what only it can produce.
+    assert.match(second.error, /Could not read/);
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.segments.length, 1, 'the recording is untouched');
+    assert.equal(await store.reclaimOrphans(), 0, 'and nothing was orphaned');
+});
+
+await test('a manifest from a NEWER build is not written over either', async () => {
+    await resetAll();
+    const first = await freshRecorder();
+    await first.begin('s1');
+    mic.__setStream();
+    await first.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await first._writeChain;
+    await first.end();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const stored = await idb.get(store.manifestKey('s1'));
+    await idb.set(store.manifestKey('s1'),
+        { ...stored, schema: store.AUDIO_SCHEMA_VERSION + 1 });
+
+    const second = await freshRecorder();
+    assert.equal(await second.resume('s1'), false);
+    assert.equal(second.stoppedReason, 'unsupported');
+    assert.match(second.error, /newer version/);
+    const after = await idb.get(store.manifestKey('s1'));
+    assert.equal(after.schema, store.AUDIO_SCHEMA_VERSION + 1, 'left exactly as it was');
+    assert.equal(after.segments.length, 1);
+});
+
+await test('begin() refuses to create over an existing recording', async () => {
+    // Held in begin() itself, not only at its caller, so no future caller can
+    // reintroduce the overwrite.
+    await resetAll();
+    const first = await freshRecorder();
+    await first.begin('s1');
+    mic.__setStream();
+    await first.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await first._writeChain;
+    await first.end();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const second = await freshRecorder();
+    assert.equal(await second.begin('s1'), false);
+    assert.equal((await store.readManifest('s1')).segments.length, 1);
+});
+
+await test('a genuinely new session still starts normally', async () => {
+    // The refusals above must not cost the ordinary case.
+    await resetAll();
+    const recorder = await freshRecorder();
+    assert.equal(await recorder.resume('brand-new'), true);
+    assert.ok(await store.readManifest('brand-new'));
 });
 
 console.log('\nlinking detections to the recording');

@@ -1380,6 +1380,36 @@ Worth stating as rules rather than incidents:
     `app/test/sessionAudioPlayer.test.mjs` (7 cases) exists for this — the
     player had no tests of its own, and both of these live entirely in it.
 
+16. **`readManifest()` collapses three answers into `null`**, and `resume()`
+    read that as "no recording exists" and called `begin()` — which writes a
+    fresh empty manifest over a real recording and orphans every segment it
+    named. "Nothing stored", "the read failed" and "a newer build wrote this"
+    are the same value to a reader that only wants to play something, and
+    completely different to one about to WRITE. `probeManifest()` keeps them
+    apart; only genuine absence may create. **Third instance of "could not tell
+    means it is gone" in this feature** — after the orphan sweep and the
+    session sweep — and the first on a write path.
+
+    `begin()` holds the same invariant on its own terms, so no future caller
+    can reintroduce it. The two are redundant, so each is pinned by what only
+    it produces: the resume guard by its MESSAGE, since begin() can only say
+    "this session already has a recording", which is wrong and unactionable for
+    a transient read failure.
+
+17. **`playTune()` sought even when nothing contained the tune.** With no
+    containing range there is nothing to clamp to, and `start - 12 s` lands in
+    the PRECEDING stretch — so a tune just inside a hole played unrelated audio
+    rather than failing. It refuses now. The view does not offer a button
+    there, but it decides from state that can be a moment stale while a segment
+    is being written, so the player has to hold the line itself.
+
+**A test-harness bug surfaced by (16):** several writes are deliberately
+fire-and-forget (mute ranges, the stop marker, the format patch), and
+`resetAll()` cleared the fake database synchronously — so one of those could
+land *afterwards*, inside the next test's supposedly empty store. Invisible
+until `begin()` started refusing to overwrite. `resetAll()` is async now and
+drains first.
+
 ⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
 test is for: which container iOS actually records, whether `[init, ...midChunks]`
 plays standalone and seeks there, and whether an 86 MB `navigator.share` is

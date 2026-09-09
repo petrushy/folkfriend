@@ -408,8 +408,17 @@ export default {
             // whose audio is right there. The same clamp handles the start of
             // the recording, where the preroll would go negative.
             const range = this._rangeContaining(detection.audioStartSeconds);
+            if (!range) {
+                // Nothing was recorded at this tune's position, so there is
+                // nothing to clamp to — and seeking to start - 12 s would land
+                // in the PRECEDING stretch and play unrelated audio. The view
+                // does not offer a button here, but it decides from state that
+                // can be a moment stale while a segment is being written.
+                this.error = 'That part of the session was not recorded.';
+                return;
+            }
             const target = detection.audioStartSeconds - PLAY_PREROLL_SECONDS;
-            return this.playFrom(range ? Math.max(target, range.from) : target);
+            return this.playFrom(Math.max(target, range.from));
         },
 
         async _loadSegment(segment, seekSeconds, autoplay) {

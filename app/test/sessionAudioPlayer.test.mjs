@@ -149,12 +149,25 @@ await test('a tune at the very start of the recording is not sought below zero',
     assert.deepEqual(vm.playRequests, [0]);
 });
 
-await test('a tune inside the hole is not offered a seek at all', async () => {
-    // It has no containing stretch, so there is nothing to clamp to. The view
-    // does not render a button for it; this is the player refusing on its own
-    // terms if one is somehow requested.
+await test('a tune inside the hole is not sought at all', async () => {
+    // Its name claimed this and it only checked _rangeContaining, which is not
+    // the same assertion: playTune() went on to seek anyway. A tune just inside
+    // a hole is the dangerous case — start - 12 s lands in the PRECEDING
+    // stretch, so it plays unrelated audio rather than failing.
+    //
+    // The view does not render a button here, but it decides from state that
+    // can be a moment stale while a segment is being written, so the player has
+    // to refuse on its own terms.
     const vm = await mountPlayer(GAPPY);
     assert.equal(vm._rangeContaining(250), null);
+
+    await vm.playTune({ audioStartSeconds: 250 });
+    assert.deepEqual(vm.playRequests, [], 'no seek was attempted');
+
+    // Just inside the hole, where the preroll would reach back into real audio.
+    await vm.playTune({ audioStartSeconds: 185 });
+    assert.deepEqual(vm.playRequests, []);
+    assert.match(vm.error, /not recorded/);
 });
 
 await test('a continuous recording has no gaps and no clamping', async () => {

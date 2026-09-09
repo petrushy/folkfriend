@@ -40,6 +40,7 @@ import {
     patchManifest,
     appendSegment,
     readManifest,
+    probeManifest,
     deleteSessionAudio,
     headroomBytes,
 } from './sessionAudioStore.js';
@@ -227,6 +228,17 @@ class SessionRecorder {
             return false;
         }
 
+        // begin() CREATES, and creating over an existing recording destroys it.
+        // Held here rather than only at the caller, so no future caller can
+        // reintroduce it: anything but genuine absence is refused.
+        const probe = await probeManifest(sessionId);
+        if (probe.state !== 'absent') {
+            this.stoppedReason = probe.state === 'ok' ? 'exists' : probe.state;
+            this.error = 'This session already has a recording; not starting a new one over it.';
+            this._emit();
+            return false;
+        }
+
         this.sessionId = sessionId;
         this.mimeType = mimeType;
         this.bitsPerSecond = Math.round(bitrateKbps * 1000);
@@ -298,8 +310,21 @@ class SessionRecorder {
             return true;
         }
 
-        const manifest = await readManifest(sessionId);
-        if (!manifest) return this.begin(sessionId, { bitrateKbps });
+        const probe = await probeManifest(sessionId);
+        // Only genuine ABSENCE may create a manifest. A read that failed, or a
+        // manifest from a build this one does not understand, must never be
+        // written over: begin() would replace it with an empty one and orphan
+        // every segment of an existing recording.
+        if (probe.state === 'unreadable' || probe.state === 'unsupported') {
+            this.stoppedReason = probe.state;
+            this.error = probe.state === 'unreadable'
+                ? 'Could not read this session\'s existing recording, so nothing further is being recorded.'
+                : 'This session\'s recording was made by a newer version of the app, so nothing further is being recorded.';
+            this._emit();
+            return false;
+        }
+        if (probe.state === 'absent') return this.begin(sessionId, { bitrateKbps });
+        const manifest = probe.manifest;
 
         const mimeType = pickMimeType();
         if (mimeType === null) return false;
