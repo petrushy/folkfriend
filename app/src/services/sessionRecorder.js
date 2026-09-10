@@ -209,22 +209,9 @@ class SessionRecorder {
     get audioSeconds() {
         if (!this.sessionId) return null;
         if (!this.isRecording) return this._chunkCursorSeconds;
-        // Anchored to what has ACTUALLY been recorded — the end of the last
-        // chunk MediaRecorder handed over — plus a bounded extrapolation for
-        // the piece still in flight.
-        //
-        // It used to free-run on wall clock from the track's start, which
-        // contradicted this module's own rule: the clock counted time whether
-        // or not the recorder produced anything. If chunks stop arriving while
-        // the track still claims to be recording — a disabled track that yields
-        // no data rather than silence, an encoder stalled under load — the
-        // recording stops growing while the clock does not, and every detection
-        // after that points somewhere later in the file than the audio it came
-        // from. The error is permanent and accumulates over an evening.
-        //
-        // The extrapolation is capped at two timeslices so consecutive
-        // detections inside one chunk still get distinct, increasing stamps,
-        // while a recorder that has gone quiet can only drift by that much.
+        // Estimate from delivered chunks, with bounded extrapolation while
+        // waiting for the next event. MediaRecorder events do not establish
+        // exact encoded duration; playback measures the media separately.
         const sinceChunk = this._lastChunkPerf === null ? 0 : (now() - this._lastChunkPerf) / 1000;
         return this._chunkCursorSeconds + Math.min(sinceChunk, (TIMESLICE_MS * 2) / 1000);
     }
@@ -636,26 +623,17 @@ class SessionRecorder {
         if (!blob || !blob.size) return;
         if (trackIndex !== this._trackIndexActive) return;   // a stale track
 
-        // A chunk advances the clock by what a chunk can plausibly HOLD, not by
-        // the wall clock since the track began.
-        //
-        // Taking absolute wall clock meant a stall — chunks not arriving for two
-        // minutes because the encoder produced nothing — was credited to the
-        // next chunk, injecting two minutes of timeline that the audio does not
-        // contain. Everything after it was then shifted by that much, and the
-        // error never closes.
-        //
-        // The cap is generous (four timeslices) because a busy main thread can
-        // legitimately deliver one chunk holding several seconds of audio. It
-        // cannot be exact: arrival times cannot tell "recorded silence" from
-        // "recorded nothing". That is why playback measures each clip's real
-        // decoded length and scales to it — see the player's _measureDrift().
+        // Event delivery is not a measure of encoded duration: a busy main
+        // thread can delay a blob containing arbitrarily many seconds. Never
+        // truncate that interval to a multiple of the requested timeslice.
+        // This remains an elapsed-time estimate, not a decoded-media clock.
+        // Actual capture interruptions must close the track through the
+        // lifecycle handlers; missing events alone cannot prove lost audio.
         const startSeconds = this._chunkCursorSeconds;
         const sinceLast = this._lastChunkPerf === null
             ? TIMESLICE_MS / 1000
             : (now() - this._lastChunkPerf) / 1000;
-        const held = Math.min(sinceLast, (TIMESLICE_MS * 4) / 1000);
-        this._chunkCursorSeconds = startSeconds + Math.max(0, held);
+        this._chunkCursorSeconds = startSeconds + Math.max(0, sinceLast);
         this._lastChunkPerf = now();
 
         const isInit = this._initBlob === null;
