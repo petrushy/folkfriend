@@ -1,4 +1,5 @@
 import Vue from 'vue';
+import { readDropboxStorage } from './dropboxStorage.mjs';
 import { get, set, del, keys } from 'idb-keyval';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
@@ -12,6 +13,8 @@ const APP_KEY = process.env.VUE_APP_DROPBOX_APP_KEY || 'zl982bc269ijgda';
 const AUTH_KEY = 'folkfriend.dropbox.auth';
 const ENABLED_KEY = 'folkfriend.dropbox.enabled';
 const ACCOUNT_KEY = 'folkfriend.dropbox.account';
+const SPACE_KEY = 'folkfriend.dropbox.spacePermission';
+const emptyStorage = () => ({ storedBytes: null, availableBytes: null, quotaState: 'unavailable', checkedAt: 0, attemptedAt: 0, loading: false, error: '' });
 const cachePrefix = 'dropboxCache:';
 const CACHE_LIMIT = 32 * 1024 * 1024;
 const json = value => JSON.stringify(value);
@@ -20,7 +23,7 @@ let auth;
 try { auth = JSON.parse(stored(AUTH_KEY)); } catch (_) { auth = null; }
 let account = stored(ACCOUNT_KEY) || '';
 export const dropboxState = Vue.observable({ configured: !!APP_KEY, enabled: stored(ENABLED_KEY) === 'true',
-    connected: !!auth && auth.expiresAt > Date.now() + 30000, busy: false, error: '', sessions: {}, revision: 0 });
+    connected: !!auth && auth.expiresAt > Date.now() + 30000, busy: false, error: '', sessions: {}, revision: 0, storage: emptyStorage() });
 const client = new DropboxClient({ token: () => dropboxState.enabled ? auth : null });
 let queue = Promise.resolve();
 let retryAt = 0;
@@ -43,6 +46,24 @@ function report(e, id) {
     if (id) status(id, label);
     dropboxState.error = e.message || 'Dropbox is unavailable. Backup will retry.';
 }
+export async function refreshDropboxStorage(force = false) {
+    const storage = dropboxState.storage;
+    if (!dropboxState.enabled || !dropboxState.connected || storage.loading) return;
+    if (!force && storage.attemptedAt > Date.now() - 60000) return;
+    const requestedAccount = account;
+    storage.loading = true;
+    storage.attemptedAt = Date.now();
+    try {
+        const result = await readDropboxStorage(client);
+        if (storage !== dropboxState.storage || requestedAccount !== account || !dropboxState.enabled) return;
+        Object.assign(storage, result, { error: '' });
+    } catch (e) {
+        if (storage !== dropboxState.storage || requestedAccount !== account || !dropboxState.enabled) return;
+        storage.error = 'Could not refresh Dropbox storage. Try again when connected.';
+        if (e.code === 'auth') report(e);
+    } finally { storage.loading = false; }
+}
+
 export function backupStatus(id) {
     // Read the observable revision even when no status has been set yet.
     void dropboxState.revision;
@@ -62,7 +83,7 @@ export function handleDropboxCallback() {
     document.body.textContent = 'Dropbox authorization finished. Return to the FolkFriend window where you connected.';
     return true;
 }
-export async function connectDropbox() {
+export async function connectDropbox({ includeSpaceUsage = stored(SPACE_KEY) === 'true' } = {}) {
     if (!APP_KEY) throw new Error('Dropbox backup is not configured for this installation.');
     const popup = window.open('about:blank', 'folkfriend-dropbox', 'width=600,height=750');
     if (!popup) throw new Error('Allow the Dropbox sign-in popup, then try again.');
@@ -86,7 +107,7 @@ export async function connectDropbox() {
             window.addEventListener('message', receive);
             popup.location.href = `https://www.dropbox.com/oauth2/authorize?${new URLSearchParams({ client_id: APP_KEY, response_type: 'code',
                 redirect_uri: redirect, state, code_challenge: challenge, code_challenge_method: 'S256', token_access_type: 'online',
-                scope: 'files.metadata.read files.content.read files.content.write' })}`;
+                scope: 'files.metadata.read files.content.read files.content.write' + (includeSpaceUsage ? ' account_info.read' : '') })}`;
         });
         const response = await fetch('https://api.dropboxapi.com/oauth2/token', { method: 'POST', body: new URLSearchParams({
             grant_type: 'authorization_code', client_id: APP_KEY, code, code_verifier: verifier, redirect_uri: redirect,
@@ -96,6 +117,8 @@ export async function connectDropbox() {
         if (!result.access_token || !result.account_id || !(result.expires_in > 0)) throw new Error('Invalid Dropbox authorization response.');
         await serialize(async () => {
             account = result.account_id;
+            dropboxState.storage = emptyStorage();
+            localStorage.setItem(SPACE_KEY, String(includeSpaceUsage));
             auth = { accessToken: result.access_token, expiresAt: Date.now() + result.expires_in * 1000 };
             localStorage.setItem(AUTH_KEY, json(auth)); localStorage.setItem(ACCOUNT_KEY, account); localStorage.setItem(ENABLED_KEY, 'true');
             dropboxState.enabled = true; dropboxState.connected = true; dropboxState.sessions = {}; dropboxState.error = ''; retryAt = 0;
@@ -109,6 +132,7 @@ export async function disconnectDropbox() {
     dropboxState.enabled = false;
     await serialize(async () => {
         auth = null; localStorage.removeItem(AUTH_KEY); localStorage.setItem(ENABLED_KEY, 'false');
+        dropboxState.storage = emptyStorage(); localStorage.removeItem(SPACE_KEY);
         dropboxState.connected = false; dropboxState.sessions = {}; dropboxState.error = ''; changed();
     });
 }
@@ -281,6 +305,7 @@ export function startDropbox() {
     window.addEventListener('storage', event => {
         if (![AUTH_KEY, ACCOUNT_KEY, ENABLED_KEY].includes(event.key)) return;
         dropboxState.enabled = false;
+        dropboxState.storage = emptyStorage();
         serialize(async () => {
             try { auth = JSON.parse(stored(AUTH_KEY)); } catch (_) { auth = null; }
             account = stored(ACCOUNT_KEY) || '';

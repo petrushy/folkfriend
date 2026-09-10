@@ -183,6 +183,32 @@ try {
     await until(() => evaluate(`document.querySelector('.sessionAudioPlayer audio')?.duration === 1`), 'cached WAV decoded');
     assert.ok(await evaluate(`document.documentElement.scrollWidth <= window.innerWidth`), 'Dropbox controls fit mobile width');
     console.log('✓ Cached Dropbox recording decodes in the existing player with expired authorization');
+    await send('Page.addScriptToEvaluateOnNewDocument', { source: `
+        const originalFetch = window.fetch.bind(window);
+        window.fetch = async (url, options) => {
+            if (!String(url).includes('.dropboxapi.com/')) return originalFetch(url, options);
+            const endpoint = new URL(url).pathname;
+            if (endpoint === '/2/files/list_folder') return Response.json({ entries: [
+                { '.tag': 'file', path_lower: '/sessions/recording', size: 1610612736 }
+            ], has_more: false });
+            if (endpoint === '/2/users/get_space_usage') return window.__spaceAllowed
+                ? Response.json({ used: 8589934592, allocation: { '.tag': 'individual', allocated: 10737418240 } })
+                : Response.json({ error: { '.tag': 'missing_scope', required_scope: 'account_info.read' } }, { status: 401 });
+            return Response.json({ error_summary: 'path/not_found/' }, { status: 409 });
+        };
+    ` });
+    await evaluate(`localStorage.setItem('folkfriend.dropbox.auth', JSON.stringify({ accessToken: 'fixture', expiresAt: Date.now() + 3600000 }))`);
+    await send('Page.navigate', { url: origin + '/settings' });
+    await until(() => evaluate(`document.body.textContent.includes('1.50 GB stored by FolkFriend on Dropbox')`), 'Dropbox stored size in Settings');
+    assert.ok(await evaluate(`document.body.textContent.includes('Show available space')`), 'Optional quota authorization is offered');
+    await evaluate('window.__spaceAllowed = true');
+    await click('Refresh storage usage');
+    await until(() => evaluate(`document.body.textContent.includes('2.00 GB available in your Dropbox account')`), 'Dropbox available space');
+    await evaluate(`document.querySelector('.dropboxBackup').scrollIntoView()`);
+    assert.ok(await evaluate(`document.documentElement.scrollWidth <= window.innerWidth`), 'Storage display fits mobile width');
+    const storageShot = await send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(path.join(tmpdir(), 'folkfriend-dropbox-storage-mobile.png'), Buffer.from(storageShot.data, 'base64'));
+    console.log('✓ Settings shows Dropbox stored bytes and optional available space without disconnecting backup');
     assert.deepEqual(errors, [], 'No Vue warnings or uncaught browser errors');
     console.log('Session workspace browser checks passed.');
 } catch (error) {

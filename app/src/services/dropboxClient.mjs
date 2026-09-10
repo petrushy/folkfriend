@@ -32,10 +32,10 @@ export class DropboxClient {
             });
             if (!response.ok) {
                 const detail = await response.text();
-                const code = response.status === 401 ? 'auth' : response.status === 429 ? 'rate' :
+                const code = /missing_scope/.test(detail) ? 'scope' : response.status === 401 ? 'auth' : response.status === 429 ? 'rate' :
                     /insufficient_space/.test(detail) ? 'full' : /not_found/.test(detail) ? 'missing' :
                     response.status === 409 ? 'conflict' : 'network';
-                throw new DropboxError(({ auth: 'Reconnect Dropbox to continue.', full: 'Dropbox full. Free space and retry.',
+                throw new DropboxError(({ scope: 'Dropbox account permission is needed to show available space.', auth: 'Reconnect Dropbox to continue.', full: 'Dropbox full. Free space and retry.',
                     conflict: 'Dropbox has a conflicting copy. No files were overwritten.', missing: 'This Dropbox file is missing.',
                     rate: 'Dropbox is busy. Backup will retry.', network: 'Dropbox is unavailable. Backup will retry.' })[code], code,
                 Number(response.headers.get('Retry-After')) || 0);
