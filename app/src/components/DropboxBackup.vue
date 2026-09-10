@@ -1,10 +1,19 @@
 <template>
     <div class="dropboxBackup">
-        <h3 class="text-subtitle-1">Dropbox backup</h3>
+        <h3 class="text-subtitle-1">Dropbox audio storage</h3>
         <p v-if="!sessionId" class="caption text--secondary">
-            Optional: back up all existing and future recorded sessions from this device to your
-            Dropbox Apps/FolkFriend folder. This includes room audio, tune lists, session names and locations.
-            Audio uploads directly to Dropbox and never passes through Firebase.
+            Firebase keeps your sessions, tune lists, favourites and other account data in sync
+            across devices signed into the same FolkFriend account. Dropbox adds storage for recordings,
+            using space in your own Dropbox account. Audio uploads directly to Dropbox.
+        </p>
+        <p v-if="!sessionId" class="caption text--secondary">
+            On each device, sign into the same FolkFriend account and connect the same Dropbox account.
+            Open your synced sessions as usual to play their recordings. Each device needs its own
+            Dropbox authorization; connecting Dropbox does not change your FolkFriend account sync.
+        </p>
+        <p v-if="!sessionId" class="caption text--secondary">
+            Connecting enables audio backup for all existing and future recordings on this device.
+            A recovery copy of session names, locations and tune lists is saved beside the audio.
             Originals stay on this device until you explicitly delete them.
             Uploads continue while FolkFriend is open and resume after you return online.
         </p>
@@ -18,13 +27,20 @@
             </v-btn>
             <template v-if="state.enabled">
                 <v-btn small text :loading="state.busy" :disabled="!state.connected" @click="run(retry)">Retry backup</v-btn>
-                <v-btn v-if="!sessionId" small text :disabled="!state.connected" :loading="busy" @click="restore">Restore sessions from Dropbox</v-btn>
+                <v-btn v-if="!sessionId" small text :disabled="!state.connected" :loading="busy" @click="restore">Recover missing sessions</v-btn>
                 <v-btn v-if="!sessionId" small text @click="run(disconnect)">Disconnect Dropbox</v-btn>
                 <v-btn v-if="sessionId" small text color="error" :disabled="active || !state.connected" @click="removeCloud">Delete Dropbox copy</v-btn>
             </template>
             <v-btn v-if="sessionId" small text color="error" :disabled="active" @click="removeLocal">Delete local audio</v-btn>
         </div>
+        <p v-if="state.enabled && !sessionId" class="caption text--secondary mt-2 mb-0">
+            Sessions normally appear through Firebase account sync. Recover missing sessions only
+            if a session record was lost; it is not needed to listen on another device.
+        </p>
         <p v-if="sessionId" class="caption text--secondary mt-2 mb-0">
+            Firebase syncs this session’s tune list. Connect the same Dropbox account on your other
+            devices to play its audio.
+
             Local audio and the Dropbox copy are deleted separately. Recently played Dropbox audio is cached when space allows.
         </p>
     </div>
@@ -46,7 +62,7 @@ export default {
             finally { this.busy = false; }
         },
         connect() {
-            if (!this.state.enabled && !window.confirm('Enable Dropbox backup for all existing and future recordings on this device? Room audio, session names, locations and tune lists will upload directly to your Dropbox App Folder while FolkFriend is open.')) return;
+            if (!this.state.enabled && !window.confirm('Use your Dropbox storage for all existing and future recordings on this device? Room audio and a recovery copy of session names, locations and tune lists will upload to your Dropbox App Folder while FolkFriend is open. Firebase continues to sync your FolkFriend account. Connect the same Dropbox account on your other devices to play the audio.')) return;
             return this.run(connectDropbox);
         },
         restore() { return this.run(async () => { const n = await restoreDropboxSessions(); this.message = `Restored ${n} missing sessions. Open them in Past Sessions.`; }); },
