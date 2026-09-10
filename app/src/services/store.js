@@ -6,7 +6,7 @@ import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
 import {estimateCostUsd, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
 import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '@/js/places.mjs';
-import {deleteSessionAudio, reclaimAudioForMissingSessions} from './sessionAudioStore.js';
+import {deleteSessionAudio, reclaimAudioForMissingSessions, deleteCloudAudio} from './sessionAudioStore.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
 import {
     subscribe as syncSubscribe, pushFavourites,
@@ -1258,6 +1258,9 @@ class Store {
         // record itself being deleted.
         await deleteSessionAudio(sessionID)
             .catch(e => console.warn('Could not delete session audio:', e && e.message));
+        // And the cloud copy, so "delete session" means what it says. Only the
+        // explicit deletions do this — never the reclamation sweeps.
+        await deleteCloudAudio(sessionID);
         this._syncDelete('liveSessions', sessionID);
     }
 
@@ -1271,6 +1274,7 @@ class Store {
         for (const sessionID of sessionIDs) {
             await deleteSessionAudio(sessionID)
                 .catch(e => console.warn('Could not delete session audio:', e && e.message));
+            await deleteCloudAudio(sessionID);
         }
         this._syncDeleteMany('liveSessions', sessionIDs);
     }
@@ -1437,13 +1441,32 @@ class Store {
         }
     }
 
+    // Every read here is STRICT, and a failure aborts the whole export.
+    //
+    // The ordinary getters answer a failed IndexedDB read with [] — right for
+    // rendering a list, and the worst possible behaviour for a backup: the file
+    // is written, looks complete, and has silently lost every favourite, every
+    // sighting or an entire year of sessions. The user finds out when they
+    // restore it, which is exactly when they can no longer do anything about
+    // it. A backup that refuses to be written is recoverable; one that is
+    // quietly incomplete is not.
+    //
+    // Same rule the audio sweeps learned: a read that feeds an irreversible
+    // step has to be strict.
+    async _exportRead(key) {
+        const value = await get(key);          // rethrows
+        return value || [];
+    }
+
     async exportUserData() {
         const payload = {
             version: 5,
             exportedAt: Date.now(),
             userSettings: this.userSettings,
-            historyItems: await this.getHistoryItems(),
-            favouriteItems: await this.getFavourites(),
+            historyItems: await this._exportRead('historyItems'),
+            // Read strictly, then handed to getFavourites() for the folderId
+            // migration — so a failed read cannot present as "no favourites".
+            favouriteItems: await this._exportRead('favouriteItems').then(() => this.getFavourites()),
             // Sightings carry coordinates, so a shared backup file discloses
             // where the user has played. They are included regardless: a backup
             // that silently drops the one dataset that cannot be regenerated is
@@ -1451,11 +1474,15 @@ class Store {
             // own account now, that is a convenience and not an archive — it
             // holds one live copy, which a mistaken "clear" removes everywhere.
             // The Settings panel warns before the file is written.
-            tuneSightings: await this.getSightings(),
-            places: await this.getPlaces(),
+            tuneSightings: await this._exportRead(KEY_SIGHTINGS),
+            places: await this._exportRead(KEY_PLACES),
             // Same reasoning as tuneSightings, and it may carry coordinates too
-            // when geoTagDetections is on.
-            liveSessions: await this.getLiveSessions(),
+            // when geoTagDetections is on. The tune list, times, place and the
+            // audio offsets travel with it; the AUDIO itself does not — a
+            // recording is hundreds of megabytes and does not belong in a file
+            // people mail to themselves. Its Dropbox copy, if there is one, is
+            // the backup of that.
+            liveSessions: await this._exportRead(KEY_LIVE_SESSIONS),
         };
         return JSON.stringify(payload, null, 2);
     }

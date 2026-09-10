@@ -132,6 +132,11 @@ async function loadStore() {
 // resolve.
 export async function deleteSessionAudio() {}
 export const __reclaimCalls = [];
+// The cloud copy goes with an explicit session delete, so the fake records it:
+// "delete session" leaving three hours of a room in the user's Dropbox, with
+// the record that pointed at it gone, is the failure this covers.
+export const __cloudDeleted = [];
+export async function deleteCloudAudio(id) { __cloudDeleted.push(id); return true; }
 export async function reclaimAudioForMissingSessions(ids) {
     __reclaimCalls.push([...(ids || [])]);
     return 0;
@@ -172,7 +177,9 @@ export async function reclaimAudioForMissingSessions(ids) {
     bus.__events.length = 0;
 
     const mod = await import(`${path.join(storeTmpDir, 'store.mjs')}?v=${Math.random()}`);
-    return { store: mod.default, bus, idb };
+    const audio = await import(path.join(storeTmpDir, 'fake-audio-store.mjs'));
+    audio.__cloudDeleted.length = 0;
+    return { store: mod.default, bus, idb, audio };
 }
 
 // --- liveAnalysis.js half ----------------------------------------------------
@@ -429,6 +436,63 @@ function play(service, tuneId, fromSeconds, windowCount, score = 0.7) {
 }
 
 async function run() {
+    await test('deleting a session takes its cloud copy with it', async () => {
+        // Otherwise the Dropbox copy outlives the record that pointed at it,
+        // and since the session has gone from the list there is nowhere left in
+        // the app to reach it — three hours of a room, orphaned, findable only
+        // by restoring it first.
+        const { store, audio } = await loadStore();
+        await store.upsertLiveSession({ id: 's1', startedAt: 1, tunes: [] });
+        audio.__cloudDeleted.length = 0;
+
+        await store.deleteLiveSession('s1');
+        assert.deepEqual(audio.__cloudDeleted, ['s1']);
+    });
+
+    await test('a backup refuses to be written rather than be incomplete', async () => {
+        // Every ordinary getter answers a failed read with [], which is right
+        // for rendering a list and catastrophic for a backup: the file is
+        // written, looks whole, and has silently lost an entire category. The
+        // user finds out while restoring it, which is the one moment they can
+        // no longer do anything about it.
+        const { store, idb } = await loadStore();
+        await store.upsertLiveSession({ id: 's1', startedAt: 1, tunes: [] });
+
+        idb.__failReadsOf('liveSessions');
+        await assert.rejects(() => store.exportUserData());
+        idb.__allowAll();
+
+        const json = JSON.parse(await store.exportUserData());
+        assert.equal(json.version, 5);
+        assert.equal(json.liveSessions.length, 1, 'sessions travel in the backup');
+    });
+
+    await test('the backup carries session metadata but never audio', async () => {
+        // The tune list, times, place and the playback offsets are what cannot
+        // be regenerated. The audio is hundreds of megabytes and does not
+        // belong in a file people mail to themselves.
+        const { store } = await loadStore();
+        await store.upsertLiveSession({ id: 's1', startedAt: 1, name: 'The Cobblestone', customName: true, tunes: [
+            { tuneId: 2, title: 'The Kesh', startSeconds: 0, endSeconds: 60,
+                audioStartSeconds: 30, audioEndSeconds: 90, audioAnchorSeconds: 25 },
+        ] });
+
+        const json = await store.exportUserData();
+        const parsed = JSON.parse(json);
+        assert.equal(parsed.liveSessions[0].name, 'The Cobblestone');
+        assert.equal(parsed.liveSessions[0].tunes[0].audioAnchorSeconds, 25,
+            'the playback offsets survive, so a restored session can still seek');
+
+        // Structural, not a string search: the payload's top-level keys are a
+        // fixed set, and none of them is an audio store.
+        assert.deepEqual(Object.keys(parsed).sort(), [
+            'exportedAt', 'favouriteItems', 'historyItems', 'liveSessions',
+            'places', 'tuneSightings', 'userSettings', 'version',
+        ]);
+        assert.ok(!Object.keys(parsed).some(k => k.startsWith('sessionAudio')));
+        assert.ok(!('segments' in parsed.liveSessions[0]), 'no audio manifest rides along');
+    });
+
     await rm(storeTmpDir, { recursive: true, force: true });
     await rm(serviceTmpDir, { recursive: true, force: true });
 

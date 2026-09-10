@@ -385,6 +385,31 @@ async function run() {
         assert.match(vm.audioError, /Could not read/);
     });
 
+    await test('another feature\'s event cannot clear the recording indicator', async () => {
+        // Dropbox backup reused sessionAudioState for its own notifications,
+        // with a payload carrying only { sessionId }. Every recorder field then
+        // read undefined and this handler reset them all — so a backup landing
+        // mid-session cleared the REC chip, the muted indicator and any storage
+        // error WHILE RECORDING CONTINUED, on a 30 s timer.
+        //
+        // The bar renders straight from this payload, so the rule is simply
+        // that only the recorder may send it. Dropbox has its own event now,
+        // and this asserts the bar does not listen to it.
+        const { vm, component, bus } = await loadComponent();
+        component.created.call(vm);
+        bus.__fire('sessionAudioState', {
+            recording: true, muted: true, muteSupported: true, mutedSeconds: 42,
+            stoppedReason: null, error: '',
+        });
+        assert.equal(vm.audioRecording, true);
+
+        bus.__fire('dropboxStateChanged', { sessionId: 'abc' });
+
+        assert.equal(vm.audioRecording, true, 'still recording, and still says so');
+        assert.equal(vm.audioMuted, true);
+        assert.equal(vm.audioMutedSeconds, 42);
+    });
+
     await test('unsubscribing on destroy stops it reacting to a later session', async () => {
         const { vm, component, bus, live } = await loadComponent();
         live.default.sessionId = 'session-1';

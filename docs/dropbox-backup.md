@@ -112,3 +112,18 @@ connect while recording; cross a three-minute boundary; go offline and reconnect
 close and reopen; expire authorization; restore on another device; seek and export
 across multiple segments/tracks; and exercise independent deletion. Automated
 transport tests do not establish iPhone microphone or Dropbox account behavior.
+
+## Storage usage in Settings
+
+Dropbox audio storage shows bytes stored throughout the FolkFriend App Folder,
+including audio and recovery JSON from all devices. It counts file metadata over
+all recursive listing pages, without downloading recordings. Usage refreshes when
+Settings opens, once a minute while visible, and on Refresh storage usage. Failed
+refreshes retain the last reading with its check time and an error message.
+
+Available account space is optional. In the Dropbox App Console, enable
+`account_info.read` under Permissions and click Submit. Then choose Show available
+space in FolkFriend to authorize that additional scope. Existing audio connections
+and stored-byte counts continue to work without it. The extra authorization still
+uses App Folder file access. Account free space includes other Dropbox content;
+for teams, the display respects both shared capacity and enforced member limits.

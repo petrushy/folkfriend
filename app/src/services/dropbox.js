@@ -37,7 +37,15 @@ const serialize = fn => {
     return next;
 };
 const key = (kind, id) => `dropbox:${account}:${kind}:${id}`;
-function changed(id) { dropboxState.revision++; eventBus.$emit('sessionAudioState', { sessionId: id }); }
+// Dropbox's OWN event, deliberately not sessionAudioState.
+//
+// That event carries the recorder's state — whether it is recording, whether it
+// is muted, why it stopped — and the session bar renders straight from the
+// payload. Re-using it with a Dropbox-shaped payload left every one of those
+// fields undefined, so the bar cleared the REC chip, the muted indicator and
+// any storage error WHILE RECORDING CONTINUED, every time a backup finished.
+// One event, one meaning.
+function changed(id) { dropboxState.revision++; eventBus.$emit('dropboxStateChanged', { sessionId: id }); }
 function status(id, label) { Vue.set(dropboxState.sessions, id, label); }
 function report(e, id) {
     if (e.code === 'auth') { dropboxState.connected = false; auth = null; localStorage.removeItem(AUTH_KEY); }
@@ -79,7 +87,15 @@ export function handleDropboxCallback() {
     if (!params.get('state')?.startsWith('ffdb-') || !(params.has('code') || params.has('error'))) return false;
     const payload = { type: 'folkfriend-dropbox', state: params.get('state'), code: params.get('code'), error: params.get('error') };
     history.replaceState(null, '', location.pathname);
-    if (window.opener) { window.opener.postMessage(payload, location.origin); window.close(); }
+    // With no opener there is nobody to hand the code to: the popup was
+    // blocked, the window that started it is gone, or this is a stale callback
+    // URL someone reopened. Claiming the tab then left it showing a line of
+    // text with no way back — the app never mounted, for a link the user may
+    // simply have had in their history. The query string is already cleared
+    // above, so falling through starts FolkFriend normally.
+    if (!window.opener) return false;
+    window.opener.postMessage(payload, location.origin);
+    window.close();
     document.body.textContent = 'Dropbox authorization finished. Return to the FolkFriend window where you connected.';
     return true;
 }
@@ -287,6 +303,19 @@ export async function deleteDropboxCopy(id) {
         status(id, 'Local only'); changed(id);
     });
 }
+// Deleting a SESSION takes its Dropbox copy with it.
+//
+// Without this the remote copy outlived the record that pointed at it, and
+// since the session had gone from the list there was no longer anywhere in the
+// app to reach it: three hours of a room, orphaned in the user's Dropbox, only
+// findable by restoring it first. deleteDropboxCopy() refuses when nothing is
+// stored remotely, which is the ordinary case, so that is not an error here.
+async function removeDropboxCopyIfPresent(id) {
+    if (!dropboxState.enabled || !account) return;
+    if (!(await get(key('manifest', id))) && !(await client.json(`${sessionPath(id)}/audio-manifest.json`))) return;
+    await deleteDropboxCopy(id);
+}
+
 export async function deleteLocalCopy(id) {
     return serialize(async () => {
         if (recorder.sessionId === id) throw new Error('Close this recording session before removing its local audio.');
@@ -297,9 +326,12 @@ export async function deleteLocalCopy(id) {
 }
 export async function enableSessionBackup(id) { await del(key('excluded', id)); retryAt = 0; return syncDropbox(true); }
 export function startDropbox() {
-    configureCloudAudio({ manifest: remoteManifest, segment: remoteSegment });
+    configureCloudAudio({ manifest: remoteManifest, segment: remoteSegment, remove: removeDropboxCopyIfPresent });
     const schedule = () => syncDropbox();
+    // Listens to the recorder's event (a segment landed, so there is something
+    // new to back up) but announces itself on its own — see changed().
     eventBus.$on('sessionAudioState', schedule);
+    eventBus.$on('dropboxStateChanged', schedule);
     eventBus.$on('liveSessionsChanged', schedule);
     window.addEventListener('online', () => { retryAt = 0; schedule(); });
     window.addEventListener('storage', event => {
