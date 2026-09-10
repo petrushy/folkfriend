@@ -436,17 +436,15 @@ function play(service, tuneId, fromSeconds, windowCount, score = 0.7) {
 }
 
 async function run() {
-    await test('deleting a session takes its cloud copy with it', async () => {
-        // Otherwise the Dropbox copy outlives the record that pointed at it,
-        // and since the session has gone from the list there is nowhere left in
-        // the app to reach it — three hours of a room, orphaned, findable only
-        // by restoring it first.
+    await test('individual and bulk session deletion preserve Dropbox archives', async () => {
         const { store, audio } = await loadStore();
         await store.upsertLiveSession({ id: 's1', startedAt: 1, tunes: [] });
+        await store.upsertLiveSession({ id: 's2', startedAt: 2, tunes: [] });
         audio.__cloudDeleted.length = 0;
-
         await store.deleteLiveSession('s1');
-        assert.deepEqual(audio.__cloudDeleted, ['s1']);
+        await store.clearLiveSessions();
+        assert.deepEqual(audio.__cloudDeleted, []);
+        assert.deepEqual(await store.getLiveSessions(), []);
     });
 
     await test('a backup refuses to be written rather than be incomplete', async () => {
