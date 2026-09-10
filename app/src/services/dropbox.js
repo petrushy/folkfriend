@@ -6,7 +6,7 @@ import store from '@/services/store.js';
 import recorder from '@/services/sessionRecorder.js';
 import { listManifests, readManifest, readSegment, buildClip, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
 import { DropboxClient, DropboxError, base64url } from './dropboxClient.mjs';
-import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateManifest, validateSession, sessionPath } from './dropboxBackup.mjs';
+import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateWholeRecordings, validateManifest, validateSession, sessionPath } from './dropboxBackup.mjs';
 
 // Public OAuth identifier, deliberately shipped with the browser app.
 const APP_KEY = process.env.VUE_APP_DROPBOX_APP_KEY || 'zl982bc269ijgda';
@@ -318,6 +318,8 @@ export async function deleteDropboxCopy(id) {
         const session = await client.json(`${path}/session.json`);
         if (!manifest || !session) throw new Error('The cloud copy is incomplete or missing. No files were deleted.');
         validateManifest(manifest.value, id); validateSession(session.value, id);
+        const inventory = await client.json(`${path}/whole-recordings.json`);
+        const wholePaths = inventory ? validateWholeRecordings(inventory.value, id) : [];
         // Persist exclusion FIRST, so a reload never recreates a deleted copy.
         await set(key('excluded', id), true);
         await client.request('files/delete_v2', { path });
@@ -325,7 +327,7 @@ export async function deleteDropboxCopy(id) {
         // same operation and behind the same exclusion marker, because a delete
         // that leaves three hours of a room behind in a folder the user browses
         // is the one failure this feature cannot afford.
-        for (const whole of await get(key('whole', id)) || []) {
+        for (const whole of wholePaths) {
             try { await client.request('files/delete_v2', { path: whole }); }
             catch (e) { if (e.code !== 'missing') throw e; }
         }

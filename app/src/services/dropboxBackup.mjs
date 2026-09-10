@@ -39,6 +39,18 @@ export function recordingFileName(session, trackIndex, trackCount, extension) {
     const part = trackCount > 1 ? ` (part ${trackIndex + 1})` : '';
     return `${RECORDINGS_FOLDER}/${safeName(`${stamp} ${session.name || ''}`)}${part} [${session.id}-track-${trackIndex}].${extension}`;
 }
+// A remote inventory is published before creating/moving whole recordings.
+// Keep old paths too: interrupted renames and retries remain discoverable.
+export function validateWholeRecordings(value, id) {
+    sessionPath(id);
+    if (!value || value.schema !== 1 || value.sessionId !== id || !Array.isArray(value.paths) ||
+        value.paths.some(path => typeof path !== 'string' || !path.startsWith('/recordings/') ||
+            path.slice('/recordings/'.length).includes('/') ||
+            !new RegExp('\\[' + id + '-track-[0-9]+\\]\\.(m4a|webm|ogg|bin)$').test(path))) {
+        throw new DropboxError('Unfamiliar Dropbox recording inventory. No files were changed.', 'unsupported');
+    }
+    return value.paths;
+}
 const validNumber = n => Number.isFinite(n) && n >= 0;
 export function validateManifest(m, id) {
     if (!m || m.cloudSchema !== 1 || m.schema !== 1 || m.sessionId !== id || !Array.isArray(m.tracks) || !Array.isArray(m.segments) ||
@@ -120,6 +132,9 @@ export async function backupSession(client, session, local, readSegment, extensi
 export async function backupWholeRecordings(client, session, manifest, buildClip, extension, existing = []) {
     if (!session.endedAt) return existing;
 
+    const inventoryPath = `${sessionPath(session.id)}/whole-recordings.json`;
+    let inventory = await client.json(inventoryPath);
+    let known = inventory ? validateWholeRecordings(inventory.value, session.id) : [];
     const tracks = [...new Set(manifest.segments.map(s => s.trackIndex))].sort((a, b) => a - b);
     const uploaded = [];
     for (let i = 0; i < tracks.length; i++) {
@@ -132,6 +147,15 @@ export async function backupWholeRecordings(client, session, manifest, buildClip
         if (!clip || !clip.blob.size) continue;
 
         const path = recordingFileName(session, trackIndex, tracks.length, extension(clip.mimeType));
+        const previous = existing[i];
+        const ownedPrevious = previous && previous.includes(`[${session.id}-track-${trackIndex}]`) ? previous : null;
+        const paths = [...new Set([...known, ...(ownedPrevious ? [ownedPrevious] : []), path])];
+        validateWholeRecordings({ schema: 1, sessionId: session.id, paths }, session.id);
+        if (JSON.stringify(paths) !== JSON.stringify(known)) {
+            inventory = await client.upload(inventoryPath, jsonBlob({ schema: 1, sessionId: session.id, paths }), inventory);
+            known = paths;
+        }
+
 
         // Never reuse or overwrite a different recording, even at an owned path.
         const hash = await contentHash(clip.blob);

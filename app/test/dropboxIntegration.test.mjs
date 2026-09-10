@@ -272,3 +272,20 @@ await test('renaming a session MOVES its whole file rather than re-sending it', 
 });
 
 console.log(`\n${passed} Dropbox coordinator tests passed`);
+
+await test('another device can delete whole recordings without local inventory', async () => {
+    const { f, api } = await load();
+    f.sessions[0].endedAt = 2;
+    await api.setWholeRecordings(true);
+    const whole = f.client.writes.find(p => p.startsWith('/recordings/'));
+    assert.ok(whole);
+    f.db.clear();
+    await api.deleteDropboxCopy('s1');
+    assert.equal(f.client.files.has(whole), false);
+});
+await test('unfamiliar whole-file inventory prevents all deletion', async () => {
+    const { f, api } = await load(); await api.syncDropbox(true);
+    await f.client.upload('/sessions/s1/whole-recordings.json', new Blob([JSON.stringify({ schema: 1, sessionId: 's1', paths: ['/recordings/other.m4a'] })]));
+    await assert.rejects(api.deleteDropboxCopy('s1'));
+    assert.equal(f.client.deletes.length, 0);
+});
