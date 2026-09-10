@@ -31,12 +31,13 @@ function safeName(text) {
 // The time is in the name to keep two sessions on one day from colliding: an
 // overwrite here would destroy a recording rather than merely confuse a list.
 export function recordingFileName(session, trackIndex, trackCount, extension) {
+    sessionPath(session.id); // Validate before including the identifier in a path.
     const at = new Date(session.startedAt || 0);
     const pad = n => String(n).padStart(2, '0');
     const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ` +
         `${pad(at.getHours())}${pad(at.getMinutes())}`;
     const part = trackCount > 1 ? ` (part ${trackIndex + 1})` : '';
-    return `${RECORDINGS_FOLDER}/${safeName(`${stamp} ${session.name || ''}`)}${part}.${extension}`;
+    return `${RECORDINGS_FOLDER}/${safeName(`${stamp} ${session.name || ''}`)}${part} [${session.id}-track-${trackIndex}].${extension}`;
 }
 const validNumber = n => Number.isFinite(n) && n >= 0;
 export function validateManifest(m, id) {
@@ -130,22 +131,27 @@ export async function backupWholeRecordings(client, session, manifest, buildClip
         const clip = await buildClip(session.id, from, to);
         if (!clip || !clip.blob.size) continue;
 
-        const path = recordingFileName(session, i, tracks.length, extension(clip.mimeType));
+        const path = recordingFileName(session, trackIndex, tracks.length, extension(clip.mimeType));
 
-        // Renaming a session changes the filename. MOVE the file rather than
-        // sending it again: a re-upload costs a hundred megabytes, and it would
-        // also leave the old file behind — a recording orphaned under a name
-        // the user has just decided they did not want.
-        const before = existing[i];
-        if (before && before !== path && await client.move(before, path)) { uploaded.push(path); continue; }
-
-        // Already there, same size: one metadata call rather than a second
-        // upload of the same audio. Segments are immutable and a whole file is
-        // built from them, so size is a sufficient test — and a genuinely
-        // different file is caught by the hash check inside uploadLarge().
+        // Never reuse or overwrite a different recording, even at an owned path.
+        const hash = await contentHash(clip.blob);
         const meta = await client.metadata(path);
-        if (meta && meta.size === clip.blob.size) { uploaded.push(path); continue; }
-        await client.uploadLarge(path, clip.blob, meta);
+        if (meta) {
+            if (meta.size !== clip.blob.size || meta.content_hash !== hash) {
+                throw new DropboxError('Dropbox recording differs from local audio. No files were overwritten.', 'conflict');
+            }
+            uploaded.push(path); continue;
+        }
+        const before = existing[i];
+        // Legacy names have no ownership identifier and may be shared by two
+        // sessions. Only move files whose identity and contents we can verify.
+        if (before && before.includes(`[${session.id}-track-${trackIndex}]`)) {
+            const old = await client.metadata(before);
+            if (old?.size === clip.blob.size && old.content_hash === hash && await client.move(before, path)) {
+                uploaded.push(path); continue;
+            }
+        }
+        await client.uploadLarge(path, clip.blob, null);
         uploaded.push(path);
     }
     return uploaded.length ? uploaded : existing;
