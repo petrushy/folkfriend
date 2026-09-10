@@ -1487,6 +1487,40 @@ class Store {
         return JSON.stringify(payload, null, 2);
     }
 
+    // Why a restore is refused, or null if the payload is usable.
+    //
+    // The version check alone was the only gate, so any JSON carrying
+    // `version: 5` went straight into IndexedDB: a truncated file that still
+    // closed its braces, an error document, another app's export. The tune
+    // index learned this as indexPayloadProblem(); the balance here tips
+    // further toward strictness, because a false rejection costs nothing — the
+    // file is still there to try again — while a false acceptance overwrites
+    // the data the user was trying to protect.
+    _importProblem(payload) {
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+            return 'the file does not contain FolkFriend data';
+        }
+        if (![1, 2, 3, 4, 5].includes(payload.version)) {
+            return `unsupported data version: ${payload.version}`;
+        }
+        for (const key of ['historyItems', 'favouriteItems', 'tuneSightings',
+            'places', 'liveSessions', 'favouriteFolders']) {
+            if (payload[key] !== undefined && !Array.isArray(payload[key])) {
+                return `"${key}" is not a list — the file looks damaged`;
+            }
+        }
+        if (payload.userSettings !== undefined &&
+            (typeof payload.userSettings !== 'object' || payload.userSettings === null ||
+             Array.isArray(payload.userSettings))) {
+            return 'the settings in this file look damaged';
+        }
+        // A backup carrying none of these parsed, but is not a backup.
+        const carries = ['historyItems', 'favouriteItems', 'tuneSightings', 'places', 'liveSessions']
+            .some(key => Array.isArray(payload[key]));
+        if (!carries) return 'the file contains no favourites, history, sessions or places';
+        return null;
+    }
+
     async importUserData(jsonString) {
         let payload;
         try {
@@ -1494,31 +1528,66 @@ class Store {
         } catch (e) {
             throw new Error('Could not parse import file: invalid JSON.');
         }
-        if (![1, 2, 3, 4, 5].includes(payload.version)) {
-            throw new Error(`Unsupported data version: ${payload.version}`);
-        }
-        await this._dbSet('historyItems', payload.historyItems || []);
-        // Absent in older backups. Only written when the key is present, so
-        // restoring an older backup does not wipe data recorded since.
+        const problem = this._importProblem(payload);
+        if (problem) throw new Error(`Could not restore this file: ${problem}.`);
+        // ABSENT means "leave alone", for every collection.
         //
+        // historyItems and favouriteItems used to be written as `payload.x ||
+        // []`, so a file missing them — hand-edited, truncated, or written by
+        // something else — silently destroyed every favourite. Absence is not an
+        // instruction to delete; an export that genuinely has none writes an
+        // empty array, which is present and still restores as empty.
+        const writes = [];
+        if (payload.historyItems) writes.push(['historyItems', payload.historyItems]);
+        if (payload.tuneSightings) writes.push([KEY_SIGHTINGS, payload.tuneSightings]);
+        if (payload.places) writes.push([KEY_PLACES, payload.places]);
+        if (payload.liveSessions) writes.push([KEY_LIVE_SESSIONS, payload.liveSessions]);
+        // v1/v2 exports may have folderId on items; getFavourites() migrates them on next load.
+        if (payload.favouriteItems) writes.push(['favouriteItems', payload.favouriteItems]);
+        if (payload.favouriteFolders) writes.push(['favouriteFolders', payload.favouriteFolders]);
+
+        // ALL OR NOTHING, as far as IndexedDB allows.
+        //
+        // These were sequential LENIENT writes, so a failure at the third left
+        // the user half-restored — old data already overwritten, the rest not —
+        // and _dbSet swallowed the error, so Settings reported "restored
+        // successfully" over the top of it. Someone restoring a backup is
+        // already recovering from something that went wrong; telling them it
+        // worked when it did not is the worst answer available.
+        const previous = new Map();
+        try {
+            for (const [key] of writes) previous.set(key, await get(key));
+        } catch (e) {
+            throw new Error('Could not read the current data, so nothing was changed. ' +
+                'Close other tabs and try again.');
+        }
+
+        const written = [];
+        try {
+            for (const [key, value] of writes) {
+                await this._dbSetStrict(key, value);
+                written.push(key);
+            }
+        } catch (e) {
+            let rolledBack = true;
+            for (const key of written) {
+                try { await this._dbSetStrict(key, previous.get(key)); } catch (_) { rolledBack = false; }
+            }
+            throw new Error(rolledBack
+                ? `Restore failed (${e.message}). Your existing data was put back unchanged.`
+                : `Restore failed (${e.message}) and the previous data could not be fully put ` +
+                  'back. Do not delete your backup file — try restoring it again.');
+        }
+
         // Restored records are pushed up rather than left for the seeding pass,
         // which only runs when a listener is first attached — an import made
         // while already signed in would otherwise stay on this device until the
         // next launch, looking as though half the restore had failed.
-        if (payload.tuneSightings) {
-            await this._dbSet(KEY_SIGHTINGS, payload.tuneSightings);
-            this._syncPushMany('sightings', payload.tuneSightings);
+        for (const [key, value] of writes) {
+            if (key === KEY_SIGHTINGS) this._syncPushMany('sightings', value);
+            if (key === KEY_PLACES) this._syncPushMany('places', value);
+            if (key === KEY_LIVE_SESSIONS) this._syncPushMany('liveSessions', value);
         }
-        if (payload.places) {
-            await this._dbSet(KEY_PLACES, payload.places);
-            this._syncPushMany('places', payload.places);
-        }
-        if (payload.liveSessions) {
-            await this._dbSet(KEY_LIVE_SESSIONS, payload.liveSessions);
-            this._syncPushMany('liveSessions', payload.liveSessions);
-        }
-        // v1/v2 exports may have folderId on items; getFavourites() will migrate them on next load
-        await this._dbSet('favouriteItems', payload.favouriteItems || []);
         // Backups made after 3.9.0 carry AI summaries on favourited settings.
         // Restoring a backup is an explicit request for its contents, so it
         // outranks an earlier clear on this device — drop the watermark first,
@@ -1526,7 +1595,6 @@ class Store {
         // import.
         localStorage.removeItem(AI_CLEARED_AT_STORAGE_KEY);
         await this._harvestAiSummaries(payload.favouriteItems || []);
-        if (payload.favouriteFolders) await this._dbSet('favouriteFolders', payload.favouriteFolders);
         await this.updateUserSettings(payload.userSettings || this.userSettings);
         this._invalidateFavouriteCache();
     }
