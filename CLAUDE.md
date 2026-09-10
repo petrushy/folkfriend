@@ -1323,6 +1323,37 @@ them instances of rules this feature had already learned:
    only, never from the reclamation sweeps: a local tidy-up must not destroy the
    user's own Dropbox files.
 
+### The backup is the only true snapshot, and is tested as one
+
+`app/test/userDataBackup.test.mjs` (14 cases) exists because nothing tested the
+backup's own robustness — the ~15 existing cases that touch export/import are
+feature tests that happen to route through it (AI summaries surviving a
+restore, the dataset selection in an old backup, a sightings round trip).
+
+It matters more than the other stores: Firebase holds ONE live copy, so a
+mistaken "clear" propagates everywhere, and Dropbox holds only the audio. Four
+defects were found by writing those tests, all in `importUserData`:
+
+1. **Absence was treated as deletion.** `historyItems` and `favouriteItems`
+   were written as `payload.x || []`, so a file missing them — hand-edited,
+   truncated, written by something else — silently destroyed every favourite.
+   The other three collections were already guarded; now all of them are. The
+   other half of the rule still holds: an export with nothing in it writes an
+   empty ARRAY, which is present and must still restore as empty, or a
+   deliberately cleared backup would put the data back.
+2. **The version was the only gate.** Any JSON carrying `version: 5` went
+   straight into IndexedDB. `_importProblem()` is the structural check, and
+   unlike `indexPayloadProblem` it leans toward strictness: a false rejection
+   costs nothing, because the file is still there to try again, while a false
+   acceptance overwrites the data the user was protecting.
+3. **Writes were LENIENT.** `_dbSet` logs and continues, so a failed restore
+   reported "✓ Data restored successfully" over the top of it — to someone who
+   is already recovering from something going wrong.
+4. **There was no rollback.** Five sequential writes; a failure at the third
+   left the user half-restored with the old data already overwritten. The
+   previous values are snapshotted first (strictly — an unreadable store
+   refuses before touching anything) and put back if any write fails.
+
 **`exportUserData` reads STRICTLY and refuses rather than writing a partial
 backup.** Every getter it used answers a failed read with `[]`, so one transient
 error produced a file that looked complete and had silently lost every
