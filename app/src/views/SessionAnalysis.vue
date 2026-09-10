@@ -1522,7 +1522,7 @@ export default {
         },
         async deleteSelectedSession() {
             if (this.workspaceBusy) return;
-            if (!this.activeSession || !window.confirm('Delete this session and its tune list? This cannot be undone.')) return;
+            if (!this.activeSession || !window.confirm('Delete this session, its tune list and local audio? Dropbox copies are kept and can be restored from Settings.')) return;
             this.workspaceBusy = true;
             try {
                 if (this.viewMode === 'history') await store.deleteLiveSession(this.selectedSession.id);

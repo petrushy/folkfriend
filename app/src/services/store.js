@@ -6,7 +6,7 @@ import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
 import {estimateCostUsd, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
 import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '@/js/places.mjs';
-import {deleteSessionAudio, reclaimAudioForMissingSessions, deleteCloudAudio} from './sessionAudioStore.js';
+import {deleteSessionAudio, reclaimAudioForMissingSessions} from './sessionAudioStore.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
 import {
     subscribe as syncSubscribe, pushFavourites,
@@ -1258,9 +1258,7 @@ class Store {
         // record itself being deleted.
         await deleteSessionAudio(sessionID)
             .catch(e => console.warn('Could not delete session audio:', e && e.message));
-        // And the cloud copy, so "delete session" means what it says. Only the
-        // explicit deletions do this — never the reclamation sweeps.
-        await deleteCloudAudio(sessionID);
+        // Dropbox archives are removed only through the separate cloud action.
         this._syncDelete('liveSessions', sessionID);
     }
 
@@ -1274,7 +1272,6 @@ class Store {
         for (const sessionID of sessionIDs) {
             await deleteSessionAudio(sessionID)
                 .catch(e => console.warn('Could not delete session audio:', e && e.message));
-            await deleteCloudAudio(sessionID);
         }
         this._syncDeleteMany('liveSessions', sessionIDs);
     }
