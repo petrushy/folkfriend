@@ -314,23 +314,30 @@ export async function deleteDropboxCopy(id) {
     return serialize(async () => {
         if (recorder.sessionId === id && recorder.isActive) throw new Error('Close this recording session before deleting its Dropbox copy.');
         const path = sessionPath(id);
+        const pending = await get(key('deletion', id));
         const manifest = await client.json(`${path}/audio-manifest.json`);
         const session = await client.json(`${path}/session.json`);
-        if (!manifest || !session) throw new Error('The cloud copy is incomplete or missing. No files were deleted.');
-        validateManifest(manifest.value, id); validateSession(session.value, id);
+        // A durable, previously validated job can finish after the final
+        // folder delete succeeded but its response was lost.
+        if ((!manifest || !session) && !pending) throw new Error('The cloud copy is incomplete or missing. No files were deleted.');
+        if (manifest) validateManifest(manifest.value, id);
+        if (session) validateSession(session.value, id);
         const inventory = await client.json(`${path}/whole-recordings.json`);
-        const wholePaths = inventory ? validateWholeRecordings(inventory.value, id) : [];
-        // Persist exclusion FIRST, so a reload never recreates a deleted copy.
+        const wholePaths = [...new Set([
+            ...(inventory ? validateWholeRecordings(inventory.value, id) : []),
+            ...(pending ? validateWholeRecordings(pending, id) : []),
+        ])];
+        await set(key('deletion', id), { schema: 1, sessionId: id, paths: wholePaths });
         await set(key('excluded', id), true);
-        await client.request('files/delete_v2', { path });
-        // And the whole-file copies, which are NOT under that path. Kept in the
-        // same operation and behind the same exclusion marker, because a delete
-        // that leaves three hours of a room behind in a folder the user browses
-        // is the one failure this feature cannot afford.
+        // Keep the remote manifests and inventory until every external file
+        // is gone. A different device can also resume this operation.
         for (const whole of wholePaths) {
             try { await client.request('files/delete_v2', { path: whole }); }
             catch (e) { if (e.code !== 'missing') throw e; }
         }
+        try { await client.request('files/delete_v2', { path }); }
+        catch (e) { if (e.code !== 'missing') throw e; }
+        await del(key('deletion', id));
         await del(key('whole', id));
         await del(key('manifest', id)); await del(key('receipt', id));
         for (const k of await keys()) if (typeof k === 'string' && k.startsWith(`${cachePrefix}${account}:${id}:`)) await del(k);

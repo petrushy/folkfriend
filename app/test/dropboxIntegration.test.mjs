@@ -289,3 +289,32 @@ await test('unfamiliar whole-file inventory prevents all deletion', async () => 
     await assert.rejects(api.deleteDropboxCopy('s1'));
     assert.equal(f.client.deletes.length, 0);
 });
+
+await test('interrupted cloud deletion retries while retaining its remote inventory', async () => {
+    const { f, api } = await load(); f.sessions[0].endedAt = 2;
+    await api.setWholeRecordings(true);
+    const whole = f.client.writes.find(p => p.startsWith('/recordings/'));
+    const request = f.client.request.bind(f.client);
+    f.client.request = async (endpoint, args) => {
+        if (args.path === whole) throw new DropboxError('Offline', 'network');
+        return request(endpoint, args);
+    };
+    await assert.rejects(api.deleteDropboxCopy('s1'));
+    assert.ok(f.client.files.has('/sessions/s1/audio-manifest.json'));
+    f.client.request = request;
+    await api.deleteDropboxCopy('s1');
+    assert.equal(f.client.files.size, 0);
+});
+await test('lost final delete response can be retried after the folder is gone', async () => {
+    const { f, api } = await load(); await api.syncDropbox(true);
+    const request = f.client.request.bind(f.client);
+    f.client.request = async (endpoint, args) => {
+        await request(endpoint, args);
+        throw new DropboxError('Response lost', 'network');
+    };
+    await assert.rejects(api.deleteDropboxCopy('s1'));
+    f.client.request = request;
+    await api.deleteDropboxCopy('s1');
+    assert.equal(f.db.has('dropbox:account-1:deletion:s1'), false);
+    assert.equal(api.backupStatus('s1'), 'Local only');
+});
