@@ -104,6 +104,13 @@ class SessionRecorder {
         // chunk starts.
         this._chunkCursorSeconds = 0;
         this._trackStartedPerf = 0;
+        // When the last chunk actually arrived. audioSeconds extrapolates from
+        // here, not from the track's start — see the getter.
+        //
+        // null rather than 0, and every check tests for null: performance.now()
+        // legitimately reads 0 at the very start of a page, and a truthiness
+        // guard then throws away the first chunk's duration on every track.
+        this._lastChunkPerf = null;
         this._trackIndex = 0;
         this._trackStartSeconds = 0;
         // Which track the currently wired ondataavailable belongs to, so a
@@ -202,7 +209,24 @@ class SessionRecorder {
     get audioSeconds() {
         if (!this.sessionId) return null;
         if (!this.isRecording) return this._chunkCursorSeconds;
-        return this._committedSeconds + (now() - this._trackStartedPerf) / 1000;
+        // Anchored to what has ACTUALLY been recorded — the end of the last
+        // chunk MediaRecorder handed over — plus a bounded extrapolation for
+        // the piece still in flight.
+        //
+        // It used to free-run on wall clock from the track's start, which
+        // contradicted this module's own rule: the clock counted time whether
+        // or not the recorder produced anything. If chunks stop arriving while
+        // the track still claims to be recording — a disabled track that yields
+        // no data rather than silence, an encoder stalled under load — the
+        // recording stops growing while the clock does not, and every detection
+        // after that points somewhere later in the file than the audio it came
+        // from. The error is permanent and accumulates over an evening.
+        //
+        // The extrapolation is capped at two timeslices so consecutive
+        // detections inside one chunk still get distinct, increasing stamps,
+        // while a recorder that has gone quiet can only drift by that much.
+        const sinceChunk = this._lastChunkPerf === null ? 0 : (now() - this._lastChunkPerf) / 1000;
+        return this._chunkCursorSeconds + Math.min(sinceChunk, (TIMESLICE_MS * 2) / 1000);
     }
 
     _emit() {
@@ -480,6 +504,9 @@ class SessionRecorder {
         this._trackStartSeconds = this._committedSeconds;
         this._chunkCursorSeconds = this._committedSeconds;
         this._trackStartedPerf = now();
+        // Nothing has been recorded on this track yet, so there is nothing to
+        // extrapolate from until the first chunk lands.
+        this._lastChunkPerf = now();
         this._initBlob = null;
         this._resetPending();
 
@@ -609,9 +636,27 @@ class SessionRecorder {
         if (!blob || !blob.size) return;
         if (trackIndex !== this._trackIndexActive) return;   // a stale track
 
+        // A chunk advances the clock by what a chunk can plausibly HOLD, not by
+        // the wall clock since the track began.
+        //
+        // Taking absolute wall clock meant a stall — chunks not arriving for two
+        // minutes because the encoder produced nothing — was credited to the
+        // next chunk, injecting two minutes of timeline that the audio does not
+        // contain. Everything after it was then shifted by that much, and the
+        // error never closes.
+        //
+        // The cap is generous (four timeslices) because a busy main thread can
+        // legitimately deliver one chunk holding several seconds of audio. It
+        // cannot be exact: arrival times cannot tell "recorded silence" from
+        // "recorded nothing". That is why playback measures each clip's real
+        // decoded length and scales to it — see the player's _measureDrift().
         const startSeconds = this._chunkCursorSeconds;
-        const endSeconds = this._committedSeconds + (now() - this._trackStartedPerf) / 1000;
-        this._chunkCursorSeconds = Math.max(endSeconds, startSeconds);
+        const sinceLast = this._lastChunkPerf === null
+            ? TIMESLICE_MS / 1000
+            : (now() - this._lastChunkPerf) / 1000;
+        const held = Math.min(sinceLast, (TIMESLICE_MS * 4) / 1000);
+        this._chunkCursorSeconds = startSeconds + Math.max(0, held);
+        this._lastChunkPerf = now();
 
         const isInit = this._initBlob === null;
         if (isInit) this._initBlob = blob;
