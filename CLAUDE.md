@@ -1291,6 +1291,46 @@ because an inherited "on" is never invisible: the session bar shows a REC chip
 on every route for as long as it is recording. Settings keeps the parts that
 genuinely are permanent — quality, storage used, and deleting recordings.
 
+### Dropbox backup, and the four things it broke
+
+Audio backup to the user's own Dropbox is opt-in and off by default
+(`docs/dropbox-backup.md`). Four defects came out of integrating it, three of
+them instances of rules this feature had already learned:
+
+1. **`sessionAudioState` is the RECORDER's event and nothing else may send it.**
+   Backup progress was announced on it with a payload of only `{ sessionId }`,
+   so every recorder field read `undefined` and `SessionStatusBar` — which
+   renders straight from that payload — cleared the REC chip, the muted
+   indicator and any storage error **while recording continued**, on a 30 s
+   timer, in the direction that understates recording. Dropbox has
+   `dropboxStateChanged` now. One event, one meaning; the bar's test asserts it
+   ignores the other.
+2. **A refresh may only ADD to what is known.** The player assigned the result
+   of a manifest read even when it was null, and that read answers a failed
+   IndexedDB lookup exactly as it answers "no recording" — so one hiccup took
+   the player off screen mid-session. Fourth instance of lenient-read-as-absence.
+3. **`main.js` must mount the app whatever Dropbox does.** It gated the mount on
+   the callback handler and started the service before mounting, so a throw in
+   an opt-in feature that is off by default left a blank page. It also claimed
+   any tab carrying a callback query string — including a stale one from
+   history, where there is no opener to hand the code to — and never mounted.
+   Both are wrapped, the mount is unconditional, and a callback with no opener
+   falls through to the app.
+4. **"Delete session" has to reach the cloud copy.** It deleted the local audio
+   only, and the record that pointed at the remote copy was then gone, so
+   nothing in the app could reach it — three hours of a room orphaned in the
+   user's Dropbox. `deleteCloudAudio()` is called from the explicit deletions
+   only, never from the reclamation sweeps: a local tidy-up must not destroy the
+   user's own Dropbox files.
+
+**`exportUserData` reads STRICTLY and refuses rather than writing a partial
+backup.** Every getter it used answers a failed read with `[]`, so one transient
+error produced a file that looked complete and had silently lost every
+favourite, or an entire year of sessions — discovered while restoring it, which
+is the one moment nothing can be done. Sessions have been in the export since
+v5 and carry the tune list, times, place and the playback offsets; the audio
+itself never does, and its Dropbox copy is the backup of that.
+
 **Privacy is why several of these choices are not configurable.** Three hours of
 a pub records everyone in it. Off by default; a **REC chip in the session bar**
 on every route; **never synced** (and no `hasAudio` flag on the session record —

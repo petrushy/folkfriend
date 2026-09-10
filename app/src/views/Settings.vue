@@ -1668,7 +1668,21 @@ export default {
             }
         },
         async downloadUserData() {
-            const json = await store.exportUserData();
+            // A backup that cannot be read completely is not written at all.
+            // exportUserData() reads strictly and throws rather than handing
+            // back a file that looks whole and has quietly lost a category —
+            // the user would only discover that while restoring it, which is
+            // the one moment they can no longer do anything about it.
+            this.restoreMessage = null;
+            let json;
+            try {
+                json = await store.exportUserData();
+            } catch (err) {
+                this.restoreMessage =
+                    `Backup not created: your data could not be read completely (${err.message}). ` +
+                    'Nothing was saved — try again rather than keeping a partial file.';
+                return;
+            }
             const blob = new Blob([json], {type: 'application/json'});
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');

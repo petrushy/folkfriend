@@ -156,4 +156,21 @@ await test('a late storage result cannot repopulate usage after disconnect', asy
     await pending;
     assert.equal(api.dropboxState.storage.storedBytes, null);
 });
+await test('backup progress never speaks on the recorder\'s event', async () => {
+    // sessionAudioState carries the RECORDER's state, and the session bar
+    // renders straight from that payload. Emitting it from here with only a
+    // sessionId left every recorder field undefined, so a backup landing
+    // mid-session cleared the REC chip, the muted indicator and any storage
+    // error while recording carried on — on a 30 s timer, in the direction that
+    // understates recording.
+    const { f, api } = await load();
+    f.events.length = 0;
+    await api.syncDropbox(true);
+
+    const names = f.events.map(([name]) => name);
+    assert.ok(names.includes('dropboxStateChanged'), 'it announces itself');
+    assert.ok(!names.includes('sessionAudioState'),
+        'and never on the event that means something else');
+});
+
 console.log(`\n${passed} Dropbox coordinator tests passed`);

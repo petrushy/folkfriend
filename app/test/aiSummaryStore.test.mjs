@@ -114,6 +114,11 @@ async function loadStore({ storedSettings = null } = {}) {
 // resolve.
 export async function deleteSessionAudio() {}
 export const __reclaimCalls = [];
+// The cloud copy goes with an explicit session delete, so the fake records it:
+// "delete session" leaving three hours of a room in the user's Dropbox, with
+// the record that pointed at it gone, is the failure this covers.
+export const __cloudDeleted = [];
+export async function deleteCloudAudio(id) { __cloudDeleted.push(id); return true; }
 export async function reclaimAudioForMissingSessions(ids) {
     __reclaimCalls.push([...(ids || [])]);
     return 0;

@@ -115,6 +115,28 @@ export function formatBytes(bytes) {
 // Playback can fetch cloud audio; recorder reads/writes remain strictly local.
 let cloudAudio = null;
 export function configureCloudAudio(provider) { cloudAudio = provider; }
+
+// Deleting a session deletes its recording — INCLUDING a cloud copy.
+//
+// Routed through the provider rather than imported, because store.js cannot
+// import the Dropbox service (that service imports store.js). Best-effort and
+// never allowed to block the local delete: a cloud copy that could not be
+// removed now is still removable from Settings, whereas a local delete that
+// failed would leave the session listed with audio the user asked to be rid of.
+//
+// Deliberately called from the explicit user deletions only, never from the
+// reclamation sweeps: a local tidy-up must not reach across and destroy the
+// user's own Dropbox files.
+export async function deleteCloudAudio(sessionId) {
+    if (!sessionId || !cloudAudio || typeof cloudAudio.remove !== 'function') return false;
+    try {
+        await cloudAudio.remove(sessionId);
+        return true;
+    } catch (e) {
+        console.warn('Could not delete the Dropbox copy of this recording:', e && e.message);
+        return false;
+    }
+}
 export async function playbackReadManifest(sessionId) {
     const local = await readManifest(sessionId);
     return local || (cloudAudio ? cloudAudio.manifest(sessionId) : null);

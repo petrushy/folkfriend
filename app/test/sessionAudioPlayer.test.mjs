@@ -41,6 +41,7 @@ const FAKE_EVENTBUS = `export default { $emit() {}, $on() {}, $off() {} };`;
 const FAKE_MDI = `export const mdiPlay = 'play'; export const mdiPause = 'pause';`;
 const FAKE_SESSION_ANALYSIS = `
 export function formatSecondsAsDuration(s) { return String(Math.round(s)); }`;
+let store;
 const FAKE_AUDIO_STORE = `
 export let __manifest = null;
 export function __setManifest(m) { __manifest = m; }
@@ -75,6 +76,7 @@ async function loadPlayer() {
     await writeFile(path.join(tmpDir, 'player.mjs'), source);
 
     const mod = await import(`${path.join(tmpDir, 'player.mjs')}?v=${Math.random()}`);
+    store = await import(`${path.join(tmpDir, 'fake-audio-store.mjs')}`);
     return mod.default;
 }
 
@@ -214,6 +216,29 @@ await test('a continuous recording has no gaps and no clamping', async () => {
     assert.deepEqual(vm.gapBlocks, []);
     await vm.playTune({ audioStartSeconds: 200, audioAnchorSeconds: 195 });
     assert.deepEqual(vm.playRequests, [195]);
+});
+
+await test('a refresh only ever adds to what is known', async () => {
+    // The read answers a failed IndexedDB lookup with null exactly as it
+    // answers "there is no recording", so assigning that result took the whole
+    // player off the screen mid-session on one transient hiccup. A refresh runs
+    // on every segment write and on every Dropbox status change, which makes it
+    // the most frequently executed read in the feature.
+    const vm = await mountPlayer(GAPPY);
+    store.__setManifest(GAPPY);
+    assert.ok(vm.manifest);
+
+    store.__setManifest(null);          // the read comes back empty
+    await vm.refreshManifest();
+    assert.ok(vm.manifest, 'the player is still there');
+    assert.deepEqual(vm.recordedRanges, [{ from: 0, to: 180 }, { from: 360, to: 540 }]);
+
+    // And a manifest that really has grown is still adopted.
+    const grown = { ...GAPPY, totalSeconds: 720,
+        segments: [...GAPPY.segments, { index: 3, trackIndex: 0, startSeconds: 540, durationSeconds: 180 }] };
+    store.__setManifest(grown);
+    await vm.refreshManifest();
+    assert.equal(vm.manifest.totalSeconds, 720);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

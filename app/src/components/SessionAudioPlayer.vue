@@ -311,6 +311,10 @@ export default {
             this.refreshManifest();
         };
         eventBus.$on('sessionAudioState', this._onAudioState);
+        // A backup finishing can make a cloud manifest available, so the player
+        // listens to both — but they stay separate events, because only one of
+        // them says anything about the recorder.
+        eventBus.$on('dropboxStateChanged', this._onAudioState);
         this._onDropboxConnected = async () => {
             await this.refreshManifest();
             const pending = this._pendingCloudPlay;
@@ -321,6 +325,7 @@ export default {
     },
     beforeDestroy() {
         eventBus.$off('sessionAudioState', this._onAudioState);
+        eventBus.$off('dropboxStateChanged', this._onAudioState);
         eventBus.$off('dropboxConnected', this._onDropboxConnected);
         this.teardown();
     },
@@ -351,8 +356,16 @@ export default {
             try {
                 const manifest = await readManifest(id);
                 if (id !== this.sessionId) return;
-                this.manifest = manifest && manifest.segments.length ? manifest : null;
-                this.error = '';
+                // A refresh only ever ADDS to what is known. readManifest()
+                // answers a failed IndexedDB read with null exactly as it
+                // answers "there is no recording", so assigning null here made
+                // one transient hiccup take the whole player off the screen
+                // mid-session. reload() is the only thing that clears it, and
+                // it does so because the session itself changed.
+                if (manifest && manifest.segments.length) {
+                    this.manifest = manifest;
+                    this.error = '';
+                }
             } catch (e) { if (id === this.sessionId) this.error = e.message; }
         },
 
