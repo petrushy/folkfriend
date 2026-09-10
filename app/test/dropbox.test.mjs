@@ -121,4 +121,74 @@ await test('Dropbox content hash uses 4 MiB blocks, including empty files', asyn
     const expected = Buffer.from(await crypto.subtle.digest('SHA-256', new Uint8Array([...first, ...second]))).toString('hex');
     assert.equal(await contentHash(new Blob([bytes])), expected);
 });
+await test('a large upload is sent as bounded chunks, not one request', async () => {
+    // files/upload is a single shot Dropbox caps at 150 MB, behind a 60 s
+    // deadline — so a three-hour recording is rejected outright above about
+    // 96 kbps, and even at 64 kbps needs ~11.5 Mbit/s sustained to land inside
+    // the timeout. An upload session sends pieces, each its own request with
+    // its own deadline, and a failure costs one piece rather than the file.
+    const calls = [];
+    const bytes = new Uint8Array(20 * 1024 * 1024);
+    for (let i = 0; i < bytes.length; i++) bytes[i] = i & 0xff;
+    const blob = new Blob([bytes]);
+    const hash = await contentHash(blob);
+
+    const c = new DropboxClient({
+        token: () => ({ accessToken: 'ok', expiresAt: Date.now() + 100000 }),
+        fetcher: async (url, options) => {
+            const endpoint = url.split('/2/')[1];
+            const arg = JSON.parse(options.headers['Dropbox-API-Arg']);
+            calls.push({ endpoint, arg, bytes: options.body.size });
+            if (endpoint === 'files/upload_session/start') return new Response(JSON.stringify({ session_id: 'S' }));
+            if (endpoint === 'files/upload_session/append_v2') return new Response('');
+            return new Response(JSON.stringify({ size: blob.size, content_hash: hash, rev: '1' }));
+        },
+    });
+
+    const result = await c.uploadLarge('/recordings/x.m4a', blob);
+    assert.equal(result.size, blob.size);
+    assert.deepEqual(calls.map(c2 => c2.endpoint), [
+        'files/upload_session/start',
+        'files/upload_session/append_v2',
+        'files/upload_session/finish',
+    ]);
+    // Every piece is bounded, and together they are the whole file exactly once.
+    assert.ok(calls.every(c2 => c2.bytes <= 8 * 1024 * 1024));
+    assert.equal(calls.reduce((n, c2) => n + c2.bytes, 0), blob.size);
+    // The offsets have to be right or Dropbox assembles a corrupt file.
+    assert.equal(calls[1].arg.cursor.offset, 8 * 1024 * 1024);
+    assert.equal(calls[2].arg.cursor.offset, 16 * 1024 * 1024);
+    assert.equal(calls[2].arg.commit.path, '/recordings/x.m4a');
+});
+
+await test('a small upload still goes in one request', async () => {
+    let endpoint = '';
+    const blob = new Blob(['short']);
+    const c = new DropboxClient({
+        token: () => ({ accessToken: 'ok', expiresAt: Date.now() + 100000 }),
+        fetcher: async (url) => {
+            endpoint = url.split('/2/')[1];
+            return new Response(JSON.stringify({ size: blob.size, content_hash: await contentHash(blob), rev: '1' }));
+        },
+    });
+    await c.uploadLarge('/recordings/x.m4a', blob);
+    assert.equal(endpoint, 'files/upload');
+});
+
+await test('a chunked upload is verified against the assembled file', async () => {
+    // A piece that arrived wrong has to be caught here rather than discovered
+    // on playback months later.
+    const bytes = new Uint8Array(20 * 1024 * 1024);
+    const blob = new Blob([bytes]);
+    const c = new DropboxClient({
+        token: () => ({ accessToken: 'ok', expiresAt: Date.now() + 100000 }),
+        fetcher: async (url) => url.includes('start')
+            ? new Response(JSON.stringify({ session_id: 'S' }))
+            : url.includes('append')
+                ? new Response('')
+                : new Response(JSON.stringify({ size: blob.size, content_hash: 'wrong', rev: '1' })),
+    });
+    await assert.rejects(() => c.uploadLarge('/recordings/x.m4a', blob), /verification failed/);
+});
+
 console.log(`\n${passed} Dropbox tests passed`);
