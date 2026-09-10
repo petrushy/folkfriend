@@ -142,6 +142,47 @@ try {
     await until(async () => !(await records()).some(s => s.id === 'session-239'), 'delete session');
     assert.equal((await records()).length, 239);
     console.log('✓ Reload preserves edits; Delete removes only the selected session');
+    // A cloud-only session with an expired token still plays previously cached
+    // audio. Seed a real WAV so this exercises browser decoding, not a fake URL.
+    await evaluate(`(async () => {
+        const id = 'dropbox-offline';
+        const session = { id, name: 'Offline Dropbox evening', customName: true, startedAt: 1757000000000,
+            listenedSeconds: 1, tunes: [] };
+        const buffer = new ArrayBuffer(16044), view = new DataView(buffer);
+        const text = (at, value) => [...value].forEach((c, i) => view.setUint8(at + i, c.charCodeAt(0)));
+        text(0, 'RIFF'); view.setUint32(4, 16036, true); text(8, 'WAVE'); text(12, 'fmt ');
+        view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+        view.setUint32(24, 8000, true); view.setUint32(28, 16000, true); view.setUint16(32, 2, true);
+        view.setUint16(34, 16, true); text(36, 'data'); view.setUint32(40, 16000, true);
+        const blob = new Blob([buffer], { type: 'audio/wav' });
+        const hash = [...new Uint8Array(await crypto.subtle.digest('SHA-256', await crypto.subtle.digest('SHA-256', buffer)))].map(b => b.toString(16).padStart(2, '0')).join('');
+        const segment = { index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 1, bytes: blob.size,
+            chunks: [{ startSeconds: 0, bytes: blob.size, init: true }], file: 'segments/000000.bin', contentHash: hash };
+        const manifest = { schema: 1, cloudSchema: 1, sessionId: id, totalSeconds: 1, bytes: blob.size,
+            tracks: [{ index: 0, startSeconds: 0, durationSeconds: 1, mimeType: 'audio/wav', initBase64: '' }], segments: [segment] };
+        localStorage.setItem('folkfriend.dropbox.enabled', 'true');
+        localStorage.setItem('folkfriend.dropbox.account', 'fixture-account');
+        localStorage.setItem('folkfriend.dropbox.auth', JSON.stringify({ accessToken: 'expired-fixture', expiresAt: 0 }));
+        await new Promise((resolve, reject) => {
+            const r = indexedDB.open('keyval-store');
+            r.onsuccess = () => { const db = r.result; const tx = db.transaction('keyval', 'readwrite'); const s = tx.objectStore('keyval');
+                s.put([session], 'liveSessions');
+                s.put(manifest, 'dropbox:fixture-account:manifest:' + id);
+                s.put({ segment: { ...segment, sessionId: id, blob }, used: Date.now() }, 'dropboxCache:fixture-account:' + id + ':' + hash);
+                tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = reject;
+            }; r.onerror = reject;
+        });
+    })()`);
+    await send('Page.reload');
+    await until(() => evaluate(`document.body && document.body.textContent.includes('Past sessions')`), 'Dropbox reload');
+    await openSaved('Offline Dropbox evening');
+    await until(() => evaluate(`!!document.querySelector('.sessionAudioPlayer audio')`), 'remote manifest player');
+    assert.ok(await evaluate(`document.body.textContent.includes('Reconnect required')`));
+    await evaluate(`document.querySelector('button[aria-label="Play recording"]').click()`);
+    await until(() => evaluate(`document.querySelector('.sessionAudioPlayer audio')?.src.startsWith('blob:')`), 'cached cloud audio loaded');
+    await until(() => evaluate(`document.querySelector('.sessionAudioPlayer audio')?.duration === 1`), 'cached WAV decoded');
+    assert.ok(await evaluate(`document.documentElement.scrollWidth <= window.innerWidth`), 'Dropbox controls fit mobile width');
+    console.log('✓ Cached Dropbox recording decodes in the existing player with expired authorization');
     assert.deepEqual(errors, [], 'No Vue warnings or uncaught browser errors');
     console.log('Session workspace browser checks passed.');
 } catch (error) {

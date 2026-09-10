@@ -17,10 +17,8 @@
 //     stops rather than spending it. Everything above that reserve is the
 //     user's to spend; the reserve itself is not negotiable.
 //
-//  3. It is LOCAL-ONLY. Nothing here is synced, exported in a backup, or
-//     touched by sync.js. Three hours of a pub records the conversations of
-//     people who did not agree to it; that stays on the device that captured
-//     it, and leaves only by an explicit share.
+//  3. It is LOCAL-FIRST. Dropbox backup is a separate, explicit opt-in.
+//     Recording never waits for cloud storage; sync.js never handles audio.
 //
 // The commit-marker discipline is the same as tuneIndexStore.js: the manifest
 // is written LAST and names only segments that are already on disk, so an
@@ -113,6 +111,14 @@ export function formatBytes(bytes) {
 // Reads never throw, in the manner of tuneIndexStore: a failure resolves to
 // null and the caller degrades to "no audio for this session", which is always
 // a survivable answer.
+
+// Playback can fetch cloud audio; recorder reads/writes remain strictly local.
+let cloudAudio = null;
+export function configureCloudAudio(provider) { cloudAudio = provider; }
+export async function playbackReadManifest(sessionId) {
+    const local = await readManifest(sessionId);
+    return local || (cloudAudio ? cloudAudio.manifest(sessionId) : null);
+}
 
 export async function readManifest(sessionId) {
     if (!sessionId) return null;
@@ -495,7 +501,8 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
 
     for (const meta of overlapping) {
         if (meta.trackIndex !== trackIndex) break;   // never cross a track
-        const segment = await readSegment(sessionId, meta.index);
+        const segment = await readSegment(sessionId, meta.index) ||
+            (cloudAudio ? await cloudAudio.segment(sessionId, meta.index) : null);
         // A segment the manifest names but that is not on disk means an
         // interrupted delete. Stop here rather than splicing a hole into the
         // middle of a clip, which would play as a glitch or not at all.

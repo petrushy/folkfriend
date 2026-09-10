@@ -1,5 +1,7 @@
 <template>
-    <div v-if="manifest" class="sessionAudioPlayer">
+    <div class="sessionAudioPlayer">
+        <v-alert v-if="!manifest && error" dense text type="warning">{{ error }}</v-alert>
+        <template v-if="manifest">
         <div class="d-flex align-center flex-wrap" style="gap: 12px;">
             <v-btn icon :disabled="!totalSeconds" :aria-label="playing ? 'Pause playback' : 'Play recording'" @click="togglePlay">
                 <v-icon>{{ playing ? icons.pause : icons.play }}</v-icon>
@@ -98,7 +100,8 @@
             {{ tracks.length }} separate files.
         </p>
 
-        <audio
+        </template>
+        <audio v-if="manifest"
             ref="audio"
             preload="metadata"
             @loadedmetadata="onLoadedMetadata"
@@ -116,7 +119,7 @@ import { mdiPlay, mdiPause } from '@mdi/js';
 import eventBus from '@/eventBus.js';
 import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';
 import {
-    readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor,
+    playbackReadManifest as readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor,
 } from '@/services/sessionAudioStore.js';
 
 // Fallback for a session recorded before detections carried their own playback
@@ -304,13 +307,21 @@ export default {
         // Re-reading the manifest never disturbs playback — it does not touch
         // the audio element.
         this._onAudioState = (payload) => {
-            if (!payload || payload.sessionId !== this.sessionId) return;
+            if (payload && payload.sessionId && payload.sessionId !== this.sessionId) return;
             this.refreshManifest();
         };
         eventBus.$on('sessionAudioState', this._onAudioState);
+        this._onDropboxConnected = async () => {
+            await this.refreshManifest();
+            const pending = this._pendingCloudPlay;
+            this._pendingCloudPlay = null;
+            if (pending && pending.id === this.sessionId) this.playFrom(pending.seconds, { autoplay: pending.autoplay });
+        };
+        eventBus.$on('dropboxConnected', this._onDropboxConnected);
     },
     beforeDestroy() {
         eventBus.$off('sessionAudioState', this._onAudioState);
+        eventBus.$off('dropboxConnected', this._onDropboxConnected);
         this.teardown();
     },
     methods: {
@@ -323,19 +334,31 @@ export default {
             this.error = '';
             this.currentSeconds = 0;
             if (!this.sessionId) return;
-            const manifest = await readManifest(this.sessionId);
-            if (manifest && manifest.segments.length) this.manifest = manifest;
+            const id = this.sessionId;
+            try {
+                const manifest = await readManifest(id);
+                if (id !== this.sessionId) return;
+                this.manifest = manifest && manifest.segments.length ? manifest : null;
+                this.error = '';
+            } catch (e) { if (id === this.sessionId) this.error = e.message; }
         },
 
         // Picks up segments written since the manifest was last read, without
         // resetting playback the way reload() does.
         async refreshManifest() {
             if (!this.sessionId) return;
-            const manifest = await readManifest(this.sessionId);
-            if (manifest && manifest.segments.length) this.manifest = manifest;
+            const id = this.sessionId;
+            try {
+                const manifest = await readManifest(id);
+                if (id !== this.sessionId) return;
+                this.manifest = manifest && manifest.segments.length ? manifest : null;
+                this.error = '';
+            } catch (e) { if (id === this.sessionId) this.error = e.message; }
         },
 
         teardown() {
+            this._loadGeneration = (this._loadGeneration || 0) + 1;
+            this._pendingCloudPlay = null;
             const audio = this.$refs.audio;
             if (audio) {
                 try { audio.pause(); } catch (e) { /* not loaded */ }
@@ -438,6 +461,7 @@ export default {
         },
 
         async _loadSegment(segment, seekSeconds, autoplay) {
+            const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
             const audio = this.$refs.audio;
             if (!audio) return;
             this.error = '';
@@ -448,6 +472,7 @@ export default {
                     segment.startSeconds + segment.durationSeconds,
                     this.manifest,
                 );
+                if (generation !== this._loadGeneration) return;
                 if (!clip) {
                     this.error = 'That part of the recording is missing.';
                     return;
@@ -462,6 +487,8 @@ export default {
                 audio.src = this.objectUrl;
                 audio.load();
             } catch (e) {
+                if (generation !== this._loadGeneration) return;
+                if (e.code === 'auth') this._pendingCloudPlay = { id: this.sessionId, seconds: seekSeconds, autoplay };
                 this.error = `Could not load the recording: ${(e && e.message) || e}`;
             }
         },

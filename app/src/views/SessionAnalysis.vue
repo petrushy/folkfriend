@@ -262,8 +262,8 @@
             </p>
             <p v-else class="caption text--secondary mb-4">
                 Keeps the audio so you can play the evening back and jump to any tune.
-                It records the whole room, stays on this device, and is deleted with the
-                session. Quality and stored recordings are in Settings.
+                It records the whole room. Audio stays local unless you enable Dropbox backup
+                or export it. Local audio is deleted with the session. Quality and stored recordings are in Settings.
             </p>
             <div class="d-flex flex-wrap align-center" style="gap: 12px;">
                 <v-btn
@@ -421,6 +421,7 @@
             <h2 class="text-h6 mb-2">
                 Session recording
             </h2>
+            <DropboxBackup :session-id="audioSessionId" :active="isOpenSession(activeSession)" class="mb-3" />
             <SessionAudioPlayer
                 ref="audioPlayer"
                 :session-id="audioSessionId"
@@ -586,9 +587,10 @@ import liveAnalysisService from '@/services/liveAnalysis.js';
 import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
 import LiveScoreFollow from '@/components/LiveScoreFollow.vue';
+import DropboxBackup from '@/components/DropboxBackup.vue';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
 import sessionRecorder from '@/services/sessionRecorder.js';
-import { listManifests, reclaimOrphans } from '@/services/sessionAudioStore.js';
+import { listManifests, playbackReadManifest, reclaimOrphans } from '@/services/sessionAudioStore.js';
 import { clearLastShown } from '@/js/liveScoreFollow.mjs';
 import {
     buildTuneListText,
@@ -640,7 +642,7 @@ const emptyLiveState = () => ({
 
 export default {
     name: 'SessionAnalysisView',
-    components: { VolumeMeter, LiveScoreFollow, SessionAudioPlayer },
+    components: { VolumeMeter, LiveScoreFollow, SessionAudioPlayer, DropboxBackup },
     data() {
         return {
             dragActive: false,
@@ -691,8 +693,8 @@ export default {
             // Session ids known to have a recording, so the picker can mark
             // them and the player is only mounted when there is something to
             // play. Read from the audio manifests rather than from the session
-            // records: audio is local-only, so a synced record from another
-            // device must never claim audio this device does not have.
+            // records: a playable recording needs a local or Dropbox manifest,
+            // not just a tune list synced from another device.
             audioSessionIDs: [],
             // Which stretches of the active session's audio are on disk.
             // See _rangesFor() — a recording can have holes.
@@ -764,13 +766,11 @@ export default {
                 ? 'Record this session\'s audio'
                 : 'Record this session\'s audio (unavailable)';
         },
-        // Empty unless this session actually has a recording on THIS device.
-        // Audio is never synced, so a session record that arrived from another
-        // device must not offer a player over audio that is not here.
+        // The player resolves local audio first, then the connected Dropbox copy.
         audioSessionId() {
             const session = this.activeSession;
             if (!session || !session.id) return '';
-            return this.audioSessionIDs.includes(session.id) ? session.id : '';
+            return session.id;
         },
         activeAcceptedWindows() {
             if (this.viewMode === 'history') return 0;
@@ -1593,6 +1593,10 @@ export default {
         async refreshAudioSessions() {
             try {
                 const manifests = await listManifests();
+                if (this.activeSession && !manifests.some(m => m.sessionId === this.activeSession.id)) {
+                    const remote = await playbackReadManifest(this.activeSession.id);
+                    if (remote) manifests.push(remote);
+                }
                 this.audioSessionIDs = manifests
                     .filter(m => m.segments && m.segments.length)
                     .map(m => m.sessionId);

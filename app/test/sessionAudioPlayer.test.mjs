@@ -44,7 +44,7 @@ export function formatSecondsAsDuration(s) { return String(Math.round(s)); }`;
 const FAKE_AUDIO_STORE = `
 export let __manifest = null;
 export function __setManifest(m) { __manifest = m; }
-export async function readManifest() { return __manifest; }
+export async function playbackReadManifest() { return __manifest; }
 export async function buildClip() { return null; }
 export function trackRanges() { return []; }
 export function formatBytes(n) { return String(n); }
