@@ -13,12 +13,17 @@ export async function contentHash(blob) {
     hashes.forEach((hash, i) => joined.set(hash, i * 32));
     return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', joined)), b => b.toString(16).padStart(2, '0')).join('');
 }
+// One piece of a large upload. Dropbox accepts up to 150 MB per request; 8 MB
+// keeps each one inside the 60 s deadline on a slow connection (~1.1 Mbit/s) and
+// bounds what a failure costs.
+const CHUNK_BYTES = 8 * 1024 * 1024;
+
 export class DropboxClient {
     constructor({ token, fetcher = (...args) => fetch(...args) }) { this.token = token; this.fetcher = fetcher; }
     async request(endpoint, args, body) {
         const token = this.token();
         if (!token || token.expiresAt <= Date.now() + 30000) throw new DropboxError('Reconnect Dropbox to continue.', 'auth');
-        const content = endpoint === 'files/download' || endpoint === 'files/upload';
+        const content = endpoint === 'files/download' || endpoint.startsWith('files/upload');
         const headers = { Authorization: `Bearer ${token.accessToken}` };
         if (content) {
             headers['Dropbox-API-Arg'] = JSON.stringify(args).replace(/[\u007f-\uffff]/g, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
@@ -26,6 +31,10 @@ export class DropboxClient {
         } else headers['Content-Type'] = 'application/json';
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 60000);
+        // Deliberately per REQUEST, not per file. Sixty seconds is generous for
+        // a manifest or one segment and hopeless for a whole three-hour
+        // recording, which is why uploadLarge() below sends one bounded chunk
+        // per request rather than asking for a longer deadline.
         try {
             const response = await this.fetcher(`https://${content ? 'content' : 'api'}.dropboxapi.com/2/${endpoint}`, {
                 method: 'POST', headers, body: content ? body : JSON.stringify(args), signal: controller.signal,
@@ -41,7 +50,9 @@ export class DropboxClient {
                 Number(response.headers.get('Retry-After')) || 0);
             }
             if (endpoint === 'files/download') return { blob: await response.blob(), metadata: JSON.parse(response.headers.get('Dropbox-API-Result')) };
-            return response.json();
+            // append_v2 answers 200 with an empty body.
+            const text = await response.text();
+            return text ? JSON.parse(text) : {};
         } finally { clearTimeout(timer); }
     }
     async metadata(path) {
@@ -63,6 +74,43 @@ export class DropboxClient {
         if (result.size !== blob.size || result.content_hash !== hash) throw new DropboxError('Dropbox upload verification failed.', 'integrity');
         return result;
     }
+    // Whole-recording upload, in chunks.
+    //
+    // files/upload is a single shot capped by Dropbox at 150 MB, behind the 60 s
+    // deadline above — so a three-hour session is REJECTED outright above about
+    // 96 kbps, and even at 64 kbps (86 MB) it needs ~11.5 Mbit/s sustained to
+    // land inside the timeout, which a phone in a pub does not have. An upload
+    // session sends bounded pieces, each its own request with its own deadline,
+    // and a failure costs one chunk rather than the whole file.
+    async uploadLarge(path, blob, previous = null) {
+        const hash = await contentHash(blob);
+        if (previous && previous.content_hash === hash) return previous;
+        if (blob.size <= CHUNK_BYTES) return this.upload(path, blob, previous);
+
+        const commit = { path, mode: previous ? { '.tag': 'update', update: previous.rev } : 'add',
+            autorename: false, strict_conflict: true, mute: true };
+        const { session_id: sessionId } = await this.request('files/upload_session/start',
+            { close: false }, blob.slice(0, CHUNK_BYTES));
+
+        let offset = CHUNK_BYTES;
+        while (blob.size - offset > CHUNK_BYTES) {
+            await this.request('files/upload_session/append_v2',
+                { cursor: { session_id: sessionId, offset }, close: false },
+                blob.slice(offset, offset + CHUNK_BYTES));
+            offset += CHUNK_BYTES;
+        }
+
+        const result = await this.request('files/upload_session/finish',
+            { cursor: { session_id: sessionId, offset }, commit }, blob.slice(offset));
+        // Verified exactly as a single-shot upload is: Dropbox computes the same
+        // content hash over the assembled file, so a chunk that arrived wrong
+        // is caught here rather than being discovered on playback.
+        if (result.size !== blob.size || result.content_hash !== hash) {
+            throw new DropboxError('Dropbox upload verification failed.', 'integrity');
+        }
+        return result;
+    }
+
     async immutable(path, blob) {
         const existing = await this.metadata(path);
         if (existing) {
@@ -71,6 +119,19 @@ export class DropboxClient {
         }
         return this.upload(path, blob);
     }
+    // Renaming a session changes its whole-file NAME, and the file is a hundred
+    // megabytes. Moving it costs one request; re-uploading costs the lot, and
+    // leaving the old one behind orphans a recording under a name the user no
+    // longer recognises.
+    async move(from, to) {
+        try {
+            return await this.request('files/move_v2', { from_path: from, to_path: to, autorename: false });
+        } catch (e) {
+            if (e.code === 'missing' || e.code === 'conflict') return null;
+            throw e;
+        }
+    }
+
     async folders() {
         let page;
         try { page = await this.request('files/list_folder', { path: '/sessions' }); }

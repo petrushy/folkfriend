@@ -4,6 +4,40 @@ export const sessionPath = id => {
     return `/sessions/${id}`;
 };
 const jsonBlob = value => new Blob([JSON.stringify(value)], { type: 'application/json' });
+
+// Whole recordings live in a FLAT folder with readable names, because their
+// whole purpose is to be opened by something that is not FolkFriend: a player
+// app, the Files app, a phone plugged into a laptop. Nobody wants to dig
+// through /sessions/<random id>/ to find one.
+//
+// The cost is that a recording now exists in two places, so deleteDropboxCopy()
+// has to clear both — the manifest records these paths for exactly that reason.
+export const RECORDINGS_FOLDER = '/recordings';
+
+// Dropbox rejects / \ : ? * < > " | and trailing dots or spaces.
+function safeName(text) {
+    return String(text || '')
+        .replace(/[/\\:?*<>"|]/g, '-')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .replace(/[. ]+$/, '')
+        .slice(0, 80) || 'session';
+}
+
+// `2026-09-10 2108 The Cobblestone.m4a`, plus ` (part 2)` when a session was
+// paused or the microphone had to be reacquired — each continuous stretch is
+// its own container and they cannot be joined into one file.
+//
+// The time is in the name to keep two sessions on one day from colliding: an
+// overwrite here would destroy a recording rather than merely confuse a list.
+export function recordingFileName(session, trackIndex, trackCount, extension) {
+    const at = new Date(session.startedAt || 0);
+    const pad = n => String(n).padStart(2, '0');
+    const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ` +
+        `${pad(at.getHours())}${pad(at.getMinutes())}`;
+    const part = trackCount > 1 ? ` (part ${trackIndex + 1})` : '';
+    return `${RECORDINGS_FOLDER}/${safeName(`${stamp} ${session.name || ''}`)}${part}.${extension}`;
+}
 const validNumber = n => Number.isFinite(n) && n >= 0;
 export function validateManifest(m, id) {
     if (!m || m.cloudSchema !== 1 || m.schema !== 1 || m.sessionId !== id || !Array.isArray(m.tracks) || !Array.isArray(m.segments) ||
@@ -70,6 +104,53 @@ export async function backupSession(client, session, local, readSegment, extensi
     await client.upload(`${root}/audio-manifest.json`, jsonBlob(manifest), remote);
     return manifest;
 }
+// Uploads one playable file per continuous recording stretch, for anything that
+// is not FolkFriend to open.
+//
+// Only for a FINISHED session. A live one's last track is still growing, so
+// every new segment would mean re-uploading the entire file — hundreds of
+// megabytes an hour, on what is usually mobile data.
+//
+// `buildClip` produces exactly the bytes MediaRecorder would have written had
+// it been asked for that stretch, which is the same thing the local "Export
+// audio" button hands you. Skipped when the local segments are gone: rebuilding
+// a whole file would pull every segment back DOWN from Dropbox only to push the
+// same bytes up again.
+export async function backupWholeRecordings(client, session, manifest, buildClip, extension, existing = []) {
+    if (!session.endedAt) return existing;
+
+    const tracks = [...new Set(manifest.segments.map(s => s.trackIndex))].sort((a, b) => a - b);
+    const uploaded = [];
+    for (let i = 0; i < tracks.length; i++) {
+        const trackIndex = tracks[i];
+        const spans = manifest.segments.filter(s => s.trackIndex === trackIndex);
+        const from = Math.min(...spans.map(s => s.startSeconds));
+        const to = Math.max(...spans.map(s => s.startSeconds + s.durationSeconds));
+
+        const clip = await buildClip(session.id, from, to);
+        if (!clip || !clip.blob.size) continue;
+
+        const path = recordingFileName(session, i, tracks.length, extension(clip.mimeType));
+
+        // Renaming a session changes the filename. MOVE the file rather than
+        // sending it again: a re-upload costs a hundred megabytes, and it would
+        // also leave the old file behind — a recording orphaned under a name
+        // the user has just decided they did not want.
+        const before = existing[i];
+        if (before && before !== path && await client.move(before, path)) { uploaded.push(path); continue; }
+
+        // Already there, same size: one metadata call rather than a second
+        // upload of the same audio. Segments are immutable and a whole file is
+        // built from them, so size is a sufficient test — and a genuinely
+        // different file is caught by the hash check inside uploadLarge().
+        const meta = await client.metadata(path);
+        if (meta && meta.size === clip.blob.size) { uploaded.push(path); continue; }
+        await client.uploadLarge(path, clip.blob, meta);
+        uploaded.push(path);
+    }
+    return uploaded.length ? uploaded : existing;
+}
+
 export async function downloadSegment(client, manifest, index) {
     validateManifest(manifest, manifest.sessionId);
     const meta = manifest.segments.find(s => s.index === index);

@@ -1301,6 +1301,23 @@ push a developer's concern onto everyone. The console steps in
 `docs/dropbox-backup.md` are one-time deployment steps, and that doc now says so
 explicitly, because it read as though users had to perform them.
 
+**A whole-session file is written to a flat `/recordings` folder, opt-in.**
+Segments are how audio is stored and are useless to anything that is not
+FolkFriend. The concatenation is free — `buildClip` already produces exactly the
+bytes MediaRecorder would have written, which is what local "Export audio"
+hands you. Four rules: only for a FINISHED session (a live track is still
+growing, so every segment would re-upload the whole file), one file per
+continuous stretch (two tracks carry two container headers and cannot be
+joined), a rename MOVES the file rather than re-uploading it and orphaning the
+old name, and `deleteDropboxCopy` reaches both locations because the file lives
+outside the session folder.
+
+⚠️ **`files/upload` is capped at 150 MB and this client aborts at 60 s.** A
+three-hour recording is rejected outright above ~96 kbps and needs ~11.5 Mbit/s
+at 64 kbps to beat the timeout, so `uploadLarge()` uses an upload session in
+8 MB pieces — each its own request with its own deadline. **Anything here that
+can exceed a few megabytes must use it, not `upload()`.**
+
 ⚠️ **A Dropbox app is capped in Development status** (50 linked accounts at the
 time of writing) until it is submitted for production approval. That is the one
 real barrier to "any user can just connect", and it is invisible from the code.

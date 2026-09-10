@@ -37,6 +37,24 @@
             <v-btn small text :loading="state.storage.loading" :disabled="!state.connected" @click="refreshStorage(true)">Refresh storage usage</v-btn>
             <v-btn v-if="state.storage.quotaState === 'permission'" small text :disabled="!state.connected" :loading="busy" @click="allowSpaceUsage">Show available space</v-btn>
         </div>
+        <div v-if="!sessionId && state.enabled" class="mb-3">
+            <v-switch
+                :input-value="state.wholeRecordings"
+                :disabled="!state.connected || busy"
+                inset
+                dense
+                hide-details
+                class="mt-0"
+                label="Also save each finished session as one playable file"
+                @change="setWhole"
+            />
+            <p class="caption text--secondary mb-0">
+                Puts a complete recording in <strong>/recordings</strong>, named by date and place, so
+                you can open it in any player. It is a second copy, so a session takes about twice the
+                Dropbox space, and it is uploaded once the session is finished — not while you are still
+                listening. A session paused part-way saves one file per stretch.
+            </p>
+        </div>
         <p v-if="sessionId" class="caption mb-1" role="status">{{ label }}</p>
         <p v-if="!state.configured" class="caption">Dropbox backup has not been configured for this installation.</p>
         <v-alert v-if="error || state.error" dense text type="warning">{{ error || state.error }}</v-alert>
@@ -66,7 +84,7 @@
     </div>
 </template>
 <script>
-import { dropboxState, backupStatus, connectDropbox, disconnectDropbox, syncDropbox, restoreDropboxSessions,
+import { dropboxState, backupStatus, connectDropbox, disconnectDropbox, syncDropbox, restoreDropboxSessions, setWholeRecordings,
     deleteDropboxCopy, deleteLocalCopy, enableSessionBackup, refreshDropboxStorage } from '@/services/dropbox.js';
 import { formatBytes } from '@/services/sessionAudioStore.js';
 export default {
@@ -91,6 +109,11 @@ export default {
             await this.refreshStorage(true);
         }); },
         disconnect: disconnectDropbox,
+        // Turning it on re-runs the backup, so sessions already in Dropbox get
+        // their whole-file copy rather than waiting for something else to
+        // change. Turning it off leaves existing files alone — deleting a
+        // recording is always an explicit act.
+        setWhole(value) { return this.run(() => setWholeRecordings(value)); },
         retry() { return this.sessionId ? enableSessionBackup(this.sessionId) : syncDropbox(true); },
         async run(action) {
             this.busy = true; this.error = ''; this.message = '';

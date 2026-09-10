@@ -4,9 +4,9 @@ import { get, set, del, keys } from 'idb-keyval';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
 import recorder from '@/services/sessionRecorder.js';
-import { listManifests, readManifest, readSegment, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
+import { listManifests, readManifest, readSegment, buildClip, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
 import { DropboxClient, DropboxError, base64url } from './dropboxClient.mjs';
-import { backupSession, downloadSegment, playableManifest, validateManifest, validateSession, sessionPath } from './dropboxBackup.mjs';
+import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateManifest, validateSession, sessionPath } from './dropboxBackup.mjs';
 
 // Public OAuth identifier, deliberately shipped with the browser app.
 const APP_KEY = process.env.VUE_APP_DROPBOX_APP_KEY || 'zl982bc269ijgda';
@@ -14,6 +14,10 @@ const AUTH_KEY = 'folkfriend.dropbox.auth';
 const ENABLED_KEY = 'folkfriend.dropbox.enabled';
 const ACCOUNT_KEY = 'folkfriend.dropbox.account';
 const SPACE_KEY = 'folkfriend.dropbox.spacePermission';
+// Opt-in: a whole-session copy DOUBLES what a session costs in Dropbox and
+// uploads the same bytes a second time, usually over mobile data. Worth it when
+// you want to open a recording in something else; not worth imposing.
+const WHOLE_KEY = 'folkfriend.dropbox.wholeRecordings';
 const emptyStorage = () => ({ storedBytes: null, availableBytes: null, quotaState: 'unavailable', checkedAt: 0, attemptedAt: 0, loading: false, error: '' });
 const cachePrefix = 'dropboxCache:';
 const CACHE_LIMIT = 32 * 1024 * 1024;
@@ -23,7 +27,18 @@ let auth;
 try { auth = JSON.parse(stored(AUTH_KEY)); } catch (_) { auth = null; }
 let account = stored(ACCOUNT_KEY) || '';
 export const dropboxState = Vue.observable({ configured: !!APP_KEY, enabled: stored(ENABLED_KEY) === 'true',
-    connected: !!auth && auth.expiresAt > Date.now() + 30000, busy: false, error: '', sessions: {}, revision: 0, storage: emptyStorage() });
+    connected: !!auth && auth.expiresAt > Date.now() + 30000, busy: false, error: '', sessions: {}, revision: 0, storage: emptyStorage(),
+    wholeRecordings: stored(WHOLE_KEY) === 'true' });
+
+// Turning it ON re-runs the backup so finished sessions already in Dropbox get
+// their whole-file copy without waiting for something else to change.
+export function setWholeRecordings(enabled) {
+    dropboxState.wholeRecordings = !!enabled;
+    try { localStorage.setItem(WHOLE_KEY, String(!!enabled)); } catch (_) { /* private mode */ }
+    dropboxState.revision++;
+    if (enabled) { retryAt = 0; return syncDropbox(true); }
+    return Promise.resolve();
+}
 const client = new DropboxClient({ token: () => dropboxState.enabled ? auth : null });
 let queue = Promise.resolve();
 let retryAt = 0;
@@ -186,6 +201,14 @@ export function syncDropbox(force = false) {
                     await set(key('receipt', id), { ...receipt, pendingSession: json(session) });
                     const cloud = await backupSession(client, session, local, readSegment, fileExtensionFor, remoteSession?.rev || null);
                     await set(key('manifest', id), cloud);
+                    if (dropboxState.wholeRecordings) {
+                        // Recorded so deletion can find them: a whole recording
+                        // lives outside the session folder, which is the price
+                        // of it being somewhere a person would look.
+                        const paths = await backupWholeRecordings(client, session, cloud, buildClip,
+                            fileExtensionFor, await get(key('whole', id)) || []);
+                        if (paths.length) await set(key('whole', id), paths);
+                    }
                     await set(key('receipt', id), { fingerprint, session: json(session), verifiedAt: Date.now() });
                     status(id, recorder.sessionId === id && recorder.isRecording ? 'Syncing' : 'Backed up'); changed(id);
                 } catch (e) { report(e, id); if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break; }
@@ -298,6 +321,15 @@ export async function deleteDropboxCopy(id) {
         // Persist exclusion FIRST, so a reload never recreates a deleted copy.
         await set(key('excluded', id), true);
         await client.request('files/delete_v2', { path });
+        // And the whole-file copies, which are NOT under that path. Kept in the
+        // same operation and behind the same exclusion marker, because a delete
+        // that leaves three hours of a room behind in a folder the user browses
+        // is the one failure this feature cannot afford.
+        for (const whole of await get(key('whole', id)) || []) {
+            try { await client.request('files/delete_v2', { path: whole }); }
+            catch (e) { if (e.code !== 'missing') throw e; }
+        }
+        await del(key('whole', id));
         await del(key('manifest', id)); await del(key('receipt', id));
         for (const k of await keys()) if (typeof k === 'string' && k.startsWith(`${cachePrefix}${account}:${id}:`)) await del(k);
         status(id, 'Local only'); changed(id);

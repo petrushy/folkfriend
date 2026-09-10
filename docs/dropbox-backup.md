@@ -143,6 +143,46 @@ close and reopen; expire authorization; restore on another device; seek and expo
 across multiple segments/tracks; and exercise independent deletion. Automated
 transport tests do not establish iPhone microphone or Dropbox account behavior.
 
+## One playable file per session
+
+Segments are how the audio is *stored*; they are useless to anything that is not
+FolkFriend. **Also save each finished session as one playable file** (in the
+Dropbox panel, off by default) puts a complete recording in a flat
+`/recordings` folder, named by date and session:
+
+```text
+/Apps/FolkFriend/recordings/2026-09-10 2108 The Cobblestone.m4a
+```
+
+Point any player at that folder and it works. Four things about it:
+
+- **Only for a FINISHED session.** A live one's last track is still growing, so
+  building the file now would mean re-uploading all of it on every new segment —
+  hundreds of megabytes an hour, usually over mobile data.
+- **One file per continuous stretch.** A pause, or a microphone the OS took
+  away, starts a new track, and two tracks carry two container headers and
+  cannot be joined. Those sessions save `… (part 2)` and so on.
+- **It is a second copy**, so a session costs about twice the Dropbox space.
+  That is the whole trade, and why it is opt-in.
+- **Renaming a session MOVES the file**, it does not upload it again. The name
+  is in the filename, so a rename changes it; re-uploading would cost the whole
+  file and leave the old one orphaned under a name the user has just rejected.
+
+Deleting the Dropbox copy removes this file too. It lives outside the session
+folder, so that delete reaches two places — the paths are recorded in local
+bookkeeping precisely so it can.
+
+### Large uploads
+
+`files/upload` is a single shot Dropbox caps at 150 MB, behind this client's
+60 s deadline. A three-hour recording is **rejected outright above about
+96 kbps**, and even at 64 kbps (86 MB) it needs ~11.5 Mbit/s sustained to land
+inside the timeout. So whole recordings go through an upload session
+(`upload_session/start` → `append_v2` → `finish`) in 8 MB pieces: each piece is
+its own request with its own deadline, and a failure costs one piece rather than
+the file. Dropbox computes the content hash over the assembled result, which is
+verified exactly as a single-shot upload is.
+
 ## Storage usage in Settings
 
 Dropbox audio storage shows bytes stored throughout the FolkFriend App Folder,

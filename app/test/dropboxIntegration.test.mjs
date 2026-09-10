@@ -11,7 +11,7 @@ const local = { schema: 1, sessionId: 's1', totalSeconds: 3, bytes: blob.size, u
     tracks: [{ index: 0, init: new Blob(['header']), mimeType: 'audio/mp4' }],
     segments: [{ index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 3, bytes: blob.size }] };
 class FakeClient {
-    files = new Map(); writes = []; deletes = []; failPath = ''; failReads = false; rev = 0;
+    files = new Map(); writes = []; deletes = []; moves = []; failPath = ''; failReads = false; rev = 0;
     async json(path) {
         if (this.failReads) throw new DropboxError('Cloud read failed.', 'network');
         const f = this.files.get(path); return f ? { value: JSON.parse(await f.blob.text()), rev: f.rev } : null;
@@ -25,8 +25,25 @@ class FakeClient {
         this.files.set(path, m); this.writes.push(path); return m;
     }
     async immutable(path, blob) { return await this.metadata(path) || this.upload(path, blob); }
+    // The real one chunks above 8 MB and delegates below it. The chunking
+    // itself is tested against the real client in dropbox.test.mjs; here it
+    // only has to behave like an upload.
+    async uploadLarge(path, blob, previous = null) { return this.upload(path, blob, previous); }
     async folders() { return [{ name: 's1' }]; }
-    async request(_, { path }) { this.deletes.push(path); for (const k of this.files.keys()) if (k.startsWith(path + '/')) this.files.delete(k); return {}; }
+    async move(from, to) {
+        const f = this.files.get(from);
+        if (!f) return null;
+        this.files.delete(from); this.files.set(to, f); this.moves.push([from, to]); return f;
+    }
+    async request(endpoint, args) {
+        if (endpoint === 'files/delete_v2') {
+            const { path } = args;
+            this.deletes.push(path);
+            this.files.delete(path);
+            for (const k of this.files.keys()) if (k.startsWith(path + '/')) this.files.delete(k);
+        }
+        return {};
+    }
 }
 let sequence = 0;
 async function load({ enabled = true, expired = false, active = false } = {}) {
@@ -51,6 +68,9 @@ export const recorder = f.recorder;
 export const listManifests = async () => structuredClone(f.locals);
 export const readManifest = async id => f.locals.find(m => m.sessionId === id);
 export const readSegment = async () => ({ blob: new Blob(['headerpayload']), chunks: [{ startSeconds: 0, bytes: 13, init: true }] });
+// The whole-recording copy is built from the same local segments the player's
+// "Export audio" uses — one continuous file per track.
+export const buildClip = async () => ({ blob: new Blob(['headerpayload']), mimeType: 'audio/mp4', startSeconds: 0, endSeconds: 3, trackIndex: 0 });
 export const fileExtensionFor = () => 'm4a';
 export const headroomBytes = async () => 10000000;
 export const deleteSessionAudio = async id => { f.locals = f.locals.filter(m => m.sessionId !== id); f.deletedLocal.push(id); };
@@ -171,6 +191,84 @@ await test('backup progress never speaks on the recorder\'s event', async () => 
     assert.ok(names.includes('dropboxStateChanged'), 'it announces itself');
     assert.ok(!names.includes('sessionAudioState'),
         'and never on the event that means something else');
+});
+
+await test('a whole-file copy is only made for a FINISHED session', async () => {
+    // A live session's last track is still growing, so building the file now
+    // means re-uploading all of it on every new segment — hundreds of megabytes
+    // an hour, usually over mobile data.
+    const { f, api } = await load();
+    await api.setWholeRecordings(true);
+    assert.ok(!f.client.writes.some(p => p.startsWith('/recordings/')),
+        'nothing while the session is still open');
+
+    f.sessions[0].endedAt = 2;
+    f.locals[0].updatedAt++;
+    await api.syncDropbox(true);
+    const whole = f.client.writes.filter(p => p.startsWith('/recordings/'));
+    assert.equal(whole.length, 1);
+    assert.match(whole[0], /^\/recordings\/1970-01-01 \d{4} Original\.m4a$/,
+        'named by date and session, where a person would look');
+});
+
+await test('the whole-file copy is off unless asked for', async () => {
+    const { f, api } = await load();
+    f.sessions[0].endedAt = 2;
+    await api.syncDropbox(true);
+    assert.ok(!f.client.writes.some(p => p.startsWith('/recordings/')));
+});
+
+await test('deleting the Dropbox copy removes the whole file too', async () => {
+    // It lives OUTSIDE the session folder, which is the price of being
+    // somewhere a person would look — so the delete has to reach both, or three
+    // hours of a room stays behind in a folder the user browses.
+    const { f, api } = await load();
+    await api.setWholeRecordings(true);
+    f.sessions[0].endedAt = 2;
+    f.locals[0].updatedAt++;
+    await api.syncDropbox(true);
+    const whole = f.client.writes.find(p => p.startsWith('/recordings/'));
+    assert.ok(whole);
+
+    await api.deleteDropboxCopy('s1');
+    assert.ok(f.client.deletes.includes(whole), 'the whole file was deleted as well');
+    assert.ok(f.client.deletes.includes('/sessions/s1'));
+});
+
+await test('an unchanged whole file is not uploaded twice', async () => {
+    const { f, api } = await load();
+    await api.setWholeRecordings(true);
+    f.sessions[0].endedAt = 2;
+    f.locals[0].updatedAt++;
+    await api.syncDropbox(true);
+
+    f.client.writes = [];
+    f.locals[0].updatedAt++;
+    await api.syncDropbox(true);
+    assert.ok(!f.client.writes.some(p => p.startsWith('/recordings/')),
+        'the same audio is not sent twice');
+});
+
+await test('renaming a session MOVES its whole file rather than re-sending it', async () => {
+    // The filename carries the session name, so a rename changes it. Uploading
+    // again would cost a hundred megabytes AND leave the old file behind —
+    // a recording orphaned under a name the user has just rejected.
+    const { f, api } = await load();
+    await api.setWholeRecordings(true);
+    f.sessions[0].endedAt = 2;
+    f.locals[0].updatedAt++;
+    await api.syncDropbox(true);
+    const before = f.client.writes.find(p => p.startsWith('/recordings/'));
+
+    f.client.writes = [];
+    f.sessions[0].name = 'The Cobblestone';
+    await api.syncDropbox(true);
+
+    assert.ok(!f.client.writes.some(p => p.startsWith('/recordings/')), 'nothing re-uploaded');
+    assert.equal(f.client.moves.length, 1);
+    assert.equal(f.client.moves[0][0], before);
+    assert.match(f.client.moves[0][1], /The Cobblestone\.m4a$/);
+    assert.ok(!f.client.files.has(before), 'and no orphan left behind');
 });
 
 console.log(`\n${passed} Dropbox coordinator tests passed`);
