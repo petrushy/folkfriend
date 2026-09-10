@@ -162,7 +162,7 @@
                     :loading="deletingSessionAudio"
                     @click="deleteAllSessionAudio"
                 >
-                    Delete all local recordings
+                    Delete closed session recordings
                 </v-btn>
             </v-row>
         </v-card>
@@ -1286,12 +1286,14 @@ export default {
 
         async deleteAllSessionAudio() {
             if (!window.confirm(
-                'Delete every local session recording? Tune lists and Dropbox copies are kept. Audio without a verified backup cannot be recovered.'
+                'Delete local recordings from closed sessions? The open session (including paused recording), tune lists and Dropbox copies are kept. Audio without a verified backup cannot be recovered.'
             )) return;
             this.deletingSessionAudio = true;
             try {
                 const manifests = await listAudioManifests();
                 for (const manifest of manifests) {
+                    // The recorder still owns its manifest while paused too.
+                    if (manifest.sessionId === sessionRecorder.sessionId) continue;
                     await deleteSessionAudio(manifest.sessionId);
                 }
             } finally {
