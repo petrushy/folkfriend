@@ -24,7 +24,27 @@ Dropbox account themselves.
 The session JSON stored beside recordings is a disaster-recovery copy. Recover
 missing sessions is for lost records, not the normal cross-device workflow.
 
-## Deployment setup
+## Who does what
+
+**Nothing in this section is a user step.** A Dropbox app is registered **once,
+by whoever ships FolkFriend**, and the resulting *app key* identifies the
+application — not a person. It is public by design, which is why the OAuth flow
+uses PKCE and no secret is shipped. Every user of that build shares it.
+
+What a user does is: Settings → Dropbox audio storage → **Connect Dropbox**,
+sign in, approve. That is all. They never see the App Console, never need an app
+key of their own, and there is deliberately no field to paste one into — that
+would push a developer's concern onto everybody who just wants their tunes
+backed up.
+
+> ⚠️ **A new Dropbox app is capped until it is approved for production.** Dropbox
+> starts every registration in *Development* status, which limits how many
+> Dropbox accounts may link it (50 at the time of writing). That is ample for a
+> personal fork and is the one real barrier to "any user can just connect" —
+> going beyond it means applying for production approval in the console. Check
+> the current limit and status on the app's page before assuming otherwise.
+
+## Deployment setup (done once, by the person shipping the app)
 
 1. Register one scoped application in the [Dropbox App Console](https://www.dropbox.com/developers/apps).
    Select **App folder**, not Full Dropbox, and name it FolkFriend (the actual
@@ -40,7 +60,17 @@ missing sessions is for lost records, not the normal cross-device workflow.
    For GitHub deployment, set the repository Actions variable
    `VUE_APP_DROPBOX_APP_KEY`; the deployment workflow passes it to the build.
    **Do not configure or ship an app secret.**
-5. Open Settings → Dropbox audio storage → Connect Dropbox. Allow the sign-in popup.
+5. Optional: to show the user how much space is free in their Dropbox, also
+   enable `account_info.read` under Permissions and Submit. Without it,
+   FolkFriend still reports how much it has stored; only the account's free
+   space is unavailable, and the panel says so rather than failing. Users are
+   asked to approve that extra scope with a **Show available space** button —
+   but the scope has to exist on the registration first, or that button returns
+   an error.
+
+## What a user does
+
+1. Open Settings → Dropbox audio storage → Connect Dropbox. Allow the sign-in popup.
    The popup prevents authentication from navigating away from a live recording.
    A blocked popup reports an error and leaves recording running.
 
@@ -121,9 +151,11 @@ all recursive listing pages, without downloading recordings. Usage refreshes whe
 Settings opens, once a minute while visible, and on Refresh storage usage. Failed
 refreshes retain the last reading with its check time and an error message.
 
-Available account space is optional. In the Dropbox App Console, enable
-`account_info.read` under Permissions and click Submit. Then choose Show available
-space in FolkFriend to authorize that additional scope. Existing audio connections
-and stored-byte counts continue to work without it. The extra authorization still
-uses App Folder file access. Account free space includes other Dropbox content;
-for teams, the display respects both shared capacity and enforced member limits.
+Available account space is optional, and needs both halves: the app
+registration must carry `account_info.read` (a one-time developer step — see
+Deployment setup), and the user must then approve that extra scope with **Show
+available space**. Without either, audio backup and the stored-byte count work
+exactly as before; only the free-space figure is missing, and the panel says so.
+The extra authorization still uses App Folder file access and grants no access
+to files outside it. Account free space includes other Dropbox content; for
+teams, the display respects both shared capacity and enforced member limits.

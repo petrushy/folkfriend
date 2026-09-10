@@ -1293,6 +1293,18 @@ genuinely are permanent — quality, storage used, and deleting recordings.
 
 ### Dropbox backup, and the four things it broke
 
+**The app key is per-APP, not per user, and no user ever opens the Dropbox
+console.** One registration, its public key shipped in the build
+(`VUE_APP_DROPBOX_APP_KEY`, with a fallback in `dropbox.js`); users tap Connect
+and approve. There is deliberately no Settings field for an app key — that would
+push a developer's concern onto everyone. The console steps in
+`docs/dropbox-backup.md` are one-time deployment steps, and that doc now says so
+explicitly, because it read as though users had to perform them.
+
+⚠️ **A Dropbox app is capped in Development status** (50 linked accounts at the
+time of writing) until it is submitted for production approval. That is the one
+real barrier to "any user can just connect", and it is invisible from the code.
+
 Audio backup to the user's own Dropbox is opt-in and off by default
 (`docs/dropbox-backup.md`). Four defects came out of integrating it, three of
 them instances of rules this feature had already learned:
