@@ -171,7 +171,12 @@
             <h1 class="pb-3">
                 Sync
             </h1>
-            <p>Sign in to keep your favourites and history in sync across devices.</p>
+            <p>
+                Sign into the same FolkFriend account on each device. Firebase keeps your sessions,
+                tune lists, favourites, history and places in sync.
+                For recordings, connect the same Dropbox account on each device using Dropbox audio storage above.
+                Audio uses your own Dropbox storage; FolkFriend account sync continues through Firebase.
+            </p>
             <div v-if="currentUser">
                 <v-row
                     align="center"

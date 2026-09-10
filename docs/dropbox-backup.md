@@ -1,4 +1,4 @@
-# Dropbox recording backup
+# Dropbox audio storage alongside Firebase sync
 
 FolkFriend uploads recordings directly from the browser to a user-owned Dropbox
 App Folder. Firebase continues to sync lightweight session records and never
@@ -6,6 +6,23 @@ receives audio, Dropbox credentials, or audio manifests. Backup is off by defaul
 Connecting explicitly opts this device into backing up all its existing and future
 recordings. Disconnecting stops uploads and removes the saved access token;
 it does not delete Dropbox files. Users can revoke the app in Dropbox as well.
+
+## Account sync and audio access
+
+Firebase remains the account sync service: devices signed into the same FolkFriend
+account receive sessions, tune lists, favourites, history and places through the
+existing Firebase integration. Users supply their own Dropbox capacity for audio;
+FolkFriend does not host those recordings in Firebase storage.
+
+On every device, sign into the same FolkFriend account and authorize the same
+Dropbox account. Open a session from the usual synced session list to play its
+Dropbox audio. Dropbox authorization is separate on each device; logging into
+FolkFriend alone does not grant Dropbox access. The implementation does not yet
+bind a Dropbox account ID to a Firebase user, so users must select the same
+Dropbox account themselves.
+
+The session JSON stored beside recordings is a disaster-recovery copy. Recover
+missing sessions is for lost records, not the normal cross-device workflow.
 
 ## Deployment setup
 
@@ -23,7 +40,7 @@ it does not delete Dropbox files. Users can revoke the app in Dropbox as well.
    For GitHub deployment, set the repository Actions variable
    `VUE_APP_DROPBOX_APP_KEY`; the deployment workflow passes it to the build.
    **Do not configure or ship an app secret.**
-5. Open Settings → Dropbox backup → Connect Dropbox. Allow the sign-in popup.
+5. Open Settings → Dropbox audio storage → Connect Dropbox. Allow the sign-in popup.
    The popup prevents authentication from navigating away from a live recording.
    A blocked popup reports an error and leaves recording running.
 
@@ -68,7 +85,7 @@ Unchanged receipts are periodically reverified. Local recording never waits on
 Dropbox, and originals are never automatically evicted after uploading.
 
 The session ID locates cloud audio for a Firestore-synced session. Settings →
-Restore sessions from Dropbox also reconstructs missing session records from
+Recover missing sessions also reconstructs missing session records from
 `session.json`, without replacing existing local edits. This works without a
 Firebase record or Firebase sign-in. Opening a remote session downloads only
 needed segments. A separate least-recently-used cache holds up to 32 MiB and
