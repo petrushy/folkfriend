@@ -124,10 +124,17 @@ deliberately **not** `liveAnalysis.elapsedSeconds`:
 - it keeps counting through a microphone outage during which nothing was
   recorded, so every marker after the outage would be shifted.
 
-The recorder's clock advances only while a track is recording, and is measured
-as a single subtraction from that track's origin rather than by accumulating
-ticks. Time the recorder did not capture is time the clock did not count, so it
-agrees with the recording by construction.
+The recorder estimates elapsed time from delivered chunks, with a bounded
+extrapolation between events. It never caps the time credited to a delivered
+chunk: a busy browser can legitimately delay delivery by many seconds. Known
+microphone interruptions close the track and do not count toward the next one.
+
+This is not an exact encoded-media clock. A silent encoder stall cannot be
+distinguished from delayed delivery using event arrival times or Chrome's
+`BlobEvent.timecode`. Playback measures clip duration, but precise annotation
+alignment through such stalls still requires reading encoded media timestamps.
+The browser regression `node test/e2e/recorder-clock.mjs` checks delayed delivery
+against the duration of real decoded audio without using the microphone.
 
 The stamp is taken **when the analysed window's PCM is read**, not after the
 transcription returns — a backend call takes seconds, and a stamp taken
