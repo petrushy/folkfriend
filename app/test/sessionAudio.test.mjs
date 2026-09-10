@@ -563,6 +563,32 @@ await test('export ranges are one per track', async () => {
 
 console.log('\nsessionRecorder — the audio clock');
 
+await test('Settings bulk deletion preserves the open recorder and its next segment', async () => {
+    await resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1'); mic.__setStream(); await recorder.ensureRecording();
+    const media = recorders[recorders.length - 1];
+    feed(media, 180); await recorder._writeChain;
+    await seedManifest('closed');
+    const settings = await readFile(path.join(srcDir, 'views/Settings.vue'), 'utf8');
+    const start = settings.indexOf('async deleteAllSessionAudio() {');
+    const end = settings.indexOf('\n        },', start);
+    const action = new Function('window', 'sessionRecorder', 'listAudioManifests', 'deleteSessionAudio',
+        `return ({ ${settings.slice(start, end)}\n} }).deleteAllSessionAudio`)(
+        { confirm: () => true }, recorder, store.listManifests, store.deleteSessionAudio);
+    const view = { _refreshSessionAudio: async () => {} };
+    await action.call(view);
+    assert.equal(await store.readManifest('closed'), null);
+    assert.ok(await store.readManifest('s1'));
+    feed(media, 180); await recorder._writeChain;
+    assert.equal(recorder.isRecording, true);
+    assert.equal((await store.readManifest('s1')).segments.length, 2);
+    await recorder.stop();
+    await action.call(view);
+    assert.ok(await store.readManifest('s1'), 'paused session remains resumable');
+    await recorder.end();
+});
+
 await test('the clock does not advance before a track starts', async () => {
     await resetAll();
     const recorder = await freshRecorder();
