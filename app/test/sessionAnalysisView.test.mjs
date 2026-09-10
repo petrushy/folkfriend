@@ -303,6 +303,7 @@ export default {
 export let __manifests = [];
 export function __setManifests(m) { __manifests = m; }
 export async function listManifests() { return __manifests; }
+export async function playbackReadManifest(id) { return __manifests.find(m => m.sessionId === id); }
 export async function reclaimOrphans() { return 0; }
 `);
 
@@ -321,6 +322,7 @@ export async function reclaimOrphans() { return 0; }
         ["from '@/services/fileSessionAnalysis.js'", "from './fake-file-analysis.mjs'"],
         ["from '@/components/VolumeMeter.vue'", "from './fake-component.mjs'"],
         ["from '@/components/LiveScoreFollow.vue'", "from './fake-component.mjs'"],
+        ["from '@/components/DropboxBackup.vue'", "from './fake-component.mjs'"],
         ["from '@/components/SessionAudioPlayer.vue'", "from './fake-component.mjs'"],
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from '@/services/sessionRecorder.js'", "from './fake-recorder.mjs'"],
@@ -1010,7 +1012,7 @@ await test('no play button at all for a session with no recording here', async (
     vm.selectSession('remote');
     await vm.refreshAudioSessions();
 
-    assert.equal(vm.audioSessionId, '');
+    assert.equal(vm.audioSessionId, 'remote'); // Player may discover Dropbox audio; rows still require coverage.
     assert.equal(vm.hasAudioFor(vm.activeDetections[0]), false);
 });
 

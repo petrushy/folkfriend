@@ -129,6 +129,8 @@ jobs:
 
       - name: Build
         working-directory: app
+        env:
+          VUE_APP_DROPBOX_APP_KEY: ${{ vars.VUE_APP_DROPBOX_APP_KEY }}
         run: npm run build
 
       # Guards the failure above. Checks the files reached dist/ *and* that each

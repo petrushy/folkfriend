@@ -110,9 +110,9 @@
             </p>
             <p class="caption text--secondary">
                 <strong>This records the room, not just the music.</strong> Everything said
-                near the phone is recorded too. It stays on this device — recordings are
-                never synced and are not included in exported backups — and it is deleted
-                with the session it belongs to.
+                near the phone is recorded too. Recordings stay on this device unless you opt in
+                to Dropbox backup or export them. Deleting a session removes its local recording;
+                any Dropbox copy must be deleted separately.
             </p>
             <v-alert
                 v-if="!sessionAudioAvailable"
@@ -162,10 +162,11 @@
                     :loading="deletingSessionAudio"
                     @click="deleteAllSessionAudio"
                 >
-                    Delete all recordings
+                    Delete all local recordings
                 </v-btn>
             </v-row>
         </v-card>
+        <v-card class="pa-5 my-2"><DropboxBackup /></v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
                 Sync
@@ -874,6 +875,7 @@
 </template>
 
 <script>
+import DropboxBackup from '@/components/DropboxBackup.vue';
 import store, { KNOWN_DATASETS } from '@/services/store.js';
 import { DATASET_LABELS, DATASET_DESCRIPTIONS } from '@/js/source.mjs';
 import ffBackend from '@/services/backend.js';
@@ -922,6 +924,7 @@ function formatBytes(bytes) {
 
 export default {
     name: 'SettingsView',
+    components: { DropboxBackup },
     beforeRouteEnter(_, from, next) {
         // This becomes a parent view, unless it's come from the search,
         //  in which case the hamburger state isn't changed. This enables
@@ -1278,7 +1281,7 @@ export default {
 
         async deleteAllSessionAudio() {
             if (!window.confirm(
-                'Delete every stored session recording? The sessions and their tune lists are kept. This cannot be undone.'
+                'Delete every local session recording? Tune lists and Dropbox copies are kept. Audio without a verified backup cannot be recovered.'
             )) return;
             this.deletingSessionAudio = true;
             try {
