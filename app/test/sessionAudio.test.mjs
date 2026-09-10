@@ -582,6 +582,56 @@ await test('the clock advances with the recording, not with wall clock', async (
     assert.equal(Math.round(recorder.audioSeconds), 10);
 });
 
+await test('the clock does not run ahead of the audio that was recorded', async () => {
+    // Every other clock test here advances time only WHEN a chunk arrives, so
+    // wall clock and recorded audio are identical and the two cannot be told
+    // apart. This is the case that separates them: the track still claims to be
+    // recording, but nothing is coming out — a disabled track that yields no
+    // data instead of silence, an encoder stalled under load.
+    //
+    // Free-running on wall clock counted that time anyway, so every detection
+    // after it pointed further into the file than the audio it came from, by a
+    // margin that never closes.
+    await resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], 20);
+    assert.equal(Math.round(recorder.audioSeconds), 20);
+
+    // Two minutes pass with the recorder producing nothing.
+    fakeNow += 120_000;
+
+    const drifted = recorder.audioSeconds - 20;
+    assert.ok(drifted <= 2.001,
+        `the clock may extrapolate at most one chunk or two, not ${drifted.toFixed(1)}s`);
+
+    // And when audio resumes, the stall is not credited to the next chunk:
+    // the wall clock is now past 145 s, and the timeline must not be.
+    feed(recorders[recorders.length - 1], 5);
+    const after = recorder.audioSeconds;
+    assert.ok(after > 24 && after < 35,
+        `expected roughly 25 s of recorded audio, got ${after.toFixed(1)}s`);
+});
+
+await test('detections during a silent stretch do not all collide', async () => {
+    // The bound cannot be zero: several analysis cycles can land inside one
+    // chunk, and stamping them all identically would make them
+    // indistinguishable in the recording.
+    await resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], 10);
+
+    const first = recorder.audioSeconds;
+    fakeNow += 400;
+    const second = recorder.audioSeconds;
+    assert.ok(second > first, 'the stamp still advances between chunks');
+});
+
 await test('a pause and resume CONTINUES the clock rather than restarting it', async () => {
     // Restarting at zero would overwrite the first stretch's timeline, so every
     // tune from before the pause would seek into audio recorded after it.

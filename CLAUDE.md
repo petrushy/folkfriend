@@ -1146,6 +1146,35 @@ rather than appearing to have lost it. `headroomBytes()` returns `null`, never
 `0`, when the browser has no `storage.estimate()` — zero would read as "no room"
 and silently disable the feature everywhere it cannot measure.
 
+**2b. The clock is anchored to what was RECORDED, and playback re-measures it.**
+Reported from the field as "the detections didn't really match the audio", with
+mutes and several segments involved — and the code contradicted its own stated
+rule. `audioSeconds` free-ran on wall clock from the track's start, and each
+chunk's end was that same wall clock sampled when `ondataavailable` fired. So
+any period where the recorder produced nothing while the track still claimed to
+be recording — a disabled track yielding no data rather than silence, an
+encoder stalled under load — was counted into the timeline anyway, and every
+detection after it pointed later into the file than the audio it came from, by
+a margin that never closes.
+
+Now: the live clock extrapolates from the last chunk (capped at two
+timeslices, so several detections inside one chunk still get distinct stamps),
+and a chunk advances the cursor by what a chunk can plausibly HOLD (capped at
+four timeslices — generous, because a busy main thread legitimately delivers one
+chunk holding several seconds).
+
+⚠️ **Arrival times cannot distinguish "recorded silence" from "recorded
+nothing", so this reduces the error and cannot eliminate it.** The audio element
+is the only authority on its own timeline, so `_measureDrift()` compares each
+clip's real decoded length against the manifest's and SCALES every seek by the
+ratio — accepted between 0.25× and 4×, outside which the measurement itself is
+not believable. That correction is what makes playback right whatever the clock
+did.
+
+`_lastChunkPerf` is `null` when unset, never `0`: `performance.now()` reads 0 at
+the very start of a page, and a truthiness guard silently dropped the first
+chunk of every track. Found by tracing a test that was off by exactly one chunk.
+
 **2. The audio clock is NOT `elapsedSeconds`.** Detections are stamped with
 `audioSeconds` from `sessionRecorder`, because `elapsedSeconds` is a
 `setInterval` tick that drifts over three hours *and* keeps counting through a

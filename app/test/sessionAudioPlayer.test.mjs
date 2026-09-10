@@ -241,6 +241,77 @@ await test('a refresh only ever adds to what is known', async () => {
     assert.equal(vm.manifest.totalSeconds, 720);
 });
 
+await test('a seek is scaled to the audio\'s REAL length, not the manifest\'s', async () => {
+    // The manifest's times come from the recorder's clock, sampled when chunks
+    // arrive. If a clip decodes to a different length than the manifest claims
+    // — an encoder that stalled, a muted track that yielded less data than the
+    // wall clock expected — then a position two thirds through the manifest is
+    // NOT two thirds through the audio, and every ▶ lands late by a growing
+    // margin. The audio element is the authority on its own timeline.
+    const vm = await mountPlayer(GAPPY);
+    const seeks = [];
+    vm.$refs.audio = {
+        seekable: { length: 1, start: () => 0, end: () => 90 },   // really 90 s
+        duration: 90,
+        set currentTime(v) { seeks.push(v); },
+        get currentTime() { return seeks[seeks.length - 1] || 0; },
+    };
+    vm.segmentIndex = 0;
+    vm.segmentStartSeconds = 0;
+    vm._segmentDurationSeconds = 180;      // the manifest claims 180 s
+    vm.pendingSeekSeconds = null;
+
+    vm.onLoadedMetadata();
+    assert.equal(vm.driftRatio, 0.5, 'measured against what the manifest promised');
+    assert.equal(vm.driftSeconds, -90);
+
+    vm._seekWithin(60);
+    assert.equal(seeks[seeks.length - 1], 30, 'a third of the way in, on the real timeline');
+});
+
+await test('an implausible measurement is ignored rather than trusted', async () => {
+    // Metadata that is not fully parsed, or a container reporting nonsense,
+    // would otherwise scale every seek by a wild factor — far worse than not
+    // scaling at all.
+    const vm = await mountPlayer(GAPPY);
+    const seeks = [];
+    vm.$refs.audio = {
+        seekable: { length: 1, start: () => 0, end: () => 2 },    // absurd for a 180 s clip
+        duration: 2,
+        set currentTime(v) { seeks.push(v); },
+        get currentTime() { return 0; },
+    };
+    vm.segmentIndex = 0;
+    vm.segmentStartSeconds = 0;
+    vm._segmentDurationSeconds = 180;
+    vm.pendingSeekSeconds = null;
+
+    vm.onLoadedMetadata();
+    assert.equal(vm.driftRatio, 1, 'left alone');
+    vm._seekWithin(60);
+    assert.equal(seeks[seeks.length - 1], 60);
+});
+
+await test('audio that matches the manifest is not scaled at all', async () => {
+    const vm = await mountPlayer(GAPPY);
+    const seeks = [];
+    vm.$refs.audio = {
+        seekable: { length: 1, start: () => 0, end: () => 180 },
+        duration: 180,
+        set currentTime(v) { seeks.push(v); },
+        get currentTime() { return 0; },
+    };
+    vm.segmentIndex = 0;
+    vm.segmentStartSeconds = 0;
+    vm._segmentDurationSeconds = 180;
+    vm.pendingSeekSeconds = null;
+
+    vm.onLoadedMetadata();
+    assert.equal(vm.driftRatio, 1);
+    vm._seekWithin(60);
+    assert.equal(seeks[seeks.length - 1], 60);
+});
+
 await rm(tmpDir, { recursive: true, force: true });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

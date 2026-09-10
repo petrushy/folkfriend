@@ -37,17 +37,8 @@
             />
             <!-- Drawn OVER the tune blocks: a muted stretch still has tunes
                  detected in it (detection never stops), so the two overlap and
-                 the mute is the fact that needs to win visually. -->
-            <div
-                v-for="(block, index) in mutedBlocks"
-                :key="`muted-${index}`"
-                class="audioStripMuted"
-                :style="block"
-                title="Audio muted here"
-            />
-            <!-- Drawn OVER the tune blocks: a stretch the user muted contains
-                 no audio, so a row that looks playable there is a lie. Seeking
-                 into unexplained silence is indistinguishable from a bug. -->
+                 the mute is the fact that has to win visually. Seeking into
+                 unexplained silence is indistinguishable from a bug. -->
             <div
                 v-for="(band, i) in mutedBands"
                 :key="`muted-${i}`"
@@ -61,7 +52,6 @@
             <span>{{ nowPlayingLabel }}</span>
             <span v-if="mutedSeconds > 0">{{ formatSecondsAsDuration(mutedSeconds) }} muted</span>
             <span v-if="gapBlocks.length">Some audio was not saved</span>
-            <span v-if="mutedBlocks.length">{{ mutedSummary }}</span>
             <span v-if="manifest.stopped">Recording stopped early</span>
         </div>
 
@@ -163,6 +153,12 @@ export default {
             // assumed. Every seek is expressed relative to it, which is correct
             // under both behaviours.
             timelineBase: 0,
+            // How this clip's real decoded length compares with what the
+            // manifest claims. 1 when they agree — see _measureDrift().
+            driftRatio: 1,
+            driftSeconds: 0,
+            // The manifest's duration for the clip currently loaded.
+            _segmentDurationSeconds: 0,
             objectUrl: null,
             pendingSeekSeconds: null,
             icons: { play: mdiPlay, pause: mdiPause },
@@ -261,32 +257,6 @@ export default {
                     width: `${Math.min(((gap.to - gap.from) / this.totalSeconds) * 100, 100 - left)}%`,
                 };
             });
-        },
-        // Stretches the user silenced with the mute button. Tunes detected
-        // during one are still listed and still seekable — they just play
-        // silence, and the strip has to say so.
-        mutedBlocks() {
-            if (!this.manifest || !this.totalSeconds) return [];
-            const ranges = Array.isArray(this.manifest.mutedRanges) ? this.manifest.mutedRanges : [];
-            return ranges.map(range => {
-                const from = Math.max(0, range.from);
-                // A range left open by a session that ended while muted runs to
-                // the end of the recorded audio.
-                const to = Math.min(this.totalSeconds,
-                    typeof range.to === 'number' ? range.to : this.totalSeconds);
-                if (!(to > from)) return null;
-                const left = (from / this.totalSeconds) * 100;
-                return {
-                    left: `${left}%`,
-                    width: `${Math.min(((to - from) / this.totalSeconds) * 100, 100 - left)}%`,
-                };
-            }).filter(Boolean);
-        },
-        mutedSummary() {
-            const ranges = Array.isArray(this.manifest.mutedRanges) ? this.manifest.mutedRanges : [];
-            const total = ranges.reduce((sum, range) => sum +
-                Math.max(0, (typeof range.to === 'number' ? range.to : this.totalSeconds) - range.from), 0);
-            return `${formatSecondsAsDuration(total)} muted`;
         },
         nowPlayingLabel() {
             const current = this.playableDetections.filter(d =>
@@ -494,6 +464,9 @@ export default {
                 this.objectUrl = URL.createObjectURL(clip.blob);
                 this.segmentIndex = segment.index;
                 this.segmentStartSeconds = clip.startSeconds;
+                this._segmentDurationSeconds = (clip.endSeconds - clip.startSeconds) || 0;
+                this.driftRatio = 1;
+                this.driftSeconds = 0;
                 this.timelineBase = 0;
                 this.pendingSeekSeconds = seekSeconds;
                 this._autoplayAfterLoad = autoplay;
@@ -515,6 +488,7 @@ export default {
             this.timelineBase = (audio.seekable && audio.seekable.length)
                 ? audio.seekable.start(0)
                 : 0;
+            this._measureDrift(audio);
             if (this.pendingSeekSeconds !== null) {
                 this._seekWithin(this.pendingSeekSeconds);
                 this.pendingSeekSeconds = null;
@@ -525,10 +499,47 @@ export default {
             }
         },
 
+        // What this clip's audio ACTUALLY decodes to, against what the manifest
+        // says it should be.
+        //
+        // The manifest's times come from the recorder's clock, which is
+        // measured at chunk arrivals rather than from the encoded audio itself.
+        // The two normally agree closely; they can diverge when the encoder
+        // stalls, or when a muted track yields less data than the wall clock
+        // says it should. Whatever the cause, the audio element is the
+        // authority on its own timeline — so the seek is scaled to it rather
+        // than trusting the manifest.
+        _measureDrift(audio) {
+            this.driftRatio = 1;
+            this.driftSeconds = 0;
+            const expected = this._segmentDurationSeconds;
+            if (!(expected > 0)) return;
+
+            const seekable = audio.seekable;
+            const measured = (seekable && seekable.length)
+                ? seekable.end(seekable.length - 1) - seekable.start(0)
+                : (Number.isFinite(audio.duration) ? audio.duration : 0);
+            if (!(measured > 0)) return;
+
+            const ratio = measured / expected;
+            this.driftSeconds = measured - expected;
+            // Only a plausible correction is applied. A wildly different figure
+            // means the MEASUREMENT is wrong (a container reporting nonsense,
+            // metadata not fully parsed), and scaling by it would be far worse
+            // than not scaling at all.
+            //
+            // The band is wide on purpose: a clip that really did decode to
+            // half its claimed length is a large drift, not a bad reading, and
+            // scaling is exactly the right answer for it. Only figures that
+            // could not describe this audio at all are ignored.
+            if (ratio >= 0.25 && ratio <= 4) this.driftRatio = ratio;
+        },
+
         _seekWithin(targetSeconds) {
             const audio = this.$refs.audio;
             if (!audio) return;
-            const local = this.timelineBase + (targetSeconds - this.segmentStartSeconds);
+            const offsetIntoSegment = (targetSeconds - this.segmentStartSeconds) * this.driftRatio;
+            const local = this.timelineBase + offsetIntoSegment;
             try { audio.currentTime = Math.max(this.timelineBase, local); } catch (e) { /* not seekable yet */ }
             this.currentSeconds = targetSeconds;
         },
@@ -559,7 +570,10 @@ export default {
         onTimeUpdate() {
             const audio = this.$refs.audio;
             if (!audio || this.segmentIndex === null) return;
-            this.currentSeconds = this.segmentStartSeconds + (audio.currentTime - this.timelineBase);
+            // The inverse of the seek, so the clock the user reads and the
+            // position the ▶ buttons jump to stay the same scale.
+            this.currentSeconds = this.segmentStartSeconds +
+                (audio.currentTime - this.timelineBase) / this.driftRatio;
         },
 
         // Segments are separate files, so continuous playback has to walk them.
