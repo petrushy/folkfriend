@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { webcrypto } from 'node:crypto';
 import { DropboxClient, DropboxError, contentHash } from '../src/services/dropboxClient.mjs';
-import { backupSession, downloadSegment, validateManifest, validateSession, playableManifest, sessionPath } from '../src/services/dropboxBackup.mjs';
+import { backupSession, backupWholeRecordings, recordingFileName, downloadSegment, validateManifest, validateSession, playableManifest, sessionPath } from '../src/services/dropboxBackup.mjs';
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 let passed = 0;
 async function test(name, fn) { await fn(); passed++; console.log(`  ✓ ${name}`); }
@@ -192,3 +192,17 @@ await test('a chunked upload is verified against the assembled file', async () =
 });
 
 console.log(`\n${passed} Dropbox tests passed`);
+
+await test('whole recordings use unique identities and reject same-size corruption', async () => {
+    const c = new FakeDropbox(); c.uploadLarge = c.upload.bind(c);
+    const finished = { ...session, endedAt: 100 };
+    const other = { ...finished, id: 'session-2' };
+    const clip = async () => ({ blob: new Blob(['FIRST']), mimeType: 'audio/mp4' });
+    const [path] = await backupWholeRecordings(c, finished, local, clip, extension);
+    const [otherPath] = await backupWholeRecordings(c, other, local, async () => ({ blob: new Blob(['OTHER']) }), extension);
+    assert.notEqual(path, otherPath);
+    assert.equal(await c.files.get(path).blob.text(), 'FIRST');
+    await assert.rejects(backupWholeRecordings(c, finished, local, async () => ({ blob: new Blob(['OTHER']) }), extension), e => e.code === 'conflict');
+    assert.equal(await c.files.get(path).blob.text(), 'FIRST');
+    assert.notEqual(recordingFileName(finished, 0, 1, 'm4a'), recordingFileName(finished, 1, 1, 'm4a'));
+});

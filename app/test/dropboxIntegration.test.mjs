@@ -207,7 +207,7 @@ await test('a whole-file copy is only made for a FINISHED session', async () => 
     await api.syncDropbox(true);
     const whole = f.client.writes.filter(p => p.startsWith('/recordings/'));
     assert.equal(whole.length, 1);
-    assert.match(whole[0], /^\/recordings\/1970-01-01 \d{4} Original\.m4a$/,
+    assert.match(whole[0], /^\/recordings\/1970-01-01 \d{4} Original \[s1-track-0\]\.m4a$/,
         'named by date and session, where a person would look');
 });
 
@@ -267,7 +267,7 @@ await test('renaming a session MOVES its whole file rather than re-sending it', 
     assert.ok(!f.client.writes.some(p => p.startsWith('/recordings/')), 'nothing re-uploaded');
     assert.equal(f.client.moves.length, 1);
     assert.equal(f.client.moves[0][0], before);
-    assert.match(f.client.moves[0][1], /The Cobblestone\.m4a$/);
+    assert.match(f.client.moves[0][1], /The Cobblestone \[s1-track-0\]\.m4a$/);
     assert.ok(!f.client.files.has(before), 'and no orphan left behind');
 });
 
