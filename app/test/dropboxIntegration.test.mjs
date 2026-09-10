@@ -66,6 +66,7 @@ export { DropboxError, base64url } from ${JSON.stringify(new URL('dropboxClient.
         .replace("from 'idb-keyval'", `from '${fakeURL.href}'`)
         .replace("from '@/services/sessionAudioStore.js'", `from '${fakeURL.href}'`)
         .replace("from './dropboxClient.mjs'", `from '${fakeURL.href}'`)
+        .replace("from './dropboxStorage.mjs'", `from '${new URL('dropboxStorage.mjs', services).href}'`)
         .replace("from './dropboxBackup.mjs'", `from '${new URL('dropboxBackup.mjs', services).href}'`);
     const target = new URL(`coordinator-${index}.mjs`, directory); await writeFile(target, source);
     return { f, api: await import(target.href) };
@@ -128,5 +129,31 @@ await test('metadata edits after removing local audio are backed up', async () =
 await test('disconnect removes credentials without deleting originals or cloud copies', async () => {
     const { f, api } = await load(); await api.syncDropbox(true); await api.disconnectDropbox();
     assert.equal(localStorage.getItem('folkfriend.dropbox.auth'), null); assert.equal(f.deletedLocal.length, 0); assert.equal(f.client.deletes.length, 0);
+});
+await test('storage refresh keeps the last total on failure without changing backup status', async () => {
+    const { f, api } = await load(); await api.syncDropbox(true);
+    f.client.request = async endpoint => {
+        if (endpoint === 'files/list_folder') return { entries: [{ '.tag': 'file', path_lower: '/audio', size: 1500 }], has_more: false };
+        throw Object.assign(new Error('scope'), { code: 'scope' });
+    };
+    await api.refreshDropboxStorage(true);
+    assert.equal(api.dropboxState.storage.storedBytes, 1500);
+    assert.equal(api.dropboxState.storage.quotaState, 'permission');
+    f.client.request = async () => { throw new Error('offline'); };
+    await api.refreshDropboxStorage(true);
+    assert.equal(api.dropboxState.storage.storedBytes, 1500);
+    assert.ok(api.dropboxState.storage.error);
+    assert.equal(api.backupStatus('s1'), 'Backed up');
+});
+await test('a late storage result cannot repopulate usage after disconnect', async () => {
+    const { f, api } = await load(); let release;
+    f.client.request = endpoint => endpoint === 'files/list_folder'
+        ? new Promise(resolve => { release = resolve; })
+        : Promise.resolve({ used: 0, allocation: { '.tag': 'individual', allocated: 1000 } });
+    const pending = api.refreshDropboxStorage(true);
+    await api.disconnectDropbox();
+    release({ entries: [{ '.tag': 'file', path_lower: '/audio', size: 1500 }], has_more: false });
+    await pending;
+    assert.equal(api.dropboxState.storage.storedBytes, null);
 });
 console.log(`\n${passed} Dropbox coordinator tests passed`);

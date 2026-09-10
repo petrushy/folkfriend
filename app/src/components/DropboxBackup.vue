@@ -17,6 +17,26 @@
             Originals stay on this device until you explicitly delete them.
             Uploads continue while FolkFriend is open and resume after you return online.
         </p>
+        <div v-if="!sessionId && state.enabled" class="mb-4" aria-live="polite">
+            <p v-if="state.storage.storedBytes !== null" class="mb-1">
+                <strong>{{ formatBytes(state.storage.storedBytes) }} stored by FolkFriend on Dropbox</strong>
+            </p>
+            <p v-else class="mb-1">{{ state.storage.loading ? 'Checking Dropbox storage…' : 'Dropbox storage usage unavailable' }}</p>
+            <p v-if="state.storage.availableBytes !== null" class="caption mb-1">
+                {{ formatBytes(state.storage.availableBytes) }} available in your Dropbox account
+            </p>
+            <p v-else-if="state.storage.quotaState === 'permission'" class="caption mb-1">
+                Allow Dropbox account information to show available space.
+            </p>
+            <p v-else-if="state.storage.checkedAt" class="caption mb-1">Available space could not be determined.</p>
+            <p v-if="state.storage.checkedAt" class="caption text--secondary mb-1">
+                Last checked {{ new Date(state.storage.checkedAt).toLocaleTimeString() }}.
+                Stored size includes recordings and recovery files in FolkFriend’s Dropbox folder.
+            </p>
+            <p v-if="state.storage.error" class="caption error--text">{{ state.storage.error }}</p>
+            <v-btn small text :loading="state.storage.loading" :disabled="!state.connected" @click="refreshStorage(true)">Refresh storage usage</v-btn>
+            <v-btn v-if="state.storage.quotaState === 'permission'" small text :disabled="!state.connected" :loading="busy" @click="allowSpaceUsage">Show available space</v-btn>
+        </div>
         <p v-if="sessionId" class="caption mb-1" role="status">{{ label }}</p>
         <p v-if="!state.configured" class="caption">Dropbox backup has not been configured for this installation.</p>
         <v-alert v-if="error || state.error" dense text type="warning">{{ error || state.error }}</v-alert>
@@ -47,13 +67,29 @@
 </template>
 <script>
 import { dropboxState, backupStatus, connectDropbox, disconnectDropbox, syncDropbox, restoreDropboxSessions,
-    deleteDropboxCopy, deleteLocalCopy, enableSessionBackup } from '@/services/dropbox.js';
+    deleteDropboxCopy, deleteLocalCopy, enableSessionBackup, refreshDropboxStorage } from '@/services/dropbox.js';
+import { formatBytes } from '@/services/sessionAudioStore.js';
 export default {
     name: 'DropboxBackup',
     props: { sessionId: { type: String, default: '' }, active: { type: Boolean, default: false } },
     data: () => ({ state: dropboxState, busy: false, error: '', message: '' }),
     computed: { label() { return backupStatus(this.sessionId); } },
+    mounted() {
+        this.refreshStorage();
+        this._storageTimer = setInterval(() => { if (!document.hidden) this.refreshStorage(); }, 60000);
+    },
+    beforeDestroy() { clearInterval(this._storageTimer); },
+    watch: {
+        'state.connected'() { this.refreshStorage(); },
+        'state.revision'() { this.refreshStorage(); },
+    },
     methods: {
+        formatBytes,
+        refreshStorage(force = false) { if (!this.sessionId) return refreshDropboxStorage(force); },
+        allowSpaceUsage() { return this.run(async () => {
+            await connectDropbox({ includeSpaceUsage: true });
+            await this.refreshStorage(true);
+        }); },
         disconnect: disconnectDropbox,
         retry() { return this.sessionId ? enableSessionBackup(this.sessionId) : syncDropbox(true); },
         async run(action) {
