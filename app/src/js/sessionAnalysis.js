@@ -1,25 +1,29 @@
 import utils from '@/js/utils.js';
 import { settingSourceUrl } from '@/js/source.mjs';
 
-const DEFAULT_OPTIONS = {
-    windowSeconds: 10,
-    minTopScore: 0.56,
+// Shared by live listening and file analysis — the two must detect the same
+// way. Only the window/step differ, and those come from the caller.
+export const SESSION_ANALYSIS_DEFAULTS = {
+    minTopScore: 0.45,
     minClusterHits: 2,
     minContourLength: 12,
-    minRms: 0.008,
     maxAlternatives: 3,
+    // Bias toward the most recently confirmed tune: if it appears in the raw
+    // results within this score gap of the current top, promote it to first.
+    // Suppresses brief one-window outliers without blocking real transitions.
+    previousTuneBiasDelta: 0.15,
 };
 
 export function getAnalysisOptions(durationSeconds) {
-    const options = { ...DEFAULT_OPTIONS };
+    const options = { ...SESSION_ANALYSIS_DEFAULTS, windowSeconds: 10 };
 
     // Step size trades off scan density against processing time.
     // Shorter recordings get a finer scan; very long ones coarsen it to keep
     // the total window count reasonable (~600 windows at most).
-    // Rule of thumb: a tune must fall inside at least 2 windows to survive
-    // the minClusterHits filter, so step <= windowSeconds is ideal — but for
-    // long recordings we accept stepSeconds == windowSeconds (no overlap) and
-    // rely on the strongScore single-hit fallback in clusterDetections.
+    // Rule of thumb: a tune must fall inside at least 2 windows to reach
+    // MIN_PAST_DETECTION_SECONDS, so step < windowSeconds is ideal — but for
+    // long recordings we accept step >= windowSeconds (no overlap) and rely on
+    // the strong-single-window exception in filterShortPastDetections.
     if (durationSeconds < 300) {
         options.stepSeconds = 5;        // < 5 min: dense scan
     } else if (durationSeconds < 7200) {
@@ -39,6 +43,12 @@ export function getAnalysisOptions(durationSeconds) {
 // briefly sounded like this" from "this was played".
 export const MIN_PAST_DETECTION_SECONDS = 15;
 
+// A single window this confident survives the minimum-duration rule when the
+// scan does not overlap windows (step >= window) — see filterShortPastDetections.
+// For scale: correct matches score a median ~0.85 (DSP) / ~0.66 (ML), while the
+// best wrong match typically sits ~0.3 lower.
+export const STRONG_SINGLE_DETECTION_SCORE = 0.7;
+
 /**
  * Drops short-lived detections from the *past* part of the list.
  *
@@ -50,25 +60,29 @@ export const MIN_PAST_DETECTION_SECONDS = 15;
  * Display-only: the underlying window matches are untouched, so a detection
  * dropped here reappears on its own once it has accumulated enough span.
  *
+ * `keepLast: false` is for an analysis that has ended (a file fully scanned, a
+ * finished session), where nothing is playing "now" and a short final entry is
+ * a fluke like any other.
+ *
+ * `options` (the analysis options) enables the strong-single-window exception:
+ * when the step is at least the window, windows do not overlap and a short tune
+ * can legitimately land in only one of them, so a single window scoring at
+ * least STRONG_SINGLE_DETECTION_SCORE is kept despite spanning one window.
+ *
  * @param {Array} detections - clustered detections, oldest first
  * @param {number} [minSeconds]
+ * @param {{ keepLast?: boolean, options?: object }} [opts]
  */
-export function filterShortPastDetections(detections, minSeconds = MIN_PAST_DETECTION_SECONDS) {
-    if (!detections || detections.length <= 1) return detections || [];
-    const lastIndex = detections.length - 1;
+export function filterShortPastDetections(detections, minSeconds = MIN_PAST_DETECTION_SECONDS, { keepLast = true, options = null } = {}) {
+    if (!detections) return [];
+    if (keepLast && detections.length <= 1) return detections;
+    const lastIndex = keepLast ? detections.length - 1 : -1;
+    const sparseScan = !!options && options.stepSeconds >= options.windowSeconds;
     return detections.filter((detection, index) =>
         index === lastIndex ||
-        (detection.endSeconds - detection.startSeconds) >= minSeconds
+        (detection.endSeconds - detection.startSeconds) >= minSeconds ||
+        (sparseScan && detection.hits === 1 && detection.bestScore >= STRONG_SINGLE_DETECTION_SCORE)
     );
-}
-
-export function rmsOfSignal(signal) {
-    if (!signal || signal.length === 0) return 0;
-    let sum = 0;
-    for (let i = 0; i < signal.length; i++) {
-        sum += signal[i] * signal[i];
-    }
-    return Math.sqrt(sum / signal.length);
 }
 
 export function formatSecondsAsClock(totalSeconds) {
@@ -395,6 +409,62 @@ export function clusterDetections(windowMatches, options) {
         .sort((a, b) => a.startSeconds - b.startSeconds);
 
     return mergeAdjacentDetections(clustered, options);
+}
+
+// Merges consecutive rows of the same tune into one, however far apart they
+// are: when a tune is detected, lost for a while and detected again with
+// nothing else in between, the gap is assumed to be that same tune still
+// playing. The row keeps the EARLIEST start — it is when the tune began — and
+// takes its setting and title from the best-scoring cluster.
+export function mergeConsecutiveSameTune(detections) {
+    const result = [];
+    for (const det of detections) {
+        const prev = result[result.length - 1];
+        if (!prev || prev.tuneId !== det.tuneId) {
+            result.push({ ...det });
+            continue;
+        }
+        const prevHits = prev.hits || 1;
+        const detHits = det.hits || 1;
+        prev.startSeconds = Math.min(prev.startSeconds, det.startSeconds);
+        prev.endSeconds = Math.max(prev.endSeconds, det.endSeconds);
+        // Same rule as mergeAdjacentDetections: the audio span covers every
+        // merged cluster, so a row stays playable when only part of it was
+        // recorded.
+        prev.audioStartSeconds = minDefined(prev.audioStartSeconds, det.audioStartSeconds);
+        prev.audioEndSeconds = maxDefined(prev.audioEndSeconds, det.audioEndSeconds);
+        prev.audioAnchorSeconds = minDefined(prev.audioAnchorSeconds, det.audioAnchorSeconds);
+        prev.averageScore = ((prev.averageScore ?? prev.bestScore) * prevHits +
+            (det.averageScore ?? det.bestScore) * detHits) / (prevHits + detHits);
+        prev.hits = prevHits + detHits;
+        prev.alternatives = mergeAlternatives(prev.alternatives, det.alternatives);
+        if (det.bestScore > prev.bestScore) {
+            prev.bestScore = det.bestScore;
+            prev.settingId = det.settingId;
+            prev.sourceUrl = det.sourceUrl;
+            prev.dataset = det.dataset;
+            prev.title = det.title;
+        }
+    }
+    return result;
+}
+
+// The one detection pipeline, shared by live listening and file analysis so the
+// two cannot drift: cluster, drop short-lived detections, then merge
+// consecutive same-tune rows. The filter runs BEFORE the merge so that a
+// dropped blip in the middle of a tune lets the two halves either side of it
+// become one row rather than reading as the same tune twice.
+//
+// `final` is true once nothing more is coming — a file fully scanned, a live
+// session finished. The last entry is then no longer "the tune playing now"
+// and is filtered like every other.
+export function buildSessionDetections(windowMatches, options, { final = false } = {}) {
+    const filtered = filterShortPastDetections(
+        clusterDetections(windowMatches, options),
+        MIN_PAST_DETECTION_SECONDS,
+        { keepLast: !final, options },
+    );
+    return mergeConsecutiveSameTune(filtered);
 }
 
 export function normaliseQueryResults(results, options) {
