@@ -2009,7 +2009,26 @@ both are pinned by tests:
   apart across the two call sites (the analysis loop and `removeDetection`).
 
 It is display-only — the window matches are untouched, so a detection dropped
-here reappears on its own once it has accumulated enough span. 15 s is chosen
+here reappears on its own once it has accumulated enough span.
+
+**Live and file analysis share ONE detection pipeline** (September 2026).
+The filter originally ran only in live mode; file analysis never called it.
+`buildSessionDetections` (`sessionAnalysis.js`) is now the single path for both
+— cluster → filter → `mergeConsecutiveSameTune` — and `SESSION_ANALYSIS_DEFAULTS`
+the single set of options (`minTopScore` 0.45, previous-tune bias 0.15, no
+silence gate). Rules, as decided by the user:
+
+- **A merged row keeps its EARLIEST start**, and consecutive same-tune rows
+  merge however long the gap — the gap is assumed to be the same tune. (Live
+  used to advance the start to the latest cluster.)
+- **`final: true` filters the last entry too**: a file fully scanned, or a live
+  session at `finish()`. Until then the last entry is the tune playing now.
+- **A single window at ≥ `STRONG_SINGLE_DETECTION_SCORE` (0.7) survives** the
+  15 s rule, but only when `stepSeconds >= windowSeconds` — with overlapping
+  windows a real tune always hits two.
+- **File corrections are post-analysis only**: the tune and time fields are
+  disabled while scanning, and a removal after the scan does not re-emit,
+  because an emit rebuilds every row and discards the user's edits. 15 s is chosen
 against the live defaults (10 s window, 5 s step): one spurious match spans 10 s
 and two consecutive ones span exactly 15 s, so the threshold separates a
 one-window fluke from something that was actually played.
