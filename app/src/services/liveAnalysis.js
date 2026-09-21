@@ -7,6 +7,7 @@ import {
     normaliseQueryResults, buildSessionDetections, SESSION_ANALYSIS_DEFAULTS,
 } from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
+import { detectionFreshness } from '@/js/detectionFreshness.mjs';
 import eventBus from '@/eventBus.js';
 
 // How long a tune the user has rejected stays suppressed. Without a cooldown
@@ -503,6 +504,36 @@ class LiveAnalysisService {
     // is the tune playing now and must stay, however short.
     _recluster({ final = false } = {}) {
         this.detections = buildSessionDetections(this._windowMatches, this.options, { final });
+    }
+
+    // The last window that actually produced an accepted match, or null.
+    //
+    // Derived from _windowMatches rather than tracked in its own field so it
+    // cannot drift from what the session believes it heard: rejecting a tune
+    // removes its matches, and a restored session brings its matches back, and
+    // both must move this with them. A field updated in the loop would survive
+    // a rejection and keep the light green for a tune the user has just said
+    // was wrong.
+    lastWindowMatch() {
+        if (!this._windowMatches.length) return null;
+        return this._windowMatches[this._windowMatches.length - 1];
+    }
+
+    // How fresh and how good the current detection is — the session bar's LED.
+    // Computed on demand rather than pushed on an event: it changes with the
+    // CLOCK as much as with the matches (the whole point is that it goes red
+    // while nothing at all is happening), so there is no event to hang it on
+    // and every reader already ticks once a second.
+    detectionFreshness() {
+        const match = this.lastWindowMatch();
+        return detectionFreshness({
+            listening: this.isRunning,
+            micHealthy: this.micHealthy,
+            elapsedSeconds: this.elapsedSeconds,
+            lastMatchSeconds: match ? match.startSeconds : null,
+            lastMatchScore: match ? match.score : null,
+            options: this.options,
+        });
     }
 
     // `flush` is false only for abandon(), which is tearing down a session the

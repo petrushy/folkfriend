@@ -87,6 +87,7 @@ async function loadService() {
         // filter are the far side of the wiring under test.
         ["from '@/js/sessionAnalysis.js'", `from '${sessionAnalysisCopy}'`],
         ["from '@/js/biasResults.mjs'", `from '${biasModule}'`],
+        ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in liveAnalysis.js`);
@@ -283,6 +284,58 @@ await test('a null tuneId is ignored', async () => {
     service.rejectTune(null);
     assert.deepEqual(service.detections.map(d => d.tuneId), [1]);
     assert.equal(service._rejectedTunes.size, 0);
+});
+
+// ---- the detection LED ----------------------------------------------------
+//
+// The service half of the indicator. It is derived from _windowMatches rather
+// than tracked in a field of its own, and these are the two cases that
+// distinguishes: a rejection and a silence both have to move it, and a field
+// updated in the loop moves for neither.
+
+await test('the LED follows the last accepted window match', async () => {
+    const { service } = await loadService();
+    service.isRunning = true;
+    play(service, 1, 0, 6);
+    service.elapsedSeconds = 30;
+
+    const led = service.detectionFreshness();
+    assert.equal(led.level, 'green');
+    assert.equal(led.score, 0.7);
+});
+
+await test('silence after the last match takes the LED to red', async () => {
+    const { service } = await loadService();
+    service.isRunning = true;
+    play(service, 1, 0, 6);
+    // Twenty minutes of talking, with the loop finding nothing to accept.
+    service.elapsedSeconds = 30 + 20 * 60;
+
+    assert.equal(service.detectionFreshness().level, 'red');
+});
+
+await test('rejecting the tune takes its matches — and the LED — with it', async () => {
+    // The reason this is derived rather than stored: a field written by the
+    // loop would still be reporting a confident green for a tune the user has
+    // just told the app was wrong.
+    const { service } = await loadService();
+    service.isRunning = true;
+    play(service, 1, 0, 6);
+    service.elapsedSeconds = 30;
+    assert.equal(service.detectionFreshness().level, 'green');
+
+    service.rejectTune(1);
+    assert.equal(service.lastWindowMatch(), null);
+    assert.equal(service.detectionFreshness().level, 'idle');
+});
+
+await test('a paused session shows the LED off rather than red', async () => {
+    const { service } = await loadService();
+    service.isRunning = false;
+    play(service, 1, 0, 6);
+    service.elapsedSeconds = 30 + 20 * 60;
+
+    assert.equal(service.detectionFreshness().level, 'off');
 });
 
 await rm(tmpDir, { recursive: true, force: true });

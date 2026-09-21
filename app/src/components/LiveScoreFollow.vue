@@ -38,6 +38,20 @@
                     </button>
                 </h2>
                 <div class="tuneMeta">
+                    <!-- Live even while frozen, and deliberately so. Freezing
+                         stops the READOUTS moving so the dots can be read; this
+                         is not a readout about the pinned tune, it is the one
+                         thing on screen that says whether the room is still
+                         playing it. A frozen view whose light has gone red is
+                         exactly the state the user needs to be able to see. -->
+                    <span
+                        class="freshnessLed"
+                        :class="`freshnessLed--${freshness.level}`"
+                        :title="freshness.detail"
+                        :aria-label="`Detection: ${freshness.label}. ${freshness.detail}`"
+                        role="img"
+                    />
+                    <span class="freshnessLabel">{{ freshness.label }}</span>
                     <span v-if="target" class="scoreReadout">
                         match {{ target.score.toFixed(2) }}
                     </span>
@@ -127,6 +141,7 @@ import liveAnalysisService from '@/services/liveAnalysis.js';
 import AbcDisplay from '@/components/AbcDisplay.vue';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
+import { detectionFreshness } from '@/js/detectionFreshness.mjs';
 import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
 
 export default {
@@ -155,6 +170,7 @@ export default {
             loading: false,
             loadError: '',
             elapsedSeconds: liveAnalysisService.elapsedSeconds,
+            freshness: liveAnalysisService.detectionFreshness(),
             favourited: lastShown.favourited,
             // Deliberately not seeded from lastShown: freezing lasts "until
             // unfrozen or closed", so closing the overlay ends it. Carrying it
@@ -178,6 +194,7 @@ export default {
         detections: {
             immediate: true,
             handler(detections) {
+                this.freshness = liveAnalysisService.detectionFreshness();
                 this._resolveFromDetections(detections);
             },
         },
@@ -197,7 +214,12 @@ export default {
         };
         document.addEventListener('keydown', this._onKeyDown);
 
-        this._onTimerTick = (secs) => { this.elapsedSeconds = secs; };
+        this._onTimerTick = (secs) => {
+            this.elapsedSeconds = secs;
+            // Driven by the clock, not by detections: its job is to change
+            // while nothing is being recognised.
+            this.freshness = liveAnalysisService.detectionFreshness();
+        };
         eventBus.$on('liveAnalysisTimerTick', this._onTimerTick);
 
         this._wakeLock = null;
@@ -482,10 +504,32 @@ export default {
     margin-top: 2px;
 }
 
-.followingFlag::before {
-    content: '●';
-    color: #2e7d32;
-    margin-right: 4px;
+/* `followingFlag` used to carry a green ● of its own. It was always green —
+   it meant "auto-switching is on", not "this is right" — and read as a
+   confidence light that never changed. Two dots side by side, one of them
+   permanently green, would be worse than none, so the real LED below is the
+   only dot in this header now. */
+
+/* Green / amber / red on how recently, and how well, something matched. A
+   filled dot rather than an icon: it has to be readable at a glance from a
+   music stand's distance. */
+.freshnessLed {
+    align-self: center;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #9e9e9e;
+    flex: none;
+}
+
+.freshnessLed--green { background: #2e7d32; box-shadow: 0 0 6px rgba(46, 125, 50, 0.9); }
+.freshnessLed--amber { background: #f9a825; box-shadow: 0 0 6px rgba(249, 168, 37, 0.9); }
+.freshnessLed--red { background: #c62828; box-shadow: 0 0 6px rgba(198, 40, 40, 0.9); }
+.freshnessLed--idle { background: #9e9e9e; }
+.freshnessLed--off { background: #616161; }
+
+.freshnessLabel {
+    margin-left: -4px;
 }
 
 .overrideFlag {

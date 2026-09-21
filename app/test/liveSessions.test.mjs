@@ -381,6 +381,7 @@ async function loadService({ keepStore = false } = {}) {
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from '@/js/sessionAnalysis.js'", `from '${sessionAnalysisCopy}'`],
         ["from '@/js/biasResults.mjs'", `from '${biasModule}'`],
+        ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in liveAnalysis.js`);

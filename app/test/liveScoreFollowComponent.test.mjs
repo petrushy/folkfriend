@@ -75,6 +75,11 @@ const service = {
     elapsedSeconds: 0,
     detections: [],
     rejectTune(tuneId) { __rejected.push(tuneId); },
+    // The detection LED, scriptable so the overlay's wiring can be checked
+    // without the real service. Its levels are pinned in
+    // detectionFreshness.test.mjs.
+    __freshness: { level: 'green', colour: 'green darken-1', label: 'Following', detail: '' },
+    detectionFreshness() { return this.__freshness; },
 };
 export default service;
 `;
@@ -118,6 +123,7 @@ async function loadOverlay() {
         ["from '@/components/AbcDisplay.vue'", "from './fake-component.mjs'"],
         ["from '@/components/TuneBackgroundButton.vue'", "from './fake-component.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
+        ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
         // Deliberately the real module.
         ["from '@/js/liveScoreFollow.mjs'", `from '${followModule}'`],
     ];
@@ -363,6 +369,25 @@ async function loadOverlayInto(vm) {
     component.created.call(vm);
     return { component };
 }
+
+await test('the LED keeps moving while frozen — it is about the room, not the tune', async () => {
+    // A deliberate exception to "the freeze is total". Everything else in this
+    // header is a readout ABOUT THE PINNED TUNE, and freezing exists so those
+    // can be read without them moving. The LED is not one of those: it says
+    // whether the room is still playing, and a frozen view whose light has
+    // gone red is exactly the state the user needs to be able to see.
+    const { vm, push, live } = await loadOverlay();
+
+    await push([det(1, 10, 'The Kesh', 0.71)]);
+    vm.toggleFrozen();
+    assert.equal(vm.frozen, true);
+
+    live.default.__freshness = { level: 'red', colour: 'red darken-2', label: 'Tune over?', detail: '' };
+    await push([]);
+
+    assert.equal(vm.target.tuneId, 1, 'the frozen tune must not move');
+    assert.equal(vm.freshness.level, 'red');
+});
 
 await rm(tmpDir, { recursive: true, force: true });
 

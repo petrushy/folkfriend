@@ -1038,6 +1038,7 @@ async function loadLiveAnalysis() {
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from '@/js/sessionAnalysis.js'", `from '${path.join(sessionAnalysisTmpDir, 'sessionAnalysis.mjs')}'`],
         ["from '@/js/biasResults.mjs'", `from '${path.join(srcDir, 'js', 'biasResults.mjs')}'`],
+        ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected ${from} in liveAnalysis.js`);

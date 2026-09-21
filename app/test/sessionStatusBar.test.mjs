@@ -75,6 +75,12 @@ const service = {
     async finish() { __calls.push({ op: 'finish' }); this.sessionId = null; this.isRunning = false; return { ok: true }; },
     async retryMicrophone() { __calls.push({ op: 'retryMicrophone' }); this.micHealthy = true; return true; },
     async _persistSession() { __calls.push({ op: 'persist' }); return { ok: true }; },
+    // The LED. Scriptable, because the bar's job here is only to ASK for it
+    // often enough — the levels themselves are pinned in
+    // detectionFreshness.test.mjs.
+    __freshness: { level: 'idle', colour: 'grey darken-1', label: 'Listening…', detail: '' },
+    __freshnessCalls: 0,
+    detectionFreshness() { this.__freshnessCalls++; return this.__freshness; },
 };
 export function __reset() {
     __calls.length = 0;
@@ -85,6 +91,8 @@ export function __reset() {
     service.micHealthy = true;
     service.saveState = 'idle';
     service.saveError = null;
+    service.__freshness = { level: 'idle', colour: 'grey darken-1', label: 'Listening…', detail: '' };
+    service.__freshnessCalls = 0;
 }
 export default service;
 `;
@@ -140,6 +148,10 @@ async function loadComponent({ route = { name: 'search' } } = {}) {
         ["from '@/services/sessionRecorder.js'", "from './fake-recorder.mjs'"],
         ["from '@mdi/js'", "from './fake-mdi.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
+        // Real: the levels are the far side of the wiring under test, and a
+        // faked one would let the bar render a level the module never
+        // produces.
+        ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
     ]) {
         assert.ok(source.includes(from), `expected ${JSON.stringify(from)} in the SFC`);
         source = source.split(from).join(to);
@@ -419,6 +431,48 @@ async function run() {
 
         bus.__fire('liveAnalysisTimerTick', 999);
         assert.notEqual(vm.elapsedSeconds, 999);
+    });
+
+    await test('the LED is refreshed on every clock tick, not only on updates', async () => {
+        // The single property that makes the indicator worth having: it has to
+        // change while NOTHING is happening. A light driven by
+        // liveAnalysisUpdate alone stays green for ever the moment the room
+        // stops playing — which is exactly the twenty minutes of conversation
+        // it exists to report.
+        const { vm, component, bus, live } = await loadComponent();
+        live.default.sessionId = 'session-1';
+        live.default.isRunning = true;
+        component.created.call(vm);
+
+        live.default.__freshness = { level: 'red', colour: 'red darken-2', label: 'Tune over?', detail: 'Last match 3 min ago' };
+        bus.__fire('liveAnalysisTimerTick', 400);
+
+        assert.equal(vm.freshness.level, 'red');
+        assert.equal(vm.freshness.label, 'Tune over?');
+    });
+
+    await test('the LED also follows a new detection', async () => {
+        const { vm, component, bus, live } = await loadComponent();
+        live.default.sessionId = 'session-1';
+        live.default.isRunning = true;
+        component.created.call(vm);
+
+        live.default.__freshness = { level: 'green', colour: 'green darken-1', label: 'Following', detail: '' };
+        bus.__fire('liveAnalysisUpdate', [{ tuneId: 1 }]);
+        assert.equal(vm.freshness.level, 'green');
+    });
+
+    await test('it stops asking once destroyed', async () => {
+        const { vm, component, bus, live } = await loadComponent();
+        live.default.sessionId = 'session-1';
+        live.default.isRunning = true;
+        component.created.call(vm);
+        component.beforeDestroy.call(vm);
+
+        const before = live.default.__freshnessCalls;
+        bus.__fire('liveAnalysisTimerTick', 999);
+        bus.__fire('liveAnalysisUpdate', []);
+        assert.equal(live.default.__freshnessCalls, before);
     });
 
     console.log(`\n${passed} passed, ${failed} failed`);
