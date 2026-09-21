@@ -1901,10 +1901,10 @@ await test('a cluster only partly recorded still points at the part that was', a
 });
 
 await test('a collapsed row points at where the tune BEGAN', async () => {
-    // The displayed time column deliberately advances to the latest cluster so
-    // the user can see it ticking. The audio offset must not: "play this tune"
-    // means play it from the start, and keeping the earliest known offset is
-    // also what keeps a partly-recorded row playable.
+    // A merged row keeps the start of its first stretch — both the time column
+    // and the audio offset: "play this tune" means play it from the start, and
+    // keeping the earliest known offset is also what keeps a partly-recorded
+    // row playable.
     const { service } = await loadLiveAnalysis();
     service.options = CLUSTER_OPTIONS;
     service._windowMatches = [
@@ -1915,7 +1915,7 @@ await test('a collapsed row points at where the tune BEGAN', async () => {
     assert.equal(service.detections.length, 1);
     assert.equal(service.detections[0].audioStartSeconds, 30);
     assert.equal(service.detections[0].audioEndSeconds, 130);
-    assert.equal(service.detections[0].startSeconds, 100, 'the time column still advances');
+    assert.equal(service.detections[0].startSeconds, 30, 'the time column keeps where the tune began');
 });
 
 await test('the stamp is only taken while audio is actually being recorded', async () => {
