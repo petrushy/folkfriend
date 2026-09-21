@@ -71,6 +71,42 @@ export function validateManifest(m, id) {
     }
     return m;
 }
+// Whether this device's copy of a session may replace the one in Dropbox.
+//
+// The guard this replaces compared the two with JSON.stringify and called ANY
+// difference a conflict. Two devices sharing a session through Firestore hold
+// copies that differ as a matter of course: `lastActiveAt` is stamped on every
+// save, the name and place label are re-derived per device from that device's
+// own list of places, and a Firestore round trip hands the fields back in its
+// own order. So on the device that did not write the cloud copy — the one
+// looking at a session it received over Firebase — "different" is the ordinary
+// state rather than a conflict, and the backup was refused for ever, behind a
+// Retry button that could never succeed.
+//
+// Difference is not staleness, and the old guard had no way to tell which copy
+// was newer. `updatedAt` is that signal: stamped by every session write
+// (store.upsertLiveSession / updateLiveSession), monotone per record, and it
+// rides the Firestore document to every device. Only a STRICTLY newer cloud
+// copy is a conflict now.
+//
+// A cloud copy written before that field existed reads as 0 and is therefore
+// replaceable. That is deliberate — it is what unsticks an install already in
+// this state — and it costs nothing, because the refresh stamps it.
+//
+// A genuine conflict still resolves itself rather than sitting there: the
+// device holding the newer copy pushes it to Firestore, every device adopts
+// it, and the next pass has the newer stamp locally.
+export function mayReplaceRemoteSession(remote, session, receipt) {
+    if (!remote) return true;
+    const cloud = json(remote);
+    // Identical content is never a conflict whatever the stamps say, and a copy
+    // this device wrote — or was interrupted while writing — is its own.
+    if (cloud === json(session) || cloud === receipt?.session || cloud === receipt?.pendingSession) return true;
+    return sessionStamp(session) >= sessionStamp(remote);
+}
+const json = value => JSON.stringify(value);
+const sessionStamp = s => (validNumber(s?.updatedAt) ? s.updatedAt : 0);
+
 export function validateSession(value, id) {
     if (!value || value.schema !== 1 || !value.session || value.session.id !== id || !Array.isArray(value.session.tunes) ||
         !validNumber(value.session.startedAt)) throw new DropboxError('Unfamiliar Dropbox session. No files were changed.', 'unsupported');

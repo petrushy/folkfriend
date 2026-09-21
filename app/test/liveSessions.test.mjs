@@ -506,6 +506,29 @@ async function run() {
         assert.equal(sessions[0].endedAt, 2000);
     });
 
+    await test('every session write advances updatedAt, monotonically', async () => {
+        // The one field that tells another device whether its copy of a session
+        // is ahead of or behind the one in front of it. Dropbox arbitrates on
+        // it; without it, it compared the two copies whole and called every
+        // ordinary cross-device difference a conflict.
+        const { store } = await loadStore();
+        const first = await store.upsertLiveSession({ id: 's1', startedAt: 1000, tunes: [] });
+        assert.ok(first.updatedAt > 0, 'a saved session carries a stamp');
+
+        const second = await store.upsertLiveSession({ id: 's1', startedAt: 1000, tunes: [{ tuneId: 1 }] });
+        assert.ok(second.updatedAt >= first.updatedAt, 'a later write is never older');
+
+        const edited = await store.updateLiveSession('s1', { name: 'Renamed' });
+        assert.ok(edited.updatedAt > second.updatedAt, 'an edit advances it too');
+
+        // A copy that arrived stamped ahead of this device's clock — skew, or a
+        // device whose clock is simply right where this one is slow. Wall clock
+        // alone would write a LOWER stamp here, and this device could then
+        // never replace that copy in Dropbox again.
+        const ahead = await store.upsertLiveSession({ id: 's2', startedAt: 2000, tunes: [], updatedAt: Date.now() + 600_000 });
+        assert.ok(ahead.updatedAt > Date.now() + 599_000, 'it steps past a future stamp rather than behind it');
+    });
+
     await test('saved sessions are retained beyond the former 300-session limit', async () => {
         const { store } = await loadStore();
         for (let i = 0; i < 301; i++) {
