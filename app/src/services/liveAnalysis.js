@@ -4,51 +4,11 @@ import geoService from './geo.js';
 import store from './store.js';
 import sessionRecorder from './sessionRecorder.js';
 import {
-    normaliseQueryResults, clusterDetections, filterShortPastDetections,
-    // One rule for combining an optional offset, shared with the other merge
-    // path (mergeAdjacentDetections) so the two cannot drift.
-    minDefined, maxDefined,
+    normaliseQueryResults, buildSessionDetections, SESSION_ANALYSIS_DEFAULTS,
 } from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import { detectionFreshness } from '@/js/detectionFreshness.mjs';
 import eventBus from '@/eventBus.js';
-
-// Merge consecutive rows with the same tuneId into one row.
-// The displayed startSeconds advances to the most recent cluster so the
-// time column visibly increments as the same tune is repeatedly detected.
-function collapseConsecutiveSameTune(detections) {
-    const result = [];
-    for (const det of detections) {
-        const prev = result[result.length - 1];
-        if (prev && prev.tuneId === det.tuneId) {
-            prev.startSeconds = det.startSeconds;
-            prev.endSeconds = det.endSeconds;
-            // The audio span, unlike the displayed time, keeps the EARLIEST
-            // start and the LATEST end across the merged clusters. The time
-            // column advances so the user can see it ticking; the audio offset
-            // answers "where can I hear this", and the answer is where the
-            // tune began — which also keeps the row playable when only part of
-            // it was recorded (audio can stop mid-session when storage runs
-            // out, leaving later clusters with no stamp at all).
-            prev.audioStartSeconds = minDefined(prev.audioStartSeconds, det.audioStartSeconds);
-            prev.audioEndSeconds = maxDefined(prev.audioEndSeconds, det.audioEndSeconds);
-            // Follows audioStartSeconds: the row plays from where the tune
-            // began, so it takes the anchor of the earliest merged cluster.
-            prev.audioAnchorSeconds = minDefined(prev.audioAnchorSeconds, det.audioAnchorSeconds);
-            if (det.bestScore > prev.bestScore) {
-                prev.bestScore = det.bestScore;
-                prev.settingId = det.settingId;
-                prev.sourceUrl = det.sourceUrl;
-                prev.dataset = det.dataset;
-                prev.title = det.title;
-                prev.alternatives = det.alternatives;
-            }
-        } else {
-            result.push({ ...det });
-        }
-    }
-    return result;
-}
 
 // How long a tune the user has rejected stays suppressed. Without a cooldown
 // the button is useless: the same seconds of audio are still in the ring buffer
@@ -78,17 +38,6 @@ const CHECKPOINT_MAX_WAIT_MS = 60_000;
 // stepping outside, a set break, or the pub moving to the back room; it does
 // not cover coming back the following week, which is the case this app is for.
 const RESUME_WINDOW_MS = 6 * 60 * 60 * 1000;
-
-const DEFAULT_OPTIONS = {
-    minTopScore: 0.4,
-    minClusterHits: 2,
-    minContourLength: 12,
-    maxAlternatives: 3,
-    // Bias toward the most recently confirmed tune: if it appears in the raw
-    // results within this score gap of the current top, promote it to first.
-    // Suppresses brief one-window outliers without blocking real transitions.
-    previousTuneBiasDelta: 0.15,
-};
 
 class LiveAnalysisService {
     constructor() {
@@ -211,7 +160,7 @@ class LiveAnalysisService {
         if (this.isRunning) return;
 
         const options = {
-            ...DEFAULT_OPTIONS,
+            ...SESSION_ANALYSIS_DEFAULTS,
             windowSeconds,
             stepSeconds,
             mergeGapSeconds: windowSeconds,
@@ -328,6 +277,10 @@ class LiveAnalysisService {
         if (!this.sessionId) return { ok: true };
         await this.stop();
         this._generation++;
+
+        // Nothing is playing any more, so a short last tune is a fluke like
+        // any other and does not belong in the saved session.
+        if (this.options && this._windowMatches.length) this._recluster({ final: true });
 
         const result = await this._persistSession({ endedAt: Date.now() });
         if (!result.ok) {
@@ -494,23 +447,19 @@ class LiveAnalysisService {
     // screen and stops it coming straight back, so the display falls back to
     // whatever was detected before it.
     //
-    // Rejection targets the LATEST cluster of that tune, not every appearance
-    // of it: an earlier, correct hearing of the same tune is a different claim
-    // and must survive. removeDetection() already has exactly that semantics,
-    // because a collapsed row's startSeconds/endSeconds span only its most
-    // recent cluster.
+    // Rejection targets the LATEST row of that tune, not every appearance of
+    // it: an earlier, correct hearing of the same tune with another tune in
+    // between is a different claim and must survive.
     rejectTune(tuneId) {
         if (tuneId == null) return;
         const key = String(tuneId);
         this._rejectedTunes.set(key, this.elapsedSeconds);
 
-        // Removing one cluster is not enough on its own. A tune heard earlier
-        // and then again now is two clusters that collapseConsecutiveSameTune
-        // has *not* merged (there was another tune between them, or a gap), so
-        // dropping the latest can leave the one before it as the new tail — and
-        // the overlay would sit on the same wrong tune, looking as though the
-        // button did nothing. Keep going while the tail is still this tune.
-        // Anything further back stays: an earlier hearing is a separate claim.
+        // Keep going while the tail is still this tune. One removal normally
+        // clears the whole row, since a merged row spans every cluster in it,
+        // but if anything is left the overlay would sit on the same wrong tune
+        // and the button would look broken. Anything with a different tune
+        // after it stays: an earlier hearing is a separate claim.
         let removedAny = false;
         while (this.detections.length) {
             const tail = this.detections[this.detections.length - 1];
@@ -549,15 +498,12 @@ class LiveAnalysisService {
         });
     }
 
-    // Clustering, the short-detection filter and the same-tune collapse always
-    // run together and always in this order. The filter goes BEFORE the collapse
-    // so that a dropped one-window blip in the middle of a tune lets the two
-    // halves either side of it merge into one row rather than reading as the
-    // same tune twice.
-    _recluster() {
-        this.detections = collapseConsecutiveSameTune(
-            filterShortPastDetections(clusterDetections(this._windowMatches, this.options))
-        );
+    // Clustering, the short-detection filter and the same-tune merge, via the
+    // pipeline file analysis shares — see buildSessionDetections(). `final` is
+    // set only when the session is being finished: until then the last entry
+    // is the tune playing now and must stay, however short.
+    _recluster({ final = false } = {}) {
+        this.detections = buildSessionDetections(this._windowMatches, this.options, { final });
     }
 
     // The last window that actually produced an accepted match, or null.

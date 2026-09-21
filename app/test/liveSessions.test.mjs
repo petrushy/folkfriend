@@ -746,6 +746,20 @@ async function run() {
         assert.ok(store.__sessions[0].endedAt, 'the finalized record carries an end time');
     });
 
+    await test('finish() drops a short last tune from the saved session', async () => {
+        const { service, store } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        play(service, 2, 40, 1);    // one window, still "playing now"
+        assert.deepEqual(service.detections.map(d => d.tuneId), [1, 2],
+            'while listening the last tune is kept however short');
+
+        await service.finish();
+
+        assert.deepEqual(store.__sessions[0].tunes.map(t => t.tuneId), [1],
+            'once finished nothing is playing, so the blip is a fluke like any other');
+    });
+
     console.log('\nliveAnalysis.js — edits reach the saved list');
 
     await test('a corrected tune survives the next re-cluster', async () => {
