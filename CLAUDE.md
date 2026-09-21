@@ -1117,6 +1117,72 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### The detection LED — is what is on screen still true? (September 2026)
+
+Reported from a session: "Listening" and a tune count look *exactly the same*
+during a set and during twenty minutes of conversation, so the app is equally
+confident either way and there is no way to tell whether the tune on screen is
+being played now or was recognised five minutes ago.
+
+`app/src/js/detectionFreshness.mjs` is the whole rule, and it is pure — no Vue,
+no service, no clock of its own. `liveAnalysisService.detectionFreshness()`
+feeds it and the LED is rendered in the two places the user is actually looking:
+the **session bar** (so it follows them onto every route) and the
+**follow-score header**.
+
+Four things decide whether this is useful or noise:
+
+1. **Age decides the level; the score may only hold it back from green.** That
+   asymmetry is the design. "Time since the last good detection" is the
+   parameter the user asked for and the one that answers "has the tune ended",
+   whereas a score-driven red would be permanently lit for anyone on the ML
+   transcriber — its scores run systematically lower than DSP's and are **not
+   comparable across transcribers** (see the ML-vs-DSP notes above). So a weak
+   recent match is amber and labelled *Weak match*; it is never red, however
+   bad. Verified by mutation: letting the score reach red fails 2 tests.
+
+2. **Red is a claim about the ROOM, so only the room may make it.** A paused
+   session shows the light **off**, not red — it has no business saying the
+   tune ended. A dead microphone *is* red (`No audio`): the app certainly is
+   not following anything, and saying so is the whole point. A session that has
+   just started and recognised nothing yet is idle — it has not failed at
+   anything. Reinstating a red for a paused session fails 1 test.
+
+3. **It is driven by the CLOCK, not by detections.** An update-driven light
+   stays green for ever the moment the room stops playing, which is exactly the
+   twenty minutes it exists to report — so both views recompute it on
+   `liveAnalysisTimerTick` as well as on `liveAnalysisUpdate`. Dropping the tick
+   refresh fails 1 test; dropping the update refresh fails 1.
+
+4. **The thresholds follow the analysis window** rather than being constants:
+   green up to `windowSeconds + 2 * stepSeconds`, amber to
+   `windowSeconds + 8 * stepSeconds` (20 s and 50 s at the live defaults). One
+   missed cycle is ordinary — a bar of unison, someone ordering a drink over
+   the melody — and a light that flickers through a set that is going fine is
+   one nobody reads. A fixed 20 s would mean something quite different at a
+   30 s window.
+
+**It is derived from `_windowMatches`, never tracked in a field.** A field
+written by the analysis loop survives a rejection, so the light would stay
+green for a tune the user has just told the app was wrong; deriving it means a
+rejection and a restored session both move it for free.
+
+**In the follow-score overlay the LED keeps moving while FROZEN**, which is a
+deliberate exception to "the freeze is total". Everything else in that header
+is a readout *about the pinned tune*, and freezing exists so those can be read
+without moving. This one is about the room, and a frozen view whose light has
+gone red is precisely the state the user needs to be able to see.
+
+`followingFlag`'s static green ● is gone. It was always green — it meant
+"auto-switching is on", not "this is right" — and read as a confidence light
+that never changed. Two dots side by side, one permanently green, would be
+worse than none.
+
+Tests: `app/test/detectionFreshness.test.mjs` (14, the rule itself), four cases
+in `liveAnalysisReject.test.mjs` for the service getter, three in
+`sessionStatusBar.test.mjs` and one in `liveScoreFollowComponent.test.mjs` for
+the wiring the pure tests cannot reach.
+
 ### Session audio recording (September 2026 — v3.13.0)
 
 A live session can now keep its **audio**, so an evening can be played back,

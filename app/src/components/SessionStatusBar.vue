@@ -11,6 +11,26 @@
                 {{ status.label }}
             </v-chip>
 
+            <!-- The detection LED. "Listening" and a tune count look exactly
+                 the same during a set and during twenty minutes of talking,
+                 so this is the one thing on screen that answers "is what I am
+                 looking at still true?". Green/amber/red is driven mostly by
+                 how long it has been since a match — see detectionFreshness.mjs. -->
+            <v-chip
+                v-if="capturing || freshness.level !== 'off'"
+                x-small
+                outlined
+                class="freshness-chip"
+                :title="freshness.detail"
+                :aria-label="`Detection: ${freshness.label}. ${freshness.detail}`"
+            >
+                <span
+                    class="freshness-led"
+                    :class="`freshness-led--${freshness.level}`"
+                />
+                {{ freshness.label }}
+            </v-chip>
+
             <!-- An app that is recording the room must say so wherever the
                  user happens to be, not only on the page they started it from.
                  The chip carries the mute state too: "muted" is the claim the
@@ -137,6 +157,7 @@ import {
     mdiPause, mdiRecordCircleOutline, mdiAlertCircleOutline, mdiMicrophoneOff,
 } from '@mdi/js';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
+import { detectionFreshness } from '@/js/detectionFreshness.mjs';
 
 export default {
     name: 'SessionStatusBar',
@@ -150,6 +171,12 @@ export default {
             tuneCount: 0,
             micHealthy: true,
             micIssue: '',
+            // Recomputed on every timer tick as well as on every update: it
+            // ages with the clock, which is exactly the signal it exists to
+            // report. A computed over `store.userSettings`-style non-reactive
+            // service state would never update — see the reactivity warning in
+            // CLAUDE.md — so it lives in data.
+            freshness: detectionFreshness({ listening: false }),
             saveState: 'idle',
             saveError: null,
             audioRecording: false,
@@ -201,16 +228,25 @@ export default {
             this.micIssue = svc.micIssue || '';
             this.saveState = svc.saveState;
             this.saveError = svc.saveError;
+            this.freshness = svc.detectionFreshness();
         };
         this._onTick = (secs) => {
             this.elapsedSeconds = secs;
+            // The LED's whole job is to go amber and then red while NOTHING is
+            // happening, so it has to be driven by the clock rather than by
+            // detections — an update-driven light stays green for ever the
+            // moment the room stops playing.
+            this.freshness = liveAnalysisService.detectionFreshness();
             // sessionAudioState only fires when a segment is written — every
             // three minutes — so without this the muted counter sits still
             // while the user watches it, which defeats the reassurance it
             // exists to give.
             if (this.audioMuted) this.audioMutedSeconds = sessionRecorder.mutedSeconds;
         };
-        this._onUpdate = (detections) => { this.tuneCount = detections.length; };
+        this._onUpdate = (detections) => {
+            this.tuneCount = detections.length;
+            this.freshness = liveAnalysisService.detectionFreshness();
+        };
         this._onIndexLoaded = () => { this.indexLoaded = true; };
         this._onAudioState = ({
             recording, stoppedReason, error, muted, muteSupported, mutedSeconds,
@@ -331,4 +367,24 @@ export default {
 .session-status-bar--warning {
     border-left-color: #f9a825;
 }
+
+/* The LED itself. A filled dot rather than an icon: it has to read at a
+   glance from across a table, and a coloured circle is the one shape that
+   survives being 10 px tall. */
+.freshness-led {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    margin-right: 6px;
+    background: #9e9e9e;
+}
+
+.freshness-led--green { background: #2e7d32; box-shadow: 0 0 5px rgba(46, 125, 50, 0.9); }
+.freshness-led--amber { background: #f9a825; box-shadow: 0 0 5px rgba(249, 168, 37, 0.9); }
+.freshness-led--red { background: #c62828; box-shadow: 0 0 5px rgba(198, 40, 40, 0.9); }
+.freshness-led--idle { background: #9e9e9e; }
+.freshness-led--off { background: #616161; }
+
+.freshness-chip { font-variant-numeric: tabular-nums; }
 </style>
