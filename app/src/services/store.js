@@ -36,6 +36,19 @@ const USER_SETTING_DEFAULTS = {
     // into. See sessionAudioStore.js.
     recordSessionAudio: false,
     sessionAudioBitrateKbps: 64,
+    // Record two channels rather than one.
+    //
+    // Off by default, and the default is the load-bearing half of this: asking
+    // for ONE channel is what makes a mono recording a genuinely mono file.
+    // Left unconstrained, a device that reports two input channels hands both
+    // to the encoder — and when only the first carries sound (which is the
+    // normal shape of a phone's "stereo" input) the result is a stereo file
+    // that plays out of one speaker. See audioConstraints() in mic.js.
+    //
+    // Stereo is worth having when the device really does capture two channels,
+    // but it costs: the same bitrate is split between two channels, so 64 kbps
+    // stereo sounds worse than 64 kbps mono.
+    sessionAudioStereo: false,
     // Which tune databases are downloaded, stored offline and searched.
     //
     // A FRESH install gets thesession only. folkwiki's detections are still

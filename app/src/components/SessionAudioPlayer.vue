@@ -11,7 +11,9 @@
             </div>
             <v-spacer />
             <div class="text--secondary caption">
-                {{ formatBytes(manifest.bytes) }}<span v-if="bitrateLabel"> · {{ bitrateLabel }}</span>
+                {{ formatBytes(manifest.bytes) }}<span v-if="bitrateLabel"> · {{ bitrateLabel }}</span><span
+                    v-if="channelsLabel"
+                > · {{ channelsLabel }}</span>
             </div>
         </div>
 
@@ -90,6 +92,16 @@
             {{ tracks.length }} separate files.
         </p>
 
+        <!-- A recording whose second channel is silent plays out of one
+             speaker in every ordinary player. Playback here is corrected, but
+             the stored bytes are what they are, so the export is not — and a
+             note that says only the first half would be a false promise. -->
+        <p v-if="channelRepair" class="caption text--secondary mb-0 mt-2">
+            This recording has sound on one channel only. Playback here is corrected to
+            both speakers; an exported copy of it keeps the original channels.
+            Recordings made from now on are corrected as they are recorded.
+        </p>
+
         </template>
         <audio v-if="manifest"
             ref="audio"
@@ -126,6 +138,49 @@ const FALLBACK_PREROLL_SECONDS = FALLBACK_WINDOW_SECONDS / 2;
 // has to do, so it cycles rather than trying to be stable per tune.
 const BLOCK_COLOURS = ['#1976d2', '#43a047', '#8e24aa', '#ef6c00', '#00838f', '#c62828'];
 
+// How much of the recording is decoded to find out what its channels actually
+// contain. Only long enough to tell sound from digital silence — the point is
+// to detect a dead channel, not to measure the audio.
+const CHANNEL_PROBE_SECONDS = 4;
+
+// Anything above this RMS counts as signal, for the same reason and at the same
+// order of magnitude as SILENT_RMS in mic.js: a channel carrying real audio is
+// orders of magnitude above it, and a dead one is exact zeroes.
+const SILENT_CHANNEL_RMS = 1e-5;
+
+// Decodes a clip to PCM without needing a playback AudioContext — an
+// OfflineAudioContext can be constructed with no user gesture, which a probe
+// that runs on load must not require. Resolves null when the browser cannot do
+// it, so an unanswerable question leaves playback exactly as it was.
+async function decodeClip(blob) {
+    const Offline = typeof window !== 'undefined' &&
+        (window.OfflineAudioContext || window.webkitOfflineAudioContext);
+    if (!Offline || !blob || typeof blob.arrayBuffer !== 'function') return null;
+    const ctx = new Offline(1, 1, 44100);
+    const bytes = await blob.arrayBuffer();
+    // Safari only grew the promise form in 14.1, and the callback form is still
+    // the one it implements most reliably.
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const ok = (buffer) => { if (!settled) { settled = true; resolve(buffer); } };
+        const fail = (e) => { if (!settled) { settled = true; reject(e || new Error('decode failed')); } };
+        let maybePromise;
+        try {
+            maybePromise = ctx.decodeAudioData(bytes, ok, fail);
+        } catch (e) {
+            fail(e);
+            return;
+        }
+        if (maybePromise && maybePromise.then) maybePromise.then(ok, fail);
+    });
+}
+
+function channelRms(samples) {
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+    return samples.length ? Math.sqrt(sum / samples.length) : 0;
+}
+
 export default {
     name: 'SessionAudioPlayer',
     props: {
@@ -161,6 +216,15 @@ export default {
             _segmentDurationSeconds: 0,
             objectUrl: null,
             pendingSeekSeconds: null,
+            // What the recording's channels actually CONTAIN, measured from
+            // decoded audio rather than taken from the manifest:
+            // `{ channels, oneSided }`, or null while unknown. A device that
+            // reports two input channels and only fills the first produces a
+            // stereo file that plays out of one speaker, and nothing in the
+            // manifest distinguishes that from real stereo.
+            channelProbe: null,
+            // Whether playback is being corrected for the above.
+            channelRepair: false,
             icons: { play: mdiPlay, pause: mdiPause },
         };
     },
@@ -170,6 +234,19 @@ export default {
         bitrateLabel() {
             const bps = this.manifest && this.manifest.bitsPerSecond;
             return bps ? `${Math.round(bps / 1000)} kbps` : '';
+        },
+        // What the recording IS, preferring what was measured over what was
+        // recorded at the time. Empty when neither is known — a recording made
+        // before the manifest carried a channel count is described as unknown
+        // rather than guessed at.
+        channelsLabel() {
+            const probe = this.channelProbe;
+            if (probe && probe.oneSided) return 'one channel only';
+            const count = (probe && probe.channels) ||
+                (this.manifest && this.manifest.channels) || 0;
+            if (count === 1) return 'mono';
+            if (count === 2) return 'stereo';
+            return '';
         },
         // Ranges the user muted, as strip geometry. An unclosed range (the
         // session is still muted, or ended while muted) runs to the end of
@@ -298,6 +375,12 @@ export default {
         eventBus.$off('dropboxStateChanged', this._onAudioState);
         eventBus.$off('dropboxConnected', this._onDropboxConnected);
         this.teardown();
+        if (this._audioCtx && this._audioCtx.close) {
+            this._audioCtx.close().catch(() => {});
+            this._audioCtx = null;
+            this._mixNode = null;
+            this._sourceNode = null;
+        }
     },
     methods: {
         formatSecondsAsDuration,
@@ -308,6 +391,12 @@ export default {
             this.manifest = null;
             this.error = '';
             this.currentSeconds = 0;
+            // A different recording is a different question, and the repair
+            // graph (if one was built) is reconfigured rather than torn down —
+            // an element can only ever have one MediaElementAudioSourceNode.
+            this.channelProbe = null;
+            this._channelProbeFor = null;
+            this._applyChannelRepair();
             if (!this.sessionId) return;
             const id = this.sessionId;
             try {
@@ -315,6 +404,7 @@ export default {
                 if (id !== this.sessionId) return;
                 this.manifest = manifest && manifest.segments.length ? manifest : null;
                 this.error = '';
+                if (this.manifest) this._probeChannels();
             } catch (e) { if (id === this.sessionId) this.error = e.message; }
         },
 
@@ -335,6 +425,10 @@ export default {
                 if (manifest && manifest.segments.length) {
                     this.manifest = manifest;
                     this.error = '';
+                    // Cheap after the first: _probeChannels returns at once
+                    // once it has answered for this session, and a live
+                    // session refreshes its manifest every few seconds.
+                    this._probeChannels();
                 }
             } catch (e) { if (id === this.sessionId) this.error = e.message; }
         },
@@ -499,6 +593,103 @@ export default {
             }
         },
 
+        // What this recording's channels actually CARRY.
+        //
+        // The manifest records how many channels were recorded, which does not
+        // answer the question: a device that reports two input channels and
+        // fills only the first produces a file that is stereo by every label
+        // on it and plays out of one speaker. So a few seconds are decoded and
+        // measured. Runs once per session; never throws, and an unanswerable
+        // probe leaves playback exactly as it was.
+        async _probeChannels() {
+            if (!this.sessionId || this._channelProbeFor === this.sessionId) return;
+            this._channelProbeFor = this.sessionId;
+            const id = this.sessionId;
+            const track = this.tracks[0];
+            if (!track) { this._channelProbeFor = null; return; }
+            try {
+                // From the start of the first track, so the clip carries its
+                // own container header and decodes standalone.
+                const clip = await buildClip(
+                    id, track.startSeconds,
+                    Math.min(track.endSeconds, track.startSeconds + CHANNEL_PROBE_SECONDS),
+                    this.manifest,
+                );
+                if (!clip || id !== this.sessionId) return;
+                const buffer = await decodeClip(clip.blob);
+                if (!buffer || id !== this.sessionId) return;
+
+                const levels = [];
+                for (let c = 0; c < buffer.numberOfChannels; c++) {
+                    levels.push(channelRms(buffer.getChannelData(c)));
+                }
+                const loudest = Math.max(...levels, 0);
+                const quietest = Math.min(...levels, loudest);
+                this.channelProbe = {
+                    channels: buffer.numberOfChannels,
+                    // Both halves matter: a recording of a silent room has
+                    // every channel below the threshold and is not one-sided,
+                    // it is just quiet — correcting it would be a claim about
+                    // audio nobody has heard yet.
+                    oneSided: buffer.numberOfChannels > 1 &&
+                        loudest > SILENT_CHANNEL_RMS && quietest <= SILENT_CHANNEL_RMS,
+                };
+                this._applyChannelRepair();
+            } catch (e) {
+                // Not knowing is a perfectly good answer here: the probe only
+                // ever adds a correction, so a failed one costs the correction
+                // and nothing else.
+                console.debug('Could not probe recording channels:', e && e.message);
+            }
+        },
+
+        // Routes playback through a downmix when, and only when, the recording
+        // has sound on one channel only.
+        //
+        // The graph is built once and thereafter reconfigured, because an
+        // element can only ever be given one MediaElementAudioSourceNode — and
+        // once it has one, its sound comes out of the graph rather than the
+        // element, so this is never built speculatively.
+        _applyChannelRepair() {
+            const needed = !!(this.channelProbe && this.channelProbe.oneSided);
+            if (!needed && !this._mixNode) {
+                this.channelRepair = false;
+                return;
+            }
+            if (!this._mixNode && !this._buildRepairGraph()) return;
+            // 'explicit' + one channel is what forces the downmix; 'max' hands
+            // whatever the file has straight through again.
+            this._mixNode.channelCountMode = needed ? 'explicit' : 'max';
+            this._mixNode.channelCount = needed ? 1 : 2;
+            // A stereo-to-mono downmix is (L + R) / 2, and R is the silent one,
+            // so without this the correction would cost 6 dB. With R at zero
+            // the product is exactly L.
+            this._mixNode.gain.value = needed ? 2 : 1;
+            this.channelRepair = needed;
+        },
+
+        _buildRepairGraph() {
+            const audio = this.$refs.audio;
+            const Ctx = typeof window !== 'undefined' &&
+                (window.AudioContext || window.webkitAudioContext);
+            if (!audio || !Ctx) return false;
+            try {
+                const ctx = this._audioCtx || new Ctx();
+                this._audioCtx = ctx;
+                const source = ctx.createMediaElementSource(audio);
+                const mix = ctx.createGain();
+                source.connect(mix);
+                mix.connect(ctx.destination);
+                this._sourceNode = source;
+                this._mixNode = mix;
+                if (ctx.state === 'suspended' && ctx.resume) ctx.resume().catch(() => {});
+                return true;
+            } catch (e) {
+                console.warn('Could not correct one-sided playback:', e && e.message);
+                return false;
+            }
+        },
+
         // What this clip's audio ACTUALLY decodes to, against what the manifest
         // says it should be.
         //
@@ -547,6 +738,10 @@ export default {
         _play() {
             const audio = this.$refs.audio;
             if (!audio) return;
+            // Here rather than at load, because building the graph needs an
+            // AudioContext and iOS only starts one in a user gesture — which
+            // every route to _play() is.
+            this._applyChannelRepair();
             const started = audio.play();
             if (started && started.catch) {
                 started.catch(e => { this.error = `Could not play: ${(e && e.message) || e}`; });

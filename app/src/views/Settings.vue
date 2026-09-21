@@ -81,6 +81,9 @@
                     echo cancellation {{ describeAudioSetting(appliedAudioSettings.echoCancellation) }},
                     noise suppression {{ describeAudioSetting(appliedAudioSettings.noiseSuppression) }},
                     auto gain {{ describeAudioSetting(appliedAudioSettings.autoGainControl) }}<span
+                        v-if="appliedAudioSettings.channelCount"
+                    >, {{ appliedAudioSettings.channelCount }}
+                        {{ appliedAudioSettings.channelCount === 1 ? 'channel' : 'channels' }}</span><span
                         v-if="appliedAudioSettings.sampleRate"
                     >, {{ appliedAudioSettings.sampleRate }} Hz</span>.
                 </span>
@@ -122,6 +125,22 @@
             >
                 This browser cannot record audio, so this setting will have no effect here.
             </v-alert>
+            <v-row>
+                <v-switch
+                    v-model="userSettings.sessionAudioStereo"
+                    inset
+                    label="Record in stereo (two channels, if the device captures two)"
+                    class="my-0 pl-2"
+                    @change="settingsChanged"
+                />
+            </v-row>
+            <p class="caption text--secondary mb-0 pl-2">
+                Off records one channel, which is what most phones actually capture and
+                what plays through both speakers everywhere. Stereo splits the same
+                recording quality across two channels, so it sounds slightly worse at the
+                same setting. Either way this changes the next recording, not one already
+                made, and what the device really did is shown under Audio above.
+            </p>
             <v-row
                 align="center"
                 class="pl-2 pr-4 mt-2"
@@ -1048,7 +1067,10 @@ export default {
             const threeHours = bytesPerHour(kbps) * 3;
             return `About ${formatAudioBytes(threeHours)} for a three-hour session. ` +
                 'Below 64 kbps a recording is still good to listen to, but less useful ' +
-                'to re-analyse later.';
+                'to re-analyse later' +
+                (this.userSettings.sessionAudioStereo
+                    ? ' — and stereo splits it across two channels, so consider one step up.'
+                    : '.');
         },
         aiModelItems() {
             return Object.entries(AI_MODELS).map(([value, spec]) => ({

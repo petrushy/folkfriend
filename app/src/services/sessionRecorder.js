@@ -76,6 +76,10 @@ class SessionRecorder {
         this.sessionId = null;
         this.mimeType = null;
         this.bitsPerSecond = 0;
+        // How many channels the current track is recording, or null when the
+        // browser will not report it. Taken from the track, never from the
+        // setting — see micService.recordingChannelCount.
+        this.channels = null;
         this.isRecording = false;
         // Why recording ended early, when it did:
         //
@@ -130,6 +134,7 @@ class SessionRecorder {
         // only when the encoder actually disagreed with the request.
         this._manifestMimeType = null;
         this._manifestBitsPerSecond = 0;
+        this._manifestChannels = null;
 
         // Stretches of the recording the user silenced, in audio-clock
         // seconds. The last entry has `to: null` while a mute is still open.
@@ -228,6 +233,7 @@ class SessionRecorder {
             muted: this.muted,
             muteSupported: this.muteSupported,
             mutedSeconds: this.mutedSeconds,
+            channels: this.channels,
         });
     }
 
@@ -264,6 +270,7 @@ class SessionRecorder {
         this.sessionId = sessionId;
         this.mimeType = mimeType;
         this.bitsPerSecond = Math.round(bitrateKbps * 1000);
+        this.channels = null;
         this.stoppedReason = null;
         this.error = '';
         this._committedSeconds = 0;
@@ -298,6 +305,7 @@ class SessionRecorder {
             }));
             this._manifestMimeType = mimeType;
             this._manifestBitsPerSecond = this.bitsPerSecond;
+            this._manifestChannels = null;
         } catch (e) {
             this.sessionId = null;
             this.stoppedReason = 'storage';
@@ -365,6 +373,8 @@ class SessionRecorder {
         this.mimeType = manifest.mimeType || mimeType;
         this._manifestMimeType = manifest.mimeType || null;
         this._manifestBitsPerSecond = manifest.bitsPerSecond || 0;
+        this._manifestChannels = manifest.channels || null;
+        this.channels = null;
         this.bitsPerSecond = Math.round(bitrateKbps * 1000);
         // A new listening stretch gets a fresh chance, even after a stop for
         // storage: the user may well have deleted something in between, and the
@@ -440,6 +450,7 @@ class SessionRecorder {
         await this._writeChain.catch(() => {});
         this.sessionId = null;
         this.mimeType = null;
+        this.channels = null;
         this.stoppedReason = null;
         this.error = '';
         this.bytes = 0;
@@ -520,6 +531,11 @@ class SessionRecorder {
             this.bitsPerSecond = this._recorder.audioBitsPerSecond;
         }
         if (this._recorder.mimeType) this.mimeType = this._recorder.mimeType;
+        // What the microphone is actually delivering to this encoder. A request
+        // for two channels on a device that only captures one produces a mono
+        // file, and the manifest must say so — otherwise the player reports a
+        // recording as stereo on the strength of a setting.
+        this.channels = micService.recordingChannelCount;
         // What was ASKED for and what the encoder does are different things,
         // and the manifest is what the export and the player read. Left
         // unpatched, a fallback to the browser's own container writes WebM
@@ -563,9 +579,11 @@ class SessionRecorder {
         const sessionId = this.sessionId;
         if (!sessionId) return;
         if (this.mimeType === this._manifestMimeType &&
-            this.bitsPerSecond === this._manifestBitsPerSecond) return;
+            this.bitsPerSecond === this._manifestBitsPerSecond &&
+            this.channels === this._manifestChannels) return;
         this._manifestMimeType = this.mimeType;
         this._manifestBitsPerSecond = this.bitsPerSecond;
+        this._manifestChannels = this.channels;
 
         // Nothing is stored yet, so this track's format IS the session's.
         // Otherwise the session keeps the container its existing audio is in
@@ -574,6 +592,7 @@ class SessionRecorder {
         patchManifest(sessionId, {
             mimeType: this.mimeType,
             bitsPerSecond: this.bitsPerSecond,
+            channels: this.channels,
         }).catch(e => console.warn('Could not record audio format:', e && e.message));
     }
 
@@ -667,6 +686,7 @@ class SessionRecorder {
         const trackStartSeconds = this._trackStartSeconds;
         const trackMimeType = this.mimeType;
         const trackBitsPerSecond = this.bitsPerSecond;
+        const trackChannels = this.channels;
         this._resetPending();
 
         this._writeChain = this._writeChain.then(async () => {
@@ -704,6 +724,7 @@ class SessionRecorder {
                     // the session's other tracks. See _recordActualFormat().
                     mimeType: trackMimeType,
                     bitsPerSecond: trackBitsPerSecond,
+                    channels: trackChannels,
                 });
                 this.bytes = manifest.bytes;
                 this._emit();
