@@ -30,16 +30,19 @@ export const GOOD_SCORE = 0.55;
  * options rather than hard-coded — the window and step are user-visible
  * settings, and a fixed 20 s would mean something different at a 30 s window.
  *
- * At the live defaults (10 s window, 5 s step) this is 20 s green and 50 s
+ * At the live defaults (10 s window, 5 s step) this is 20 s green and 40 s
  * amber: two missed cycles is ordinary (a bar of unison, someone shouting an
- * order), eight in a row is not.
+ * order), six in a row is not. 40 s rather than 50 because the point of the
+ * red is to tell the user the tune has probably ended, and by three quarters
+ * of a minute of nothing that is already the likelier reading — a light that
+ * is late saying so is no more use than one that never does.
  */
 export function freshnessLimits(options) {
     const windowSeconds = Number(options && options.windowSeconds) || 10;
     const stepSeconds = Number(options && options.stepSeconds) || 5;
     return {
         freshSeconds: windowSeconds + 2 * stepSeconds,
-        staleSeconds: windowSeconds + 8 * stepSeconds,
+        staleSeconds: windowSeconds + 6 * stepSeconds,
     };
 }
 
