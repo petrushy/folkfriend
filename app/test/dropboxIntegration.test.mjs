@@ -318,3 +318,85 @@ await test('lost final delete response can be retried after the folder is gone',
     assert.equal(f.db.has('dropbox:account-1:deletion:s1'), false);
     assert.equal(api.backupStatus('s1'), 'Local only');
 });
+
+// ---- A session received over Firebase, not recorded on this device --------
+//
+// The iPad records and backs up; the iPhone gets the session record over
+// Firestore and has no local audio. Its copy of the record legitimately
+// differs from the one in Dropbox — `lastActiveAt` is stamped on every save,
+// the name and place label are re-derived per device, and a Firestore round
+// trip reorders the fields — and the old guard read any difference as
+// somebody else having changed the cloud copy. It refused for ever, behind a
+// Retry button that could never succeed.
+await test('a session synced from another device backs up despite differing from the cloud copy', async () => {
+    const { f, api } = await load();
+    await api.syncDropbox(true);
+    await api.deleteLocalCopy('s1');
+    // This device never backed the session up itself — it holds the cloud
+    // manifest because it PLAYED the audio. Without clearing the receipt the
+    // test passes through the "a copy this device wrote is its own" shortcut
+    // and never reaches the rule it is here to pin.
+    f.db.delete('dropbox:account-1:receipt:s1');
+
+    // What Firestore hands back: same session, its own field order, a fresh
+    // lastActiveAt, a locally re-derived label, and a newer version stamp.
+    f.sessions[0] = { endedAt: null, id: 's1', lastActiveAt: 9_000, name: 'Original',
+        placeName: '', startedAt: 1, tunes: [], updatedAt: 9_000 };
+
+    f.client.writes = [];
+    await api.syncDropbox(true);
+
+    assert.equal(api.backupStatus('s1'), 'Backed up');
+    assert.ok(f.client.writes.includes('/sessions/s1/session.json'), 'the newer copy reaches Dropbox');
+    assert.equal((await f.client.json('/sessions/s1/session.json')).value.session.lastActiveAt, 9_000);
+    assert.equal(api.dropboxState.error, '');
+});
+
+await test('a STRICTLY newer cloud copy is still refused', async () => {
+    // The whole point of the guard: a device that has been offline while
+    // another one edited the session must not push its stale copy over the top.
+    const { f, api } = await load();
+    await api.syncDropbox(true);
+    await api.deleteLocalCopy('s1');
+
+    const path = '/sessions/s1/session.json';
+    const previous = f.client.files.get(path);
+    await f.client.upload(path, new Blob([JSON.stringify({ schema: 1,
+        session: { id: 's1', startedAt: 1, name: 'Edited elsewhere', tunes: [], updatedAt: 9_000 } })]), previous);
+
+    f.sessions[0] = { id: 's1', startedAt: 1, name: 'Stale local', tunes: [], updatedAt: 5_000 };
+    f.db.delete('dropbox:account-1:receipt:s1');
+    f.client.writes = [];
+    await api.syncDropbox(true);
+
+    assert.equal(f.client.writes.length, 0, 'no files were overwritten');
+    assert.equal((await f.client.json(path)).value.session.name, 'Edited elsewhere');
+    assert.equal(api.backupStatus('s1'), 'Backup pending');
+});
+
+await test('one conflicted session does not block the metadata sync of the next', async () => {
+    // The metadata loop broke on ANY error, so a single session stuck in
+    // conflict silently stopped every session behind it from syncing at all —
+    // which is how one unresolvable copy takes the whole backup down.
+    const { f, api } = await load();
+    f.sessions.push({ id: 's2', startedAt: 2, name: 'Second', tunes: [] });
+    f.locals.push({ ...structuredClone(local), sessionId: 's2' });
+    f.client.folders = async () => [{ name: 's1' }, { name: 's2' }];
+    await api.syncDropbox(true);
+    await api.deleteLocalCopy('s1');
+    await api.deleteLocalCopy('s2');
+
+    const path = '/sessions/s1/session.json';
+    await f.client.upload(path, new Blob([JSON.stringify({ schema: 1,
+        session: { id: 's1', startedAt: 1, name: 'Edited elsewhere', tunes: [], updatedAt: 9_000 } })]), f.client.files.get(path));
+    f.sessions[0] = { id: 's1', startedAt: 1, name: 'Stale local', tunes: [], updatedAt: 5_000 };
+    f.sessions[1] = { id: 's2', startedAt: 2, name: 'Renamed', tunes: [], updatedAt: 5_000 };
+    f.db.delete('dropbox:account-1:receipt:s1');
+    f.db.delete('dropbox:account-1:receipt:s2');
+
+    await api.syncDropbox(true);
+
+    assert.equal(api.backupStatus('s1'), 'Backup pending');
+    assert.equal(api.backupStatus('s2'), 'Backed up');
+    assert.equal((await f.client.json('/sessions/s2/session.json')).value.session.name, 'Renamed');
+});

@@ -99,6 +99,10 @@ const liveSession = (over = {}) => ({
     customName: false,
     placeName: 'The Cobblestone',
     listenedSeconds: 3600,
+    lastActiveAt: 1757003600000,
+    // The version stamp store.upsertLiveSession writes on every save, and what
+    // Dropbox arbitrates on across devices. It rides this document.
+    updatedAt: 1757003600001,
     tunes: [{
         tuneId: 42,
         settingId: '420',
