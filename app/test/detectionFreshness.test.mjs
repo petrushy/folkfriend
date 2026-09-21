@@ -52,6 +52,15 @@ function afterSilence(age, score = 0.8, extra = {}) {
 
 console.log('\nthe LED ages with the clock');
 
+test('the live defaults are 20 s green and 40 s amber', () => {
+    // The other cases here are written relative to the limits, which is what
+    // lets the window setting move them — but it also means a change to the
+    // multipliers passes every one of them silently. This is the concrete
+    // figure a person judged against a real session, so it is pinned as one.
+    assert.equal(freshSeconds, 20);
+    assert.equal(staleSeconds, 40);
+});
+
 test('a confident match seconds ago is green', () => {
     assert.equal(afterSilence(3).level, 'green');
 });

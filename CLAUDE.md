@@ -1156,11 +1156,19 @@ Four things decide whether this is useful or noise:
 
 4. **The thresholds follow the analysis window** rather than being constants:
    green up to `windowSeconds + 2 * stepSeconds`, amber to
-   `windowSeconds + 8 * stepSeconds` (20 s and 50 s at the live defaults). One
+   `windowSeconds + 6 * stepSeconds` (20 s and 40 s at the live defaults). One
    missed cycle is ordinary — a bar of unison, someone ordering a drink over
    the melody — and a light that flickers through a set that is going fine is
    one nobody reads. A fixed 20 s would mean something quite different at a
    30 s window.
+
+   40 s to red, not 50: judged against a real session. The red says the tune
+   has probably ended, and by three quarters of a minute of nothing that is
+   already the likelier reading — a light that is late saying so is no more
+   use than one that never does. **The relative form of the tests hides a
+   change to these multipliers**, since every other case is written against
+   `freshnessLimits()`; one case pins the concrete 20 / 40 so a future tweak
+   has to be deliberate.
 
 **It is derived from `_windowMatches`, never tracked in a field.** A field
 written by the analysis loop survives a rejection, so the light would stay
