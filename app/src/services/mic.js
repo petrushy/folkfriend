@@ -16,6 +16,16 @@ import store from './store';
 //    at capture time (better than post-capture digital gain, which cannot
 //    improve SNR), at the risk of level "pumping" on sustained notes.
 //
+// channelCount is asked for EXPLICITLY, and asking for 1 matters as much as
+// asking for 2. Left unconstrained, a device that reports two input channels
+// hands both through — and a phone's second channel is routinely silent, which
+// produces a recording that plays out of one speaker while every meter in the
+// app looks healthy (analysis is unaffected: the ScriptProcessorNode has one
+// input channel, so it downmixes whatever it is given). A file that really is
+// one channel is played through both speakers by every player there is, so
+// mono-by-request is the fix for the one-sided recording, not a limitation of
+// it. Stereo is opt-in via settings for a device that genuinely captures two.
+//
 // Bare values are IDEAL constraints per the spec, not required ones, so a
 // browser that does not support one ignores it rather than failing
 // getUserMedia. Asking is therefore free; what actually gets applied is
@@ -27,6 +37,7 @@ function audioConstraints() {
             echoCancellation: false,
             noiseSuppression: false,
             autoGainControl: !!store.userSettings.autoGainControl,
+            channelCount: store.userSettings.sessionAudioStereo ? 2 : 1,
         }
     };
 }
@@ -212,6 +223,25 @@ class MicService {
 
     get recordingMuted() { return this._recordingMuted; }
 
+    // How many channels the recording branch is actually carrying, or null when
+    // the browser will not say. Read from the track rather than from the
+    // setting, because asking for a channel count and getting it are different
+    // things — it is what the manifest records and what the player reports, so
+    // a recording is never described as stereo on the word of a request alone.
+    get recordingChannelCount() {
+        const stream = this._recordingStream || this.micStream;
+        if (!stream) return null;
+        const tracks = stream.getAudioTracks ? stream.getAudioTracks() : stream.getTracks();
+        const track = tracks && tracks.length ? tracks[0] : null;
+        if (!track || typeof track.getSettings !== 'function') return null;
+        try {
+            const count = (track.getSettings() || {}).channelCount;
+            return Number.isFinite(count) && count > 0 ? count : null;
+        } catch (e) {
+            return null;
+        }
+    }
+
     // Silences (or restores) the recorded audio without touching capture.
     // Returns what the state actually is afterwards, which is not necessarily
     // what was asked for: on a browser that cannot clone, mute is unavailable
@@ -300,6 +330,7 @@ class MicService {
                 noiseSuppression: settings.noiseSuppression,
                 autoGainControl: settings.autoGainControl,
                 sampleRate: settings.sampleRate,
+                channelCount: settings.channelCount,
             };
             console.debug('Microphone audio processing applied:', this.appliedAudioSettings);
         } catch (e) {

@@ -100,7 +100,7 @@ export default { $emit(name, payload) { __emits.push({ name, payload }); }, $on(
 // could not tell a mute that silences the recording from one that also
 // silences detection, which is the entire distinction being built.
 const FAKE_MIC = `
-export const __state = { stream: null, recordingStream: null, generation: 0, cloneable: true };
+export const __state = { stream: null, recordingStream: null, generation: 0, cloneable: true, channels: null };
 let __muted = false;
 export function __setStream() {
     __state.stream = { __track: { enabled: true } };
@@ -112,7 +112,10 @@ export function __setStream() {
 export function __reset() {
     __state.stream = null; __state.recordingStream = null;
     __state.generation = 0; __state.cloneable = true; __muted = false;
+    __state.channels = null;
 }
+// What the DEVICE reports, which is not necessarily what was asked for.
+export function __setChannels(n) { __state.channels = n; }
 export function __setCloneable(v) { __state.cloneable = v; }
 // The track the ANALYSIS path reads. Mute must never touch it.
 export function __captureTrack() { return __state.stream && __state.stream.__track; }
@@ -123,6 +126,7 @@ export default {
     get recordingMuteSupported() { return !!__state.recordingStream; },
     get recordingMuted() { return !!__state.recordingStream && __muted; },
     get streamGeneration() { return __state.generation; },
+    get recordingChannelCount() { return __state.channels; },
     setRecordingMuted(muted) {
         __muted = !!muted;
         if (__state.recordingStream) {
@@ -1351,6 +1355,59 @@ await test('the manifest names the container actually recorded', async () => {
     const manifest = await store.readManifest('s1');
     assert.equal(manifest.mimeType, 'audio/webm;codecs=opus');
     assert.equal(store.fileExtensionFor(manifest.mimeType), 'webm');
+});
+
+await test('the manifest records the channels the device actually gave', async () => {
+    // Asking for one channel and getting one are different things, and the
+    // player reports what the recording IS. Taking the setting's word for it
+    // would describe a mono file as stereo.
+    await resetAll();
+    const recorder = await freshRecorder();
+    mic.__setChannels(1);
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await recorder._writeChain;
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.channels, 1);
+    assert.equal(manifest.tracks[0].channels, 1);
+    assert.equal((await store.buildClip('s1', 0, 10, manifest)).channels, 1);
+});
+
+await test('a track recorded in stereo is labelled separately from a mono one', async () => {
+    // The setting can be changed between two listening stretches of the same
+    // session, exactly as the container can — and for the same reason the
+    // channel count belongs to the track rather than the session.
+    await resetAll();
+    const first = await freshRecorder();
+    mic.__setChannels(1);
+    await first.begin('s1');
+    mic.__setStream();
+    await first.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await first._writeChain;
+    await first.end();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    mic.__setChannels(2);
+    const second = await freshRecorder();
+    await second.resume('s1');
+    mic.__setStream();
+    await second.ensureRecording();
+    feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
+    await second._writeChain;
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.channels, 1, 'the session keeps what its first track was');
+    assert.equal(manifest.tracks[0].channels, 1);
+    assert.equal(manifest.tracks[1].channels, 2);
+    const late = await store.buildClip(
+        's1', store.SEGMENT_SECONDS + 5, store.SEGMENT_SECONDS + 10, manifest);
+    assert.equal(late.channels, 2);
 });
 
 console.log('\nsessionAudioStore — playback never guesses');
