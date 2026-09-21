@@ -135,6 +135,77 @@ function d(tuneId, startSeconds, endSeconds) {
     assert.equal(input.length, 2);
 }
 
+// keepLast: false filters the last entry too (a finished file analysis).
+{
+    const out = filterShortPastDetections([d(1, 0, 40), d(2, 40, 45)], 15, { keepLast: false });
+    assert.deepEqual(out.map(x => x.tuneId), [1]);
+    assert.deepEqual(filterShortPastDetections([d(1, 0, 5)], 15, { keepLast: false }), []);
+}
+
+// --- buildSessionDetections --------------------------------------------------
+//
+// The one pipeline live listening and file analysis share.
+{
+    const { buildSessionDetections, getAnalysisOptions, SESSION_ANALYSIS_DEFAULTS, STRONG_SINGLE_DETECTION_SCORE } =
+        await loadSessionAnalysisModule();
+    const options = getAnalysisOptions(120); // 10s window, 5s step
+    const m = (tuneId, startSeconds, score = 0.6) => ({
+        tuneId, startSeconds, settingId: String(tuneId * 10), displayName: `tune-${tuneId}`, score, alternatives: [],
+    });
+
+    assert.equal(SESSION_ANALYSIS_DEFAULTS.minTopScore, 0.45);
+    assert.equal(options.minTopScore, 0.45);
+    assert.equal(options.previousTuneBiasDelta, 0.15);
+    assert.equal('minRms' in options, false, 'no silence gate: live has none');
+
+    // A single window between two stretches of tune 1 is dropped, and tune 1's
+    // halves merge into ONE row that keeps the earliest start.
+    const matches = [
+        m(1, 0), m(1, 5), m(1, 10), m(1, 15),
+        m(2, 20),
+        m(1, 25), m(1, 30), m(1, 35),
+        m(3, 45), m(3, 50), m(3, 55),
+    ];
+    const running = buildSessionDetections(matches, options);
+    assert.deepEqual(running.map(x => x.tuneId), [1, 3]);
+    assert.equal(running[0].startSeconds, 0);
+    assert.equal(running[0].endSeconds, 45);
+
+    // While running, a short final entry is kept (it is the tune playing now)...
+    const tail = [...matches, m(4, 70)];
+    assert.deepEqual(buildSessionDetections(tail, options).map(x => x.tuneId), [1, 3, 4]);
+    // ...and dropped once the analysis has ended.
+    assert.deepEqual(buildSessionDetections(tail, options, { final: true }).map(x => x.tuneId), [1, 3]);
+
+    // A tune that returns after a gap with nothing else in between is one row,
+    // keeping the start of its first stretch and the best-scoring setting.
+    const gap = buildSessionDetections([
+        m(1, 0), m(1, 5), m(1, 10),
+        { ...m(1, 60, 0.9), settingId: 'best' }, m(1, 65), m(1, 70),
+        m(2, 80), m(2, 85), m(2, 90),
+    ], options, { final: true });
+    assert.deepEqual(gap.map(x => x.tuneId), [1, 2]);
+    assert.equal(gap[0].startSeconds, 0);
+    assert.equal(gap[0].endSeconds, 80);
+    assert.equal(gap[0].settingId, 'best');
+    assert.equal(gap[0].hits, 6);
+
+    // Strong single window: kept only when windows do not overlap.
+    const strong = STRONG_SINGLE_DETECTION_SCORE;
+    const sparse = { ...options, stepSeconds: 10 };
+    const single = (opts) => buildSessionDetections([
+        m(1, 0, 0.6), m(1, 10, 0.6),
+        m(2, 20, strong),
+        m(3, 30, 0.6), m(3, 40, 0.6),
+    ], opts, { final: true }).map(x => x.tuneId);
+    assert.deepEqual(single(sparse), [1, 2, 3], 'step >= window: a strong single window counts');
+    assert.deepEqual(single(options), [1, 3], 'overlapping windows: a real tune hits two, so a single is a fluke');
+    const weak = buildSessionDetections([
+        m(1, 0), m(1, 10), m(2, 20, strong - 0.01), m(3, 30), m(3, 40),
+    ], sparse, { final: true }).map(x => x.tuneId);
+    assert.deepEqual(weak, [1, 3], 'a single window below the strong score is still dropped');
+}
+
 await rm(sessionAnalysisTmpDir, { recursive: true, force: true });
 
 console.log('sessionAnalysis.test.mjs passed');

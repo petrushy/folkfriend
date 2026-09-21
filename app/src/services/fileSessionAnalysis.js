@@ -1,11 +1,11 @@
 import audioService from './audio.js';
 import ffBackend from './backend.js';
 import {
-    clusterDetections,
+    buildSessionDetections,
     getAnalysisOptions,
     normaliseQueryResults,
-    rmsOfSignal,
 } from '@/js/sessionAnalysis.js';
+import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import eventBus from '@/eventBus.js';
 
 class FileSessionAnalysisService {
@@ -18,6 +18,9 @@ class FileSessionAnalysisService {
         this._pcm = null;
         this._windowMatches = [];
         this._options = null;
+        // Whether the whole file has been scanned — decides whether the last
+        // detection is still exempt from the short-detection filter.
+        this._done = false;
     }
 
     async start(file, { customAnalysisSettings, windowSeconds, stepSeconds }) {
@@ -27,6 +30,7 @@ class FileSessionAnalysisService {
         this.detections = [];
         this._windowMatches = [];
         this._options = null;
+        this._done = false;
         this.progress = { current: 0, total: 0, currentTimeSeconds: 0 };
         this.durationSeconds = 0;
 
@@ -111,14 +115,21 @@ class FileSessionAnalysisService {
                 );
                 const segment = pcm.subarray(startSample, endSample);
 
-                if (rmsOfSignal(segment) < options.minRms) continue;
-
                 // Decoding is fixed at audioService.sampleRate; say so, rather
                 // than relying on a global a live capture may have changed.
                 const response = await ffBackend.transcribeAndQueryPCMSignal(segment, sampleRate);
                 if (response.error || !response.contour || response.contour.length < options.minContourLength) continue;
 
-                const normalized = normaliseQueryResults(response.results, options);
+                // Same bias toward the tune just detected as live listening.
+                const previousTuneId = this.detections.length > 0
+                    ? this.detections[this.detections.length - 1].tuneId
+                    : null;
+                const biasedResults = biasResultsTowardPrevious(
+                    response.results || [],
+                    previousTuneId,
+                    options.previousTuneBiasDelta,
+                );
+                const normalized = normaliseQueryResults(biasedResults, options);
                 if (!normalized) continue;
 
                 this._windowMatches.push({
@@ -126,12 +137,13 @@ class FileSessionAnalysisService {
                     tuneId: normalized.tuneId,
                     settingId: normalized.settingId,
                     sourceUrl: normalized.sourceUrl,
+                    dataset: normalized.dataset,
                     displayName: normalized.displayName,
                     score: normalized.score,
                     alternatives: normalized.alternatives,
                 });
 
-                this.detections = clusterDetections(this._windowMatches, options);
+                this.detections = buildSessionDetections(this._windowMatches, options);
                 eventBus.$emit('fileAnalysisUpdate', this.detections, this._windowMatches.length);
 
                 // Yield every 5 windows to keep the event loop responsive
@@ -140,7 +152,8 @@ class FileSessionAnalysisService {
                 }
             }
 
-            this.detections = clusterDetections(this._windowMatches, options);
+            this._done = true;
+            this.detections = buildSessionDetections(this._windowMatches, options, { final: true });
             eventBus.$emit('fileAnalysisUpdate', this.detections, this._windowMatches.length);
             eventBus.$emit('fileAnalysisStage', 'done');
         } catch (e) {
@@ -158,9 +171,12 @@ class FileSessionAnalysisService {
         this._pcm = null;
     }
 
-    // Drops the window matches that produced a given detection cluster, then
-    // re-clusters and emits. Needed during a still-running analysis (and harmless
-    // when done) so a removed row isn't recreated by the next re-cluster.
+    // Drops the window matches that produced a given detection row. During a
+    // still-running analysis it re-clusters and emits, so a removed row isn't
+    // recreated by the next re-cluster. Once the analysis is done nothing will
+    // re-cluster again, so the row is simply dropped WITHOUT emitting: an emit
+    // rebuilds every row in the view and would throw away the tune choices and
+    // start times the user has edited since.
     removeDetection(id) {
         if (!this._options) return;
         const target = this.detections.find(d => d.id === id);
@@ -171,7 +187,11 @@ class FileSessionAnalysisService {
             match.startSeconds >= target.startSeconds - epsilon &&
             match.startSeconds <= target.endSeconds + epsilon
         ));
-        this.detections = clusterDetections(this._windowMatches, this._options);
+        if (this._done) {
+            this.detections = this.detections.filter(d => d.id !== id);
+            return;
+        }
+        this.detections = buildSessionDetections(this._windowMatches, this._options);
         eventBus.$emit('fileAnalysisUpdate', this.detections, this._windowMatches.length);
     }
 }

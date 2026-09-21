@@ -482,6 +482,7 @@
                                     dense
                                     hide-details
                                     solo
+                                    :disabled="isFileAnalyzing"
                                 />
                             </td>
                             <td>
@@ -494,7 +495,7 @@
                                     dense
                                     hide-details
                                     solo
-                                    :disabled="workspaceBusy"
+                                    :disabled="workspaceBusy || (viewMode === 'file' && isFileAnalyzing)"
                                     @change="onTuneChange(detection)"
                                 />
                             </td>
