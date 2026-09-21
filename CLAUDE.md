@@ -1381,6 +1381,70 @@ them instances of rules this feature had already learned:
    only, never from the reclamation sweeps: a local tidy-up must not destroy the
    user's own Dropbox files.
 
+#### A fifth: "The Dropbox session has changed" on a device that changed nothing
+
+Reported from the field (September 2026) — an iPhone showing a session recorded
+on an iPad, permanently **Backup pending** with *"The Dropbox session has
+changed. No files were overwritten."* and a Retry button that could never
+succeed. Nothing had touched Dropbox.
+
+**The conflict guard tested for DIFFERENCE and called it staleness.** It
+compared the local session record against the copy in `session.json` with
+`JSON.stringify` and treated any inequality as another device having edited the
+cloud copy. Two devices sharing a session through Firestore hold copies that
+differ as a matter of course, and for at least three independent reasons:
+
+- `lastActiveAt` is stamped `Date.now()` on **every** `_persistSession`, so the
+  recording device's record moves on after each backup;
+- `name` and `placeName` are re-derived per device by `_liveSessionLabel` from
+  *that device's* list of places;
+- a Firestore round trip hands the fields back in its own order, and
+  `JSON.stringify` is order-sensitive.
+
+So on the device that did not write the cloud copy — exactly the device the
+feature exists for, the one reading a session it received over Firebase —
+"different" was the ordinary state, and the backup was refused for ever.
+
+The guard had no way to tell which copy was newer, because nothing on the record
+said. `updatedAt` is that field now: stamped by `store.upsertLiveSession` and
+`updateLiveSession`, monotone **per record** (`Math.max(Date.now(), previous + 1)`,
+so a slow clock cannot write a stamp below the copy it just derived from), and
+it rides the Firestore document to every device for free.
+`mayReplaceRemoteSession` refuses only a **strictly newer** cloud copy. A cloud
+copy written before the field existed reads as 0 and is replaceable — which is
+what unsticks an install already in this state, and costs nothing since the
+refresh stamps it.
+
+A genuine conflict now resolves itself rather than sitting there: the device
+holding the newer copy pushes it to Firestore, every device adopts it, and the
+next pass has the newer stamp locally. The irreplaceable half was never what
+this guard protected anyway — the **audio** is immutable segments, protected by
+`backupSession`'s own "Dropbox contains audio absent from this device" check,
+the content-hash verification, and the rev CAS on every upload.
+
+**And one conflicted session took every session behind it down with it.** The
+metadata loop `break`s, where the audio loop above it breaks only on a
+transient, whole-account fault (`auth`/`full`/`rate`/`network`). So the first
+session stuck in conflict silently stopped the rest of the log from syncing at
+all. Same rule in both loops now.
+
+> **Rule: a cross-device guard needs a version, not an equality test.** Firestore
+> arbitrates at the document level and tells a reader nothing about whether the
+> copy in front of it is ahead or behind. Anything comparing two devices' copies
+> has to carry its own stamp.
+
+Three cases in `dropboxIntegration.test.mjs` and one in `liveSessions.test.mjs`.
+Note the first of those has to **clear the receipt**: this device never backed
+the session up itself (it holds the cloud manifest because it *played* the
+audio), and without clearing it the test passes through the "a copy this device
+wrote is its own" shortcut and never reaches the rule it exists to pin — it
+survived the mutation on the first attempt.
+
+Verified by reinstating each bug: the equality-only guard fails 2, the
+unconditional `break` fails 1, dropping the stamp from `upsertLiveSession` fails
+1, from `updateLiveSession` fails 1, and a plain wall clock with no monotonic
+step fails 1.
+
 ### The backup is the only true snapshot, and is tested as one
 
 `app/test/userDataBackup.test.mjs` (14 cases) exists because nothing tested the

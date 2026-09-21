@@ -6,7 +6,7 @@ import store from '@/services/store.js';
 import recorder from '@/services/sessionRecorder.js';
 import { listManifests, readManifest, readSegment, buildClip, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
 import { DropboxClient, DropboxError, base64url } from './dropboxClient.mjs';
-import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateWholeRecordings, validateManifest, validateSession, sessionPath } from './dropboxBackup.mjs';
+import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateWholeRecordings, validateManifest, validateSession, mayReplaceRemoteSession, sessionPath } from './dropboxBackup.mjs';
 
 // Public OAuth identifier, deliberately shipped with the browser app.
 const APP_KEY = process.env.VUE_APP_DROPBOX_APP_KEY || 'zl982bc269ijgda';
@@ -189,13 +189,14 @@ export function syncDropbox(force = false) {
                         status(id, recorder.sessionId === id && recorder.isRecording ? 'Syncing' : 'Backed up'); continue;
                     }
                     status(id, 'Syncing');
-                    // A changed cloud session must never be overwritten by a
+                    // A NEWER cloud session must never be overwritten by a
                     // stale local editor, including after a crash/reconnect.
+                    // Newer, not merely different — see mayReplaceRemoteSession.
                     const remoteSession = await client.json(`${sessionPath(id)}/session.json`);
                     if (remoteSession) {
                         validateSession(remoteSession.value, id);
-                        if (json(remoteSession.value.session) !== json(session) && json(remoteSession.value.session) !== receipt?.session && json(remoteSession.value.session) !== receipt?.pendingSession) {
-                            throw new DropboxError('The Dropbox session has changed. Restore or review that copy before backing up.', 'conflict');
+                        if (!mayReplaceRemoteSession(remoteSession.value.session, session, receipt)) {
+                            throw new DropboxError('A newer version of this session is in Dropbox. Restore or review that copy before backing up.', 'conflict');
                         }
                     }
                     await set(key('receipt', id), { ...receipt, pendingSession: json(session) });
@@ -227,7 +228,7 @@ export function syncDropbox(force = false) {
                     const remote = await client.json(`${root}/session.json`);
                     if (!audio || !remote) throw new DropboxError('Dropbox backup is incomplete. No files were changed.', 'missing');
                     validateManifest(audio.value, id); validateSession(remote.value, id);
-                    if (json(remote.value.session) !== json(session) && json(remote.value.session) !== receipt?.session) throw new DropboxError('The Dropbox session has changed. No files were overwritten.', 'conflict');
+                    if (!mayReplaceRemoteSession(remote.value.session, session, receipt)) throw new DropboxError('A newer version of this session is in Dropbox. No files were overwritten.', 'conflict');
                     // Confirm every immutable segment before claiming a backup.
                     for (const segment of audio.value.segments) {
                         const metadata = await client.metadata(`${root}/${segment.file}`);
@@ -237,7 +238,12 @@ export function syncDropbox(force = false) {
                     await set(key('manifest', id), audio.value);
                     await set(key('receipt', id), { session: json(session), verifiedAt: Date.now() });
                     status(id, 'Backed up'); changed(id);
-                } catch (e) { report(e, id); break; }
+                    // Only a transient, WHOLE-ACCOUNT fault is worth stopping
+                    // the pass for. Breaking on anything — which is what this
+                    // did — let one session's conflict block the metadata sync
+                    // of every session after it, silently and indefinitely.
+                    // Same rule as the audio loop above.
+                } catch (e) { report(e, id); if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break; }
             }
         } catch (e) { report(e); }
         finally { dropboxState.busy = false; }

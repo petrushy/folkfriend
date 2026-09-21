@@ -192,6 +192,25 @@ const KEY_LIVE_SESSIONS = 'liveSessions';
 // session itself is already safely in 'liveSessions'.
 const KEY_OPEN_LIVE_SESSION = 'openLiveSession';
 
+// A version stamp on every session write, and the ONE field that says which of
+// two devices' copies of a session is newer.
+//
+// Firestore carries the record itself between devices, but it arbitrates at the
+// document level and hands nothing down to a reader deciding whether the copy
+// in front of it is ahead of or behind another. Dropbox needs exactly that:
+// without it, its backup compared the two copies whole and read any difference
+// as somebody else having changed the cloud copy — and two devices' copies
+// differ as a matter of course (`lastActiveAt` is stamped on every save, the
+// name and place label are re-derived per device, a Firestore round trip
+// reorders the fields), so a device that received a session over Firebase could
+// never back it up, permanently.
+//
+// Taken as one past the previous value when the clock does not already exceed
+// it, so it is monotone PER RECORD whatever a device's clock says. Wall clock
+// alone would let a device running slow write a stamp below the copy it just
+// derived from, and that device could then never replace it.
+const nextUpdatedAt = previous => Math.max(Date.now(), (Number(previous) || 0) + 1);
+
 class Store {
     constructor() {
         this.state = {
@@ -1218,7 +1237,7 @@ class Store {
 
     async upsertLiveSession(session) {
         if (!session || !session.id) return null;
-        const record = { ...session };
+        const record = { ...session, updatedAt: nextUpdatedAt(session.updatedAt) };
         Object.assign(record, this._liveSessionLabel(record, this.userSettings.geoTagDetections ? await this.getPlaces() : []));
         await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
             const index = sessions.findIndex(s => s.id === record.id);
@@ -1237,7 +1256,7 @@ class Store {
         const record = await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
             const index = sessions.findIndex(s => s.id === sessionID);
             if (index < 0) throw new Error('This session was deleted. Your changes have not been saved.');
-            const updated = { ...sessions[index], ...patch, id: sessionID };
+            const updated = { ...sessions[index], ...patch, id: sessionID, updatedAt: nextUpdatedAt(sessions[index].updatedAt) };
             sessions[index] = updated;
             return { write: true, records: sessions, value: updated };
         }, 'liveSessionsChanged');
