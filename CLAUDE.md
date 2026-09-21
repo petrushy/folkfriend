@@ -1336,6 +1336,68 @@ permanently) and only from `_play()`, which is always a user gesture. The
 **export is not corrected** and the player says so; what fixes the exported file
 is recording one channel in the first place.
 
+#### The channel repair did not reach the device, twice over (September 2026)
+
+Reported from the field after the correction shipped: *"gaps, and only sound in
+the left speaker still"*. Two independent defects, and **neither could be seen
+from the tests**, because the fake decoder was too tidy — the same lesson as the
+container fake and the disabled-track silence.
+
+1. **The probe decoded through a ONE-channel `OfflineAudioContext.`** Per spec
+   the decoding context's channel count does not constrain what
+   `decodeAudioData` returns — the buffer carries the FILE's channels — so
+   `new Offline(1, 1, 44100)` reads as harmless. But WebKit has a long history
+   of remixing decoded data to the decoding context's own configuration, and
+   this probe exists *precisely* to count the file's channels. Where WebKit
+   does remix, a stereo file comes back as one channel, `numberOfChannels > 1`
+   is false, and the probe reports the very recording it was asked to examine
+   as healthy: one speaker, no correction, no explanation. It asks for **two**
+   now, which removes the dependency rather than betting on it — a genuinely
+   mono file still answers mono where the spec is followed, and upmixes to two
+   IDENTICAL channels where it is not, which reads as not-one-sided either way.
+
+   The fake `OfflineAudioContext` ignored its constructor arguments and handed
+   back whatever the test had set, so it could not see this. It models the
+   remix now, and reverting to a one-channel context fails a test.
+
+2. **The repair graph could be built outside a user gesture**, which is the
+   rule this feature had already written down and did not keep:
+   `_probeChannels()` ended by calling `_applyChannelRepair()`, and the probe
+   runs from `reload()` and `refreshManifest()` — neither a gesture. On iOS an
+   `AudioContext` created outside one starts suspended and cannot be resumed
+   without one, and **an element that has been given a
+   `MediaElementAudioSourceNode` outputs through the graph permanently**. So
+   building it there does not merely fail to correct the audio; it can take
+   playback to SILENT for the whole session. The probe records its finding and
+   `_play()` applies it, which is the only caller that is always a gesture.
+
+**A probe that could not answer now says so.** It reported failure to
+`console.debug`, which on an installed iPhone app is unreadable without a Mac
+and a cable — and "nothing to correct" and "could not work out whether to
+correct" sound completely different coming out of a phone. `channelProbeFailed`
+puts one line on screen.
+
+**`play()` rejects with `NotSupportedError` for every reason a clip could not be
+used**, and "Could not play: The operation is not supported." cannot tell them
+apart — it sends anyone reading it to the wrong half of the system. The message
+now carries `audio.error.code` (4 is `SRC_NOT_SUPPORTED`, i.e. *these bytes*,
+not *this situation*) plus the clip's declared container and size, because on
+the one device this matters on there is no console to read them from.
+
+> ⚠️ **Still unexplained: a refused clip mid-track.** A clip that does not begin
+> at a track's first chunk is built as `[init, ...midChunks]`, and whether that
+> plays standalone on iOS is one of the three things this feature has always
+> listed as unmeasured on a device. A refusal there would look exactly like the
+> report. The diagnostic above is what will say whether that is what it is; if
+> it is, the fallback is to build the clip from the track's start, which is
+> what "Export part N" already does and is known to play.
+
+> ⚠️ **Segment boundaries are audible, and over Dropbox they are long.**
+> `onEnded` loads the next segment on demand, which for a cloud recording means
+> a download and a hash verification before any sound — every 180 s, on whatever
+> network the phone has. Prefetching the next segment during playback is the
+> fix and is not built.
+
 **A manual mute silences the RECORDING without stopping detection.** The
 mechanism is `MediaStreamTrack.clone()`: a cloned track shares the microphone
 but carries its own `enabled` flag, and a disabled audio track emits silence by

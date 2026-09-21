@@ -101,6 +101,14 @@
             both speakers; an exported copy of it keeps the original channels.
             Recordings made from now on are corrected as they are recorded.
         </p>
+        <!-- Not cosmetic: one-sided playback with no correction is exactly
+             what this looks like, and without this line it is indistinguishable
+             from a recording that genuinely has nothing to correct. -->
+        <p v-if="channelProbeFailed" class="caption text--secondary mb-0 mt-2">
+            This device could not examine the recording's channels, so playback is
+            not being corrected. If it plays out of one speaker only, an exported
+            copy will too.
+        </p>
 
         </template>
         <audio v-if="manifest"
@@ -156,7 +164,19 @@ async function decodeClip(blob) {
     const Offline = typeof window !== 'undefined' &&
         (window.OfflineAudioContext || window.webkitOfflineAudioContext);
     if (!Offline || !blob || typeof blob.arrayBuffer !== 'function') return null;
-    const ctx = new Offline(1, 1, 44100);
+    // TWO channels, not one. Per spec the context's channel count does not
+    // constrain what decodeAudioData returns — the buffer carries the FILE's
+    // channels — so one would be harmless. But this probe exists precisely to
+    // count the file's channels, and WebKit has a long history of remixing
+    // decoded data to the decoding context's own configuration. If it does,
+    // a stereo file comes back as one channel, `numberOfChannels > 1` is
+    // false, and the probe reports "nothing to fix" about the very recording
+    // it was asked to examine — the one-sided playback it exists to correct,
+    // declared healthy. Asking for two removes the dependency altogether: a
+    // genuinely mono file still answers mono where the spec is followed, and
+    // upmixes to two IDENTICAL channels where it is not, which reads as
+    // not-one-sided either way.
+    const ctx = new Offline(2, 1, 44100);
     const bytes = await blob.arrayBuffer();
     // Safari only grew the promise form in 14.1, and the callback form is still
     // the one it implements most reliably.
@@ -225,6 +245,14 @@ export default {
             channelProbe: null,
             // Whether playback is being corrected for the above.
             channelRepair: false,
+            // The probe could not answer. Distinct from "answered: nothing to
+            // correct", because the two sound entirely different out of a
+            // phone and only one of them is worth telling someone about.
+            channelProbeFailed: false,
+            // What the currently loaded clip actually is, for the failure
+            // message: the container a decode refusal is about.
+            clipMimeType: '',
+            clipBytes: 0,
             icons: { play: mdiPlay, pause: mdiPause },
         };
     },
@@ -396,6 +424,7 @@ export default {
             // an element can only ever have one MediaElementAudioSourceNode.
             this.channelProbe = null;
             this._channelProbeFor = null;
+            this.channelProbeFailed = false;
             this._applyChannelRepair();
             if (!this.sessionId) return;
             const id = this.sessionId;
@@ -556,6 +585,8 @@ export default {
                 }
                 this._revoke();
                 this.objectUrl = URL.createObjectURL(clip.blob);
+                this.clipMimeType = clip.mimeType || (clip.blob && clip.blob.type) || '';
+                this.clipBytes = (clip.blob && clip.blob.size) || 0;
                 this.segmentIndex = segment.index;
                 this.segmentStartSeconds = clip.startSeconds;
                 this._segmentDurationSeconds = (clip.endSeconds - clip.startSeconds) || 0;
@@ -634,11 +665,27 @@ export default {
                     oneSided: buffer.numberOfChannels > 1 &&
                         loudest > SILENT_CHANNEL_RMS && quietest <= SILENT_CHANNEL_RMS,
                 };
-                this._applyChannelRepair();
+                this.channelProbeFailed = false;
+                // NOT _applyChannelRepair(). This runs from reload() and from
+                // refreshManifest(), neither of which is a user gesture, and
+                // building the graph needs an AudioContext: on iOS one created
+                // outside a gesture starts suspended and cannot be resumed
+                // without one. Since an element that has been given a
+                // MediaElementAudioSourceNode outputs through the graph
+                // permanently, building it here does not merely fail to
+                // correct the audio — it can take playback to silent, for the
+                // whole session, with nothing on screen to explain it.
+                //
+                // The finding is recorded and _play() applies it, which is the
+                // rule this file already states and is the only caller that is
+                // always a gesture.
             } catch (e) {
-                // Not knowing is a perfectly good answer here: the probe only
-                // ever adds a correction, so a failed one costs the correction
-                // and nothing else.
+                // The correction is all that is lost, so playback continues —
+                // but NOT silently. "No correction needed" and "the correction
+                // could not be worked out" sound completely different coming
+                // out of a phone, and console.debug is unreadable on the
+                // device this feature is used on.
+                this.channelProbeFailed = true;
                 console.debug('Could not probe recording channels:', e && e.message);
             }
         },
@@ -744,8 +791,29 @@ export default {
             this._applyChannelRepair();
             const started = audio.play();
             if (started && started.catch) {
-                started.catch(e => { this.error = `Could not play: ${(e && e.message) || e}`; });
+                started.catch(e => { this.error = `Could not play: ${this._playFailureDetail(audio, e)}`; });
             }
+        },
+
+        // play() rejects with NotSupportedError — "The operation is not
+        // supported" — for every reason the element could not use the clip,
+        // and that message alone cannot tell them apart. The element's own
+        // error code can: DECODE (4 is SRC_NOT_SUPPORTED) says the bytes are
+        // not something this browser will play, which is a different problem
+        // from a refused autoplay and needs a different answer.
+        //
+        // The clip's declared type and size go in the same line because they
+        // are what decides it, and because the one device this matters on is
+        // a phone with no console to read.
+        _playFailureDetail(audio, e) {
+            const base = (e && e.message) || String(e);
+            const code = audio.error && audio.error.code;
+            const KINDS = { 1: 'aborted', 2: 'network', 3: 'decode', 4: 'format not supported' };
+            const parts = [];
+            if (code) parts.push(KINDS[code] || `media error ${code}`);
+            if (this.clipMimeType) parts.push(this.clipMimeType);
+            if (this.clipBytes) parts.push(`${Math.round(this.clipBytes / 1024)} kB`);
+            return parts.length ? `${base} (${parts.join(', ')})` : base;
         },
 
         async togglePlay() {
