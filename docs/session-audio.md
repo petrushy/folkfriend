@@ -45,6 +45,63 @@ gained the tune — and below 64 kbps that starts to suffer. `audioBitsPerSecond
 is a hint the encoder may ignore, so what it settled on is read back off the
 recorder, in the manner of `micService.appliedAudioSettings`.
 
+## Channels: mono is a request, not a default
+
+A recording that plays out of one speaker is not a playback bug, and it is not
+what "mono" means. It is what happens when a device reports **two** input
+channels and fills only the first: the file is stereo by every label on it, so
+every player faithfully sends its silent half to the right speaker. A file that
+really is one channel is played through both speakers by every player there is.
+
+So `audioConstraints()` in `mic.js` asks for a channel count **explicitly**, and
+asking for one matters as much as asking for two. Left unconstrained the browser
+hands through whatever the device reports, which is the failure above. Analysis
+is unaffected either way — the `ScriptProcessorNode` has one input channel, so
+it downmixes whatever it is given.
+
+Stereo is opt-in (Settings → Session Recording), because it is only worth having
+on a device that genuinely captures two channels and it splits the same bitrate
+across both, so 64 kbps stereo sounds worse than 64 kbps mono.
+
+Three rules follow, each pinned by a test:
+
+- **The manifest records what the TRACK reported, never the setting.** Asking
+  for two channels on a device that captures one produces a mono file, and a
+  player that described it as stereo would be repeating a request back to the
+  user as a fact. Same rule, and the same reason, as
+  `micService.appliedAudioSettings` and the container in `_recordActualFormat`.
+- **The channel count belongs to the track**, like the container: the setting
+  can be changed between two listening stretches of one session, and a clip
+  never spans a track. The session-level value is only ever the first track's.
+- **A recording made before any of this has no channel count**, and is described
+  as unknown rather than guessed at.
+
+### Correcting a recording that is already one-sided
+
+The stored bytes of an existing recording are what they are, so the player
+measures rather than trusts: `_probeChannels()` decodes the first few seconds
+(an `OfflineAudioContext`, which needs no user gesture) and compares the
+channels' RMS. Two channels where one carries signal and the other is exactly
+dead is the one-sided case; two quiet channels is a quiet recording, and
+"correcting" that would be a claim about audio nobody has heard yet.
+
+When it is one-sided, playback is routed through a gain node with
+`channelCountMode: 'explicit'` and one channel, which downmixes to mono and
+back out to both speakers, at `gain: 2` — the downmix is `(L + R) / 2` and R is
+zero, so the product is exactly L rather than 6 dB below it.
+
+Two things this must not do, both in the code:
+
+- **Never build the graph speculatively.** Once an element has a
+  `MediaElementAudioSourceNode` its sound comes out of the graph rather than the
+  element, permanently, so it is built only when the probe has said it is needed
+  — and from `_play()`, which is always a user gesture, so iOS starts the
+  context running.
+- **Never present the correction as covering the export.** It does not: an
+  exported copy of a one-sided recording keeps its original channels, and the
+  player says so. Recordings made from now on are one channel at the source,
+  which is what makes the exported file play through both speakers.
+
 ## Storage: the user's call, above one reserve that is not
 
 Browsers evict per **origin**. An audio store that fills the quota takes the

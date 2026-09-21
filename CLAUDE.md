@@ -1307,6 +1307,35 @@ Where playback STARTS is a separate question, answered by the persisted
 above. Only a session recorded before that existed falls back to a fixed offset,
 and that fallback is half the default window, not the old 12 s.
 
+**A recording that plays out of one speaker is a CAPTURE bug, not a playback
+one** (September 2026). A device that reports two input channels and fills only
+the first produces a file that is stereo by every label on it, so every player
+faithfully sends its silent half to the right speaker — and nothing in the app
+looks wrong, because analysis downmixes whatever it is given (the
+`ScriptProcessorNode` has one input channel). `audioConstraints()` therefore
+asks for a channel count **explicitly**, and asking for **one** matters as much
+as asking for two: a file that really is one channel is played through both
+speakers by every player there is. Stereo is opt-in
+(`userSettings.sessionAudioStereo`), since it splits the same bitrate across two
+channels.
+
+The manifest records what the **track** reported rather than what was asked for,
+per track (the setting can change between two stretches of one session, exactly
+as the container can), and a recording made before this has no channel count and
+is described as unknown rather than guessed at.
+
+An existing one-sided recording cannot be fixed in its stored bytes, so the
+player measures instead: `_probeChannels()` decodes the first few seconds
+through an `OfflineAudioContext` and, when one channel carries signal and the
+other is exactly dead, routes playback through a `channelCountMode: 'explicit'`
+mono gain node at `gain: 2` — the downmix is `(L + R) / 2` with R at zero, so
+the product is exactly L. Two quiet channels is a quiet recording, not a
+one-sided one. The graph is **never built speculatively** (an element that has
+been given a `MediaElementAudioSourceNode` outputs through the graph
+permanently) and only from `_play()`, which is always a user gesture. The
+**export is not corrected** and the player says so; what fixes the exported file
+is recording one channel in the first place.
+
 **A manual mute silences the RECORDING without stopping detection.** The
 mechanism is `MediaStreamTrack.clone()`: a cloned track shares the microphone
 but carries its own `enabled` flag, and a disabled audio track emits silence by
