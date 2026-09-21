@@ -55,7 +55,7 @@ const store = {
     searchStates,
     searchState: searchStates.READY,
     state: {},
-    userSettings: { autoGainControl: false, recordingTimeLimitSecs: 10 },
+    userSettings: { autoGainControl: false, recordingTimeLimitSecs: 10, sessionAudioStereo: false },
     setSearchState(s) { this.searchState = s; },
     isReady() { return this.searchState === searchStates.READY; },
     isRecording() { return this.searchState === searchStates.RECORDING; },
@@ -354,6 +354,59 @@ await test('what the device actually applied is recorded, not what was asked', a
         'a browser that will not say must not be shown as "off"');
     assert.equal(mic.appliedAudioSettings.sampleRate, 44100);
 
+    await mic.stopContinuous();
+});
+
+await test('one channel is asked for explicitly, not left to the device', async () => {
+    // The default is the load-bearing half. Left unconstrained, a device that
+    // reports two input channels hands both to the encoder — and when only the
+    // first carries sound (the normal shape of a phone's "stereo" input) the
+    // recording plays out of one speaker while every meter looks healthy.
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+
+    assert.equal(env.gumConstraints[0].audio.channelCount, 1);
+    assert.equal(typeof env.gumConstraints[0].audio.channelCount, 'number',
+        'an ideal constraint, not an {exact: …} requirement that could fail the open');
+
+    await mic.stopContinuous();
+});
+
+await test('stereo is asked for when the user turns it on', async () => {
+    const { mic, store } = await loadMic();
+    store.userSettings.sessionAudioStereo = true;
+    try {
+        await mic.startContinuous(10);
+        assert.equal(env.gumConstraints[0].audio.channelCount, 2);
+        await mic.stopContinuous();
+    } finally {
+        store.userSettings.sessionAudioStereo = false;
+    }
+});
+
+await test('the channel count is read from the track, never from the setting', async () => {
+    // Asking for two channels on a device that captures one produces a mono
+    // file, and the manifest is written from this — so a recording must never
+    // be described as stereo on the strength of a request.
+    const { mic, store } = await loadMic();
+    store.userSettings.sessionAudioStereo = true;
+    env.appliedSettings = { ...env.appliedSettings, channelCount: 1 };
+    try {
+        await mic.startContinuous(10);
+        assert.equal(mic.appliedAudioSettings.channelCount, 1);
+        assert.equal(mic.recordingChannelCount, 1, 'what the device did, not what was asked');
+        await mic.stopContinuous();
+    } finally {
+        store.userSettings.sessionAudioStereo = false;
+    }
+});
+
+await test('a browser that will not report its channel count says so', async () => {
+    const { mic } = await loadMic();
+    // No channelCount key at all — which is "not reported", not "one".
+    await mic.startContinuous(10);
+    assert.equal(mic.recordingChannelCount, null);
+    assert.equal(mic.appliedAudioSettings.channelCount, undefined);
     await mic.stopContinuous();
 });
 

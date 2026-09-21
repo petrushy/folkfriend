@@ -261,12 +261,18 @@ async function withSession(sessionId, fn) {
     return next;
 }
 
-export function createManifest({ sessionId, mimeType, bitsPerSecond }) {
+export function createManifest({ sessionId, mimeType, bitsPerSecond, channels = null }) {
     return {
         schema: AUDIO_SCHEMA_VERSION,
         sessionId,
         mimeType: mimeType || '',
         bitsPerSecond: bitsPerSecond || 0,
+        // How many channels the encoder is being fed, as the TRACK reported it
+        // rather than as it was requested. Null means the browser would not
+        // say, which is a different answer from "one" and must not be shown as
+        // one. Additive: a recording made before this existed has no value
+        // here, and is described as unknown rather than guessed at.
+        channels: channels || null,
         timesliceMs: TIMESLICE_MS,
         createdAt: Date.now(),
         updatedAt: Date.now(),
@@ -554,6 +560,10 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     return {
         blob: new Blob(parts, { type: mimeType || 'application/octet-stream' }),
         mimeType,
+        // Per track for the same reason as the container: a session resumed
+        // after the user changed the stereo setting has tracks that genuinely
+        // differ, and a clip never spans one.
+        channels: track.channels || manifest.channels || null,
         startSeconds: clipStart,
         endSeconds: clipEnd,
         trackIndex,

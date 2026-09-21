@@ -46,8 +46,16 @@ const FAKE_AUDIO_STORE = `
 export let __manifest = null;
 export function __setManifest(m) { __manifest = m; }
 export async function playbackReadManifest() { return __manifest; }
-export async function buildClip() { return null; }
-export function trackRanges() { return []; }
+export let __clip = null;
+export function __setClip(c) { __clip = c; }
+export const __clipCalls = [];
+export async function buildClip(sessionId, from, to) {
+    __clipCalls.push([sessionId, from, to]);
+    return __clip;
+}
+export let __tracks = [];
+export function __setTracks(t) { __tracks = t; }
+export function trackRanges() { return __tracks; }
 export function formatBytes(n) { return String(n); }
 export function fileExtensionFor() { return 'm4a'; }`;
 
@@ -98,6 +106,100 @@ async function mountPlayer(manifest) {
 
 // One saved stretch, then a hole where a segment could not be stored, then
 // recording resumed.
+// --- a fake Web Audio surface ---------------------------------------------
+//
+// Only what the channel probe and the playback repair touch: decoding a few
+// seconds to PCM (which needs no user gesture, hence an OfflineAudioContext),
+// and a gain node in front of the destination.
+
+const audioEnv = {
+    decoded: null,          // the AudioBuffer decodeAudioData resolves
+    decodeError: null,      // or the error it rejects with
+    contexts: [],
+    sourceNodes: 0,
+};
+
+function fakeBuffer(channels) {
+    return {
+        numberOfChannels: channels.length,
+        getChannelData: (i) => channels[i],
+    };
+}
+
+// A channel carrying music, and one that is exactly dead.
+const LOUD = Float32Array.from({ length: 512 }, (_, i) => Math.sin(i / 4) * 0.4);
+const DEAD = new Float32Array(512);
+// Not silent, just recorded in a quiet room: still orders of magnitude above
+// the threshold.
+const QUIET = Float32Array.from({ length: 512 }, (_, i) => Math.sin(i / 4) * 0.002);
+
+class FakeOfflineAudioContext {
+    decodeAudioData(bytes, ok, fail) {
+        setTimeout(() => {
+            if (audioEnv.decodeError) fail(audioEnv.decodeError);
+            else ok(audioEnv.decoded);
+        }, 0);
+    }
+}
+
+class FakeGain {
+    constructor() {
+        this.channelCount = 2;
+        this.channelCountMode = 'max';
+        this.channelInterpretation = 'speakers';
+        this.gain = { value: 1 };
+        this.connectedTo = null;
+    }
+    connect(node) { this.connectedTo = node; }
+}
+
+class FakeAudioContext {
+    constructor() {
+        this.state = 'running';
+        this.destination = { id: 'destination' };
+        this.gains = [];
+        audioEnv.contexts.push(this);
+    }
+    createMediaElementSource() {
+        audioEnv.sourceNodes++;
+        return { connect: (node) => { this.sourceTarget = node; } };
+    }
+    createGain() { const g = new FakeGain(); this.gains.push(g); return g; }
+    resume() { return Promise.resolve(); }
+    close() { this.state = 'closed'; return Promise.resolve(); }
+}
+
+globalThis.window = {
+    OfflineAudioContext: FakeOfflineAudioContext,
+    AudioContext: FakeAudioContext,
+};
+
+function resetAudioEnv() {
+    audioEnv.decoded = null;
+    audioEnv.decodeError = null;
+    audioEnv.contexts = [];
+    audioEnv.sourceNodes = 0;
+}
+
+// A player sitting on a recording whose decoded audio is `channels`.
+async function mountProbed(channels, { manifestChannels = null } = {}) {
+    resetAudioEnv();
+    const vm = await mountPlayer({
+        sessionId: 's1',
+        totalSeconds: 180,
+        mimeType: 'audio/mp4',
+        channels: manifestChannels,
+        tracks: [{ index: 0, startSeconds: 0, durationSeconds: 180 }],
+        segments: [{ index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 180 }],
+    });
+    store.__setTracks([{ index: 0, startSeconds: 0, endSeconds: 180, durationSeconds: 180 }]);
+    store.__setClip({ blob: new Blob(['audio']), mimeType: 'audio/mp4', startSeconds: 0, endSeconds: 4 });
+    if (channels) audioEnv.decoded = fakeBuffer(channels);
+    vm.$refs.audio = { play: () => Promise.resolve(), pause() {} };
+    await vm._probeChannels();
+    return vm;
+}
+
 const GAPPY = {
     sessionId: 's1',
     totalSeconds: 540,
@@ -310,6 +412,90 @@ await test('audio that matches the manifest is not scaled at all', async () => {
     assert.equal(vm.driftRatio, 1);
     vm._seekWithin(60);
     assert.equal(seeks[seeks.length - 1], 60);
+});
+
+console.log('\nSessionAudioPlayer — a recording that plays out of one speaker');
+
+await test('a dead second channel is measured, not taken from the manifest', async () => {
+    // The manifest says two channels and is telling the truth; the file is
+    // stereo by every label on it. What makes it play out of one speaker is
+    // what the second channel CONTAINS, which only decoding can answer.
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    assert.deepEqual(vm.channelProbe, { channels: 2, oneSided: true });
+    assert.equal(vm.channelsLabel, 'one channel only');
+});
+
+await test('playback of a one-sided recording is downmixed to both speakers', async () => {
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    vm._play();
+
+    assert.equal(audioEnv.sourceNodes, 1, 'the element was routed through the graph');
+    const mix = audioEnv.contexts[0].gains[0];
+    assert.equal(mix.channelCount, 1);
+    assert.equal(mix.channelCountMode, 'explicit', 'this is what forces the downmix');
+    // (L + R) / 2 with R silent would cost 6 dB; with R at zero this is exactly L.
+    assert.equal(mix.gain.value, 2);
+    assert.equal(mix.connectedTo, audioEnv.contexts[0].destination);
+    assert.equal(vm.channelRepair, true);
+});
+
+await test('a real stereo recording is never touched', async () => {
+    // Once an element has a MediaElementAudioSourceNode its sound comes out of
+    // the graph rather than the element, permanently — so the graph must never
+    // be built speculatively.
+    const vm = await mountProbed([LOUD, LOUD], { manifestChannels: 2 });
+    assert.equal(vm.channelProbe.oneSided, false);
+    assert.equal(vm.channelsLabel, 'stereo');
+    vm._play();
+    assert.equal(audioEnv.sourceNodes, 0, 'no graph was built');
+    assert.equal(vm.channelRepair, false);
+});
+
+await test('a quietly recorded room is not mistaken for a dead channel', async () => {
+    // Both channels below the threshold is a quiet recording, not a one-sided
+    // one. "Correcting" it would be a claim about audio nobody has heard yet.
+    const vm = await mountProbed([DEAD, DEAD], { manifestChannels: 2 });
+    assert.equal(vm.channelProbe.oneSided, false);
+    // And a genuinely quiet one really is stereo.
+    const quiet = await mountProbed([QUIET, QUIET], { manifestChannels: 2 });
+    assert.equal(quiet.channelProbe.oneSided, false);
+    assert.equal(quiet.channelsLabel, 'stereo');
+});
+
+await test('a mono recording needs no correction at all', async () => {
+    // Which is the whole point of recording mono: one channel is played
+    // through both speakers by every player there is.
+    const vm = await mountProbed([LOUD], { manifestChannels: 1 });
+    assert.equal(vm.channelProbe.oneSided, false);
+    assert.equal(vm.channelsLabel, 'mono');
+    vm._play();
+    assert.equal(audioEnv.sourceNodes, 0);
+});
+
+await test('a browser that cannot decode leaves playback exactly as it was', async () => {
+    // Not knowing is a perfectly good answer: the probe only ever ADDS a
+    // correction, so a failed one costs the correction and nothing else.
+    const vm = await mountProbed(null, { manifestChannels: 2 });
+    audioEnv.decodeError = new Error('unsupported');
+    vm._channelProbeFor = null;
+    await vm._probeChannels();
+
+    assert.equal(vm.channelProbe, null);
+    assert.equal(vm.channelsLabel, 'stereo', 'the manifest still answers what it can');
+    vm._play();
+    assert.equal(audioEnv.sourceNodes, 0);
+    assert.equal(vm.channelRepair, false);
+});
+
+await test('the probe runs once per session, not on every manifest refresh', async () => {
+    // A live session re-reads its manifest every few seconds, and decoding
+    // audio on each of those would be a real cost for an answer that cannot
+    // change.
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    const calls = store.__clipCalls.length;
+    await vm._probeChannels();
+    await vm._probeChannels();
+    assert.equal(store.__clipCalls.length, calls, 'no further decoding');
 });
 
 await rm(tmpDir, { recursive: true, force: true });
