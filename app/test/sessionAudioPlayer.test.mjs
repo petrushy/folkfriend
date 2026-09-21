@@ -117,6 +117,9 @@ const audioEnv = {
     decodeError: null,      // or the error it rejects with
     contexts: [],
     sourceNodes: 0,
+    // WebKit-style: remix the decoded buffer down to the decoding context's
+    // own channel count.
+    remixToContext: false,
 };
 
 function fakeBuffer(channels) {
@@ -133,11 +136,26 @@ const DEAD = new Float32Array(512);
 // the threshold.
 const QUIET = Float32Array.from({ length: 512 }, (_, i) => Math.sin(i / 4) * 0.002);
 
+// Models the WebKit behaviour the probe must not depend on: decoded data
+// remixed to the DECODING CONTEXT's channel count rather than kept at the
+// file's. A fake that hands back whatever the test set, whatever the context
+// was built with, cannot see a probe that decodes through a one-channel
+// context — it echoes the answer the test wanted, exactly as the container
+// fake once echoed back the requested mimeType.
 class FakeOfflineAudioContext {
+    constructor(channels) { this.channelCount = channels; }
     decodeAudioData(bytes, ok, fail) {
         setTimeout(() => {
-            if (audioEnv.decodeError) fail(audioEnv.decodeError);
-            else ok(audioEnv.decoded);
+            if (audioEnv.decodeError) { fail(audioEnv.decodeError); return; }
+            const decoded = audioEnv.decoded;
+            if (decoded && audioEnv.remixToContext &&
+                decoded.numberOfChannels > this.channelCount) {
+                const kept = [];
+                for (let i = 0; i < this.channelCount; i++) kept.push(decoded.getChannelData(i));
+                ok(fakeBuffer(kept));
+                return;
+            }
+            ok(decoded);
         }, 0);
     }
 }
@@ -179,11 +197,16 @@ function resetAudioEnv() {
     audioEnv.decodeError = null;
     audioEnv.contexts = [];
     audioEnv.sourceNodes = 0;
+    audioEnv.remixToContext = false;
 }
 
 // A player sitting on a recording whose decoded audio is `channels`.
-async function mountProbed(channels, { manifestChannels = null } = {}) {
+async function mountProbed(channels, { manifestChannels = null, remixToContext = false } = {}) {
     resetAudioEnv();
+    // AFTER the reset, which is what wipes it — setting it at the call site
+    // before mountProbed() leaves the flag off and the test passes against
+    // the bug it exists to catch.
+    audioEnv.remixToContext = remixToContext;
     const vm = await mountPlayer({
         sessionId: 's1',
         totalSeconds: 180,
@@ -497,6 +520,73 @@ await test('the probe runs once per session, not on every manifest refresh', asy
     await vm._probeChannels();
     assert.equal(store.__clipCalls.length, calls, 'no further decoding');
 });
+
+
+await test('a one-sided recording is still found when decoding remixes to the context', async () => {
+    // WebKit has a long history of remixing decoded data to the DECODING
+    // context's channel count. Decoding through a one-channel context then
+    // hands back one channel whatever the file holds — so the probe counts one
+    // channel, concludes there is nothing to correct, and reports the very
+    // recording it was asked to examine as healthy. The symptom is silent and
+    // permanent: one speaker, no explanation, no correction.
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2, remixToContext: true });
+    assert.equal(vm.channelProbe.channels, 2, 'the FILE has two channels');
+    assert.equal(vm.channelProbe.oneSided, true, 'and one of them is dead');
+});
+
+await test('the probe never builds the audio graph — only a user gesture does', async () => {
+    // _probeChannels() runs from reload() and refreshManifest(), neither of
+    // which is a gesture. On iOS an AudioContext built outside one starts
+    // suspended and cannot be resumed without one — and an element that has
+    // been given a MediaElementAudioSourceNode outputs through the graph
+    // PERMANENTLY. So building it here does not merely fail to correct the
+    // audio, it can take playback to silent for the whole session.
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    assert.equal(vm.channelProbe.oneSided, true, 'the finding is recorded');
+    assert.equal(audioEnv.sourceNodes, 0, 'but nothing was routed through a graph');
+    assert.equal(audioEnv.contexts.length, 0, 'and no AudioContext was created');
+
+    vm._play();
+    assert.equal(audioEnv.sourceNodes, 1, 'the gesture is what applies it');
+    assert.equal(vm.channelRepair, true);
+});
+
+await test('a probe that could not answer says so rather than going quiet', async () => {
+    // "Nothing to correct" and "could not work out whether to correct" sound
+    // completely different coming out of a phone, and console.debug is
+    // unreadable on the device this feature is used on.
+    const vm = await mountProbed(null, { manifestChannels: 2 });
+    audioEnv.decodeError = new Error('unsupported');
+    vm._channelProbeFor = null;
+    await vm._probeChannels();
+    assert.equal(vm.channelProbeFailed, true);
+    assert.equal(vm.channelRepair, false, 'and playback is left exactly as it was');
+
+    // A probe that DID answer never shows it, whatever the answer was.
+    const fine = await mountProbed([LOUD, LOUD], { manifestChannels: 2 });
+    assert.equal(fine.channelProbeFailed, false);
+});
+
+await test('a refused clip reports WHICH failure, not just "not supported"', async () => {
+    // play() rejects with NotSupportedError for every reason the element could
+    // not use the clip. That message alone sends anyone reading it to the
+    // wrong half of the system; the element's own error code and the clip's
+    // container are what decide it.
+    const vm = await mountProbed([LOUD, LOUD], { manifestChannels: 2 });
+    vm.clipMimeType = 'audio/mp4';
+    vm.clipBytes = 2048;
+    vm.$refs.audio = {
+        error: { code: 4 },
+        play: () => Promise.reject(new Error('The operation is not supported.')),
+        pause() {},
+    };
+    vm._play();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(vm.error.includes('format not supported'), vm.error);
+    assert.ok(vm.error.includes('audio/mp4'), vm.error);
+    assert.ok(vm.error.includes('2 kB'), vm.error);
+});
+
 
 await rm(tmpDir, { recursive: true, force: true });
 
