@@ -390,18 +390,16 @@ await test('a deletion on one device is not undone by another', async () => {
         'it adopted the exclusion, so later passes need no listing at all');
 });
 
-await test('a settled account makes no request to find out about deletions', async () => {
-    // The marker is read once per pass and only when the pass is about to
-    // upload something. syncDropbox() runs every thirty seconds for as long as
-    // the app is open, so a listing on every one of them would be a request a
-    // minute, for ever, about nothing.
+await test('settled timer passes throttle deletion checks, while manual retries reconcile', async () => {
     const { f, api } = await load();
     await api.syncDropbox(true);
     let listings = 0;
     const list = f.client.list.bind(f.client);
     f.client.list = async (path) => { listings++; return list(path); };
-    await api.syncDropbox(true);
+    await api.syncDropbox();
     assert.equal(listings, 0);
+    await api.syncDropbox(true);
+    assert.equal(listings, 1);
 });
 
 await test('turning backup back on clears the shared marker too', async () => {
@@ -609,4 +607,78 @@ await test('legacy manifest cannot finalize while the recorder still owns it', a
     f.recorder.sessionId = null; f.recorder.isActive = false; f.recorder.isRecording = false;
     await api.syncDropbox(true);
     assert.equal(f.client.writes.filter(p => p.startsWith('/recordings/')).length, 1);
+});
+
+// Node's Web Locks represent tabs of ONE origin. These scenarios represent
+// separate devices, which cannot share that lock.
+async function separateDevices(action) {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { value: {}, configurable: true });
+    try { await action(); }
+    finally {
+        if (descriptor) Object.defineProperty(globalThis, 'navigator', descriptor);
+        else delete globalThis.navigator;
+    }
+}
+
+await test('an upload that already read the deletion state cleans up after a concurrent delete', () => separateDevices(async () => {
+    const a = await load(); await a.api.syncDropbox(true);
+    const b = await load({ shareWith: a.f });
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const paused = new Promise(resolve => { entered = resolve; });
+    const read = a.f.client.json.bind(a.f.client);
+    let hold = true;
+    a.f.client.json = async path => {
+        const result = await read(path);
+        if (hold && path === '/deleted/s1.json') {
+            hold = false; entered(); await gate;
+        }
+        return result;
+    };
+    const uploading = b.api.syncDropbox(true);
+    await paused;
+    await a.api.deleteDropboxCopy('s1');
+    release(); await uploading;
+    assert.deepEqual([...a.f.client.files.keys()], ['/deleted/s1.json']);
+    assert.equal(b.api.backupStatus('s1'), 'Local only');
+    assert.equal(b.f.deletedLocal.length, 0);
+}));
+
+await test('a whole-file upload finishing after its inventory was deleted is removed too', () => separateDevices(async () => {
+    const a = await load(); await a.api.syncDropbox(true);
+    a.f.sessions[0].endedAt = 2;
+    const b = await load({ shareWith: a.f });
+    let release, entered;
+    const gate = new Promise(resolve => { release = resolve; });
+    const paused = new Promise(resolve => { entered = resolve; });
+    const upload = a.f.client.uploadLarge.bind(a.f.client);
+    a.f.client.uploadLarge = async (...args) => { entered(); await gate; return upload(...args); };
+    const uploading = b.api.setWholeRecordings(true);
+    await paused;
+    await a.api.deleteDropboxCopy('s1');
+    release(); await uploading;
+    assert.deepEqual([...a.f.client.files.keys()], ['/deleted/s1.json']);
+    assert.equal(b.api.backupStatus('s1'), 'Local only');
+}));
+
+await test('a later pass cleans crashed-upload residue even without a local session or inventory', async () => {
+    const { f, api } = await load(); await api.syncDropbox(true);
+    await api.deleteDropboxCopy('s1');
+    // Bytes a different uploader committed after the delete, then crashed.
+    await f.client.upload('/sessions/s1/segments/000000.m4a', new Blob(['late']));
+    await f.client.upload('/recordings/late [s1-track-0].m4a', new Blob(['late']));
+    await f.client.upload('/recordings/legacy.m4a', new Blob(['unowned']));
+    f.sessions = []; f.locals = [];
+    await api.syncDropbox(true);
+    assert.deepEqual([...f.client.files.keys()].sort(), ['/deleted/s1.json', '/recordings/legacy.m4a']);
+});
+
+await test('unreadable or unknown deletion markers never authorize cleanup', async () => {
+    const { f, api } = await load(); await api.syncDropbox(true);
+    await f.client.upload('/deleted/s1.json', new Blob(['{"schema":99}']));
+    f.client.deletes = [];
+    await api.syncDropbox(true);
+    assert.deepEqual(f.client.deletes, []);
+    assert.ok(f.client.files.has('/sessions/s1/audio-manifest.json'));
 });
