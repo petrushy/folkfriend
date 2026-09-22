@@ -47,6 +47,7 @@ export function setWholeRecordings(enabled) {
 const client = new DropboxClient({ token: () => dropboxState.enabled ? auth : null });
 let queue = Promise.resolve();
 let retryAt = 0;
+let deletionCheckAt = 0;
 const serialize = fn => {
     // Coordinate tabs where Web Locks is available; revision checks remain the
     // protection against other devices and browsers without Web Locks.
@@ -192,23 +193,14 @@ export function syncDropbox(force = false) {
             dropboxState.error = '';
             const sessions = await store.getLiveSessionsStrict();
             const manifests = await listManifests();
-            // Deletions another device recorded. Read LAZILY — once per pass,
-            // and only when this pass is actually about to upload something —
-            // because the steady state of a backed-up account makes no
-            // requests at all and it must stay that way: syncDropbox() runs
-            // every thirty seconds for as long as the app is open.
-            let deletions = null;
-            const deletedElsewhere = async id => {
-                if (!deletions) deletions = await client.deletedSessions();
-                if (!deletions.has(id)) return false;
-                // Adopt it here too. This device is the one that would have
-                // re-uploaded, so the exclusion belongs on it — and once it is
-                // written, later passes short-circuit before the listing.
-                await set(key('excluded', id), true);
-                status(id, 'Local only');
-                changed(id);
-                return true;
-            };
+            // A crashed uploader may leave files behind AFTER another device
+            // deleted them. Reconcile tombstones even for locally excluded or
+            // missing sessions. Ordinary timer passes poll at most every 5 min.
+            if (force || Date.now() >= deletionCheckAt) {
+                const deleted = await client.deletedSessions();
+                for (const id of deleted) await reconcileDeletedSession(id);
+                deletionCheckAt = Date.now() + 300000;
+            }
             for (const local of manifests) {
                 if (!dropboxState.enabled) break;
                 const id = local.sessionId;
@@ -220,7 +212,7 @@ export function syncDropbox(force = false) {
                     if (receipt?.fingerprint === fingerprint && receipt.verifiedAt > Date.now() - 300000) {
                         status(id, recorder.sessionId === id && recorder.isRecording ? 'Syncing' : 'Backed up'); continue;
                     }
-                    if (await deletedElsewhere(id)) continue;
+                    if (await reconcileDeletedSession(id)) continue;
                     status(id, 'Syncing');
                     // A NEWER cloud session must never be overwritten by a
                     // stale local editor, including after a crash/reconnect.
@@ -239,6 +231,7 @@ export function syncDropbox(force = false) {
                     // be committing its tail after that record is saved.
                     if (dropboxState.wholeRecordings && session.endedAt &&
                         (local.finalizedAt === null || (recorder.sessionId === id && recorder.isActive))) {
+                        if (await reconcileDeletedSession(id)) continue;
                         status(id, 'Syncing');
                         continue; // No receipt: retry after the final write.
                     }
@@ -250,10 +243,16 @@ export function syncDropbox(force = false) {
                             fileExtensionFor, await get(key('whole', id)) || []);
                         if (paths.length) await set(key('whole', id), paths);
                     }
+                    if (await reconcileDeletedSession(id)) continue;
                     await set(key('receipt', id), { fingerprint, session: json(session), verifiedAt: Date.now() });
                     noteConflict(id, '');
                     status(id, recorder.sessionId === id && recorder.isRecording ? 'Syncing' : 'Backed up'); changed(id);
-                } catch (e) { report(e, id); if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break; }
+                } catch (e) {
+                    try { if (await reconcileDeletedSession(id)) continue; }
+                    catch (cleanupError) { e = cleanupError; }
+                    report(e, id);
+                    if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break;
+                }
             }
             for (const session of sessions) {
                 const id = session.id;
@@ -263,7 +262,7 @@ export function syncDropbox(force = false) {
                 try {
                     const receipt = await get(key('receipt', id));
                     if (receipt?.session === json(session) && receipt.verifiedAt > Date.now() - 300000) continue;
-                    if (await deletedElsewhere(id)) continue;
+                    if (await reconcileDeletedSession(id)) continue;
                     status(id, 'Syncing');
                     const root = sessionPath(id);
                     const audio = await client.json(`${root}/audio-manifest.json`);
@@ -278,6 +277,7 @@ export function syncDropbox(force = false) {
                     }
                     await client.upload(`${root}/session.json`, new Blob([json({ schema: 1, session })]), remote);
                     await set(key('manifest', id), audio.value);
+                    if (await reconcileDeletedSession(id)) continue;
                     await set(key('receipt', id), { session: json(session), verifiedAt: Date.now() });
                     noteConflict(id, '');
                     status(id, 'Backed up'); changed(id);
@@ -286,7 +286,12 @@ export function syncDropbox(force = false) {
                     // did — let one session's conflict block the metadata sync
                     // of every session after it, silently and indefinitely.
                     // Same rule as the audio loop above.
-                } catch (e) { report(e, id); if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break; }
+                } catch (e) {
+                    try { if (await reconcileDeletedSession(id)) continue; }
+                    catch (cleanupError) { e = cleanupError; }
+                    report(e, id);
+                    if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break;
+                }
             }
         } catch (e) { report(e); }
         finally { dropboxState.busy = false; }
@@ -363,6 +368,61 @@ export async function restoreDropboxSessions() {
         return count;
     });
 }
+// Called within the coordinator queue, never by entering it again. A marker
+// remains until explicit Retry backup; it is also the durable cleanup job for
+// an uploader that crashes after recreating bytes. Recheck it after the LAST
+// remote write, including whole-file uploads, before reporting Backed up.
+async function reconcileDeletedSession(id) {
+    const markerPath = deletionPath(id);
+    const marker = await client.json(markerPath);
+    if (!marker) return false;
+    const value = marker.value;
+    if (value?.schema !== 1 || value.sessionId !== id ||
+        !Number.isFinite(value.deletedAt) || value.deletedAt < 0) {
+        throw new DropboxError('Unfamiliar Dropbox deletion marker. No files were changed.', 'unsupported');
+    }
+    const root = sessionPath(id);
+    const manifest = await client.json(`${root}/audio-manifest.json`);
+    const session = await client.json(`${root}/session.json`);
+    if (manifest) validateManifest(manifest.value, id);
+    if (session) validateSession(session.value, id);
+    const inventory = await client.json(`${root}/whole-recordings.json`);
+    const pending = await get(key('deletion', id));
+    const paths = new Set([
+        ...validateWholeRecordings({ schema: 1, sessionId: id, paths: value.paths || [] }, id),
+        ...(inventory ? validateWholeRecordings(inventory.value, id) : []),
+        ...(pending ? validateWholeRecordings(pending, id) : []),
+    ]);
+    // The old inventory may already be gone when a late whole-file upload
+    // finishes. Its stable session/track identity still establishes ownership.
+    for (const entry of await client.list('/recordings')) {
+        if (entry['.tag'] !== 'file') continue;
+        const path = `/recordings/${entry.name}`;
+        try { validateWholeRecordings({ schema: 1, sessionId: id, paths: [path] }, id); }
+        catch (_) { continue; } // Never delete ambiguous legacy names.
+        paths.add(path);
+    }
+    const stillDeleted = async () => (await client.metadata(markerPath))?.rev === marker.rev;
+    if (!await stillDeleted()) return false;
+    await set(key('excluded', id), true);
+    await set(key('deletion', id), { schema: 1, sessionId: id, paths: [...paths] });
+    for (const path of [...paths, root]) {
+        if (!await stillDeleted()) return false;
+        try { await client.request('files/delete_v2', { path }); }
+        catch (e) { if (e.code !== 'missing') throw e; }
+    }
+    await del(key('deletion', id));
+    await del(key('whole', id));
+    await del(key('manifest', id));
+    await del(key('receipt', id));
+    for (const k of await keys()) {
+        if (typeof k === 'string' && k.startsWith(`${cachePrefix}${account}:${id}:`)) await del(k);
+    }
+    noteConflict(id, '');
+    status(id, 'Local only'); changed(id);
+    return true;
+}
+
 export async function deleteDropboxCopy(id) {
     return serialize(async () => {
         if (recorder.sessionId === id && recorder.isActive) throw new Error('Close this recording session before deleting its Dropbox copy.');
@@ -392,20 +452,10 @@ export async function deleteDropboxCopy(id) {
         // first, so an interrupted delete still leaves the marker rather than
         // a half-removed folder nothing explains.
         const marker = deletionPath(id);
-        await client.upload(marker, new Blob([json(deletionRecord(id))]), await client.metadata(marker));
-        // Keep the remote manifests and inventory until every external file
-        // is gone. A different device can also resume this operation.
-        for (const whole of wholePaths) {
-            try { await client.request('files/delete_v2', { path: whole }); }
-            catch (e) { if (e.code !== 'missing') throw e; }
+        await client.upload(marker, new Blob([json({ ...deletionRecord(id), paths: wholePaths })]), await client.metadata(marker));
+        if (!await reconcileDeletedSession(id)) {
+            throw new DropboxError('Dropbox deletion changed on another device. Please retry.', 'conflict');
         }
-        try { await client.request('files/delete_v2', { path }); }
-        catch (e) { if (e.code !== 'missing') throw e; }
-        await del(key('deletion', id));
-        await del(key('whole', id));
-        await del(key('manifest', id)); await del(key('receipt', id));
-        for (const k of await keys()) if (typeof k === 'string' && k.startsWith(`${cachePrefix}${account}:${id}:`)) await del(k);
-        status(id, 'Local only'); changed(id);
     });
 }
 // Deleting a SESSION takes its Dropbox copy with it.
