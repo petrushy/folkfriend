@@ -215,7 +215,7 @@ export function syncDropbox(force = false) {
                 const session = sessions.find(s => s.id === id);
                 if (!session || !local.segments.length || await get(key('excluded', id))) continue;
                 try {
-                    const fingerprint = json({ local, session });
+                    const fingerprint = json({ local, session, wholeRecordings: dropboxState.wholeRecordings });
                     const receipt = await get(key('receipt', id));
                     if (receipt?.fingerprint === fingerprint && receipt.verifiedAt > Date.now() - 300000) {
                         status(id, recorder.sessionId === id && recorder.isRecording ? 'Syncing' : 'Backed up'); continue;
@@ -235,6 +235,13 @@ export function syncDropbox(force = false) {
                     await set(key('receipt', id), { ...receipt, pendingSession: json(session) });
                     const cloud = await backupSession(client, session, local, readSegment, fileExtensionFor, remoteSession?.rev || null);
                     await set(key('manifest', id), cloud);
+                    // endedAt belongs to the tune list. The recorder can still
+                    // be committing its tail after that record is saved.
+                    if (dropboxState.wholeRecordings && session.endedAt &&
+                        (local.finalizedAt === null || (recorder.sessionId === id && recorder.isActive))) {
+                        status(id, 'Syncing');
+                        continue; // No receipt: retry after the final write.
+                    }
                     if (dropboxState.wholeRecordings) {
                         // Recorded so deletion can find them: a whole recording
                         // lives outside the session folder, which is the price

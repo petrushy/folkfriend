@@ -337,6 +337,7 @@ class SessionRecorder {
             // safely begin: anything earlier overwrites the timeline of
             // segments that already exist.
             await this._adoptStoredClock(sessionId);
+            await patchManifest(sessionId, { finalizedAt: null });
             this._clearStorageStop();
             return true;
         }
@@ -367,6 +368,9 @@ class SessionRecorder {
         const mimeType = pickMimeType();
         if (mimeType === null) return false;
 
+        // Clear completion before allowing capture to resume. Keep track startup
+        // synchronous so shutdown cannot race an extra storage await there.
+        await patchManifest(sessionId, { finalizedAt: null });
         this.sessionId = sessionId;
         // Keep recording in the container the existing tracks are in. A session
         // whose segments were half MP4 and half WebM could not be exported as
@@ -449,6 +453,7 @@ class SessionRecorder {
         await this._stopTrack();
         this._closeOpenMuteRange();
         await this._writeChain.catch(() => {});
+        await patchManifest(this.sessionId, { finalizedAt: Date.now() });
         this.sessionId = null;
         this.mimeType = null;
         this.channels = null;

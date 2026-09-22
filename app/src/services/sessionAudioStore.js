@@ -386,6 +386,9 @@ export function createManifest({ sessionId, mimeType, bitsPerSecond, channels = 
         // segment that could not be stored, monotone, and never cleared — see
         // storedClockFloor() in sessionRecorder.js.
         clockFloor: 0,
+        // null until end() has drained the final segment write. Older manifests
+        // omit this field; new recordings must not publish whole files early.
+        finalizedAt: null,
         // Set when recording ended for a reason the user needs to know about —
         // storage exhausted, the encoder failing. A player that silently runs
         // out of audio partway through an evening is indistinguishable from a
@@ -420,6 +423,7 @@ export async function appendSegment(sessionId, segment, trackPatch = null) {
         const next = {
             ...manifest,
             updatedAt: Date.now(),
+            finalizedAt: null,
             tracks: trackPatch ? mergeTrack(manifest.tracks, trackPatch) : manifest.tracks,
             segments: [...manifest.segments, {
                 index: segment.index,
