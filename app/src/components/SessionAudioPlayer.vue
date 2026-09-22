@@ -1241,7 +1241,8 @@ export default {
             this.error = '';
             try {
                 const clip = await buildClip(
-                    this.sessionId, track.startSeconds, track.endSeconds, this.manifest);
+                    this.sessionId, track.startSeconds, track.endSeconds, this.manifest,
+                    { requireComplete: true });
                 if (!clip) throw new Error('nothing recorded for this part');
                 const extension = fileExtensionFor(clip.mimeType);
                 const name = `folkfriend-session-${this.sessionId}` +

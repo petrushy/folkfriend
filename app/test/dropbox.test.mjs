@@ -206,3 +206,15 @@ await test('whole recordings use unique identities and reject same-size corrupti
     assert.equal(await c.files.get(path).blob.text(), 'FIRST');
     assert.notEqual(recordingFileName(finished, 0, 1, 'm4a'), recordingFileName(finished, 1, 1, 'm4a'));
 });
+
+await test('whole-recording backup refuses an incomplete export before publishing inventory or bytes', async () => {
+    const c = new FakeDropbox(); c.uploadLarge = c.upload.bind(c);
+    let requestedComplete = false;
+    await assert.rejects(backupWholeRecordings(c, { ...session, endedAt: 100 }, local,
+        async (id, from, to, manifest, options) => {
+            requestedComplete = options?.requireComplete === true;
+            throw new Error('missing audio');
+        }, extension), /missing audio/);
+    assert.equal(requestedComplete, true);
+    assert.equal(c.files.size, 0);
+});

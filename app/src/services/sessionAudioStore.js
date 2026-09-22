@@ -760,7 +760,7 @@ async function readHead(parts) {
  * — never later than requested, and possibly earlier, because a cut can only
  * land on a chunk boundary.
  */
-export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = null) {
+export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = null, { requireComplete = false } = {}) {
     const manifest = manifestIn || await readManifest(sessionId);
     if (!manifest) return null;
 
@@ -776,6 +776,8 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     const parts = [];
     let clipStart = null;
     let clipEnd = null;
+    let coveredTo = fromSeconds;
+    const incomplete = () => new Error('Some audio for this part is missing or unreadable. No complete file was created.');
     // 0 when the clip begins at the track's own first chunk and needs no
     // header prepended. Reported because a header far smaller than a real
     // initialisation segment is itself the diagnosis.
@@ -783,12 +785,19 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
 
     for (const meta of overlapping) {
         if (meta.trackIndex !== trackIndex) break;   // never cross a track
+        if (requireComplete && meta.startSeconds > coveredTo + 0.001) throw incomplete();
         const segment = await readSegment(sessionId, meta.index) ||
             (cloudAudio ? await cloudAudio.segment(sessionId, meta.index) : null);
         // A segment the manifest names but that is not on disk means an
         // interrupted delete. Stop here rather than splicing a hole into the
         // middle of a clip, which would play as a glitch or not at all.
-        if (!segment || !segment.blob) break;
+        if (!segment || !segment.blob) {
+            if (requireComplete) throw incomplete();
+            break;
+        }
+        if (requireComplete && (segment.blob.size !== meta.bytes ||
+            !Array.isArray(segment.chunks) ||
+            segment.chunks.reduce((n, c) => n + c.bytes, 0) !== meta.bytes)) throw incomplete();
 
         const spans = chunkSpans(segment);
         const wanted = spans.filter(s => s.endSeconds > fromSeconds && s.startSeconds < toSeconds);
@@ -807,8 +816,11 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         parts.push(segment.blob.slice(wanted[0].from, wanted[wanted.length - 1].to));
         if (clipStart === null) clipStart = wanted[0].startSeconds;
         clipEnd = wanted[wanted.length - 1].endSeconds;
+        coveredTo = clipEnd;
     }
 
+    if (requireComplete && (clipStart === null || clipStart > fromSeconds + 0.001 ||
+        coveredTo < toSeconds - 0.001)) throw incomplete();
     if (clipStart === null) return null;
     // The TRACK's own container, not the session's. A session resumed onto a
     // browser that fell back to a different encoder has tracks that genuinely

@@ -206,8 +206,8 @@ export async function backupWholeRecordings(client, session, manifest, buildClip
         const from = Math.min(...spans.map(s => s.startSeconds));
         const to = Math.max(...spans.map(s => s.startSeconds + s.durationSeconds));
 
-        const clip = await buildClip(session.id, from, to);
-        if (!clip || !clip.blob.size) continue;
+        const clip = await buildClip(session.id, from, to, null, { requireComplete: true });
+        if (!clip || !clip.blob.size) throw new DropboxError('The complete recording could not be read.', 'local');
 
         const path = recordingFileName(session, trackIndex, tracks.length, extension(clip.mimeType));
         const previous = existing[i];
