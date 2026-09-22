@@ -1498,6 +1498,18 @@ neither is a fix yet:
   make every clip but a whole finished track unplayable and is not something a
   different cut could repair.
 
+**The FIRST failure carried no detail, which is why it took two taps to learn
+anything.** From the field: the first attempt said only *"This browser could
+not play the recorded audio"*, and the container and size appeared on the
+second — because those are two different paths. The element's own `error` event
+is the informative moment and had the bare string; the detailed message came
+from the rejection of `play()` on an element that had already failed to load,
+which is only reached by tapping again. `_clipDetail()` is shared by both now.
+
+That sequence also says the retry DECLINED on the first attempt rather than
+running quietly: it returns true while it works, so a message at all means it
+refused — and it refuses only for a track's first segment.
+
 **And one refusal is reported twice.** A refused clip reaches both the
 element's `error` event and the rejection of the `play()` waiting on it, in no
 reliable order. Each was starting its own rebuild of the same clip — over
