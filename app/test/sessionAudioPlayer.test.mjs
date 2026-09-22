@@ -53,9 +53,9 @@ export function __setClip(c) { __clip = c; }
 export let __clipFactory = null;
 export function __setClipFactory(f) { __clipFactory = f; }
 export const __clipCalls = [];
-export async function buildClip(sessionId, from, to, manifest) {
+export async function buildClip(sessionId, from, to, manifest, options) {
     __clipCalls.push([sessionId, from, to]);
-    return __clipFactory ? __clipFactory(sessionId, from, to, manifest) : __clip;
+    return __clipFactory ? __clipFactory(sessionId, from, to, manifest, options) : __clip;
 }
 export let __tracks = [];
 export function __setTracks(t) { __tracks = t; }
@@ -1087,6 +1087,20 @@ await test('a seek never runs off either end of the recording', async () => {
 });
 
 await rm(tmpDir, { recursive: true, force: true });
+
+await test('export requests complete audio and reports a read failure instead of sharing a prefix', async () => {
+    const vm = await mountPlayer(GAPPY);
+    let requestedComplete = false;
+    store.__setClipFactory(async (id, from, to, manifest, options) => {
+        requestedComplete = options?.requireComplete === true;
+        throw new Error('Some audio is missing or unreadable');
+    });
+    await vm.exportTrack({ index: 0, startSeconds: 0, endSeconds: 180 });
+    assert.equal(requestedComplete, true);
+    assert.match(vm.error, /Could not export.*missing or unreadable/);
+    assert.equal(vm.exportingIndex, null);
+    store.__setClipFactory(null);
+});
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

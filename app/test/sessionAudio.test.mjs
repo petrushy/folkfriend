@@ -714,6 +714,31 @@ await test('a clip stops at a missing segment rather than splicing a hole', asyn
     assert.equal(await clip.blob.text(), 'H0a1a2');
 });
 
+await test('complete exports reject missing, unreadable, or truncated segments', async () => {
+    for (const fault of ['missing', 'unreadable', 'truncated']) {
+        await seedTwoSegments();
+        const key = store.segmentKey('s1', 1);
+        if (fault === 'missing') await idb.del(key);
+        if (fault === 'unreadable') idb.__failReads.add(key);
+        if (fault === 'truncated') {
+            const value = await idb.get(key);
+            await idb.set(key, { ...value, blob: value.blob.slice(0, 1) });
+        }
+        await assert.rejects(store.buildClip('s1', 0, 6, null, { requireComplete: true }), /missing or unreadable/);
+    }
+    await seedTwoSegments();
+    const clip = await store.buildClip('s1', 0, 6, null, { requireComplete: true });
+    assert.equal(clip.endSeconds, 6);
+    assert.equal(await clip.blob.text(), 'H0a1a2b3b4b5');
+});
+
+await test('complete exports reject an unrecorded hole inside a track', async () => {
+    await seedTwoSegments();
+    const manifest = await store.readManifest('s1');
+    manifest.segments[1].startSeconds += 1;
+    await assert.rejects(store.buildClip('s1', 0, 6, manifest, { requireComplete: true }), /missing or unreadable/);
+});
+
 await test('export ranges are one per track', async () => {
     await resetAll();
     await seedManifest();
