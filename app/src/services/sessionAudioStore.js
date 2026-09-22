@@ -125,6 +125,42 @@ export function plausibleRecordedMimeType(reported, requested) {
         : (requested || '');
 }
 
+// The top-level boxes a clip BEGINS with, as a short string for a failure
+// message — 'ftyp+moov', 'ftyp+mdat', 'webm'.
+//
+// The one question worth answering on a device with no console: is there an
+// initialisation segment in this clip at all. `ftyp+moov` says the header cut
+// found what it was looking for; `ftyp+mdat` says the `moov` is somewhere else
+// entirely (some writers put it at the end, and only on stop), which would
+// make every clip but a whole finished track unplayable and is not something
+// this code could fix by cutting differently.
+export function describeContainer(bytes) {
+    if (!bytes || bytes.length < 8) return '';
+    if (bytes[0] === 0x1A && bytes[1] === 0x45 && bytes[2] === 0xDF && bytes[3] === 0xA3) {
+        return 'webm';
+    }
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const names = [];
+    let offset = 0;
+    // Only the first few, and only as far as the bytes in hand reach — a moov
+    // is routinely larger than the sample this is given, which is fine: having
+    // seen its name is the whole point.
+    while (offset + 8 <= bytes.length && names.length < 4) {
+        let size = view.getUint32(offset);
+        const type = String.fromCharCode(
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+        if (!/^[A-Za-z0-9]{4}$/.test(type)) break;
+        names.push(type);
+        if (size === 1) {
+            if (offset + 16 > bytes.length || view.getUint32(offset + 8) !== 0) break;
+            size = view.getUint32(offset + 12);
+        }
+        if (size < 8) break;
+        offset += size;
+    }
+    return names.join('+');
+}
+
 // The container a clip's own BYTES are in, or null when they say nothing this
 // build recognises.
 //
@@ -686,16 +722,19 @@ function firstIsoFragmentOffset(bytes) {
 // it agrees, because it carries the codecs parameter as well. Bytes this build
 // does not recognise leave the label alone — being unable to tell is not
 // grounds for relabelling someone's recording.
-async function correctedMimeType(parts, labelled) {
-    let sniffed = null;
-    try {
-        const head = new Blob(parts).slice(0, 16);
-        sniffed = sniffContainer(new Uint8Array(await head.arrayBuffer()));
-    } catch (e) {
-        return labelled;
-    }
+function correctedMimeType(head, labelled) {
+    const sniffed = head ? sniffContainer(head) : null;
     if (!sniffed) return labelled;
     return containerOf(labelled) === sniffed ? labelled : sniffed;
+}
+
+// The first bytes of an assembled clip, or null if they cannot be read.
+async function readHead(parts) {
+    try {
+        return new Uint8Array(await new Blob(parts).slice(0, 2048).arrayBuffer());
+    } catch (e) {
+        return null;
+    }
 }
 
 /**
@@ -733,6 +772,10 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     const parts = [];
     let clipStart = null;
     let clipEnd = null;
+    // 0 when the clip begins at the track's own first chunk and needs no
+    // header prepended. Reported because a header far smaller than a real
+    // initialisation segment is itself the diagnosis.
+    let headerBytes = 0;
 
     for (const meta of overlapping) {
         if (meta.trackIndex !== trackIndex) break;   // never cross a track
@@ -752,7 +795,9 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         // Prepending the init blob to a clip that already begins there would
         // write the header twice, which is not a file any decoder will accept.
         if (clipStart === null && !wanted[0].init && track.init) {
-            parts.push(await containerHeader(track.init));
+            const header = await containerHeader(track.init);
+            headerBytes = header.size || 0;
+            parts.push(header);
         }
 
         parts.push(segment.blob.slice(wanted[0].from, wanted[wanted.length - 1].to));
@@ -773,7 +818,8 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     // 'audio/mp3;codecs=mp4a.40.2' for AAC-in-MP4. Recordings already on disk
     // carry the bad label for ever, so the repair belongs here.
     const labelled = track.mimeType || manifest.mimeType || '';
-    const mimeType = await correctedMimeType(parts, labelled);
+    const head = await readHead(parts);
+    const mimeType = correctedMimeType(head, labelled);
     return {
         blob: new Blob(parts, { type: mimeType || 'application/octet-stream' }),
         mimeType,
@@ -784,6 +830,10 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         startSeconds: clipStart,
         endSeconds: clipEnd,
         trackIndex,
+        // What these bytes ARE, for a failure message on a device with no
+        // console. See describeContainer().
+        shape: describeContainer(head),
+        headerBytes,
         // The origin of the clip's own media timeline. A clip's container
         // timestamps are the TRACK's, not the clip's — it begins with that
         // track's initialisation bytes — so this is what a seek is measured

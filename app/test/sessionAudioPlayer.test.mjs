@@ -699,6 +699,75 @@ await test('a refused clip reports WHICH failure, not just "not supported"', asy
 });
 
 
+await test('two reports of one refusal start ONE retry', async () => {
+    // A refused clip reaches BOTH the element's error event and the rejection
+    // of the play() waiting on it, and neither arrives first reliably. Without
+    // a guard each starts its own rebuild of the same clip — over Dropbox that
+    // is a second download of the whole track — and the two race on the load
+    // generation, so which one the element ends up holding is undefined.
+    const vm = await mountPlayer(GAPPY);
+    let release;
+    store.__setClip(new Promise(resolve => { release = resolve; }));
+    store.__clipCalls.length = 0;
+    vm.$refs.audio = {
+        seekable: { length: 0 },
+        duration: NaN,
+        error: { code: 4 },
+        getAttribute: () => 'blob:x',
+        load() {},
+        play: () => Promise.reject(new Error('The operation is not supported.')),
+        pause() {},
+        set currentTime(v) { /* ignored */ },
+        get currentTime() { return 0; },
+    };
+    vm._loadedSegment = GAPPY.segments[1];
+    vm._loadedSeekSeconds = 400;
+    vm._clipFromTrackStart = false;
+
+    vm.onAudioError();                    // the element gives up first
+    vm._play();                           // and the waiting play() rejects
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.equal(store.__clipCalls.length, 1, 'one rebuild, not two');
+    assert.ok(!vm.error, `stayed quiet while retrying, got: ${vm.error}`);
+
+    // Once the retry has landed and been refused in its turn, it IS reported.
+    release({
+        blob: new Blob(['audio']), mimeType: 'audio/mp4',
+        startSeconds: 0, endSeconds: 540, trackStartSeconds: 0,
+    });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    vm.onAudioError();
+    assert.ok(vm.error, 'the second refusal is the real answer');
+});
+
+await test('a refusal says whether there was an init segment in the clip', async () => {
+    // The one question worth answering on a device with no console: is there
+    // an initialisation segment in this clip at all, and was this already the
+    // track-start fallback. Those two facts decide which half of the system is
+    // at fault, and neither is recoverable from "not supported".
+    const vm = await mountPlayer(GAPPY);
+    vm.clipMimeType = 'audio/mp4';
+    vm.clipBytes = 2048;
+    vm.clipShape = 'ftyp+moov';
+    vm.clipHeaderBytes = 1180;
+    vm._clipFromTrackStart = false;
+    vm.$refs.audio = {
+        error: { code: 4 },
+        play: () => Promise.reject(new Error('The operation is not supported.')),
+        pause() {},
+    };
+    vm._play();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(vm.error.includes('ftyp+moov'), vm.error);
+    assert.ok(vm.error.includes('hdr 1180 B'), vm.error);
+
+    vm._clipFromTrackStart = true;
+    vm.error = '';
+    vm._play();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    assert.ok(vm.error.includes('from track start'), vm.error);
+});
+
 await test('the correction is resumed on EVERY play, not only when it is built', async () => {
     // A browser suspends an AudioContext whose page is backgrounded, and an
     // element that has been given a MediaElementAudioSourceNode plays through
