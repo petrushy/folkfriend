@@ -681,6 +681,18 @@ class SessionRecorder {
             if (final) this._resetPending();
             return this._writeChain;
         }
+        // A segment belongs to a track or it does not get written. _fail()
+        // ends a track without flushing and clears _trackIndexActive, so
+        // anything still pending afterwards would be filed under index -1 —
+        // and `mergeTrack` would add a phantom track at that index, which
+        // `trackRanges` then offers as a part to export. The write is guarded
+        // again inside the chain by `stoppedReason`, but that can be cleared
+        // by a Resume before the queued body runs, which is exactly when this
+        // would land.
+        if (this._trackIndexActive < 0) {
+            this._resetPending();
+            return this._writeChain;
+        }
 
         const chunks = this._pending;
         const bytes = this._pendingBytes;
@@ -774,6 +786,11 @@ class SessionRecorder {
         // failure seeks into the wrong one.
         this._committedSeconds = this._chunkCursorSeconds;
         this._trackIndexActive = -1;
+        // Chunks accumulated since the last segment closed cannot be stored:
+        // that is what has just failed. Holding them keeps the audio alive in
+        // memory for the rest of the session for nothing, and leaves them to
+        // be filed against a track that has ended.
+        this._resetPending();
 
         const sessionId = this.sessionId;
         const atSeconds = this._chunkCursorSeconds;
