@@ -429,6 +429,44 @@ await test('a seek into a mid-track clip is measured from the TRACK\'s start', a
     assert.equal(vm.currentSeconds, 1300);
 });
 
+await test('a refused mid-track clip is retried from the TRACK\'s start', async () => {
+    // A mid-track clip is [the track's initialisation bytes, ...the wanted
+    // chunks], and whether WebKit accepts that for its own fMP4 has never been
+    // measurable anywhere but the device. A clip from the track's start needs
+    // no assembly at all — it is a prefix of what MediaRecorder wrote, which is
+    // what "Export part N" produces and is known to play.
+    const vm = await mountPlayer(GAPPY);
+    const src = [];
+    vm.$refs.audio = {
+        seekable: { length: 0 },
+        duration: NaN,
+        error: { code: 4 },                      // SRC_NOT_SUPPORTED
+        getAttribute: () => 'blob:x',
+        load() {},
+        set currentTime(v) { /* ignored */ },
+        get currentTime() { return 0; },
+    };
+    store.__setClip({
+        blob: new Blob(['audio']), mimeType: 'audio/mp4',
+        startSeconds: 360, endSeconds: 540, trackStartSeconds: 0,
+    });
+    await vm._loadSegment(GAPPY.segments[1], 400, false);
+    const before = store.__clipCalls.length;
+
+    vm.onAudioError();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.equal(store.__clipCalls.length, before + 1, 'the clip is rebuilt');
+    assert.equal(store.__clipCalls[before][1], 0, 'from the track\'s start');
+    assert.ok(!vm.error, 'and no failure is reported while a retry is running');
+
+    // Once. A second refusal is the real answer.
+    vm.onAudioError();
+    await Promise.resolve();
+    assert.ok(vm.error, 'the second refusal is reported');
+});
+
 await test('a tap on a stretch that was never recorded says so', async () => {
     // Returning silently is indistinguishable from a timeline that does not
     // respond to taps at all, which is how this was reported.

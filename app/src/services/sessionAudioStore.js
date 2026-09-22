@@ -88,11 +88,77 @@ export function pickMimeType(Recorder = globalThis.MediaRecorder) {
     return '';
 }
 
+// The container part of a media type, without its codecs parameter.
+export function containerOf(mimeType) {
+    return String(mimeType || '').split(';')[0].trim().toLowerCase();
+}
+
+// What a MediaRecorder says it is recording, when that can be believed.
+//
+// Reported from the field: playback failing with "format not supported,
+// audio/mp3;codecs=mp4a.40.2". That type cannot exist — mp4a.40.2 is AAC in
+// MP4, and no MediaRecorder anywhere encodes MP3 — but `_startTrack` adopted
+// `recorder.mimeType` unchecked, so it went into the manifest, onto every blob
+// built from that track, and into the exported filename. A Blob whose declared
+// type contradicts its bytes is refused outright by the decoder, which is the
+// error the user saw.
+//
+// The test is only whether the CONTAINER is one a MediaRecorder could be
+// producing. Deliberately not `isTypeSupported(reported)`: that is conservative
+// in several browsers, and a fallback to a container it will not advertise is
+// exactly the case `_recordActualFormat` exists for — rejecting those would
+// trade this bug for the one it fixed. The bytes settle anything this misses,
+// at `buildClip`.
+const RECORDABLE_CONTAINERS = [
+    'audio/mp4', 'video/mp4',
+    'audio/webm', 'video/webm',
+    'audio/ogg', 'video/ogg',
+    // Chromium reports this for what is, to a demuxer, WebM.
+    'audio/x-matroska', 'video/x-matroska',
+];
+
+export function plausibleRecordedMimeType(reported, requested) {
+    if (!reported) return requested || '';
+    if (containerOf(reported) === containerOf(requested)) return reported;
+    return RECORDABLE_CONTAINERS.includes(containerOf(reported))
+        ? reported
+        : (requested || '');
+}
+
+// The container a clip's own BYTES are in, or null when they say nothing this
+// build recognises.
+//
+// The bytes are the only authority on this, and the label has been wrong in
+// the field in two different ways now — a fallback container that was never
+// written down, and a browser reporting a type that cannot exist. A recording
+// already on disk carries the bad label for ever, so the repair has to happen
+// where the blob is built rather than only at the recorder.
+export function sniffContainer(bytes) {
+    if (!bytes || bytes.length < 8) return null;
+    const ascii = (at, text) => {
+        for (let i = 0; i < text.length; i++) {
+            if (bytes[at + i] !== text.charCodeAt(i)) return false;
+        }
+        return true;
+    };
+    // ISO-BMFF: a size field, then 'ftyp'. MediaRecorder always writes it first.
+    if (ascii(4, 'ftyp')) return 'audio/mp4';
+    if (bytes[0] === 0x1A && bytes[1] === 0x45 && bytes[2] === 0xDF && bytes[3] === 0xA3) {
+        return 'audio/webm';
+    }
+    if (ascii(0, 'OggS')) return 'audio/ogg';
+    return null;
+}
+
 export function fileExtensionFor(mimeType) {
-    if (!mimeType) return 'bin';
-    if (mimeType.includes('mp4')) return 'm4a';
-    if (mimeType.includes('ogg')) return 'ogg';
-    if (mimeType.includes('webm')) return 'webm';
+    // The CONTAINER decides the extension. Matching anywhere in the string
+    // also matches the codecs parameter, so 'audio/mp3;codecs=mp4a.40.2' was
+    // exported as .m4a — right by accident, for a label that is wrong.
+    const container = containerOf(mimeType);
+    if (!container) return 'bin';
+    if (container.includes('mp4')) return 'm4a';
+    if (container.includes('ogg')) return 'ogg';
+    if (container.includes('webm') || container.includes('matroska')) return 'webm';
     return 'bin';
 }
 
@@ -614,6 +680,24 @@ function firstIsoFragmentOffset(bytes) {
     return -1;
 }
 
+// The label a clip's bytes will actually be accepted under.
+//
+// The sniffed container wins whenever the two disagree; the label is kept when
+// it agrees, because it carries the codecs parameter as well. Bytes this build
+// does not recognise leave the label alone — being unable to tell is not
+// grounds for relabelling someone's recording.
+async function correctedMimeType(parts, labelled) {
+    let sniffed = null;
+    try {
+        const head = new Blob(parts).slice(0, 16);
+        sniffed = sniffContainer(new Uint8Array(await head.arrayBuffer()));
+    } catch (e) {
+        return labelled;
+    }
+    if (!sniffed) return labelled;
+    return containerOf(labelled) === sniffed ? labelled : sniffed;
+}
+
 /**
  * Builds a playable Blob covering [fromSeconds, toSeconds) of a session's audio.
  *
@@ -681,7 +765,15 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     // browser that fell back to a different encoder has tracks that genuinely
     // differ, and a clip never spans one — so the track is the only level at
     // which "what format is this" has a single answer.
-    const mimeType = track.mimeType || manifest.mimeType || '';
+    //
+    // Then checked against the BYTES, which outrank it. A blob whose declared
+    // type contradicts its content is refused outright by the decoder, and
+    // this label has been wrong in the field twice: a fallback container that
+    // was never written down, and Safari reporting the impossible
+    // 'audio/mp3;codecs=mp4a.40.2' for AAC-in-MP4. Recordings already on disk
+    // carry the bad label for ever, so the repair belongs here.
+    const labelled = track.mimeType || manifest.mimeType || '';
+    const mimeType = await correctedMimeType(parts, labelled);
     return {
         blob: new Blob(parts, { type: mimeType || 'application/octet-stream' }),
         mimeType,

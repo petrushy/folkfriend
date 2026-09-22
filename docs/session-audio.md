@@ -242,6 +242,26 @@ scanning for the Cluster ID, whose bytes occur by chance inside `CodecPrivate`;
 a container it does not recognise keeps the whole init chunk, degrading to the
 old ambiguity rather than to an unplayable file.
 
+### When a clip is refused
+
+A mid-track clip is the track's initialisation bytes followed by the wanted
+chunks. Chromium accepts that; whether WebKit does for its own fMP4 has never
+been measurable anywhere but the device. So a `MEDIA_ERR_SRC_NOT_SUPPORTED`
+refusal retries once, rebuilding the clip **from the track's start** — a prefix
+of what MediaRecorder wrote, which is what "Export part N" produces and is
+known to play. The timeline is the track's under both, so the seek is unchanged;
+only the blob is larger, which is why it is a fallback and not the default.
+
+### The label is a claim; the bytes are the authority
+
+`MediaRecorder.mimeType` has been wrong in the field twice — a fallback
+container that was never written down, and WebKit reporting
+`audio/mp3;codecs=mp4a.40.2` for AAC-in-MP4, a type that cannot exist. So
+`plausibleRecordedMimeType` keeps a reported type only when its container is
+one a recorder could be producing, and `buildClip` sniffs the first bytes
+(`ftyp` / EBML magic / `OggS`) and lets them outrank the label. Bytes this build
+does not recognise leave the label alone.
+
 ### Where ▶ starts
 
 `audioStartSeconds` is the moment the *first matching window ended*, so the

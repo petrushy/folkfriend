@@ -530,6 +530,65 @@ function webmInitChunk() {
     return { blob: new Blob([new Uint8Array(bytes)]), headerBytes };
 }
 
+await test('an impossible reported container is not believed', async () => {
+    // Reported from the field: "format not supported,
+    // audio/mp3;codecs=mp4a.40.2". mp4a.40.2 is AAC in MP4 and no
+    // MediaRecorder anywhere encodes MP3, so that type cannot exist — but it
+    // went into the manifest, onto every blob built from the track and into
+    // the exported filename, and a blob whose declared type contradicts its
+    // bytes is refused outright by the decoder.
+    assert.equal(
+        store.plausibleRecordedMimeType('audio/mp3;codecs=mp4a.40.2', 'audio/mp4;codecs=mp4a.40.2'),
+        'audio/mp4;codecs=mp4a.40.2');
+    // A GENUINE fallback to another container is still adopted — that is the
+    // case _recordActualFormat exists for, and rejecting it would trade this
+    // bug for the one it fixed.
+    assert.equal(
+        store.plausibleRecordedMimeType('audio/webm;codecs=opus', 'audio/mp4;codecs=mp4a.40.2'),
+        'audio/webm;codecs=opus');
+    assert.equal(store.plausibleRecordedMimeType('', 'audio/mp4'), 'audio/mp4');
+});
+
+await test('the extension is decided by the container, not by any substring', async () => {
+    // 'audio/mp3;codecs=mp4a.40.2' contains "mp4" in its CODECS parameter, so
+    // a substring match called it .m4a — the right answer by accident, for a
+    // label that is wrong.
+    assert.equal(store.fileExtensionFor('audio/mp3;codecs=mp4a.40.2'), 'bin');
+    assert.equal(store.fileExtensionFor('audio/mp4;codecs=mp4a.40.2'), 'm4a');
+    assert.equal(store.fileExtensionFor('audio/webm;codecs=opus'), 'webm');
+});
+
+await test('a clip is labelled from its BYTES when the manifest disagrees', async () => {
+    // A recording already on disk carries its bad label for ever, so the
+    // repair has to happen where the blob is built. The bytes are the only
+    // authority: this label has now been wrong in the field twice.
+    await resetAll();
+    await seedManifest();
+    const mp4 = new Blob([new Uint8Array([
+        0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70,   // size + 'ftyp'
+        0x69, 0x73, 0x6F, 0x6D, 0, 0, 0, 0,
+    ])]);
+    await store.appendSegment('s1', {
+        index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 2,
+        bytes: 16, blob: mp4,
+        chunks: [{ startSeconds: 0, bytes: 16, init: true }],
+    }, {
+        index: 0, startSeconds: 0, durationSeconds: 2, init: mp4,
+        mimeType: 'audio/mp3;codecs=mp4a.40.2',
+    });
+
+    const clip = await store.buildClip('s1', 0, 2);
+    assert.equal(clip.blob.type, 'audio/mp4');
+    assert.equal(store.fileExtensionFor(clip.mimeType), 'm4a');
+});
+
+await test('bytes this build does not recognise leave the label alone', async () => {
+    // Being unable to tell is not grounds for relabelling someone's recording.
+    await seedTwoSegments();
+    const clip = await store.buildClip('s1', 0, 3);
+    assert.equal(clip.mimeType, 'audio/mp4');
+});
+
 await test('a mid-stream clip is prefixed with the header WITHOUT its audio', async () => {
     // The track's first chunk carries the header AND its first second of
     // audio. Prepending all of it puts two stretches of audio in one file
@@ -1426,6 +1485,23 @@ await test('the manifest names the container actually recorded', async () => {
     const manifest = await store.readManifest('s1');
     assert.equal(manifest.mimeType, 'audio/webm;codecs=opus');
     assert.equal(store.fileExtensionFor(manifest.mimeType), 'webm');
+});
+
+await test('an impossible reported container never reaches the manifest', async () => {
+    // Safari reports 'audio/mp3;codecs=mp4a.40.2' for AAC-in-MP4. Taken at its
+    // word it was written to the manifest, and every clip built from that
+    // track was then handed to the decoder under a type its bytes contradict.
+    await resetAll();
+    const recorder = await freshRecorder();
+    FakeMediaRecorder.actualMimeType = 'audio/mp3;codecs=mp4a.40.2';
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.mimeType, 'audio/mp4;codecs=mp4a.40.2');
+    assert.equal(store.fileExtensionFor(manifest.mimeType), 'm4a');
 });
 
 await test('the manifest records the channels the device actually gave', async () => {

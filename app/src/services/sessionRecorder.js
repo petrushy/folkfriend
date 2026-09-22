@@ -35,6 +35,7 @@ import {
     TIMESLICE_MS,
     DEFAULT_BITRATE_KBPS,
     pickMimeType,
+    plausibleRecordedMimeType,
     createManifest,
     putManifest,
     patchManifest,
@@ -517,7 +518,8 @@ class SessionRecorder {
             // Falling back to its default container is better than no recording.
             try {
                 this._recorder = new Recorder(stream);
-                this.mimeType = this._recorder.mimeType || this.mimeType;
+                this.mimeType = plausibleRecordedMimeType(
+                    this._recorder.mimeType, this.mimeType);
             } catch (e2) {
                 this._fail('encoder', `Could not start recording: ${(e2 && e2.message) || e2}`);
                 return false;
@@ -530,7 +532,12 @@ class SessionRecorder {
         if (this._recorder.audioBitsPerSecond) {
             this.bitsPerSecond = this._recorder.audioBitsPerSecond;
         }
-        if (this._recorder.mimeType) this.mimeType = this._recorder.mimeType;
+        // Adopted only if the browser will vouch for it. Safari reports
+        // 'audio/mp3;codecs=mp4a.40.2' for AAC-in-MP4 — a type that cannot
+        // exist, since no MediaRecorder encodes MP3 — and taking it at its
+        // word put it in the manifest, on every blob built from the track and
+        // in the exported filename, where the decoder then refused the bytes.
+        this.mimeType = plausibleRecordedMimeType(this._recorder.mimeType, this.mimeType);
         // What the microphone is actually delivering to this encoder. A request
         // for two channels on a device that only captures one produces a mono
         // file, and the manifest must say so — otherwise the player reports a
