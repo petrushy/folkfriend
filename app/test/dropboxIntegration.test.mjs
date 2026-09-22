@@ -29,7 +29,21 @@ class FakeClient {
     // itself is tested against the real client in dropbox.test.mjs; here it
     // only has to behave like an upload.
     async uploadLarge(path, blob, previous = null) { return this.upload(path, blob, previous); }
+    async list(path) {
+        const prefix = path.endsWith('/') ? path : `${path}/`;
+        return [...this.files.keys()]
+            .filter(k => k.startsWith(prefix) && !k.slice(prefix.length).includes('/'))
+            .map(k => ({ '.tag': 'file', name: k.slice(prefix.length) }));
+    }
     async folders() { return [{ name: 's1' }]; }
+    // The real client reads this from a listing of /deleted; the fake serves
+    // it from the same files map, so a marker a test writes is one the
+    // coordinator can see.
+    async deletedSessions() {
+        return new Set((await this.list('/deleted'))
+            .map(e => /^(.+)\.json$/.exec(e.name))
+            .filter(Boolean).map(m => m[1]));
+    }
     async move(from, to) {
         const f = this.files.get(from);
         if (!f) return null;
@@ -46,8 +60,13 @@ class FakeClient {
     }
 }
 let sequence = 0;
-async function load({ enabled = true, expired = false, active = false } = {}) {
-    const f = { db: new Map(), client: new FakeClient(), sessions: [{ id: 's1', startedAt: 1, name: 'Original', tunes: [] }],
+// `shareWith` gives a SECOND device: the same Dropbox account and the same
+// session records (which is what Firebase sync means), but its own IndexedDB
+// and its own copy of the audio — which is the whole point, since what one
+// device knows about a deletion is exactly what the other one does not.
+async function load({ enabled = true, expired = false, active = false, shareWith = null } = {}) {
+    const f = { db: new Map(), client: shareWith ? shareWith.client : new FakeClient(),
+        sessions: shareWith ? shareWith.sessions : [{ id: 's1', startedAt: 1, name: 'Original', tunes: [] }],
         locals: [structuredClone(local)], recorder: { sessionId: active ? 's1' : null, isActive: active, isRecording: active }, deletedLocal: [], events: [] };
     globalThis.__dropboxFixture = f;
     const storage = new Map([['folkfriend.dropbox.enabled', String(enabled)], ['folkfriend.dropbox.account', 'account-1'],
@@ -63,7 +82,18 @@ export const del = async k => f.db.delete(k);
 export const keys = async () => [...f.db.keys()];
 export const Vue = { observable: x => x, set: (o,k,v) => { o[k] = v; } };
 export const bus = { $emit: (...args) => f.events.push(args), $on() {} };
-export const store = { getLiveSessionsStrict: async () => structuredClone(f.sessions), upsertLiveSession: async s => f.sessions.push(s) };
+// Matches the real store: an upsert REPLACES a record of the same id and
+// stamps updatedAt above what it was handed, which is what makes a conflict
+// resolution the newest copy. A fake that only pushed could not see either.
+export const store = {
+    getLiveSessionsStrict: async () => structuredClone(f.sessions),
+    upsertLiveSession: async s => {
+        const record = { ...s, updatedAt: Math.max(Date.now(), (s.updatedAt || 0) + 1) };
+        const index = f.sessions.findIndex(existing => existing.id === record.id);
+        if (index === -1) f.sessions.push(record); else f.sessions[index] = record;
+        return record;
+    },
+};
 export const recorder = f.recorder;
 export const listManifests = async () => structuredClone(f.locals);
 export const readManifest = async id => f.locals.find(m => m.sessionId === id);
@@ -303,7 +333,9 @@ await test('interrupted cloud deletion retries while retaining its remote invent
     assert.ok(f.client.files.has('/sessions/s1/audio-manifest.json'));
     f.client.request = request;
     await api.deleteDropboxCopy('s1');
-    assert.equal(f.client.files.size, 0);
+    // Everything the session had is gone; what is left is the marker saying so,
+    // which is the one file a deletion CREATES.
+    assert.deepEqual([...f.client.files.keys()], ['/deleted/s1.json']);
 });
 await test('lost final delete response can be retried after the folder is gone', async () => {
     const { f, api } = await load(); await api.syncDropbox(true);
@@ -328,6 +360,157 @@ await test('lost final delete response can be retried after the folder is gone',
 // trip reorders the fields — and the old guard read any difference as
 // somebody else having changed the cloud copy. It refused for ever, behind a
 // Retry button that could never succeed.
+// ---- Deleting the cloud copy is a SHARED fact -----------------------------
+
+await test('a deletion on one device is not undone by another', async () => {
+    // "Delete Dropbox copy" wrote its exclusion into the deleting device's own
+    // IndexedDB and nowhere else. Any other device still holding that
+    // session's local audio then saw a session with audio and no cloud copy,
+    // did exactly what it is for, and put the whole recording back — the
+    // deletion undone by a machine that was never told about it.
+    const a = await load();
+    await a.api.syncDropbox(true);
+    assert.ok(a.f.client.files.has('/sessions/s1/audio-manifest.json'));
+
+    const b = await load({ shareWith: a.f });
+    await b.api.syncDropbox(true);
+
+    await a.api.deleteDropboxCopy('s1');
+    assert.equal(a.f.client.files.has('/sessions/s1/audio-manifest.json'), false);
+
+    // The other device comes to verify, as it does every few minutes.
+    b.f.db.delete('dropbox:account-1:receipt:s1');
+    b.f.client.writes = [];
+    await b.api.syncDropbox(true);
+
+    assert.deepEqual(b.f.client.writes, [], 'nothing was uploaded again');
+    assert.equal(b.api.backupStatus('s1'), 'Local only');
+    assert.equal(b.f.deletedLocal.length, 0, 'and its own audio is left alone');
+    assert.equal(b.f.db.get('dropbox:account-1:excluded:s1'), true,
+        'it adopted the exclusion, so later passes need no listing at all');
+});
+
+await test('a settled account makes no request to find out about deletions', async () => {
+    // The marker is read once per pass and only when the pass is about to
+    // upload something. syncDropbox() runs every thirty seconds for as long as
+    // the app is open, so a listing on every one of them would be a request a
+    // minute, for ever, about nothing.
+    const { f, api } = await load();
+    await api.syncDropbox(true);
+    let listings = 0;
+    const list = f.client.list.bind(f.client);
+    f.client.list = async (path) => { listings++; return list(path); };
+    await api.syncDropbox(true);
+    assert.equal(listings, 0);
+});
+
+await test('turning backup back on clears the shared marker too', async () => {
+    const { f, api } = await load();
+    await api.syncDropbox(true);
+    await api.deleteDropboxCopy('s1');
+    assert.ok(f.client.files.has('/deleted/s1.json'));
+
+    await api.enableSessionBackup('s1');
+    assert.equal(f.client.files.has('/deleted/s1.json'), false,
+        'or the next pass, here or anywhere else, would switch it straight off again');
+    assert.equal(api.backupStatus('s1'), 'Backed up');
+});
+
+await test('recovery does not rebuild a session whose cloud copy was deleted', async () => {
+    const { f, api } = await load();
+    await api.syncDropbox(true);
+    // An interrupted delete leaves the marker and the folder, which is the one
+    // state where the folder alone would resurrect the record.
+    await f.client.upload('/deleted/s1.json', new Blob([JSON.stringify({ schema: 1, sessionId: 's1', deletedAt: 1 })]));
+    f.sessions.length = 0;
+    assert.equal(await api.restoreDropboxSessions(), 0);
+    assert.equal(f.sessions.length, 0);
+});
+
+// ---- A conflict the user can actually settle ------------------------------
+
+async function conflicted() {
+    const { f, api } = await load();
+    await api.syncDropbox(true);
+    await api.deleteLocalCopy('s1');
+    const path = '/sessions/s1/session.json';
+    await f.client.upload(path, new Blob([JSON.stringify({ schema: 1,
+        session: { id: 's1', startedAt: 1, name: 'Edited elsewhere', tunes: [{ tuneId: 9 }], updatedAt: 9_000 } })]),
+    f.client.files.get(path));
+    f.sessions[0] = { id: 's1', startedAt: 1, name: 'Kept here', tunes: [], updatedAt: 5_000 };
+    f.db.delete('dropbox:account-1:receipt:s1');
+    await api.syncDropbox(true);
+    assert.equal(api.backupStatus('s1'), 'Needs review');
+    return { f, api, path };
+}
+
+await test('the two copies can be compared before choosing between them', async () => {
+    // The refusal told the user to "restore or review that copy", and there was
+    // nothing in the app that could do either — "Recover missing sessions"
+    // deliberately skips a session that already exists locally, so unless
+    // Firebase happened to deliver the newer version the Retry button could
+    // never succeed.
+    const { api } = await conflicted();
+    const both = await api.sessionConflict('s1');
+    assert.equal(both.local.name, 'Kept here');
+    assert.equal(both.local.tunes, 0);
+    assert.equal(both.remote.name, 'Edited elsewhere');
+    assert.equal(both.remote.tunes, 1);
+    assert.ok(both.remote.updatedAt > both.local.updatedAt, 'which is why it was refused');
+});
+
+await test('keeping this device\'s copy unsticks the backup', async () => {
+    const { f, api, path } = await conflicted();
+    await api.resolveSessionConflict('s1', 'local');
+    assert.equal((await f.client.json(path)).value.session.name, 'Kept here');
+    assert.equal(api.backupStatus('s1'), 'Backed up');
+    assert.equal(api.sessionConflictMessage('s1'), '');
+    // Stamped above BOTH copies, so the decision rides Firestore to every
+    // other device rather than being re-fought on the next pass.
+    assert.ok(f.sessions[0].updatedAt > 9_000);
+});
+
+await test('adopting the Dropbox copy replaces the local record with it', async () => {
+    const { f, api, path } = await conflicted();
+    await api.resolveSessionConflict('s1', 'remote');
+    assert.equal(f.sessions[0].name, 'Edited elsewhere');
+    assert.equal(f.sessions[0].tunes.length, 1);
+    assert.ok(f.sessions[0].updatedAt > 9_000);
+    assert.equal((await f.client.json(path)).value.session.name, 'Edited elsewhere');
+    assert.equal(api.backupStatus('s1'), 'Backed up');
+});
+
+await test('a resolution outranks a cloud copy written by a fast clock', async () => {
+    // The stamp has to be taken above BOTH copies, not just above this
+    // device's. A phone whose clock runs ten minutes ahead writes a session
+    // stamped in the future, and a resolution stamped from the local record
+    // alone is still the older one — so the backup is refused again on the
+    // very next pass and the button reads as having done nothing.
+    const { f, api } = await load();
+    await api.syncDropbox(true);
+    await api.deleteLocalCopy('s1');
+    const path = '/sessions/s1/session.json';
+    const ahead = Date.now() + 600_000;
+    await f.client.upload(path, new Blob([JSON.stringify({ schema: 1,
+        session: { id: 's1', startedAt: 1, name: 'From the fast phone', tunes: [], updatedAt: ahead } })]),
+    f.client.files.get(path));
+    f.sessions[0] = { id: 's1', startedAt: 1, name: 'Kept here', tunes: [], updatedAt: 5_000 };
+    f.db.delete('dropbox:account-1:receipt:s1');
+    await api.syncDropbox(true);
+    assert.equal(api.backupStatus('s1'), 'Needs review');
+
+    await api.resolveSessionConflict('s1', 'local');
+    assert.ok(f.sessions[0].updatedAt > ahead);
+    assert.equal((await f.client.json(path)).value.session.name, 'Kept here');
+    assert.equal(api.backupStatus('s1'), 'Backed up');
+});
+
+await test('a resolution has to name which copy it keeps', async () => {
+    const { api } = await conflicted();
+    await assert.rejects(api.resolveSessionConflict('s1', 'whichever'));
+    assert.equal(api.backupStatus('s1'), 'Needs review');
+});
+
 await test('a session synced from another device backs up despite differing from the cloud copy', async () => {
     const { f, api } = await load();
     await api.syncDropbox(true);
@@ -371,7 +554,11 @@ await test('a STRICTLY newer cloud copy is still refused', async () => {
 
     assert.equal(f.client.writes.length, 0, 'no files were overwritten');
     assert.equal((await f.client.json(path)).value.session.name, 'Edited elsewhere');
-    assert.equal(api.backupStatus('s1'), 'Backup pending');
+    // "Needs review", not "Backup pending": retrying cannot change this one,
+    // and saying pending is what left a button being pressed for ever against
+    // a state it had no way to move.
+    assert.equal(api.backupStatus('s1'), 'Needs review');
+    assert.match(api.sessionConflictMessage('s1'), /newer version/);
 });
 
 await test('one conflicted session does not block the metadata sync of the next', async () => {
@@ -396,7 +583,7 @@ await test('one conflicted session does not block the metadata sync of the next'
 
     await api.syncDropbox(true);
 
-    assert.equal(api.backupStatus('s1'), 'Backup pending');
+    assert.equal(api.backupStatus('s1'), 'Needs review');
     assert.equal(api.backupStatus('s2'), 'Backed up');
     assert.equal((await f.client.json('/sessions/s2/session.json')).value.session.name, 'Renamed');
 });

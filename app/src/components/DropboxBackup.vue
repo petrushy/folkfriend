@@ -56,6 +56,56 @@
             </p>
         </div>
         <p v-if="sessionId" class="caption mb-1" role="status">{{ label }}</p>
+
+        <!-- A newer copy in Dropbox. The refusal used to say "restore or review
+             that copy", and nothing in the app could do either: "Recover
+             missing sessions" deliberately skips a session that already exists
+             here, so unless Firebase happened to deliver the newer version the
+             Retry button could never succeed. This is that missing half. -->
+        <v-alert v-if="sessionId && conflictMessage" type="warning" dense text class="mb-2">
+            {{ conflictMessage }}
+            <div v-if="!conflict" class="mt-2">
+                <v-btn small text :loading="busy" :disabled="!state.connected" @click="reviewConflict">
+                    Compare the two copies
+                </v-btn>
+            </div>
+            <template v-else>
+                <table class="conflictTable caption mt-2">
+                    <tr>
+                        <th />
+                        <th>This device</th>
+                        <th>Dropbox</th>
+                    </tr>
+                    <tr>
+                        <td>Name</td>
+                        <td>{{ copyField('name') }}</td>
+                        <td>{{ copyField('name', true) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Tunes</td>
+                        <td>{{ copyField('tunes') }}</td>
+                        <td>{{ copyField('tunes', true) }}</td>
+                    </tr>
+                    <tr>
+                        <td>Last edited</td>
+                        <td>{{ editedAt(conflict.local) }}</td>
+                        <td>{{ editedAt(conflict.remote) }}</td>
+                    </tr>
+                </table>
+                <p class="caption text--secondary mt-2 mb-1">
+                    Whichever you keep becomes this session everywhere: it is saved here and
+                    synced to your other devices. The audio is not affected either way.
+                </p>
+                <div class="d-flex flex-wrap" style="gap: 8px;">
+                    <v-btn small color="primary" :loading="busy" @click="keepCopy('local')">
+                        Keep this device's version
+                    </v-btn>
+                    <v-btn small text :loading="busy" @click="keepCopy('remote')">
+                        Use the Dropbox version
+                    </v-btn>
+                </div>
+            </template>
+        </v-alert>
         <p v-if="!state.configured" class="caption">Dropbox backup has not been configured for this installation.</p>
         <v-alert v-if="error || state.error" dense text type="warning">{{ error || state.error }}</v-alert>
         <p v-if="message" class="caption" role="status">{{ message }}</p>
@@ -85,24 +135,51 @@
 </template>
 <script>
 import { dropboxState, backupStatus, connectDropbox, disconnectDropbox, syncDropbox, restoreDropboxSessions, setWholeRecordings,
-    deleteDropboxCopy, deleteLocalCopy, enableSessionBackup, refreshDropboxStorage } from '@/services/dropbox.js';
+    deleteDropboxCopy, deleteLocalCopy, enableSessionBackup, refreshDropboxStorage, sessionConflictMessage, sessionConflict, resolveSessionConflict } from '@/services/dropbox.js';
 import { formatBytes } from '@/services/sessionAudioStore.js';
 export default {
     name: 'DropboxBackup',
     props: { sessionId: { type: String, default: '' }, active: { type: Boolean, default: false } },
-    data: () => ({ state: dropboxState, busy: false, error: '', message: '' }),
-    computed: { label() { return backupStatus(this.sessionId); } },
+    data: () => ({ state: dropboxState, busy: false, error: '', message: '', conflict: null }),
+    computed: {
+        label() { return backupStatus(this.sessionId); },
+        conflictMessage() { return this.sessionId ? sessionConflictMessage(this.sessionId) : ''; },
+    },
+    watch: {
+        // A conflict that has gone (settled here, or resolved by the device
+        // that held the newer copy pushing it through Firebase) must take its
+        // comparison table with it.
+        conflictMessage(value) { if (!value) this.conflict = null; },
+        sessionId() { this.conflict = null; },
+        'state.connected'() { this.refreshStorage(); },
+        'state.revision'() { this.refreshStorage(); },
+    },
     mounted() {
         this.refreshStorage();
         this._storageTimer = setInterval(() => { if (!document.hidden) this.refreshStorage(); }, 60000);
     },
     beforeDestroy() { clearInterval(this._storageTimer); },
-    watch: {
-        'state.connected'() { this.refreshStorage(); },
-        'state.revision'() { this.refreshStorage(); },
-    },
     methods: {
         formatBytes,
+        copyField(field, remote = false) {
+            const copy = remote ? this.conflict.remote : this.conflict.local;
+            if (!copy) return 'not there';
+            return copy[field] === '' ? '(unnamed)' : copy[field];
+        },
+        editedAt(copy) {
+            if (!copy) return 'not there';
+            return copy.updatedAt ? new Date(copy.updatedAt).toLocaleString() : 'unknown';
+        },
+        reviewConflict() {
+            return this.run(async () => { this.conflict = await sessionConflict(this.sessionId); });
+        },
+        keepCopy(which) {
+            if (which === 'remote' && !window.confirm('Replace this session\u2019s tune list and details with the Dropbox copy? The version on this device will be overwritten, on your other devices too.')) return;
+            return this.run(async () => {
+                await resolveSessionConflict(this.sessionId, which);
+                this.conflict = null;
+            });
+        },
         refreshStorage(force = false) { if (!this.sessionId) return refreshDropboxStorage(force); },
         allowSpaceUsage() { return this.run(async () => {
             await connectDropbox({ includeSpaceUsage: true });
@@ -136,3 +213,14 @@ export default {
     },
 };
 </script>
+<style scoped>
+.conflictTable {
+    border-collapse: collapse;
+}
+.conflictTable th,
+.conflictTable td {
+    text-align: left;
+    padding: 2px 12px 2px 0;
+    vertical-align: top;
+}
+</style>

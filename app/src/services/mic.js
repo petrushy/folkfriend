@@ -154,6 +154,13 @@ class MicService {
         // integrated level since the last read.
         this._rmsSquaredSum = 0;
         this._rmsSampleCount = 0;
+        // Loudest single SAMPLE since the last read, squared. RMS is an
+        // average, and averages hide clipping completely: a signal hitting
+        // full scale on every peak can sit twelve dB down on RMS and read as
+        // comfortable, which is how a recording nobody can use gets made while
+        // the meter says it is fine. Accumulated here rather than measured
+        // separately because the loop over the buffer is already running.
+        this._peakSquared = 0;
 
         this._ringBuffer = [];
         this._ringBufferMaxChunks = 0;
@@ -705,11 +712,15 @@ class MicService {
     // signal from digital silence without a second pass over the buffer.
     _accumulateRms(samples) {
         let sum = 0;
+        let loudest = 0;
         for (let i = 0; i < samples.length; i++) {
-            sum += samples[i] * samples[i];
+            const square = samples[i] * samples[i];
+            sum += square;
+            if (square > loudest) loudest = square;
         }
         this._rmsSquaredSum += sum;
         this._rmsSampleCount += samples.length;
+        if (loudest > this._peakSquared) this._peakSquared = loudest;
         return sum;
     }
 
@@ -723,6 +734,17 @@ class MicService {
         this._rmsSquaredSum = 0;
         this._rmsSampleCount = 0;
         return rms;
+    }
+
+    // The loudest sample since the last call (linear amplitude, 0..1), and
+    // resets. Separate from the RMS reading above because the two answer
+    // different questions: RMS is how loud the room is, peak is whether the
+    // input has run out of headroom. Only the second can say "this is being
+    // clipped", and only the first is worth drawing as a level.
+    getPeakLevel() {
+        const peak = Math.sqrt(this._peakSquared);
+        this._peakSquared = 0;
+        return peak;
     }
 
     async startRecording() {
@@ -816,6 +838,7 @@ class MicService {
         this._ringBuffer = [];
         this._rmsSquaredSum = 0;
         this._rmsSampleCount = 0;
+        this._peakSquared = 0;
         store.setSearchState(store.searchStates.READY);
     }
 
@@ -848,6 +871,7 @@ class MicService {
 
         this._rmsSquaredSum = 0;
         this._rmsSampleCount = 0;
+        this._peakSquared = 0;
     }
 
     // Shared stop path: mark the capture as no longer wanted, let any in-flight

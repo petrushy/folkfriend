@@ -6,7 +6,7 @@ import store from '@/services/store.js';
 import recorder from '@/services/sessionRecorder.js';
 import { listManifests, readManifest, readSegment, buildClip, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
 import { DropboxClient, DropboxError, base64url } from './dropboxClient.mjs';
-import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateWholeRecordings, validateManifest, validateSession, mayReplaceRemoteSession, sessionPath } from './dropboxBackup.mjs';
+import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateWholeRecordings, validateManifest, validateSession, mayReplaceRemoteSession, sessionPath, deletionPath, deletionRecord, sessionSummary } from './dropboxBackup.mjs';
 
 // Public OAuth identifier, deliberately shipped with the browser app.
 const APP_KEY = process.env.VUE_APP_DROPBOX_APP_KEY || 'zl982bc269ijgda';
@@ -28,6 +28,11 @@ try { auth = JSON.parse(stored(AUTH_KEY)); } catch (_) { auth = null; }
 let account = stored(ACCOUNT_KEY) || '';
 export const dropboxState = Vue.observable({ configured: !!APP_KEY, enabled: stored(ENABLED_KEY) === 'true',
     connected: !!auth && auth.expiresAt > Date.now() + 30000, busy: false, error: '', sessions: {}, revision: 0, storage: emptyStorage(),
+    // Sessions whose backup is blocked by a newer copy in Dropbox, id → why.
+    // Kept apart from `sessions` because a conflict is the one backup failure
+    // the user can actually do something about, and the view needs to know
+    // which one to offer that something for.
+    conflicts: {},
     wholeRecordings: stored(WHOLE_KEY) === 'true' });
 
 // Turning it ON re-runs the backup so finished sessions already in Dropbox get
@@ -62,11 +67,21 @@ const key = (kind, id) => `dropbox:${account}:${kind}:${id}`;
 // One event, one meaning.
 function changed(id) { dropboxState.revision++; eventBus.$emit('dropboxStateChanged', { sessionId: id }); }
 function status(id, label) { Vue.set(dropboxState.sessions, id, label); }
+function noteConflict(id, message) { if (id) Vue.set(dropboxState.conflicts, id, message || ''); }
+export function sessionConflictMessage(id) {
+    void dropboxState.revision;
+    return dropboxState.conflicts[id] || '';
+}
 function report(e, id) {
     if (e.code === 'auth') { dropboxState.connected = false; auth = null; localStorage.removeItem(AUTH_KEY); }
     retryAt = Date.now() + Math.max(30000, (e.retryAfter || 0) * 1000);
-    const label = e.code === 'auth' ? 'Reconnect required' : e.code === 'full' ? 'Dropbox full' : 'Backup pending';
+    // A conflict is not "pending": nothing is going to clear it by retrying,
+    // and calling it pending is what left a Retry button being pressed for
+    // ever against a state it could not change.
+    const label = e.code === 'auth' ? 'Reconnect required' : e.code === 'full' ? 'Dropbox full'
+        : e.code === 'conflict' ? 'Needs review' : 'Backup pending';
     if (id) status(id, label);
+    if (id) noteConflict(id, e.code === 'conflict' ? e.message : '');
     dropboxState.error = e.message || 'Dropbox is unavailable. Backup will retry.';
 }
 export async function refreshDropboxStorage(force = false) {
@@ -177,6 +192,23 @@ export function syncDropbox(force = false) {
             dropboxState.error = '';
             const sessions = await store.getLiveSessionsStrict();
             const manifests = await listManifests();
+            // Deletions another device recorded. Read LAZILY — once per pass,
+            // and only when this pass is actually about to upload something —
+            // because the steady state of a backed-up account makes no
+            // requests at all and it must stay that way: syncDropbox() runs
+            // every thirty seconds for as long as the app is open.
+            let deletions = null;
+            const deletedElsewhere = async id => {
+                if (!deletions) deletions = await client.deletedSessions();
+                if (!deletions.has(id)) return false;
+                // Adopt it here too. This device is the one that would have
+                // re-uploaded, so the exclusion belongs on it — and once it is
+                // written, later passes short-circuit before the listing.
+                await set(key('excluded', id), true);
+                status(id, 'Local only');
+                changed(id);
+                return true;
+            };
             for (const local of manifests) {
                 if (!dropboxState.enabled) break;
                 const id = local.sessionId;
@@ -188,6 +220,7 @@ export function syncDropbox(force = false) {
                     if (receipt?.fingerprint === fingerprint && receipt.verifiedAt > Date.now() - 300000) {
                         status(id, recorder.sessionId === id && recorder.isRecording ? 'Syncing' : 'Backed up'); continue;
                     }
+                    if (await deletedElsewhere(id)) continue;
                     status(id, 'Syncing');
                     // A NEWER cloud session must never be overwritten by a
                     // stale local editor, including after a crash/reconnect.
@@ -211,6 +244,7 @@ export function syncDropbox(force = false) {
                         if (paths.length) await set(key('whole', id), paths);
                     }
                     await set(key('receipt', id), { fingerprint, session: json(session), verifiedAt: Date.now() });
+                    noteConflict(id, '');
                     status(id, recorder.sessionId === id && recorder.isRecording ? 'Syncing' : 'Backed up'); changed(id);
                 } catch (e) { report(e, id); if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break; }
             }
@@ -222,6 +256,7 @@ export function syncDropbox(force = false) {
                 try {
                     const receipt = await get(key('receipt', id));
                     if (receipt?.session === json(session) && receipt.verifiedAt > Date.now() - 300000) continue;
+                    if (await deletedElsewhere(id)) continue;
                     status(id, 'Syncing');
                     const root = sessionPath(id);
                     const audio = await client.json(`${root}/audio-manifest.json`);
@@ -237,6 +272,7 @@ export function syncDropbox(force = false) {
                     await client.upload(`${root}/session.json`, new Blob([json({ schema: 1, session })]), remote);
                     await set(key('manifest', id), audio.value);
                     await set(key('receipt', id), { session: json(session), verifiedAt: Date.now() });
+                    noteConflict(id, '');
                     status(id, 'Backed up'); changed(id);
                     // Only a transient, WHOLE-ACCOUNT fault is worth stopping
                     // the pass for. Breaking on anything — which is what this
@@ -297,8 +333,12 @@ export async function restoreDropboxSessions() {
     return serialize(async () => {
         const existing = await store.getLiveSessionsStrict();
         let count = 0;
+        // A session whose cloud copy was deleted is not a session to recover,
+        // even if an interrupted delete left its folder behind.
+        const deletions = await client.deletedSessions();
         for (const folder of await client.folders()) {
             const id = folder.name;
+            if (deletions.has(id)) continue;
             sessionPath(id);
             const result = await client.json(`${sessionPath(id)}/session.json`);
             const audio = await client.json(`${sessionPath(id)}/audio-manifest.json`);
@@ -335,6 +375,17 @@ export async function deleteDropboxCopy(id) {
         ])];
         await set(key('deletion', id), { schema: 1, sessionId: id, paths: wholePaths });
         await set(key('excluded', id), true);
+        // BEFORE any file is removed, and outside the folder being removed.
+        //
+        // The exclusion above is local to this device, and that was the whole
+        // of the record: another device still holding this session's audio saw
+        // a session with local audio and no cloud copy, did what it is for,
+        // and put the recording straight back. The deletion has to be a fact
+        // both devices can read, so it is written into Dropbox — and written
+        // first, so an interrupted delete still leaves the marker rather than
+        // a half-removed folder nothing explains.
+        const marker = deletionPath(id);
+        await client.upload(marker, new Blob([json(deletionRecord(id))]), await client.metadata(marker));
         // Keep the remote manifests and inventory until every external file
         // is gone. A different device can also resume this operation.
         for (const whole of wholePaths) {
@@ -371,7 +422,69 @@ export async function deleteLocalCopy(id) {
         changed(id);
     });
 }
-export async function enableSessionBackup(id) { await del(key('excluded', id)); retryAt = 0; return syncDropbox(true); }
+// Turning backup back on for one session. Clears the SHARED marker as well as
+// the local exclusion: leaving it would let the next pass — on this device or
+// any other — read the deletion and switch the session straight back off, so
+// the button would appear to do nothing.
+export async function enableSessionBackup(id) {
+    await serialize(async () => {
+        await del(key('excluded', id));
+        if (!dropboxState.enabled) return;
+        try { await client.request('files/delete_v2', { path: deletionPath(id) }); }
+        catch (e) { if (e.code !== 'missing') throw e; }
+    });
+    retryAt = 0;
+    return syncDropbox(true);
+}
+
+// ---- Conflicts: a newer copy in Dropbox -----------------------------------
+//
+// mayReplaceRemoteSession() refuses to overwrite a strictly newer cloud copy,
+// which is right — but the message told the user to "restore or review that
+// copy", and there was nothing in the app that could do either: "Recover
+// missing sessions" deliberately skips a session that already exists locally,
+// so unless Firebase happened to deliver the newer version the Retry button
+// could never succeed. These two are that missing half.
+
+// The two copies side by side, so the choice below is an informed one.
+export async function sessionConflict(id) {
+    return serialize(async () => {
+        const remote = await client.json(`${sessionPath(id)}/session.json`);
+        const local = (await store.getLiveSessionsStrict()).find(s => s.id === id) || null;
+        return {
+            local: sessionSummary(local),
+            remote: remote ? sessionSummary(validateSession(remote.value, id)) : null,
+        };
+    });
+}
+
+// Settle it, in the user's favour whichever way they choose.
+//
+// Neither branch reaches past the version rule: both make the LOCAL record
+// legitimately the newest copy and let the ordinary backup replace Dropbox
+// with it. That also means the decision rides Firestore to every other device,
+// so the conflict is resolved everywhere rather than on the phone in front of
+// the user — which is what stops it coming back on the next pass.
+export async function resolveSessionConflict(id, keep = 'local') {
+    if (keep !== 'local' && keep !== 'remote') throw new Error('Choose which copy to keep.');
+    await serialize(async () => {
+        const remote = await client.json(`${sessionPath(id)}/session.json`);
+        const cloud = remote ? validateSession(remote.value, id) : null;
+        const local = (await store.getLiveSessionsStrict()).find(s => s.id === id) || null;
+        if (!local && !cloud) throw new DropboxError('This session is in neither place.', 'missing');
+        if (keep === 'remote' && !cloud) throw new DropboxError('There is no Dropbox copy of this session to keep.', 'missing');
+        // Stamped above BOTH copies, because a cloud copy written by a device
+        // whose clock runs ahead would otherwise still be the newer one and the
+        // conflict would survive the resolution.
+        const base = Math.max(cloud?.updatedAt || 0, local?.updatedAt || 0);
+        const chosen = keep === 'remote' ? { ...(local || {}), ...cloud } : local;
+        await store.upsertLiveSession({ ...chosen, id, updatedAt: base });
+        noteConflict(id, '');
+        status(id, 'Syncing');
+    });
+    retryAt = 0;
+    return syncDropbox(true);
+}
 export function startDropbox() {
     configureCloudAudio({ manifest: remoteManifest, segment: remoteSegment, remove: removeDropboxCopyIfPresent });
     const schedule = () => syncDropbox();

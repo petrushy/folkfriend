@@ -163,6 +163,19 @@ class FakeAudioContext {
         }
         return count;
     }
+
+    // One buffer sitting at `base` with a single sample at `peak`. What a
+    // clipped transient actually looks like, and the shape a constant-valued
+    // buffer cannot express: with every sample the same, peak and RMS are the
+    // same number and a test cannot tell the two readings apart.
+    deliverPeak(base, peak) {
+        if (!this.processor || !this.processor.onaudioprocess) return 0;
+        if (this.state !== 'running') return 0;
+        const data = new Float32Array(this.processor.bufferSize).fill(base);
+        data[0] = peak;
+        this.processor.onaudioprocess({ inputBuffer: { getChannelData: () => data } });
+        return 1;
+    }
 }
 
 function installGlobals() {
@@ -433,6 +446,27 @@ await test('a capture delivering nothing but silence is re-acquired', async () =
     assert.equal(await mic.ensureMicHealthy(), true);
     assert.equal(env.streams.length, 2, 'the capture is rebuilt');
 
+    await mic.stopContinuous();
+});
+
+await test('clipping shows in the peak while the average still reads comfortable', async () => {
+    // The meter is an RMS average of the last second, and an average hides
+    // clipping completely: a signal hitting full scale on every peak can sit
+    // twelve dB down on RMS and light exactly the same LEDs as a healthy one.
+    // So a recording nobody can use gets made while the display says it is
+    // fine. Only the peak can answer that question.
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    env.contexts[0].deliverPeak(0.1, 1);
+
+    const rms = mic.getRmsLevel();
+    const peak = mic.getPeakLevel();
+    assert.ok(rms < 0.2, `an average of ${rms} reads as comfortable`);
+    assert.equal(peak, 1, 'while the input was at full scale');
+
+    // Both readings reset, so one clip is never reported over and over — and
+    // in particular not again on the next tick that carries no audio at all.
+    assert.equal(mic.getPeakLevel(), 0);
     await mic.stopContinuous();
 });
 

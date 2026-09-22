@@ -38,7 +38,8 @@ async function test(name, fn) {
 }
 
 const FAKE_EVENTBUS = `export default { $emit() {}, $on() {}, $off() {} };`;
-const FAKE_MDI = `export const mdiPlay = 'play'; export const mdiPause = 'pause';`;
+const FAKE_MDI = `export const mdiPlay = 'play'; export const mdiPause = 'pause';
+export const mdiRewind15 = 'rewind'; export const mdiFastForward15 = 'forward';`;
 const FAKE_SESSION_ANALYSIS = `
 export function formatSecondsAsDuration(s) { return String(Math.round(s)); }`;
 let store;
@@ -48,10 +49,13 @@ export function __setManifest(m) { __manifest = m; }
 export async function playbackReadManifest() { return __manifest; }
 export let __clip = null;
 export function __setClip(c) { __clip = c; }
+// A clip whose arrival the test controls, for the seeks that race each other.
+export let __clipFactory = null;
+export function __setClipFactory(f) { __clipFactory = f; }
 export const __clipCalls = [];
-export async function buildClip(sessionId, from, to) {
+export async function buildClip(sessionId, from, to, manifest) {
     __clipCalls.push([sessionId, from, to]);
-    return __clip;
+    return __clipFactory ? __clipFactory(sessionId, from, to, manifest) : __clip;
 }
 export let __tracks = [];
 export function __setTracks(t) { __tracks = t; }
@@ -92,6 +96,9 @@ async function loadPlayer() {
 // performed — what matters is the OFFSET it is asked for.
 async function mountPlayer(manifest) {
     const component = await loadPlayer();
+    // The fake store module is shared across mounts (no cache-buster), so a
+    // factory one test installed would otherwise still be there in the next.
+    store.__setClipFactory(null);
     const vm = { $refs: {}, sessionId: 's1', detections: [], listening: false };
     for (const [name, fn] of Object.entries(component.methods)) vm[name] = fn.bind(vm);
     Object.assign(vm, component.data.call(vm));
@@ -118,6 +125,8 @@ const audioEnv = {
     decodeError: null,      // or the error it rejects with
     contexts: [],
     sourceNodes: 0,
+    contextState: 'running',
+    resumeFails: false,
     // WebKit-style: remix the decoded buffer down to the decoding context's
     // own channel count.
     remixToContext: false,
@@ -174,7 +183,8 @@ class FakeGain {
 
 class FakeAudioContext {
     constructor() {
-        this.state = 'running';
+        this.state = audioEnv.contextState;
+        this.resumeCalls = 0;
         this.destination = { id: 'destination' };
         this.gains = [];
         audioEnv.contexts.push(this);
@@ -184,7 +194,14 @@ class FakeAudioContext {
         return { connect: (node) => { this.sourceTarget = node; } };
     }
     createGain() { const g = new FakeGain(); this.gains.push(g); return g; }
-    resume() { return Promise.resolve(); }
+    resume() {
+        this.resumeCalls++;
+        // A browser that refuses to resume outside a gesture leaves the state
+        // exactly as it was, which is the case worth reporting.
+        if (audioEnv.resumeFails) return Promise.reject(new Error('not allowed'));
+        this.state = 'running';
+        return Promise.resolve();
+    }
     close() { this.state = 'closed'; return Promise.resolve(); }
 }
 
@@ -199,7 +216,11 @@ function resetAudioEnv() {
     audioEnv.contexts = [];
     audioEnv.sourceNodes = 0;
     audioEnv.remixToContext = false;
+    audioEnv.contextState = 'running';
+    audioEnv.resumeFails = false;
 }
+
+const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 
 // A player sitting on a recording whose decoded audio is `channels`.
 async function mountProbed(channels, { manifestChannels = null, remixToContext = false } = {}) {
@@ -498,7 +519,7 @@ await test('a dead second channel is measured, not taken from the manifest', asy
     // stereo by every label on it. What makes it play out of one speaker is
     // what the second channel CONTAINS, which only decoding can answer.
     const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
-    assert.deepEqual(vm.channelProbe, { channels: 2, oneSided: true });
+    assert.deepEqual(vm.channelProbe, { channels: 2, oneSided: true, inconclusive: false });
     assert.equal(vm.channelsLabel, 'one channel only');
 });
 
@@ -554,7 +575,6 @@ await test('a browser that cannot decode leaves playback exactly as it was', asy
     // correction, so a failed one costs the correction and nothing else.
     const vm = await mountProbed(null, { manifestChannels: 2 });
     audioEnv.decodeError = new Error('unsupported');
-    vm._channelProbeFor = null;
     await vm._probeChannels();
 
     assert.equal(vm.channelProbe, null);
@@ -611,7 +631,6 @@ await test('a probe that could not answer says so rather than going quiet', asyn
     // unreadable on the device this feature is used on.
     const vm = await mountProbed(null, { manifestChannels: 2 });
     audioEnv.decodeError = new Error('unsupported');
-    vm._channelProbeFor = null;
     await vm._probeChannels();
     assert.equal(vm.channelProbeFailed, true);
     assert.equal(vm.channelRepair, false, 'and playback is left exactly as it was');
@@ -641,6 +660,276 @@ await test('a refused clip reports WHICH failure, not just "not supported"', asy
     assert.ok(vm.error.includes('2 kB'), vm.error);
 });
 
+
+await test('the correction is resumed on EVERY play, not only when it is built', async () => {
+    // A browser suspends an AudioContext whose page is backgrounded, and an
+    // element that has been given a MediaElementAudioSourceNode plays through
+    // the graph permanently — so a context resumed once at construction and
+    // never again means silence on every play after the first time the phone
+    // was put down. Not a missing correction: no sound at all.
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    vm._play();
+    const ctx = audioEnv.contexts[0];
+    assert.equal(vm.channelRepair, true);
+    assert.equal(ctx.resumeCalls, 0, 'nothing to resume while it is running');
+
+    ctx.state = 'suspended';              // backgrounded between two plays
+    vm._play();
+    await settle();
+    assert.equal(ctx.resumeCalls, 1);
+    assert.equal(ctx.state, 'running');
+    assert.equal(vm.channelRepairStalled, false);
+});
+
+await test('a resume that does not take is said out loud', async () => {
+    // "Uncorrected" and "silent" are completely different outcomes, and only
+    // one of them is worth interrupting someone for. There is no console on
+    // the device this matters on.
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    vm._play();
+    const ctx = audioEnv.contexts[0];
+    audioEnv.resumeFails = true;
+    ctx.state = 'suspended';
+    vm._play();
+    await settle();
+    assert.equal(vm.channelRepairStalled, true);
+
+    // And it clears itself once a later play gets the context back.
+    audioEnv.resumeFails = false;
+    vm._play();
+    await settle();
+    assert.equal(vm.channelRepairStalled, false);
+});
+
+await test('a correction is per TRACK, not per session', async () => {
+    // A track is one continuous MediaRecorder run: Pause, Resume and a
+    // reacquired microphone each start a new one, and each can come back on a
+    // different device. Applying the first track's finding to the rest meant a
+    // later MONO track — which needs no correction at all — was played through
+    // an explicit one-channel downmix at gain 2, i.e. twice as loud as it was
+    // recorded.
+    resetAudioEnv();
+    const vm = await mountPlayer({
+        sessionId: 's1', totalSeconds: 360, mimeType: 'audio/mp4',
+        tracks: [{ index: 0 }, { index: 1 }],
+        segments: [
+            { index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 180 },
+            { index: 1, trackIndex: 1, startSeconds: 180, durationSeconds: 180 },
+        ],
+    });
+    store.__setTracks([
+        { index: 0, startSeconds: 0, endSeconds: 180, durationSeconds: 180 },
+        { index: 1, startSeconds: 180, endSeconds: 360, durationSeconds: 180 },
+    ]);
+    store.__setClip({ blob: new Blob(['audio']), mimeType: 'audio/mp4', startSeconds: 0, endSeconds: 4 });
+    vm.$refs.audio = { play: () => Promise.resolve(), pause() {} };
+
+    audioEnv.decoded = fakeBuffer([LOUD, DEAD]);
+    await vm._probeChannels(0);
+    vm._play();
+    const mix = audioEnv.contexts[0].gains[0];
+    assert.equal(mix.gain.value, 2, 'the first track really is one-sided');
+
+    // The phone was plugged into a mono interface after the break.
+    audioEnv.decoded = fakeBuffer([LOUD]);
+    vm.currentTrackIndex = 1;
+    await vm._probeChannels(1);
+    vm._play();
+    assert.equal(vm.channelRepair, false);
+    assert.equal(mix.gain.value, 1, 'and is handed through untouched');
+    assert.equal(mix.channelCountMode, 'max');
+
+    // Going back to the first track corrects it again.
+    vm.currentTrackIndex = 0;
+    vm._play();
+    assert.equal(vm.channelRepair, true);
+    assert.equal(mix.gain.value, 2);
+});
+
+await test('a silent stretch is inconclusive, and a later one is looked at', async () => {
+    // Silence cannot tell a dead channel from a muted opening, so reporting
+    // "nothing to correct" from it is a claim the audio does not support — and
+    // a session muted for its first minute is exactly the case that produced
+    // it. Bounded, because a genuinely silent recording must not be decoded
+    // again on every manifest refresh for the rest of the session.
+    resetAudioEnv();
+    audioEnv.decoded = fakeBuffer([DEAD, DEAD]);
+    const vm = await mountProbed([DEAD, DEAD], { manifestChannels: 2 });
+    assert.equal(vm.channelProbe.inconclusive, true);
+    assert.equal(vm.channelProbe.oneSided, false, 'and it claims nothing');
+
+    // A second look, further into the same track, where the music starts.
+    const before = store.__clipCalls.length;
+    audioEnv.decoded = fakeBuffer([LOUD, DEAD]);
+    await vm._probeChannels(0);
+    assert.equal(store.__clipCalls.length, before + 1, 'it looked again');
+    assert.equal(store.__clipCalls[store.__clipCalls.length - 1][1], 30, 'and further in');
+    assert.equal(vm.channelProbe.oneSided, true);
+    assert.equal(vm.channelProbe.inconclusive, false);
+
+    // Now that it has an answer, it stops.
+    const settled = store.__clipCalls.length;
+    await vm._probeChannels(0);
+    assert.equal(store.__clipCalls.length, settled);
+});
+
+await test('an evening of silence is given up on rather than decoded for ever', async () => {
+    resetAudioEnv();
+    audioEnv.decoded = fakeBuffer([DEAD, DEAD]);
+    const vm = await mountProbed([DEAD, DEAD], { manifestChannels: 2 });
+    const after = store.__clipCalls.length;
+    // Two more offsets to try, then nothing.
+    await vm._probeChannels(0);
+    await vm._probeChannels(0);
+    await vm._probeChannels(0);
+    await vm._probeChannels(0);
+    assert.equal(store.__clipCalls.length, after + 2,
+        'three attempts in total, then it stops');
+});
+
+console.log('\nSessionAudioPlayer — a newer seek wins');
+
+await test('seeking back into the loaded segment cancels a slower pending load', async () => {
+    // A load is a clip build, which over Dropbox is a download and a hash
+    // verification. While one is in flight, segmentIndex still names the
+    // segment IN the element — so a seek back into it took the "already
+    // loaded" branch, and the older request then landed, replaced the source
+    // and seeked to ITS target. The user's newer choice, silently overridden
+    // by the one they had moved on from.
+    const vm = await mountPlayer(GAPPY);
+    vm.playFrom = vm.__realPlayFrom;
+    const seeks = [];
+    vm.$refs.audio = {
+        seekable: { length: 1, start: () => 0, end: () => Infinity },
+        duration: Infinity,
+        load() {}, play: () => Promise.resolve(), pause() {},
+        removeAttribute() {}, getAttribute: () => 'src',
+        set currentTime(v) { seeks.push(v); },
+        get currentTime() { return seeks[seeks.length - 1] || 0; },
+    };
+    store.__setClip({ blob: new Blob(['first']), mimeType: 'audio/mp4',
+        startSeconds: 0, endSeconds: 180, trackStartSeconds: 0 });
+    await vm.playFrom(30, { autoplay: false });
+    vm.onLoadedMetadata();
+    assert.equal(vm.segmentIndex, 0);
+
+    // A tap far into the evening, on a connection that takes its time.
+    let release;
+    store.__setClipFactory(() => new Promise(resolve => {
+        release = () => resolve({ blob: new Blob(['second']), mimeType: 'audio/mp4',
+            startSeconds: 360, endSeconds: 540, trackStartSeconds: 0 });
+    }));
+    const slow = vm.playFrom(400, { autoplay: false });
+    await settle();
+
+    // The user changes their mind and goes back to something already loaded.
+    store.__setClipFactory(null);
+    await vm.playFrom(30, { autoplay: false });
+    assert.equal(seeks[seeks.length - 1], 30);
+
+    release();
+    await slow;
+    assert.equal(vm.segmentIndex, 0, 'the abandoned load never replaced the source');
+    assert.equal(seeks[seeks.length - 1], 30, 'nor moved the position');
+});
+
+console.log('\nSessionAudioPlayer — what the timeline claims');
+
+await test('a tune block ends where its last matching window did', async () => {
+    // audioSeconds is stamped when the analysed window is READ, i.e. at its
+    // end — so a cluster's audio finishes at its last stamp. The block used to
+    // be drawn a whole window past that, painting the tune over ten seconds of
+    // recording the detector never looked at, and the "now playing" label
+    // under it kept naming the tune for those ten seconds too.
+    const vm = await mountPlayer({
+        sessionId: 's1', totalSeconds: 200, mimeType: 'audio/mp4',
+        tracks: [{ index: 0, startSeconds: 0, durationSeconds: 200 }],
+        segments: [{ index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 200 }],
+    });
+    vm.detections = [
+        { id: 'a', tuneId: 1, title: 'The Kesh', audioStartSeconds: 30,
+            audioAnchorSeconds: 25, audioEndSeconds: 60 },
+    ];
+    const [block] = vm.blocks;
+    // 25 s → 60 s of 200 s.
+    assert.equal(block.style.left, '12.5%');
+    assert.equal(block.style.width, '17.5%');
+
+    vm.currentSeconds = 59;
+    assert.equal(vm.nowPlayingLabel, 'The Kesh');
+    vm.currentSeconds = 61;
+    assert.notEqual(vm.nowPlayingLabel, 'The Kesh');
+    // And the block reaches back into the window the match came from, rather
+    // than starting where that window ended.
+    vm.currentSeconds = 26;
+    assert.equal(vm.nowPlayingLabel, 'The Kesh');
+});
+
+await test('a row matched in a single window still has somewhere to tap', async () => {
+    const vm = await mountPlayer({
+        sessionId: 's1', totalSeconds: 200, mimeType: 'audio/mp4',
+        tracks: [{ index: 0, startSeconds: 0, durationSeconds: 200 }],
+        segments: [{ index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 200 }],
+    });
+    vm.detections = [
+        { id: 'a', tuneId: 1, title: 'A reel', audioStartSeconds: 40,
+            audioAnchorSeconds: 35, audioEndSeconds: 40 },
+    ];
+    const [block] = vm.blocks;
+    assert.equal(block.style.left, '17.5%');
+    assert.equal(parseFloat(block.style.width) > 0, true);
+    vm.currentSeconds = 38;
+    assert.equal(vm.nowPlayingLabel, 'A reel');
+});
+
+await test('the timeline can be driven from the keyboard', async () => {
+    // It was a click-only div: no keyboard seeking, nothing for a screen
+    // reader, and no way to land on a given second of a three-hour evening
+    // where one phone pixel is about twenty of them.
+    const vm = await mountPlayer({
+        sessionId: 's1', totalSeconds: 600, mimeType: 'audio/mp4',
+        tracks: [{ index: 0, startSeconds: 0, durationSeconds: 600 }],
+        segments: [{ index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 600 }],
+    });
+    vm.currentSeconds = 300;
+    const prevented = [];
+    const press = (key, shiftKey = false) => vm.onStripKey({
+        key, shiftKey, preventDefault: () => prevented.push(key),
+    });
+
+    press('ArrowRight');
+    assert.deepEqual(vm.playRequests, [315]);
+    vm.currentSeconds = 300;
+    press('ArrowLeft');
+    assert.deepEqual(vm.playRequests, [315, 285]);
+    vm.currentSeconds = 300;
+    press('ArrowRight', true);
+    assert.deepEqual(vm.playRequests, [315, 285, 360], 'shift covers ground');
+    vm.currentSeconds = 300;
+    press('Home');
+    press('End');
+    assert.deepEqual(vm.playRequests, [315, 285, 360, 0, 600]);
+    assert.equal(prevented.length, 5);
+
+    // A key it does not act on is left entirely alone — swallowing everything
+    // would take Tab off the control the user just focused.
+    press('Tab');
+    assert.equal(prevented.length, 5);
+    assert.equal(vm.playRequests.length, 5);
+});
+
+await test('a seek never runs off either end of the recording', async () => {
+    const vm = await mountPlayer({
+        sessionId: 's1', totalSeconds: 600, mimeType: 'audio/mp4',
+        tracks: [{ index: 0, startSeconds: 0, durationSeconds: 600 }],
+        segments: [{ index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 600 }],
+    });
+    vm.currentSeconds = 5;
+    vm.seekBy(-15);
+    vm.currentSeconds = 595;
+    vm.seekBy(15);
+    assert.deepEqual(vm.playRequests, [0, 600]);
+});
 
 await rm(tmpDir, { recursive: true, force: true });
 

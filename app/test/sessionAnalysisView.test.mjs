@@ -306,6 +306,13 @@ export async function listManifests() { return __manifests; }
 export async function playbackReadManifest(id) { return __manifests.find(m => m.sessionId === id); }
 export async function reclaimOrphans() { return 0; }
 `);
+    // The view reads the backup label and whether a session's backup is
+    // waiting on a decision, so the header can say so with the panel closed.
+    await writeFile(path.join(tmpDir, 'fake-dropbox.mjs'), `
+export const __state = { label: 'Local only', conflict: '' };
+export function backupStatus() { return __state.label; }
+export function sessionConflictMessage() { return __state.conflict; }
+`);
 
     const sfc = await readFile(path.join(srcDir, 'views', 'SessionAnalysis.vue'), 'utf8');
     const open = sfc.indexOf('<script>');
@@ -328,6 +335,7 @@ export async function reclaimOrphans() { return 0; }
         ["from '@/services/sessionRecorder.js'", "from './fake-recorder.mjs'"],
         ["from '@/js/liveScoreFollow.mjs'", "from './fake-follow.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
+        ["from '@/services/dropbox.js'", "from './fake-dropbox.mjs'"],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in the SFC`);
@@ -405,7 +413,10 @@ async function mountView({
     recorder.__state.available = true;
     const audio = await import(path.join(tmpDir, 'fake-audio-store.mjs'));
     audio.__setManifests([]);
-    return { vm, component, settle, bus, live, file, store, audio, recorder };
+    const dropbox = await import(path.join(tmpDir, 'fake-dropbox.mjs'));
+    dropbox.__state.label = 'Local only';
+    dropbox.__state.conflict = '';
+    return { vm, component, settle, bus, live, file, store, audio, recorder, dropbox };
 }
 
 await writeFakes();
@@ -1113,6 +1124,81 @@ await test('contiguous segments are one range, not many', async () => {
 
     assert.equal(vm.audioRanges.length, 1);
     assert.equal(vm.hasAudioFor(vm.activeDetections[0]), true);
+});
+
+console.log('\nthe recording card only exists where there is a recording');
+
+await test('a saved session with no audio shows no recording card at all', async () => {
+    // It was gated on there being an ACTIVE SESSION, not on there being a
+    // recording — so every session ever saved carried a full card of backup
+    // explanation and Delete buttons about audio that did not exist, which at
+    // phone width pushed the tune list off the first screen.
+    const { vm, settle, store, audio } = await mountView();
+    await settle();
+    audio.__setManifests([]);
+    store.__liveSessions.push({ id: 'quiet', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'A reel', startSeconds: 0, endSeconds: 60 },
+    ] });
+    await vm.refreshPastSessions();
+    vm.selectSession('quiet');
+    await vm.refreshAudioSessions();
+
+    assert.equal(vm.audioSessionId, 'quiet', 'it is still the session being looked at');
+    assert.equal(vm.hasSessionRecording, false, 'but there is nothing to play or back up');
+});
+
+await test('a session with a recording still shows it', async () => {
+    const { vm, settle, store, audio } = await mountView();
+    await settle();
+    store.__liveSessions.push({ id: 'taped', startedAt: 1000, tunes: [
+        { tuneId: 2, settingId: '20', title: 'A reel', startSeconds: 0, endSeconds: 60,
+            audioStartSeconds: 30, audioEndSeconds: 50 },
+    ] });
+    audio.__setManifests([{ sessionId: 'taped', bytes: 1,
+        segments: [{ index: 0, startSeconds: 0, durationSeconds: 180 }] }]);
+    await vm.refreshPastSessions();
+    vm.selectSession('taped');
+    await vm.refreshAudioSessions();
+
+    assert.equal(vm.hasSessionRecording, true);
+});
+
+await test('a session recording right now shows it before its first segment lands', async () => {
+    // Segments are written every three minutes, so a card gated only on what
+    // is on disk would appear part way through the first tune — its own kind
+    // of surprise, on the one screen where the user has just turned recording
+    // on and is looking for confirmation.
+    const { vm, settle, audio } = await mountView({ running: true });
+    await settle();
+    audio.__setManifests([]);
+    await vm.refreshAudioSessions();
+    assert.equal(vm.hasSessionRecording, false, 'not recording: nothing to show');
+
+    await vm.setRecordAudio(true);
+    assert.equal(vm.hasSessionRecording, true);
+    // The preference is remembered as the default for the next session, and
+    // the fake store keeps it across mounts exactly as the real one does.
+    await vm.setRecordAudio(false);
+});
+
+await test('the backup state travels in the header, so collapsing cannot hide it', async () => {
+    const { vm, settle, store, audio, dropbox } = await mountView();
+    await settle();
+    store.__liveSessions.push({ id: 'taped', startedAt: 1000, tunes: [] });
+    audio.__setManifests([{ sessionId: 'taped', bytes: 1,
+        segments: [{ index: 0, startSeconds: 0, durationSeconds: 180 }] }]);
+    await vm.refreshPastSessions();
+    vm.selectSession('taped');
+    await vm.refreshAudioSessions();
+
+    dropbox.__state.label = 'Backed up';
+    assert.equal(vm.sessionBackupLabel, 'Backed up');
+    assert.equal(vm.sessionNeedsReview, false);
+
+    // A conflict is the one backup state waiting on the user, and the only one
+    // allowed to open the panel by itself.
+    dropbox.__state.conflict = 'A newer version of this session is in Dropbox.';
+    assert.equal(vm.sessionNeedsReview, true);
 });
 
 await test('the record-audio switch reaches the RUNNING session', async () => {

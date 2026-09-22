@@ -376,8 +376,19 @@ export function clusterDetections(windowMatches, options) {
                 startSeconds: cluster.firstWindowStart,
                 endSeconds: cluster.lastWindowStart + options.windowSeconds,
                 audioStartSeconds: stamped.length ? stamped[0].audioSeconds : null,
+                // Where the LAST matching window ended — not a window later.
+                //
+                // audioSeconds is stamped at the moment the analysed window's
+                // PCM is read, i.e. where that window ENDS. So the audio this
+                // cluster was recognised in finishes at the last stamp, and
+                // adding a window on top painted every tune through ten
+                // seconds of recording the detector never looked at: the
+                // coloured block on the timeline, and the "now playing" label
+                // under it, both ran on past the end of the tune. The other
+                // end is handled by audioAnchorSeconds below, which reaches
+                // BACK into the first window rather than guessing forward.
                 audioEndSeconds: stamped.length
-                    ? stamped[stamped.length - 1].audioSeconds + options.windowSeconds
+                    ? stamped[stamped.length - 1].audioSeconds
                     : null,
                 // Where playback should START for this tune, computed here
                 // rather than as a fixed offset at playback time.

@@ -1654,6 +1654,175 @@ unconditional `break` fails 1, dropping the stamp from `upsertLiveSession` fails
 1, from `updateLiveSession` fails 1, and a plain wall clock with no monotonic
 step fails 1.
 
+#### An outside review found six more (September 2026)
+
+A second reviewer went over the session-audio and Dropbox work end to end. Six
+findings, and the two serious ones are both the same shape as things already
+learned here: **a fact recorded on one device only, and a guard that runs once
+when it needs to run every time.**
+
+1. **A deletion was recorded only on the device that made it.** "Delete Dropbox
+   copy" removed the cloud files and wrote a local exclusion key — so any other
+   device still holding that session's local audio saw a session with audio and
+   no cloud copy, did exactly what it is for, and uploaded the whole recording
+   again. The deletion undone by a machine that was never told about it.
+
+   A deletion is a SHARED fact, so it is written into Dropbox:
+   `/deleted/<id>.json`, published **before** any file is removed (an
+   interrupted delete then leaves the marker rather than a half-emptied folder
+   nothing explains) and **outside** the folder being deleted. Every device
+   reads it and adopts the exclusion locally, which is also what keeps this
+   cheap: the listing is taken **lazily, once per pass, and only when the pass
+   is about to upload something**, so a settled account still makes no requests
+   at all — `syncDropbox()` runs every thirty seconds for as long as the app is
+   open, and a listing on each of those would be a request a minute, for ever,
+   about nothing. `enableSessionBackup` ("Retry backup" for one session) deletes
+   the marker as well as the local key, or the next pass would read the deletion
+   and switch the session straight back off.
+
+   > **Rule, the second half of the one above it: a cross-device decision needs
+   > a cross-device record.** A version says which copy is newer; this says the
+   > copy is gone on purpose. Neither can live in one device's IndexedDB.
+
+2. **The repair graph was resumed only when it was built.** A browser suspends
+   an AudioContext whose page is backgrounded, and an element that has been
+   given a `MediaElementAudioSourceNode` outputs through the graph
+   **permanently** — so a context resumed once at construction and never again
+   means SILENCE on every play after the first time the phone was put down, not
+   merely an uncorrected recording. `_resumeGraph()` runs on every `_play()`,
+   and a resume that does not take sets `channelRepairStalled`, which says so on
+   screen: the two outcomes sound completely different out of a phone and there
+   is no console on the device this matters on.
+
+   The same finding noted that `_play()` is reached from `onLoadedMetadata`,
+   several awaits after the tap — which is not a user gesture on iOS however it
+   started. `playFrom()` and `togglePlay()` now call `_prepareAudioGraph()`
+   **synchronously, before their first await**, so the graph is built while the
+   gesture is still current. `_probeChannels` reconfigures an existing graph but
+   still never builds one (`_applyChannelRepair({ build: false })`).
+
+3. **A slower seek could overrule a newer one.** `segmentIndex` names the
+   segment currently *in* the element, and a load only sets it once its clip is
+   built — which over Dropbox is a download and a hash verification. So while a
+   load was in flight, a seek back into the loaded segment took the "already
+   loaded" branch, and the older request then landed, replaced the source and
+   sought to ITS target. Every seek now bumps `_loadGeneration`, including that
+   branch: a newer seek invalidates the ones before it.
+
+4. **The timeline claimed audio the detector never looked at.** `audioSeconds`
+   is stamped when the analysed window's PCM is READ, i.e. where that window
+   *ends* — so a cluster's audio finishes at its last stamp, and
+   `clusterDetections` was adding a whole window on top. At the live defaults
+   that painted every tune over ten further seconds of recording, and the "now
+   playing" label under the strip kept naming it for those ten seconds too.
+
+   The other end is reached the right way round: the player draws each block
+   from the persisted `audioAnchorSeconds` (the first window's midpoint) rather
+   than from `audioStartSeconds` (where that window ended), which is both
+   truthful and what gives a row matched in a single window a visible extent.
+   `audioStartSeconds` keeps its meaning — it is persisted, and the anchor is
+   derived from it.
+
+5. **The channel probe assumed the first four seconds spoke for the evening.**
+   It ran once per session, on the first track. A track is one continuous
+   `MediaRecorder` run, and Pause, Resume and a reacquired microphone each start
+   a new one — so a later track could be on a different device entirely, and
+   applying the first track's finding to a later MONO track means an explicit
+   one-channel downmix at gain 2, i.e. twice as loud as it was recorded. It is
+   per track now, keyed by the loaded clip's `trackIndex`.
+
+   And **silence is inconclusive, not "nothing to correct"**: a muted opening
+   and a dead channel decode identically, so a session muted for its first
+   minute was being declared healthy. An inconclusive answer is retried from
+   further into the same track — offsets `[0, 30, 120]` seconds, three attempts
+   and no more, because a genuinely silent recording must not be decoded again
+   on every manifest refresh of a live session.
+
+6. **The conflict message offered a recovery the app could not perform.** The
+   refusal said to "restore or review that copy", and nothing could do either:
+   "Recover missing sessions" deliberately skips a session that already exists
+   locally, so unless Firebase happened to deliver the newer version the Retry
+   button could never succeed. `sessionConflict(id)` returns the two copies side
+   by side and `resolveSessionConflict(id, 'local' | 'remote')` settles it.
+
+   Neither branch reaches past the version rule: both make the LOCAL record
+   legitimately the newest copy and let the ordinary backup replace Dropbox with
+   it, so the decision rides Firestore to every other device rather than being
+   re-fought on the next pass. The stamp is taken above **both** copies —
+   a phone whose clock runs ahead writes a session stamped in the future, and a
+   resolution stamped from the local record alone is still the older one, so the
+   backup is refused again immediately and the button reads as having done
+   nothing. A conflict is also labelled `'Needs review'` rather than
+   `'Backup pending'`: retrying cannot change it, and calling it pending is what
+   left a button being pressed for ever against a state it had no way to move.
+
+**Also from that review, on the interface rather than the mechanism:**
+
+- **The volume meter is labelled, and clipping is reported separately.** It sits
+  beside transport buttons and the detection LED, which mean entirely different
+  things, and an unlabelled bar of lights next to them reads as a confidence or
+  quality indicator — it is neither: it is the level arriving from the
+  microphone and it gates nothing. Its red LEDs start around −13 dBFS RMS and
+  have never meant clipping.
+
+  So: it says *Mic*, its aria-label says "Microphone input level", and
+  `micService.getPeakLevel()` drives a separate CLIP indicator. **RMS is an
+  average and averages hide clipping completely** — a signal hitting full scale
+  on every peak can sit twelve dB down on RMS and light exactly the same LEDs as
+  a healthy one, which is how a recording nobody can use gets made while the
+  display says it is fine. The peak is accumulated in the loop `_accumulateRms`
+  already runs, held for four polls (a clip is momentary; the meter looks once a
+  second), and both readings reset on read so one clip is never reported twice.
+  The thresholds of the LEDs themselves are deliberately unchanged: the reviewer
+  was right that there is nothing to calibrate them against yet.
+
+- **The recording card exists only where there is a recording.** It was gated on
+  there being an active session rather than on there being audio, so every
+  session ever saved carried a full card of backup explanation and Delete
+  buttons about audio that did not exist — which at phone width pushed the tune
+  list off the first screen. `hasSessionRecording` reads `audioSessionIDs`
+  (which already covers a cloud-only copy) plus "this session is recording right
+  now", since segments are only written every three minutes and a card that
+  appeared part way through the first tune would be its own kind of surprise.
+
+- **Transport first, storage collapsed underneath.** The player is above the
+  backup panel now, and the panel is a collapsed expansion panel — but **never
+  silent**: the backup state travels in its header, so closing it cannot hide
+  that a session is not backed up, and a conflict (the one backup state waiting
+  on the user) opens it by itself.
+
+- **The timeline strip is a real slider.** It was a click-only `div`: no
+  keyboard seeking, nothing for a screen reader, and no way to land on a given
+  second of a three-hour evening where one phone pixel is about twenty of them.
+  It has `role="slider"`, `tabindex`, live `aria-valuenow`/`aria-valuetext`,
+  arrow/Page/Home/End bindings, labelled time ticks under it, and ±15 s skip
+  buttons either side of play — which are the precise control a phone needs.
+  `onStripKey` calls `preventDefault` only for keys it acts on, so Tab still
+  leaves the control.
+
+Tests: 10 new cases in `sessionAudioPlayer.test.mjs` (37 total), 8 in
+`dropboxIntegration.test.mjs`, 4 in `sessionAnalysisView.test.mjs`, 1 in
+`sessionAudio.test.mjs` and 1 in `mic.test.mjs`. Verified by reinstating each
+bug: the extra window fails 6, an uncancelled pending load fails 1, resuming
+only at construction fails 2, one probe for the whole session fails 1, silence
+read as conclusive fails 2, blocks drawn from the window end fail 2, a
+device-local deletion fails 1, a marker never written fails 1, a retry that
+leaves the marker fails 1, a conflict labelled "pending" fails 1, a resolution
+stamped from the local copy alone fails 1, an always-visible recording card
+fails 2, and a peak that is really the RMS fails 1.
+
+Two of those tests needed the fakes to be less tidy first, which is the
+recurring lesson of this feature: `FakeAudioContext` had to model a context that
+can be suspended after construction and a resume that fails, and the fake clip
+builder had to let a test hold a load open and release it — a `buildClip` that
+always resolves immediately cannot express two seeks racing at all.
+
+**Still unverified, and named as such by the reviewer:** physical iPhone
+interruption and recovery, a real Dropbox account, and long multi-segment
+seeking. Arbitrary `MediaRecorder` chunks are not guaranteed independently
+playable by the recording specification, so real container and browser coverage
+is still the thing that would settle the remaining container questions.
+
 ### The backup is the only true snapshot, and is tested as one
 
 `app/test/userDataBackup.test.mjs` (14 cases) exists because nothing tested the
@@ -1851,7 +2020,7 @@ Worth stating as rules rather than incidents:
     moment its first matching window *ended*, so the bare offset lands past the
     opening phrase.
 
-    `app/test/sessionAudioPlayer.test.mjs` (7 cases) exists for this — the
+    `app/test/sessionAudioPlayer.test.mjs` (37 cases) exists for this — the
     player had no tests of its own, and both of these live entirely in it.
 
 16. **`readManifest()` collapses three answers into `null`**, and `resume()`
