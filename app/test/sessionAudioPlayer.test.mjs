@@ -740,6 +740,34 @@ await test('two reports of one refusal start ONE retry', async () => {
     assert.ok(vm.error, 'the second refusal is the real answer');
 });
 
+await test('the FIRST refusal carries the detail, not the second', async () => {
+    // Reported from the field: the first tap said only "This browser could not
+    // play the recorded audio", and the container and size appeared on the
+    // second tap — which reaches a different path, the rejection of play() on
+    // an element that had already failed to load. So the informative moment
+    // was the one carrying nothing, and it took two attempts to learn
+    // anything about a failure that had already happened once.
+    const vm = await mountPlayer(GAPPY);
+    vm.clipMimeType = 'audio/mp4';
+    vm.clipBytes = 1471488;
+    vm.clipShape = 'ftyp+moov';
+    vm.clipHeaderBytes = 0;
+    vm._clipFromTrackStart = false;
+    // The track's own first segment: the retry declines, because the clip
+    // already begins at the track's first chunk and nothing larger exists.
+    vm._loadedSegment = GAPPY.segments[0];
+    vm.$refs.audio = {
+        error: { code: 4 },
+        getAttribute: () => 'blob:x',
+    };
+
+    vm.onAudioError();
+    assert.ok(vm.error.includes('format not supported'), vm.error);
+    assert.ok(vm.error.includes('audio/mp4'), vm.error);
+    assert.ok(vm.error.includes('ftyp+moov'), vm.error);
+    assert.ok(vm.error.includes('hdr 0 B'), vm.error);
+});
+
 await test('a refusal says whether there was an init segment in the clip', async () => {
     // The one question worth answering on a device with no console: is there
     // an initialisation segment in this clip at all, and was this already the

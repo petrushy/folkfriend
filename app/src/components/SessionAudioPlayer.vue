@@ -1059,7 +1059,19 @@ export default {
         // a phone with no console to read.
         _playFailureDetail(audio, e) {
             const base = (e && e.message) || String(e);
-            const code = audio.error && audio.error.code;
+            const detail = this._clipDetail(audio);
+            return detail ? `${base} (${detail})` : base;
+        },
+
+        // What the element was asked to play, in one line.
+        //
+        // Reported from the field: the FIRST failure said only "This browser
+        // could not play the recorded audio", and the detail appeared on the
+        // second tap — from the play() rejection rather than the element's own
+        // error event. So the informative moment was the one carrying nothing,
+        // and two attempts were needed to learn anything. Both paths read this.
+        _clipDetail(audio) {
+            const code = audio && audio.error && audio.error.code;
             const KINDS = { 1: 'aborted', 2: 'network', 3: 'decode', 4: 'format not supported' };
             const parts = [];
             if (code) parts.push(KINDS[code] || `media error ${code}`);
@@ -1067,12 +1079,14 @@ export default {
             if (this.clipShape) parts.push(this.clipShape);
             if (this.clipBytes) parts.push(`${Math.round(this.clipBytes / 1024)} kB`);
             // Which clip this was, since the answer differs entirely between a
-            // mid-track clip and a track-start one that was already the
-            // fallback.
+            // mid-track clip, a track-start one that was already the fallback,
+            // and a clip that began at the track's own first chunk — the last
+            // of which is a plain prefix of what MediaRecorder wrote, so a
+            // refusal there is not about anything this code assembled.
             parts.push(this._clipFromTrackStart
                 ? 'from track start'
                 : `hdr ${this.clipHeaderBytes} B`);
-            return parts.length ? `${base} (${parts.join(', ')})` : base;
+            return parts.join(', ');
         },
 
         async togglePlay() {
@@ -1155,7 +1169,8 @@ export default {
             const code = audio.error && audio.error.code;
             // 4 is SRC_NOT_SUPPORTED: these BYTES, not this situation.
             if (code === 4 && this._retryFromTrackStart(this._autoplayAfterLoad)) return;
-            this.error = 'This browser could not play the recorded audio.';
+            this.error =
+                `This browser could not play the recorded audio (${this._clipDetail(audio)}).`;
         },
 
         // Relative seeking, which is what the skip buttons and the arrow keys
