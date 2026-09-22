@@ -217,23 +217,30 @@ export default {
             currentSeconds: 0,
             error: '',
             exportingIndex: null,
-            // Which stored segment the <audio> element currently holds, and
-            // where that segment starts in session-audio time.
+            // Which stored segment the <audio> element currently holds.
             segmentIndex: null,
-            segmentStartSeconds: 0,
-            // The timeline origin the browser gave this blob. A clip cut from
-            // mid-stream may keep its ORIGINAL timestamps rather than starting
-            // at zero, and which of the two happens differs between containers
-            // and browsers — so it is measured from seekable rather than
-            // assumed. Every seek is expressed relative to it, which is correct
-            // under both behaviours.
+            // THE ORIGIN OF THE LOADED CLIP'S MEDIA TIMELINE, in session-audio
+            // time — the start of the TRACK the clip was cut from, not the
+            // start of the clip.
+            //
+            // A clip is a track's initialisation bytes followed by chunks that
+            // carry that track's own timestamps, so a clip cut from an hour
+            // into a track begins, as far as the container is concerned, an
+            // hour in. Seeking as though it began at zero is what made the
+            // timeline work near the start of a session and not further in.
+            trackStartSeconds: 0,
+            // Where the browser says the clip's timeline begins. Used only as
+            // a floor, never as the origin: Chromium reports 0 for a WebM
+            // whose audio starts an hour in, so it cannot answer that question
+            // — the timestamps in the bytes do.
             timelineBase: 0,
             // How this clip's real decoded length compares with what the
             // manifest claims. 1 when they agree — see _measureDrift().
             driftRatio: 1,
             driftSeconds: 0,
-            // The manifest's duration for the clip currently loaded.
-            _segmentDurationSeconds: 0,
+            // Where the manifest says the loaded clip ends, on its own media
+            // timeline (i.e. measured from the track's start).
+            _clipMediaEndSeconds: 0,
             objectUrl: null,
             pendingSeekSeconds: null,
             // What the recording's channels actually CONTAIN, measured from
@@ -588,8 +595,9 @@ export default {
                 this.clipMimeType = clip.mimeType || (clip.blob && clip.blob.type) || '';
                 this.clipBytes = (clip.blob && clip.blob.size) || 0;
                 this.segmentIndex = segment.index;
-                this.segmentStartSeconds = clip.startSeconds;
-                this._segmentDurationSeconds = (clip.endSeconds - clip.startSeconds) || 0;
+                this.trackStartSeconds = clip.trackStartSeconds || 0;
+                this._clipMediaEndSeconds =
+                    Math.max(0, clip.endSeconds - (clip.trackStartSeconds || 0));
                 this.driftRatio = 1;
                 this.driftSeconds = 0;
                 this.timelineBase = 0;
@@ -607,12 +615,11 @@ export default {
         onLoadedMetadata() {
             const audio = this.$refs.audio;
             if (!audio) return;
-            // Whatever origin this blob's timeline happens to have. Seeking is
-            // then `base + (target - segmentStart)`, which is right whether the
-            // browser rebased the clip to zero or kept its original timestamps.
-            this.timelineBase = (audio.seekable && audio.seekable.length)
+            // A floor for seeking, not the origin — see the field's comment.
+            const start = (audio.seekable && audio.seekable.length)
                 ? audio.seekable.start(0)
                 : 0;
+            this.timelineBase = Number.isFinite(start) ? start : 0;
             this._measureDrift(audio);
             if (this.pendingSeekSeconds !== null) {
                 this._seekWithin(this.pendingSeekSeconds);
@@ -750,14 +757,18 @@ export default {
         _measureDrift(audio) {
             this.driftRatio = 1;
             this.driftSeconds = 0;
-            const expected = this._segmentDurationSeconds;
+            // Both sides are measured from the track's start, because that is
+            // where the clip's timeline begins — comparing a media time
+            // against a segment's own duration would report the distance from
+            // the track's start as drift.
+            const expected = this._clipMediaEndSeconds;
             if (!(expected > 0)) return;
 
             const seekable = audio.seekable;
             const measured = (seekable && seekable.length)
-                ? seekable.end(seekable.length - 1) - seekable.start(0)
+                ? seekable.end(seekable.length - 1)
                 : (Number.isFinite(audio.duration) ? audio.duration : 0);
-            if (!(measured > 0)) return;
+            if (!(measured > 0) || !Number.isFinite(measured)) return;
 
             const ratio = measured / expected;
             this.driftSeconds = measured - expected;
@@ -776,8 +787,9 @@ export default {
         _seekWithin(targetSeconds) {
             const audio = this.$refs.audio;
             if (!audio) return;
-            const offsetIntoSegment = (targetSeconds - this.segmentStartSeconds) * this.driftRatio;
-            const local = this.timelineBase + offsetIntoSegment;
+            // Measured from the TRACK's start, which is where the clip's own
+            // timestamps are measured from.
+            const local = (targetSeconds - this.trackStartSeconds) * this.driftRatio;
             try { audio.currentTime = Math.max(this.timelineBase, local); } catch (e) { /* not seekable yet */ }
             this.currentSeconds = targetSeconds;
         },
@@ -835,8 +847,8 @@ export default {
             if (!audio || this.segmentIndex === null) return;
             // The inverse of the seek, so the clock the user reads and the
             // position the ▶ buttons jump to stay the same scale.
-            this.currentSeconds = this.segmentStartSeconds +
-                (audio.currentTime - this.timelineBase) / this.driftRatio;
+            this.currentSeconds = this.trackStartSeconds +
+                audio.currentTime / this.driftRatio;
         },
 
         // Segments are separate files, so continuous playback has to walk them.
@@ -866,7 +878,10 @@ export default {
             if (!rect.width) return;
             const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
             const target = ratio * this.totalSeconds;
-            if (!this.covers(target)) return;
+            // Deliberately NOT gated on covers(): a tap that lands in a hole
+            // has to say so. Returning silently is indistinguishable from a
+            // timeline that does not respond, and playFrom() already explains
+            // which of the two it was.
             this.playFrom(target, { autoplay: this.playing });
         },
 

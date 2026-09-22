@@ -215,15 +215,32 @@ Segments are separate files, so the player walks them: load segment → seek →
 on `ended`, load the next. Blob URLs load locally so the join is short, but it
 is not gapless.
 
-The one genuinely tricky part is **where a clip's timeline starts**. A clip cut
-from mid-stream may keep its original timestamps or be rebased to zero, and
-which happens differs between containers and browsers. Rather than assume, the
-player reads `audio.seekable.start(0)` after `loadedmetadata` and seeks to
-`base + (target - segmentStart)`, which is correct under both behaviours.
+The one genuinely tricky part is **where a clip's timeline starts**, and the
+first answer here was wrong in a way that took a field report to see.
 
-If a browser refuses to seek inside a segment at all, the worst case is bounded
-by `SEGMENT_SECONDS`: the ▶ lands up to three minutes early, rather than
-anywhere in a three-hour file.
+A clip is a track's initialisation bytes followed by chunks that carry that
+track's own timestamps, so **a clip's timeline is the TRACK's**: a clip cut an
+hour into a track begins, as far as the container is concerned, an hour in. The
+player therefore seeks to `target - trackStartSeconds`.
+
+It used to seek to `base + (target - segmentStart)`, with `base` read from
+`audio.seekable.start(0)`, on the theory that a mid-stream clip may or may not
+be rebased to zero and that this is right either way. It is not: `seekable`
+reads `[0, Infinity]` for these clips, so it arbitrates nothing. Worse, the clip
+itself was ambiguous — it began with the track's *whole* first chunk, which
+carries a second of audio at the track's origin, so the file held two stretches
+whose timestamps disagreed. Chromium plays those contiguously but seeks by the
+raw timestamps, so which interpretation a tap got depended on what had already
+been buffered. The symptom was a timeline that worked near the start of a
+session and not further in.
+
+`containerHeader()` cuts the init chunk down to the bytes before its first
+frame — before the first Cluster (WebM) or the first `moof`/`styp`/`mdat`
+(ISO-BMFF) — so a clip is now an initialisation segment followed by media
+segments, with one timeline and nothing to interpret. It walks EBML rather than
+scanning for the Cluster ID, whose bytes occur by chance inside `CodecPrivate`;
+a container it does not recognise keeps the whole init chunk, degrading to the
+old ambiguity rather than to an unplayable file.
 
 ### Where ▶ starts
 

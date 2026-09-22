@@ -491,13 +491,136 @@ function chunkSpans(segment) {
     return spans;
 }
 
+// The initialisation bytes of a track: everything BEFORE its first frame of
+// audio.
+//
+// A track's first chunk carries the container header AND its first second of
+// audio, and prepending the whole of it to a mid-stream clip was the bug this
+// exists to fix. The clip then held two stretches of audio whose container
+// timestamps disagreed — one at the track's origin, one at the chunk's real
+// position — and where a media element lands when asked to seek into such a
+// file is not defined by anything. Measured in Chromium: it plays the two
+// contiguously but SEEKS by the raw timestamps, so the same offset resolves
+// differently depending on how much had already been buffered. From the user's
+// side that is a timeline that works near the start of a session and stops
+// working further in.
+//
+// With the audio stripped, what is left is exactly an initialisation segment
+// followed by media segments — the arrangement MSE is built on — and the
+// clip's timeline IS the track's, at every offset and in every engine, because
+// the timestamps are the only thing describing it. `buildClip` therefore
+// reports `trackStartSeconds` and the player maps through that.
+//
+// Returns the whole blob unchanged when the first frame cannot be located: a
+// clip that plays with the old ambiguity is far better than one that does not
+// play at all, and a container this does not recognise is exactly the case
+// where guessing would produce the latter.
+async function containerHeader(initBlob) {
+    if (!initBlob || !initBlob.size) return initBlob;
+    let bytes;
+    try {
+        bytes = new Uint8Array(await initBlob.arrayBuffer());
+    } catch (e) {
+        return initBlob;
+    }
+    const cut = firstMediaOffset(bytes);
+    return cut > 0 && cut < initBlob.size ? initBlob.slice(0, cut) : initBlob;
+}
+
+// Where the audio starts inside a track's first chunk, or -1.
+//
+// Two containers, because MediaRecorder produces one or the other and which
+// one is the browser's choice, not ours (pickMimeType prefers audio/mp4 and
+// falls back to WebM).
+function firstMediaOffset(bytes) {
+    const webm = firstWebmClusterOffset(bytes);
+    if (webm >= 0) return webm;
+    // ISO-BMFF (audio/mp4): the first movie-fragment box. ftyp and moov are
+    // the initialisation segment; moof/mdat are the media. styp precedes moof
+    // in some writers and belongs with it.
+    return firstIsoFragmentOffset(bytes);
+}
+
+// WebM: the first Cluster element inside the Segment.
+//
+// Walked as EBML rather than scanned for the Cluster's four ID bytes. Those
+// bytes occur by chance inside CodecPrivate and the seek table often enough to
+// matter, and cutting there would leave a header that no decoder accepts —
+// which is a worse failure than the one this is fixing, because it takes the
+// audio away entirely rather than putting it at the wrong offset.
+function firstWebmClusterOffset(bytes) {
+    const EBML_HEADER = 0x1A45DFA3;
+    const SEGMENT = 0x18538067;
+    const CLUSTER = 0x1F43B675;
+
+    // An EBML variable-length integer. `keepMarker` is the difference between
+    // an element ID (stored with its length marker) and a size (without).
+    function vint(at, keepMarker) {
+        if (at >= bytes.length) return null;
+        const first = bytes[at];
+        if (first === 0) return null;
+        let length = 1;
+        for (let mask = 0x80; !(first & mask); mask >>= 1) length++;
+        if (length > 8 || at + length > bytes.length) return null;
+        let value = keepMarker ? first : (first & (0xFF >> length));
+        let unknown = !keepMarker && (first & (0xFF >> length)) === (0xFF >> length);
+        for (let i = 1; i < length; i++) {
+            value = value * 256 + bytes[at + i];
+            if (bytes[at + i] !== 0xFF) unknown = false;
+        }
+        return { value, length, unknown };
+    }
+
+    let offset = 0;
+    let insideSegment = false;
+    while (offset < bytes.length) {
+        const id = vint(offset, true);
+        if (!id) return -1;
+        const size = vint(offset + id.length, false);
+        if (!size) return -1;
+        const body = offset + id.length + size.length;
+
+        if (id.value === CLUSTER && insideSegment) return offset;
+        // The Segment is descended into rather than skipped: its size is
+        // written as unknown by MediaRecorder, since the length is not known
+        // until recording stops.
+        if (id.value === SEGMENT) { insideSegment = true; offset = body; continue; }
+        if (size.unknown) return -1;
+        if (id.value !== EBML_HEADER && !insideSegment) return -1;
+        offset = body + size.value;
+    }
+    return -1;
+}
+
+function firstIsoFragmentOffset(bytes) {
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    let offset = 0;
+    while (offset + 8 <= bytes.length) {
+        let size = view.getUint32(offset);
+        const type = String.fromCharCode(
+            bytes[offset + 4], bytes[offset + 5], bytes[offset + 6], bytes[offset + 7]);
+        if (type === 'moof' || type === 'styp' || type === 'mdat') return offset;
+        if (size === 1) {
+            // 64-bit largesize. Only the low half can address a chunk this
+            // small, and a header box that large is not one we can walk.
+            if (offset + 16 > bytes.length) return -1;
+            if (view.getUint32(offset + 8) !== 0) return -1;
+            size = view.getUint32(offset + 12);
+        }
+        // Size 0 means "to the end of the file", so there is no next box.
+        if (size < 8) return -1;
+        offset += size;
+    }
+    return -1;
+}
+
 /**
  * Builds a playable Blob covering [fromSeconds, toSeconds) of a session's audio.
  *
- * A clip is the track's init chunk followed by the stream chunks that overlap
- * the range — which is exactly the byte sequence MediaRecorder would have
- * produced had it been asked for that stretch, so no decoding or re-encoding is
- * involved and Blob.slice keeps it lazy.
+ * A clip is the track's initialisation bytes followed by the stream chunks that
+ * overlap the range, so no decoding or re-encoding is involved and Blob.slice
+ * keeps it lazy. The bytes carry the track's own timestamps, so the clip's
+ * media timeline starts at `trackStartSeconds` rather than at `startSeconds`.
  *
  * A clip never crosses a TRACK boundary. Each track is a separate MediaRecorder
  * run (the session was paused, or the microphone was reacquired) with its own
@@ -544,7 +667,9 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         // second of audio, so it is stored in the segment like any other chunk.
         // Prepending the init blob to a clip that already begins there would
         // write the header twice, which is not a file any decoder will accept.
-        if (clipStart === null && !wanted[0].init && track.init) parts.push(track.init);
+        if (clipStart === null && !wanted[0].init && track.init) {
+            parts.push(await containerHeader(track.init));
+        }
 
         parts.push(segment.blob.slice(wanted[0].from, wanted[wanted.length - 1].to));
         if (clipStart === null) clipStart = wanted[0].startSeconds;
@@ -567,6 +692,11 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         startSeconds: clipStart,
         endSeconds: clipEnd,
         trackIndex,
+        // The origin of the clip's own media timeline. A clip's container
+        // timestamps are the TRACK's, not the clip's — it begins with that
+        // track's initialisation bytes — so this is what a seek is measured
+        // from, never clipStart.
+        trackStartSeconds: track.startSeconds || 0,
     };
 }
 

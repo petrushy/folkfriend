@@ -100,6 +100,7 @@ async function mountPlayer(manifest) {
     }
     vm.manifest = manifest;
     vm.playRequests = [];
+    vm.__realPlayFrom = vm.playFrom;
     vm.playFrom = (seconds) => { vm.playRequests.push(seconds); return Promise.resolve(); };
     return vm;
 }
@@ -366,6 +367,59 @@ await test('a refresh only ever adds to what is known', async () => {
     assert.equal(vm.manifest.totalSeconds, 720);
 });
 
+await test('a seek into a mid-track clip is measured from the TRACK\'s start', async () => {
+    // A clip is a track's initialisation bytes followed by chunks carrying
+    // that track's own timestamps, so a clip cut an hour into a track begins,
+    // as far as the container is concerned, an hour in. Seeking as though it
+    // began at zero is what made the timeline work near the start of a session
+    // and not further in — and it cannot be measured out of `seekable`, which
+    // Chromium reports as [0, Infinity] for exactly these clips.
+    const vm = await mountPlayer(GAPPY);
+    const seeks = [];
+    vm.$refs.audio = {
+        seekable: { length: 1, start: () => 0, end: () => Infinity },
+        duration: Infinity,
+        load() {},
+        set currentTime(v) { seeks.push(v); },
+        get currentTime() { return seeks[seeks.length - 1] || 0; },
+    };
+    store.__setClip({
+        blob: new Blob(['audio']), mimeType: 'audio/mp4',
+        startSeconds: 360, endSeconds: 540, trackStartSeconds: 0,
+    });
+    await vm._loadSegment(GAPPY.segments[1], 400, false);
+    vm.onLoadedMetadata();
+    assert.equal(seeks[seeks.length - 1], 400,
+        'the track starts at 0, so session time IS media time');
+
+    // A track that itself began ten minutes into the session.
+    store.__setClip({
+        blob: new Blob(['audio']), mimeType: 'audio/mp4',
+        startSeconds: 1200, endSeconds: 1380, trackStartSeconds: 600,
+    });
+    await vm._loadSegment({ index: 5, trackIndex: 1, startSeconds: 1200, durationSeconds: 180 },
+        1260, false);
+    vm.onLoadedMetadata();
+    assert.equal(seeks[seeks.length - 1], 660, '1260 s into the session, 660 s into the track');
+
+    // And the clock the user reads is the inverse of it.
+    vm.$refs.audio.currentTime = 700;
+    vm.onTimeUpdate();
+    assert.equal(vm.currentSeconds, 1300);
+});
+
+await test('a tap on a stretch that was never recorded says so', async () => {
+    // Returning silently is indistinguishable from a timeline that does not
+    // respond to taps at all, which is how this was reported.
+    const vm = await mountPlayer(GAPPY);
+    // The real playFrom, not mountPlayer()'s recording stub: what this test
+    // is about is the answer it gives.
+    vm.playFrom = vm.__realPlayFrom;
+    vm.$refs.strip = { getBoundingClientRect: () => ({ left: 0, width: 540 }) };
+    vm.onStripClick({ clientX: 270 });          // 270 s — inside the hole
+    assert.ok(vm.error, 'the tap is answered');
+});
+
 await test('a seek is scaled to the audio\'s REAL length, not the manifest\'s', async () => {
     // The manifest's times come from the recorder's clock, sampled when chunks
     // arrive. If a clip decodes to a different length than the manifest claims
@@ -382,8 +436,8 @@ await test('a seek is scaled to the audio\'s REAL length, not the manifest\'s', 
         get currentTime() { return seeks[seeks.length - 1] || 0; },
     };
     vm.segmentIndex = 0;
-    vm.segmentStartSeconds = 0;
-    vm._segmentDurationSeconds = 180;      // the manifest claims 180 s
+    vm.trackStartSeconds = 0;
+    vm._clipMediaEndSeconds = 180;      // the manifest claims 180 s
     vm.pendingSeekSeconds = null;
 
     vm.onLoadedMetadata();
@@ -407,8 +461,8 @@ await test('an implausible measurement is ignored rather than trusted', async ()
         get currentTime() { return 0; },
     };
     vm.segmentIndex = 0;
-    vm.segmentStartSeconds = 0;
-    vm._segmentDurationSeconds = 180;
+    vm.trackStartSeconds = 0;
+    vm._clipMediaEndSeconds = 180;
     vm.pendingSeekSeconds = null;
 
     vm.onLoadedMetadata();
@@ -427,8 +481,8 @@ await test('audio that matches the manifest is not scaled at all', async () => {
         get currentTime() { return 0; },
     };
     vm.segmentIndex = 0;
-    vm.segmentStartSeconds = 0;
-    vm._segmentDurationSeconds = 180;
+    vm.trackStartSeconds = 0;
+    vm._clipMediaEndSeconds = 180;
     vm.pendingSeekSeconds = null;
 
     vm.onLoadedMetadata();

@@ -509,6 +509,76 @@ await test('a clip from mid-stream is prefixed with the header', async () => {
     assert.equal(clip.startSeconds, 4, 'reports where the audio really begins');
 });
 
+// A minimal but structurally real WebM prologue: the EBML header, a Segment
+// of unknown length (which is what MediaRecorder writes, the total not being
+// known until recording stops), one element inside it, then a Cluster.
+//
+// Built byte by byte rather than faked, because the whole point of the walker
+// is that it reads the structure instead of scanning for the Cluster's four ID
+// bytes — and those bytes are planted inside the element before it here, which
+// is exactly the case a scan gets wrong.
+function webmInitChunk() {
+    const bytes = [
+        0x1A, 0x45, 0xDF, 0xA3, 0x84, 0x01, 0x02, 0x03, 0x04,   // EBML header
+        0x18, 0x53, 0x80, 0x67, 0x01, 0xFF, 0xFF, 0xFF,          // Segment,
+        0xFF, 0xFF, 0xFF, 0xFF,                                  //  unknown size
+        0x16, 0x54, 0xAE, 0x6B, 0x84, 0x1F, 0x43, 0xB6, 0x75,    // Tracks: the
+        //                     ^ the Cluster ID, as element CONTENT
+    ];
+    const headerBytes = bytes.length;
+    bytes.push(0x1F, 0x43, 0xB6, 0x75, 0x84, 0xAA, 0xAA, 0xAA, 0xAA);   // Cluster
+    return { blob: new Blob([new Uint8Array(bytes)]), headerBytes };
+}
+
+await test('a mid-stream clip is prefixed with the header WITHOUT its audio', async () => {
+    // The track's first chunk carries the header AND its first second of
+    // audio. Prepending all of it puts two stretches of audio in one file
+    // whose container timestamps disagree — one at the track's origin, one an
+    // hour in — and where a media element lands when asked to seek into that
+    // is not defined by anything. Measured in Chromium: it plays them
+    // contiguously but SEEKS by the raw timestamps, so the same offset
+    // resolves differently depending on what had already been buffered. That
+    // is a timeline which works near the start of a session and not further
+    // in.
+    const init = webmInitChunk();
+    await resetAll();
+    await seedManifest();
+    await store.appendSegment('s1', segment(0, 0, 0, ['H0', 'a1', 'a2'], { firstIsInit: true }),
+        { index: 0, startSeconds: 0, durationSeconds: 6, init: init.blob });
+    await store.appendSegment('s1', segment(1, 0, 3, ['b3', 'b4', 'b5']),
+        { index: 0, startSeconds: 0, durationSeconds: 6, init: init.blob });
+
+    const clip = await store.buildClip('s1', 4, 6);
+    const prefix = clip.blob.size - 4;   // 'b4b5'
+    assert.equal(prefix, init.headerBytes,
+        'the Cluster and everything after it is left out');
+    assert.ok(prefix < init.blob.size, 'and the whole init chunk is not used');
+});
+
+await test('an unrecognised container keeps the whole init chunk', async () => {
+    // Guessing at a container this build does not know would leave a header no
+    // decoder accepts, which takes the audio away entirely — a worse failure
+    // than putting it at the wrong offset.
+    await seedTwoSegments();
+    const clip = await store.buildClip('s1', 4, 6);
+    assert.equal(await clip.blob.text(), 'H0b4b5');
+});
+
+await test('a clip reports the track it was cut from as its timeline origin', async () => {
+    // The clip's bytes carry the TRACK's timestamps, so a seek is measured
+    // from there and never from where the clip happens to begin.
+    await resetAll();
+    await seedManifest();
+    await store.appendSegment('s1', segment(0, 1, 600, ['H1', 'a1'], { firstIsInit: true }),
+        { index: 1, startSeconds: 600, durationSeconds: 6, init: new Blob(['H1']) });
+    await store.appendSegment('s1', segment(1, 1, 603, ['b3', 'b4']),
+        { index: 1, startSeconds: 600, durationSeconds: 6, init: new Blob(['H1']) });
+
+    const clip = await store.buildClip('s1', 604, 606);
+    assert.equal(clip.trackStartSeconds, 600);
+    assert.equal(clip.startSeconds, 604, 'which is NOT where its timeline begins');
+});
+
 await test('a cut lands on a chunk boundary and never later than asked', async () => {
     await seedTwoSegments();
     const clip = await store.buildClip('s1', 4.5, 5.2);

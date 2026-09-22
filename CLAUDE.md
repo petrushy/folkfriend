@@ -1295,17 +1295,61 @@ already-saved session. Records written before it fall back to half the 10 s
 default window, not the old 12 s. It is still clamped into the tune's own
 recorded stretch (rule 17).
 
-**5. Where a clip's timeline starts is unknowable in advance.** A clip cut from
-mid-stream may keep its original timestamps or be rebased to zero, and which one
-differs between containers and browsers. The player reads
-`audio.seekable.start(0)` after `loadedmetadata` and seeks to
-`base + (target - segmentStart)`, which is right under both. If a browser
-refuses to seek inside a segment at all, `SEGMENT_SECONDS` bounds the damage:
-the ▶ lands up to three minutes early rather than anywhere in three hours.
+**5. A CLIP'S TIMELINE IS THE TRACK'S** (corrected September 2026 — this bullet
+previously said the opposite, and that is what broke seeking).
+
+It used to read "where a clip's timeline starts is unknowable in advance", on
+the argument that a clip cut from mid-stream may keep its original timestamps or
+be rebased to zero, and that reading `audio.seekable.start(0)` after
+`loadedmetadata` and seeking to `base + (target - segmentStart)` is right under
+both. **Both halves were wrong**, and the second only because of the first.
+
+Reported from the field as a timeline that responds near the start of a session
+and not further in, and ▶ buttons on the tune list that work for the early tunes
+only. The cause was that a mid-stream clip was `[the track's whole first chunk,
+...the wanted chunks]`, and **the track's first chunk carries a second of
+audio** — so the clip held two stretches whose container timestamps disagreed,
+one at the track's origin and one an hour in. Nothing defines where a media
+element lands when asked to seek into that. Measured in Chromium over
+MediaRecorder output, with a marker tone stepping every second so the audio says
+which second it is: the element plays the two stretches contiguously but SEEKS
+by the raw timestamps, and which of the two a given offset resolves under
+depends on how much had already been buffered. So the same tap gave different
+answers at different points in an evening. `seekable` cannot arbitrate — it
+reads `[0, Infinity]` for every one of these clips.
+
+The fix is to prepend the **initialisation bytes only**: everything before the
+first Cluster (WebM) or the first `moof`/`styp`/`mdat` (ISO-BMFF), which
+`containerHeader()` cuts out of the init chunk. What is left is an
+initialisation segment followed by media segments — the arrangement MSE is built
+on — and since the timestamps are then the only thing describing the file, the
+clip's timeline IS the track's, at every offset. Re-measured: every seek lands
+on the second it names. `buildClip` reports `trackStartSeconds`, and the player
+seeks to `target - trackStartSeconds` rather than to anything derived from where
+the clip happens to begin.
+
+Two things about that cut are load-bearing. **It walks EBML rather than scanning
+for the Cluster's four ID bytes** — those bytes occur inside `CodecPrivate` and
+the seek table often enough to matter, and cutting there leaves a header no
+decoder accepts, which takes the audio away entirely rather than putting it at
+the wrong offset. The test plants them deliberately. And **a container the
+walker does not recognise keeps the whole init chunk**, i.e. degrades to the old
+ambiguity rather than to silence.
+
+This is also the likeliest answer to the "still unexplained: a refused clip
+mid-track" note below — `[whole init chunk, ...mid chunks]` is not a shape iOS
+was ever obliged to accept, and it is no longer produced.
+
 Where playback STARTS is a separate question, answered by the persisted
 `audioAnchorSeconds` rather than by any constant here — see the anchor section
 above. Only a session recorded before that existed falls back to a fixed offset,
 and that fallback is half the default window, not the old 12 s.
+
+**A tap on the strip is never answered with silence.** `onStripClick` returned
+early when `covers()` said no, which is indistinguishable from a timeline that
+does not respond to taps — and that is how this was reported. It calls
+`playFrom` unconditionally now, which already distinguishes "not saved yet" from
+"that part was never recorded".
 
 **A recording that plays out of one speaker is a CAPTURE bug, not a playback
 one** (September 2026). A device that reports two input channels and fills only
