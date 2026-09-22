@@ -714,15 +714,24 @@ export default {
             return this.playFrom(Math.max(this._anchorFor(detection), range.from));
         },
 
-        async _loadSegment(segment, seekSeconds, autoplay) {
+        // `fromTrackStart` is the fallback for a clip a browser refuses: see
+        // _retryFromTrackStart(). It changes only how much of the track is in
+        // the blob — the timeline is the track's either way, so nothing about
+        // seeking changes with it.
+        async _loadSegment(segment, seekSeconds, autoplay, { fromTrackStart = false } = {}) {
             const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
             const audio = this.$refs.audio;
             if (!audio) return;
             this.error = '';
+            const track = (this.manifest.tracks || [])
+                .find(t => t.index === segment.trackIndex);
+            const from = fromTrackStart && track
+                ? track.startSeconds
+                : segment.startSeconds;
             try {
                 const clip = await buildClip(
                     this.sessionId,
-                    segment.startSeconds,
+                    from,
                     segment.startSeconds + segment.durationSeconds,
                     this.manifest,
                 );
@@ -751,6 +760,9 @@ export default {
                 this.timelineBase = 0;
                 this.pendingSeekSeconds = seekSeconds;
                 this._autoplayAfterLoad = autoplay;
+                this._loadedSegment = segment;
+                this._loadedSeekSeconds = seekSeconds;
+                this._clipFromTrackStart = fromTrackStart;
                 audio.src = this.objectUrl;
                 audio.load();
             } catch (e) {
@@ -1019,7 +1031,11 @@ export default {
             this._prepareAudioGraph();
             const started = audio.play();
             if (started && started.catch) {
-                started.catch(e => { this.error = `Could not play: ${this._playFailureDetail(audio, e)}`; });
+                started.catch(e => {
+                    if (audio.error && audio.error.code === 4 &&
+                        this._retryFromTrackStart(true)) return;
+                    this.error = `Could not play: ${this._playFailureDetail(audio, e)}`;
+                });
             }
         },
 
@@ -1082,10 +1098,38 @@ export default {
             await this._loadSegment(next, next.startSeconds, true);
         },
 
+        // A clip a browser will not decode, rebuilt from the track's start.
+        //
+        // A mid-track clip is [the track's initialisation bytes, ...the wanted
+        // chunks]. That is the arrangement MSE is built on and Chromium accepts
+        // it, but whether WebKit does for its own fMP4 has never been
+        // measurable from anywhere but the device — and a refusal there looks
+        // exactly like a refusal for any other reason. A clip from the track's
+        // start needs no assembly at all: it is a prefix of what MediaRecorder
+        // wrote, which is what "Export part N" produces and is known to play.
+        //
+        // Tried once per clip, and only for a decode refusal. It costs a larger
+        // blob, so it is a fallback rather than the default; the timeline is
+        // the track's under both, so the seek does not change.
+        _retryFromTrackStart(autoplay) {
+            const segment = this._loadedSegment;
+            if (!segment || this._clipFromTrackStart) return false;
+            const track = (this.manifest && this.manifest.tracks || [])
+                .find(t => t.index === segment.trackIndex);
+            // Already the whole track; there is nothing larger to try.
+            if (!track || track.startSeconds >= segment.startSeconds) return false;
+            this._loadSegment(segment, this._loadedSeekSeconds, autoplay,
+                { fromTrackStart: true });
+            return true;
+        },
+
         onAudioError() {
             // An empty src is how teardown() clears the element; not an error.
             const audio = this.$refs.audio;
             if (!audio || !audio.getAttribute('src')) return;
+            const code = audio.error && audio.error.code;
+            // 4 is SRC_NOT_SUPPORTED: these BYTES, not this situation.
+            if (code === 4 && this._retryFromTrackStart(this._autoplayAfterLoad)) return;
             this.error = 'This browser could not play the recorded audio.';
         },
 

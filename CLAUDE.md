@@ -1428,13 +1428,53 @@ now carries `audio.error.code` (4 is `SRC_NOT_SUPPORTED`, i.e. *these bytes*,
 not *this situation*) plus the clip's declared container and size, because on
 the one device this matters on there is no console to read them from.
 
-> ⚠️ **Still unexplained: a refused clip mid-track.** A clip that does not begin
-> at a track's first chunk is built as `[init, ...midChunks]`, and whether that
-> plays standalone on iOS is one of the three things this feature has always
-> listed as unmeasured on a device. A refusal there would look exactly like the
-> report. The diagnostic above is what will say whether that is what it is; if
-> it is, the fallback is to build the clip from the track's start, which is
-> what "Export part N" already does and is known to play.
+**A refused clip mid-track now retries from the track's start**, which is the
+fallback this note used to say was not built. A mid-track clip is `[the track's
+initialisation bytes, ...the wanted chunks]` — the arrangement MSE is built on,
+and Chromium accepts it, but whether WebKit does for its own fMP4 has never
+been measurable anywhere but the device. A clip from the track's start needs no
+assembly at all: it is a prefix of what MediaRecorder wrote, which is what
+"Export part N" produces and is known to play. `_retryFromTrackStart` fires once
+per clip and only on `MEDIA_ERR_SRC_NOT_SUPPORTED` (code 4), so a working clip
+never pays for the larger blob, and the timeline is the track's under both — so
+nothing about seeking changes with it. A second refusal is reported as the real
+answer.
+
+**And the reported container cannot be taken at its word** (September 2026).
+From the field: *"Could not play: The operation is not supported. (format not
+supported, audio/mp3;codecs=mp4a.40.2, 1437 kb)"*. That media type cannot
+exist — `mp4a.40.2` is AAC in MP4, and no `MediaRecorder` anywhere encodes
+MP3 — but `_startTrack` adopted `recorder.mimeType` unchecked, so WebKit's
+bogus report went into the manifest, onto every blob built from that track, and
+into the exported filename. Two independent consequences, one certain and one
+likely:
+
+- **Certain:** `fileExtensionFor` matched `mp4` anywhere in the string, so that
+  label hit the `mp4` branch via its CODECS parameter — the right extension for
+  the wrong reason, and any other bogus label would have exported as `.bin`.
+  It reads the container alone now.
+- **Likely:** a `Blob` whose declared type contradicts its bytes. Measured in
+  Chromium, the declared type is ignored entirely and the bytes are sniffed —
+  so this is provably harmless there. WebKit checks the declared type against
+  `canPlayType` before looking at the bytes, and an MP3 container with an AAC
+  codecs parameter is not something it can claim to play. **That half is
+  reasoned, not measured**, since the failure is on the one device this cannot
+  be tested from.
+
+Two guards, because they fail in different places. `plausibleRecordedMimeType`
+keeps a reported type only when its CONTAINER is one a `MediaRecorder` could be
+producing — deliberately **not** `isTypeSupported(reported)`, which is
+conservative in several browsers and would reject the genuine fallback that
+`_recordActualFormat` exists for. And `buildClip` sniffs the clip's first bytes
+(`ftyp` / EBML magic / `OggS`) and lets them outrank the label, because a
+recording already on disk carries its bad label for ever and the repair has to
+reach it. Bytes this build does not recognise leave the label alone — being
+unable to tell is not grounds for relabelling someone's recording.
+
+> **Rule: the label on stored audio is a claim, and this one has now been wrong
+> in the field twice** — a fallback container that was never written down, and
+> a browser reporting a type that cannot exist. The bytes are the only
+> authority.
 
 > ⚠️ **Segment boundaries are audible, and over Dropbox they are long.**
 > `onEnded` loads the next segment on demand, which for a cloud recording means
@@ -2083,9 +2123,10 @@ until `begin()` started refusing to overwrite. `resetAll()` is async now and
 drains first.
 
 ⚠️ **Three things are unmeasured on a device**, and are what the first iPhone
-test is for: which container iOS actually records, whether `[init, ...midChunks]`
-plays standalone and seeks there, and whether an 86 MB `navigator.share` is
-accepted. Each degrades rather than breaks. Also unchanged and now acute: **a web
+test is for: which container iOS actually records, whether
+`[initialisation bytes, ...midChunks]` plays standalone and seeks there, and
+whether an 86 MB `navigator.share` is accepted. Each degrades rather than
+breaks — the second now falls back to a track-start clip rather than failing. Also unchanged and now acute: **a web
 app stops running when the phone locks**, so recording pauses with detection —
 Settings says so.
 
