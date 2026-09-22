@@ -1042,7 +1042,8 @@ export default {
                 started.catch(e => {
                     if (audio.error && audio.error.code === 4 &&
                         this._retryFromTrackStart(true)) return;
-                    this.error = `Could not play: ${this._playFailureDetail(audio, e)}`;
+                    this.error =
+                        `Could not play: ${this._playFailureDetail(audio, e)}${this._exportHint()}`;
                 });
             }
         },
@@ -1061,6 +1062,22 @@ export default {
             const base = (e && e.message) || String(e);
             const detail = this._clipDetail(audio);
             return detail ? `${base} (${detail})` : base;
+        },
+
+        // What the user can still do when this browser will not play the
+        // clip in place.
+        //
+        // Export hands them exactly the bytes MediaRecorder wrote for a whole
+        // continuous stretch, which is a plain file rather than anything this
+        // code assembled — so it is the one route left when the element
+        // refuses, and it is also the measurement that says whether the bytes
+        // or the browser are at fault. Offered only for a refusal of the
+        // FORMAT: an aborted or network failure has nothing to do with it.
+        _exportHint() {
+            const audio = this.$refs.audio;
+            const code = audio && audio.error && audio.error.code;
+            if (code !== 4 || !this.tracks.length) return '';
+            return ' You can still export this part and play it in another app.';
         },
 
         // What the element was asked to play, in one line.
@@ -1169,8 +1186,8 @@ export default {
             const code = audio.error && audio.error.code;
             // 4 is SRC_NOT_SUPPORTED: these BYTES, not this situation.
             if (code === 4 && this._retryFromTrackStart(this._autoplayAfterLoad)) return;
-            this.error =
-                `This browser could not play the recorded audio (${this._clipDetail(audio)}).`;
+            this.error = `This browser could not play the recorded audio` +
+                ` (${this._clipDetail(audio)}).${this._exportHint()}`;
         },
 
         // Relative seeking, which is what the skip buttons and the arrow keys
@@ -1229,7 +1246,13 @@ export default {
                 const extension = fileExtensionFor(clip.mimeType);
                 const name = `folkfriend-session-${this.sessionId}` +
                     `${this.tracks.length > 1 ? `-part${track.index + 1}` : ''}.${extension}`;
-                const file = new File([clip.blob], name, { type: clip.mimeType || 'audio/mpeg' });
+                // NOT 'audio/mpeg' as the fallback. That is MP3, which no
+                // MediaRecorder produces — declaring it over MP4 or WebM bytes
+                // is the same mislabelling that made a clip unplayable here,
+                // exported to whatever the user opens the file in. A container
+                // we cannot name is better left unnamed.
+                const file = new File([clip.blob], name,
+                    { type: clip.mimeType || 'application/octet-stream' });
 
                 if (navigator.canShare && navigator.canShare({ files: [file] })) {
                     await navigator.share({ files: [file], title: name });

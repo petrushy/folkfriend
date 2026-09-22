@@ -1233,9 +1233,10 @@ a margin that never closes.
 
 Now: the live clock extrapolates from the last chunk (capped at two
 timeslices, so several detections inside one chunk still get distinct stamps),
-and a chunk advances the cursor by what a chunk can plausibly HOLD (capped at
-four timeslices — generous, because a busy main thread legitimately delivers one
-chunk holding several seconds).
+and a chunk advances the cursor by the interval since the last one, with no
+cap — a busy main thread legitimately delivers one chunk holding several
+seconds, and truncating that to a multiple of the timeslice would lose exactly
+the time it took.
 
 ⚠️ **Arrival times cannot distinguish "recorded silence" from "recorded
 nothing", so this reduces the error and cannot eliminate it.** The audio element
@@ -1516,6 +1517,52 @@ reliable order. Each was starting its own rebuild of the same clip — over
 Dropbox a second download of the whole track — and the two raced on
 `_loadGeneration`, so which clip the element ended up holding was undefined.
 `_retryingFromTrackStart` makes the second one join the first silently.
+
+#### A read of the whole chain (September 2026)
+
+Asked for after the third field failure in a row. Three defects found, each
+certain and each fixed; the rest of the chain was read and is listed below as
+checked, because "I looked and it is sound" is worth as much here as a finding.
+
+1. **The export declared MP3 for a container it could not name.** `new File(…,
+   { type: clip.mimeType || 'audio/mpeg' })` — `audio/mpeg` is MP3, which no
+   `MediaRecorder` produces, so an unnamed container was exported to whatever
+   the user opens it in under a label contradicting its bytes. Exactly the
+   mislabelling that had just been fixed inside the app, still live on the way
+   out of it. An unnameable container is left unnamed now.
+2. **A segment could be filed against a track that had ended.** `_fail()` ends
+   a track without flushing and clears `_trackIndexActive`, leaving the pending
+   chunks behind; a later flush would write them under index **-1**, and
+   `mergeTrack` adds a phantom track there — which `trackRanges` then offers as
+   a part to export and `buildClip` cannot assemble. The `stoppedReason` guard
+   inside the write chain does not cover it, and that is the whole point: a
+   storage stop is deliberately cleared on the next Resume so recording can be
+   retried, and the stale chunks are still sitting there when it is. `_fail()`
+   drops them, and `_flushPending` refuses to write without a track.
+3. **A refusal told the user nothing they could act on.** When even a
+   track-start clip is refused there is nothing left for the app to try, but
+   there is something for the USER to try: Export hands them the bytes
+   MediaRecorder wrote for a whole continuous stretch, which is a plain file
+   rather than anything this code assembled. Offered only on
+   `MEDIA_ERR_SRC_NOT_SUPPORTED` — a network or aborted failure has nothing to
+   do with the container, and sending someone to the export for it wastes
+   their time.
+
+**Read and found sound** (worth recording so the next pass need not redo it):
+the payload-before-manifest ordering and its delete-manifest-first inverse;
+`withSession` serialisation and the sweep gate taken before joining the chain;
+`probeManifest`'s three answers on every write path; `storedClockFloor` and the
+two redundant guards against a rewound clock; per-track container and channel
+recording; `_onChunk`'s stale-track rejection; the chunk cursor and the bounded
+extrapolation in `audioSeconds`; `recordedRanges` and the gap drawing;
+`_rangeContaining` clamping in `playTune`; the load-generation cancellation in
+both `playFrom` branches.
+
+**One documentation drift found:** the notes above say a chunk advances the
+cursor "capped at four timeslices". There is no cap in `_onChunk` any more —
+the comment beside it explains why one would be wrong ("a busy main thread can
+delay a blob containing arbitrarily many seconds"). The code is right and this
+description was stale.
 
 > ⚠️ **Segment boundaries are audible, and over Dropbox they are long.**
 > `onEnded` loads the next segment on demand, which for a cloud recording means

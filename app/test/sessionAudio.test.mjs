@@ -478,6 +478,38 @@ await test('audio for sessions that no longer exist is reclaimed', async () => {
     assert.ok(await store.readManifest('alive'));
 });
 
+await test('a segment is never filed against a track that has ended', async () => {
+    // _fail() ends a track without flushing and clears the active track, so
+    // anything still pending would be written under index -1 — and mergeTrack
+    // adds a phantom track there, which trackRanges then offers as a part to
+    // export and buildClip cannot assemble.
+    //
+    // The stoppedReason guard inside the write chain does NOT cover it, which
+    // is the whole point of this case: a storage stop is deliberately cleared
+    // on the next Resume so recording can be retried, and the stale chunks are
+    // still sitting there when it is.
+    await resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    const media = recorders[recorders.length - 1];
+    feed(media, 3);                                 // pending, not yet a segment
+
+    recorder._fail('storage', 'Ran out of free storage — audio recording stopped.');
+    await recorder.resume('s1');                    // clears the storage stop
+    assert.equal(recorder.stoppedReason, null, 'the retry is allowed');
+    await recorder.stop();                          // flushes whatever is left
+    await recorder._writeChain;
+    await new Promise(resolve => setTimeout(resolve, 0));
+
+    const manifest = await store.readManifest('s1');
+    assert.ok(manifest.tracks.every(t => t.index >= 0),
+        `no phantom track: ${JSON.stringify(manifest.tracks.map(t => t.index))}`);
+    assert.ok(manifest.segments.every(seg => seg.trackIndex >= 0),
+        'and no segment belonging to one');
+});
+
 console.log('\nsessionAudioStore — clip assembly');
 
 async function seedTwoSegments() {

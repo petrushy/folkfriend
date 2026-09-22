@@ -740,6 +740,26 @@ await test('two reports of one refusal start ONE retry', async () => {
     assert.ok(vm.error, 'the second refusal is the real answer');
 });
 
+await test('a refusal of the FORMAT offers the export', async () => {
+    // Export hands the user exactly the bytes MediaRecorder wrote for a whole
+    // continuous stretch — a plain file rather than anything this code
+    // assembled — so it is the one route left when the element refuses in
+    // place, and the measurement that says which of the two is at fault.
+    const vm = await mountPlayer(GAPPY);
+    store.__setTracks([{ index: 0, startSeconds: 0, endSeconds: 540 }]);
+    vm._loadedSegment = GAPPY.segments[0];
+    vm.$refs.audio = { error: { code: 4 }, getAttribute: () => 'blob:x' };
+    vm.onAudioError();
+    assert.ok(/export/i.test(vm.error), vm.error);
+
+    // A network or aborted failure has nothing to do with the container, and
+    // sending someone to the export for it wastes their time.
+    vm.error = '';
+    vm.$refs.audio = { error: { code: 2 }, getAttribute: () => 'blob:x' };
+    vm.onAudioError();
+    assert.ok(!/export/i.test(vm.error), vm.error);
+});
+
 await test('the FIRST refusal carries the detail, not the second', async () => {
     // Reported from the field: the first tap said only "This browser could not
     // play the recorded audio", and the container and size appeared on the
