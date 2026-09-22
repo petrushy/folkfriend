@@ -341,6 +341,12 @@ export default {
             // message: the container a decode refusal is about.
             clipMimeType: '',
             clipBytes: 0,
+            // What the loaded clip's bytes ARE, and how many of them were
+            // prepended as the track's initialisation segment. On the one
+            // device this matters on there is no console, so a refusal has to
+            // carry enough to say WHICH half of the system is at fault.
+            clipShape: '',
+            clipHeaderBytes: 0,
             icons: { play: mdiPlay, pause: mdiPause, rewind: mdiRewind15, forward: mdiFastForward15 },
             SKIP_SECONDS,
         };
@@ -744,6 +750,8 @@ export default {
                 this.objectUrl = URL.createObjectURL(clip.blob);
                 this.clipMimeType = clip.mimeType || (clip.blob && clip.blob.type) || '';
                 this.clipBytes = (clip.blob && clip.blob.size) || 0;
+                this.clipShape = clip.shape || '';
+                this.clipHeaderBytes = clip.headerBytes || 0;
                 this.segmentIndex = segment.index;
                 // Which track's channel finding now applies. A correction
                 // worked out for the first track is not a claim about a later
@@ -1056,7 +1064,14 @@ export default {
             const parts = [];
             if (code) parts.push(KINDS[code] || `media error ${code}`);
             if (this.clipMimeType) parts.push(this.clipMimeType);
+            if (this.clipShape) parts.push(this.clipShape);
             if (this.clipBytes) parts.push(`${Math.round(this.clipBytes / 1024)} kB`);
+            // Which clip this was, since the answer differs entirely between a
+            // mid-track clip and a track-start one that was already the
+            // fallback.
+            parts.push(this._clipFromTrackStart
+                ? 'from track start'
+                : `hdr ${this.clipHeaderBytes} B`);
             return parts.length ? `${base} (${parts.join(', ')})` : base;
         },
 
@@ -1112,14 +1127,24 @@ export default {
         // blob, so it is a fallback rather than the default; the timeline is
         // the track's under both, so the seek does not change.
         _retryFromTrackStart(autoplay) {
+            // A refused clip reaches BOTH the element's error event and the
+            // rejection of the play() that was waiting on it, and neither
+            // arrives first reliably. The second one through must not report a
+            // failure the first one is already retrying — and it would report
+            // it against the OLD clip's size and container, since the retry's
+            // own clip is still being assembled. That is a message describing
+            // bytes nothing is trying to play any more.
+            if (this._retryingFromTrackStart) return true;
             const segment = this._loadedSegment;
             if (!segment || this._clipFromTrackStart) return false;
             const track = (this.manifest && this.manifest.tracks || [])
                 .find(t => t.index === segment.trackIndex);
             // Already the whole track; there is nothing larger to try.
             if (!track || track.startSeconds >= segment.startSeconds) return false;
+            this._retryingFromTrackStart = true;
+            const done = () => { this._retryingFromTrackStart = false; };
             this._loadSegment(segment, this._loadedSeekSeconds, autoplay,
-                { fromTrackStart: true });
+                { fromTrackStart: true }).then(done, done);
             return true;
         },
 

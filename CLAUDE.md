@@ -1476,6 +1476,35 @@ unable to tell is not grounds for relabelling someone's recording.
 > a browser reporting a type that cannot exist. The bytes are the only
 > authority.
 
+**The label was corrected and the clip was STILL refused** (September 2026).
+The same message came back from the device reading `audio/mp4;codecs=mp4a.40.2`
+— the right container this time, same 1437 kB — so the label half worked and
+the bytes are genuinely being rejected by WebKit. Two things follow, and
+neither is a fix yet:
+
+- **The retry cannot have fired**, since it returns true and stays quiet while
+  it runs. It refuses only when the failing clip is the track's FIRST segment,
+  where there is nothing larger to try — the clip already begins at the track's
+  own first chunk and is exactly what "Export part N" produces. If that is what
+  happened, the container is not sliceable on iOS at all and no assembly this
+  code does can help.
+- **So the message now says which clip it was**: `hdr <n> B` for a clip that
+  had a header prepended (0 means it began at the track's own first chunk),
+  `from track start` when it was already the fallback, plus `describeContainer`
+  — `ftyp+moov`, `ftyp+mdat` or `webm`. **The decisive question is whether
+  there is an initialisation segment in the clip at all**: `ftyp+moov` says the
+  cut found one and the fragments themselves are being refused; `ftyp+mdat`
+  says the `moov` is elsewhere (some writers emit it only on stop), which would
+  make every clip but a whole finished track unplayable and is not something a
+  different cut could repair.
+
+**And one refusal is reported twice.** A refused clip reaches both the
+element's `error` event and the rejection of the `play()` waiting on it, in no
+reliable order. Each was starting its own rebuild of the same clip — over
+Dropbox a second download of the whole track — and the two raced on
+`_loadGeneration`, so which clip the element ended up holding was undefined.
+`_retryingFromTrackStart` makes the second one join the first silently.
+
 > ⚠️ **Segment boundaries are audible, and over Dropbox they are long.**
 > `onEnded` loads the next segment on demand, which for a cloud recording means
 > a download and a hash verification before any sound — every 180 s, on whatever
