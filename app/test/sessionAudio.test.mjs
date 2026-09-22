@@ -1911,7 +1911,7 @@ await test('merging adjacent clusters keeps offsets from EITHER of them', async 
     assert.equal(detections.length, 1, 'the two clusters merged');
     const [detection] = detections;
     assert.equal(detection.audioStartSeconds, 200, 'the offset that exists survives');
-    assert.equal(detection.audioEndSeconds, 220);
+    assert.equal(detection.audioEndSeconds, 210);
     assert.equal(detection.audioAnchorSeconds, 195);
 });
 
@@ -1925,7 +1925,7 @@ await test('merging takes the earliest start and the latest end', async () => {
     assert.equal(detections.length, 1);
     assert.equal(detections[0].audioStartSeconds, 100);
     assert.equal(detections[0].audioAnchorSeconds, 95);
-    assert.equal(detections[0].audioEndSeconds, 160);
+    assert.equal(detections[0].audioEndSeconds, 150);
 });
 
 await test('a cluster with no recorded audio has no anchor', async () => {
@@ -1940,7 +1940,30 @@ await test('a cluster carries where it sits in the recording', async () => {
     ], CLUSTER_OPTIONS);
     assert.equal(clusters.length, 1);
     assert.equal(clusters[0].audioStartSeconds, 30);
-    assert.equal(clusters[0].audioEndSeconds, 60);
+    assert.equal(clusters[0].audioEndSeconds, 50);
+});
+
+await test('a cluster claims no audio the detector did not look at', async () => {
+    // audioSeconds is stamped when the window's PCM is READ, so it is where
+    // that window ENDS. The span therefore finishes at the last stamp: adding
+    // a window on top painted every tune over ten further seconds of
+    // recording — the coloured block on the timeline and the "now playing"
+    // label under it both ran past the end of the tune, by a whole window,
+    // every time. The other end is reached by audioAnchorSeconds, which goes
+    // BACK into the first window rather than guessing forward.
+    const clusters = analysis.clusterDetections([
+        windowMatch(1, 30, 30), windowMatch(1, 40, 40), windowMatch(1, 50, 50),
+    ], CLUSTER_OPTIONS);
+    assert.equal(clusters[0].audioEndSeconds, 50, 'the last window ENDED at 50');
+    assert.equal(clusters[0].audioAnchorSeconds, 25, 'and the first one began at 20');
+
+    // A tune matched in exactly one window spans nothing at all by this
+    // measure, and the anchor is what gives it an extent.
+    const [single] = analysis.clusterDetections([windowMatch(1, 30, 30)],
+        { ...CLUSTER_OPTIONS, minClusterHits: 1 });
+    assert.equal(single.audioStartSeconds, 30);
+    assert.equal(single.audioEndSeconds, 30);
+    assert.equal(single.audioAnchorSeconds, 25);
 });
 
 await test('the audio span follows the RECORDING clock, not the analysis timer', async () => {
@@ -1985,7 +2008,7 @@ await test('a collapsed row points at where the tune BEGAN', async () => {
     service._recluster();
     assert.equal(service.detections.length, 1);
     assert.equal(service.detections[0].audioStartSeconds, 30);
-    assert.equal(service.detections[0].audioEndSeconds, 130);
+    assert.equal(service.detections[0].audioEndSeconds, 120);
     assert.equal(service.detections[0].startSeconds, 30, 'the time column keeps where the tune began');
 });
 
@@ -2022,7 +2045,7 @@ await test('the saved session record carries the audio offsets', async () => {
     const saved = laStore.__sessions.find(s => s.id === 'sY');
     assert.equal(saved.tunes.length, 1);
     assert.equal(saved.tunes[0].audioStartSeconds, 30);
-    assert.equal(saved.tunes[0].audioEndSeconds, 50);
+    assert.equal(saved.tunes[0].audioEndSeconds, 40);
     // The anchor too: it depends on the window the session was analysed with,
     // so a saved session that lost it could never recover the right one.
     assert.equal(saved.tunes[0].audioAnchorSeconds, 25);

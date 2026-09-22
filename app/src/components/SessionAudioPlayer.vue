@@ -3,8 +3,19 @@
         <v-alert v-if="!manifest && error" dense text type="warning">{{ error }}</v-alert>
         <template v-if="manifest">
         <div class="d-flex align-center flex-wrap" style="gap: 12px;">
+            <!-- Landing on a given second by tapping a three-hour evening
+                 mapped onto a phone-width strip is not something anyone can
+                 do: one pixel is about twenty seconds. These are the precise
+                 control, and they are also what the keyboard bindings on the
+                 strip do. -->
+            <v-btn icon :disabled="!totalSeconds" aria-label="Back 15 seconds" @click="seekBy(-SKIP_SECONDS)">
+                <v-icon>{{ icons.rewind }}</v-icon>
+            </v-btn>
             <v-btn icon :disabled="!totalSeconds" :aria-label="playing ? 'Pause playback' : 'Play recording'" @click="togglePlay">
                 <v-icon>{{ playing ? icons.pause : icons.play }}</v-icon>
+            </v-btn>
+            <v-btn icon :disabled="!totalSeconds" aria-label="Forward 15 seconds" @click="seekBy(SKIP_SECONDS)">
+                <v-icon>{{ icons.forward }}</v-icon>
             </v-btn>
             <div class="playerClock">
                 {{ formatSecondsAsDuration(currentSeconds) }} / {{ formatSecondsAsDuration(totalSeconds) }}
@@ -19,7 +30,22 @@
 
         <!-- The strip IS the link between the tune list and the recording:
              every detection with an audio offset is a block you can tap. -->
-        <div ref="strip" class="audioStrip mt-2" @click="onStripClick">
+        <!-- A slider, not a decorated div. It was click-only: no keyboard
+             seeking, nothing for a screen reader to read, and no way to land
+             on a particular second. -->
+        <div
+            ref="strip"
+            class="audioStrip mt-2"
+            role="slider"
+            tabindex="0"
+            aria-label="Recording position"
+            aria-valuemin="0"
+            :aria-valuemax="Math.round(totalSeconds)"
+            :aria-valuenow="Math.round(currentSeconds)"
+            :aria-valuetext="positionLabel"
+            @click="onStripClick"
+            @keydown="onStripKey"
+        >
             <div
                 v-for="block in blocks"
                 :key="block.key"
@@ -48,7 +74,19 @@
                 :style="band"
                 title="Audio muted here"
             />
+            <!-- Reading a position off an unmarked bar means guessing. -->
+            <div
+                v-for="tick in ticks"
+                :key="`tick-${tick.seconds}`"
+                class="audioStripTick"
+                :style="{ left: tick.percent + '%' }"
+            />
             <div class="audioStripCursor" :style="{ left: cursorPercent + '%' }" />
+        </div>
+        <div class="audioStripScale caption text--secondary" aria-hidden="true">
+            <span v-for="tick in ticks" :key="`label-${tick.seconds}`" :style="{ left: tick.percent + '%' }">
+                {{ tick.label }}
+            </span>
         </div>
         <div class="d-flex justify-space-between caption text--secondary">
             <span>{{ nowPlayingLabel }}</span>
@@ -109,6 +147,14 @@
             not being corrected. If it plays out of one speaker only, an exported
             copy will too.
         </p>
+        <!-- The correction routes the element through a Web Audio graph, and a
+             suspended context in front of it is SILENCE rather than merely
+             uncorrected sound. Saying nothing here would present as playback
+             that runs with no audio at all. -->
+        <v-alert v-if="channelRepairStalled" type="warning" dense text class="mt-2 mb-0">
+            This device's audio engine is suspended, so the one-channel correction
+            cannot play. Tap play again, or reload the page.
+        </v-alert>
 
         </template>
         <audio v-if="manifest"
@@ -125,7 +171,7 @@
 </template>
 
 <script>
-import { mdiPlay, mdiPause } from '@mdi/js';
+import { mdiPlay, mdiPause, mdiRewind15, mdiFastForward15 } from '@mdi/js';
 import eventBus from '@/eventBus.js';
 import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';
 import {
@@ -146,10 +192,29 @@ const FALLBACK_PREROLL_SECONDS = FALLBACK_WINDOW_SECONDS / 2;
 // has to do, so it cycles rather than trying to be stable per tune.
 const BLOCK_COLOURS = ['#1976d2', '#43a047', '#8e24aa', '#ef6c00', '#00838f', '#c62828'];
 
+// The skip buttons, and what an arrow key moves by. Fifteen seconds is about a
+// phrase: far enough to be worth a tap, short enough not to skip the tune.
+const SKIP_SECONDS = 15;
+// Shift, and Page Up/Down, for getting across an evening.
+const COARSE_SKIP_SECONDS = 60;
+// How many labelled marks go under the strip. Five (four intervals) is what
+// fits at phone width without the labels colliding.
+const TICK_COUNT = 5;
+
 // How much of the recording is decoded to find out what its channels actually
 // contain. Only long enough to tell sound from digital silence — the point is
 // to detect a dead channel, not to measure the audio.
 const CHANNEL_PROBE_SECONDS = 4;
+
+// Where in a track those seconds are taken from, in order.
+//
+// One look at the opening is not enough: a session muted for its first minute,
+// or one that simply started before anyone played, decodes to silence — and
+// silence cannot tell a dead channel from a quiet room, so it is INCONCLUSIVE
+// rather than "nothing to correct". Each further attempt looks further in, and
+// there are only three of them: re-decoding on every manifest refresh would be
+// a real cost on a live session for an answer that is usually unobtainable.
+const CHANNEL_PROBE_OFFSETS_SECONDS = [0, 30, 120];
 
 // Anything above this RMS counts as signal, for the same reason and at the same
 // order of magnitude as SILENT_RMS in mic.js: a channel carrying real audio is
@@ -244,14 +309,30 @@ export default {
             objectUrl: null,
             pendingSeekSeconds: null,
             // What the recording's channels actually CONTAIN, measured from
-            // decoded audio rather than taken from the manifest:
-            // `{ channels, oneSided }`, or null while unknown. A device that
-            // reports two input channels and only fills the first produces a
-            // stereo file that plays out of one speaker, and nothing in the
-            // manifest distinguishes that from real stereo.
-            channelProbe: null,
+            // decoded audio rather than taken from the manifest, PER TRACK:
+            // `{ [trackIndex]: { channels, oneSided, inconclusive } }`. A
+            // device that reports two input channels and only fills the first
+            // produces a stereo file that plays out of one speaker, and
+            // nothing in the manifest distinguishes that from real stereo.
+            //
+            // Per track because a track is a separate MediaRecorder run: Pause,
+            // Resume and a reacquired microphone each start one, and each can
+            // come back on a different device or a different channel count.
+            // One answer for the whole session applied the first track's
+            // finding to every later one — which for a later MONO track means
+            // a doubled gain on audio that was never one-sided.
+            channelProbes: {},
+            // Which track the loaded clip belongs to, i.e. which of the above
+            // applies right now.
+            currentTrackIndex: 0,
             // Whether playback is being corrected for the above.
             channelRepair: false,
+            // The correction is configured but its AudioContext is suspended,
+            // so nothing is coming out of it. Worth saying plainly: an element
+            // that has been given a MediaElementAudioSourceNode plays through
+            // the graph permanently, so a suspended context is SILENCE, not a
+            // missing correction.
+            channelRepairStalled: false,
             // The probe could not answer. Distinct from "answered: nothing to
             // correct", because the two sound entirely different out of a
             // phone and only one of them is worth telling someone about.
@@ -260,11 +341,16 @@ export default {
             // message: the container a decode refusal is about.
             clipMimeType: '',
             clipBytes: 0,
-            icons: { play: mdiPlay, pause: mdiPause },
+            icons: { play: mdiPlay, pause: mdiPause, rewind: mdiRewind15, forward: mdiFastForward15 },
+            SKIP_SECONDS,
         };
     },
     computed: {
         totalSeconds() { return this.manifest ? this.manifest.totalSeconds : 0; },
+        // What was measured about the stretch being played, or null while
+        // unknown. An inconclusive answer is kept — it is what stops the probe
+        // running for ever — but it claims nothing.
+        channelProbe() { return this.channelProbes[this.currentTrackIndex] || null; },
         tracks() { return trackRanges(this.manifest); },
         bitrateLabel() {
             const bps = this.manifest && this.manifest.bitsPerSecond;
@@ -306,6 +392,19 @@ export default {
                 return total + Math.max(0, Math.min(to, this.totalSeconds) - range.from);
             }, 0);
         },
+        // Read out by the slider, and what a screen reader announces after
+        // each arrow press.
+        positionLabel() {
+            return `${formatSecondsAsDuration(this.currentSeconds)} of ${formatSecondsAsDuration(this.totalSeconds)}`;
+        },
+        ticks() {
+            if (!this.totalSeconds) return [];
+            return Array.from({ length: TICK_COUNT }, (_, i) => {
+                const percent = (i / (TICK_COUNT - 1)) * 100;
+                const seconds = (percent / 100) * this.totalSeconds;
+                return { percent, seconds, label: formatSecondsAsDuration(seconds) };
+            });
+        },
         cursorPercent() {
             if (!this.totalSeconds) return 0;
             return Math.min(100, Math.max(0, (this.currentSeconds / this.totalSeconds) * 100));
@@ -316,9 +415,9 @@ export default {
         blocks() {
             if (!this.totalSeconds) return [];
             return this.playableDetections.map((detection, index) => {
-                const start = Math.max(0, detection.audioStartSeconds);
-                const end = Math.min(this.totalSeconds,
-                    typeof detection.audioEndSeconds === 'number' ? detection.audioEndSeconds : start + 1);
+                const span = this.audioSpan(detection);
+                const start = span.from;
+                const end = Math.min(this.totalSeconds, span.to);
                 const left = (start / this.totalSeconds) * 100;
                 const width = Math.max(0.4, ((end - start) / this.totalSeconds) * 100);
                 return {
@@ -371,9 +470,10 @@ export default {
             });
         },
         nowPlayingLabel() {
-            const current = this.playableDetections.filter(d =>
-                d.audioStartSeconds <= this.currentSeconds &&
-                (typeof d.audioEndSeconds !== 'number' || d.audioEndSeconds >= this.currentSeconds));
+            const current = this.playableDetections.filter(d => {
+                const span = this.audioSpan(d);
+                return span.from <= this.currentSeconds && span.to >= this.currentSeconds;
+            });
             if (current.length) return current[current.length - 1].title || 'Unknown tune';
             return this.playing ? 'Playing' : 'Ready';
         },
@@ -429,9 +529,11 @@ export default {
             // A different recording is a different question, and the repair
             // graph (if one was built) is reconfigured rather than torn down —
             // an element can only ever have one MediaElementAudioSourceNode.
-            this.channelProbe = null;
-            this._channelProbeFor = null;
+            this.channelProbes = {};
+            this._probeAttempts = {};
+            this.currentTrackIndex = 0;
             this.channelProbeFailed = false;
+            this.channelRepairStalled = false;
             this._applyChannelRepair();
             if (!this.sessionId) return;
             const id = this.sessionId;
@@ -513,6 +615,13 @@ export default {
 
         // Public: the ▶ on a tune row calls this.
         async playFrom(seconds, { autoplay = true } = {}) {
+            // SYNCHRONOUSLY, before any await. Every route into this method is
+            // a tap — a ▶ on a tune row, a tap on the strip — and building the
+            // repair graph needs an AudioContext, which iOS only starts inside
+            // a gesture. Doing it here rather than leaving it all to _play()
+            // means the graph is built while the gesture is still current,
+            // instead of several awaits later from a loadedmetadata callback.
+            this._prepareAudioGraph();
             const target = Math.max(0, seconds);
             const segment = this._segmentFor(target);
             if (!segment) {
@@ -524,11 +633,43 @@ export default {
             this.error = '';
 
             if (this.segmentIndex === segment.index) {
+                // CANCELS an older load that has not landed yet.
+                //
+                // segmentIndex names the segment currently IN the element, and
+                // a load only sets it once its clip has been built — which over
+                // Dropbox means a download and a hash verification. So while a
+                // load of another segment is in flight, a seek back into the
+                // loaded one takes this branch, and without bumping the
+                // generation the older request would arrive afterwards, replace
+                // the source and seek to ITS target: the user's newer choice
+                // silently overridden by the one they had already moved on
+                // from. Every seek invalidates the seeks before it.
+                this._loadGeneration = (this._loadGeneration || 0) + 1;
                 this._seekWithin(target);
                 if (autoplay) this._play();
                 return;
             }
             await this._loadSegment(segment, target, autoplay);
+        },
+
+        // The stretch of recording a detection was actually HEARD in.
+        //
+        // audioStartSeconds is where the tune's first matching window ended
+        // and audioEndSeconds where its last one did, so neither is the edge of
+        // the audio: the tune runs from a window before the first stamp. The
+        // stored anchor is that window's midpoint — the earliest moment the
+        // tune is certainly playing — which is both where playback starts and
+        // the honest left edge of the block. Using it also gives a row matched
+        // in a single window a visible extent, without claiming any audio the
+        // detector never looked at.
+        audioSpan(detection) {
+            const start = Math.max(0, typeof detection.audioAnchorSeconds === 'number'
+                ? detection.audioAnchorSeconds
+                : detection.audioStartSeconds);
+            const end = typeof detection.audioEndSeconds === 'number'
+                ? detection.audioEndSeconds
+                : detection.audioStartSeconds;
+            return { from: start, to: Math.max(start, end) };
         },
 
         // The recorded stretch a moment falls inside, or null.
@@ -595,6 +736,13 @@ export default {
                 this.clipMimeType = clip.mimeType || (clip.blob && clip.blob.type) || '';
                 this.clipBytes = (clip.blob && clip.blob.size) || 0;
                 this.segmentIndex = segment.index;
+                // Which track's channel finding now applies. A correction
+                // worked out for the first track is not a claim about a later
+                // one: each is its own MediaRecorder run and can come back on
+                // a different device.
+                this.currentTrackIndex = segment.trackIndex || 0;
+                this._probeChannels(this.currentTrackIndex);
+                this._applyChannelRepair({ build: false });
                 this.trackStartSeconds = clip.trackStartSeconds || 0;
                 this._clipMediaEndSeconds =
                     Math.max(0, clip.endSeconds - (clip.trackStartSeconds || 0));
@@ -631,26 +779,47 @@ export default {
             }
         },
 
-        // What this recording's channels actually CARRY.
+        // What this recording's channels actually CARRY, for ONE track.
         //
         // The manifest records how many channels were recorded, which does not
         // answer the question: a device that reports two input channels and
         // fills only the first produces a file that is stereo by every label
         // on it and plays out of one speaker. So a few seconds are decoded and
-        // measured. Runs once per session; never throws, and an unanswerable
+        // measured.
+        //
+        // Per track, because each track is its own MediaRecorder run and can
+        // come back on a different device. Never throws, and an unanswerable
         // probe leaves playback exactly as it was.
-        async _probeChannels() {
-            if (!this.sessionId || this._channelProbeFor === this.sessionId) return;
-            this._channelProbeFor = this.sessionId;
+        async _probeChannels(trackIndex = this.currentTrackIndex) {
+            if (!this.sessionId) return;
             const id = this.sessionId;
-            const track = this.tracks[0];
-            if (!track) { this._channelProbeFor = null; return; }
+            const track = this.tracks.find(t => t.index === trackIndex) || this.tracks[0];
+            if (!track) return;
+
+            if (!this._probeAttempts) this._probeAttempts = {};
+            const settled = this.channelProbes[track.index];
+            // A conclusive answer never changes; an inconclusive one means the
+            // stretch examined was silent, which is worth one more look from
+            // further in — but only a few, and never while one is in flight.
+            if (settled && !settled.inconclusive) return;
+            const slot = `${id}:${track.index}`;
+            const attempt = this._probeAttempts[slot] || 0;
+            if (attempt >= CHANNEL_PROBE_OFFSETS_SECONDS.length) return;
+            if (this._probeInFlight) return;
+
+            const from = track.startSeconds + CHANNEL_PROBE_OFFSETS_SECONDS[attempt];
+            if (from >= track.endSeconds) {
+                // Nothing further in to look at. Stop, rather than re-reading
+                // the same opening for ever.
+                this._probeAttempts[slot] = CHANNEL_PROBE_OFFSETS_SECONDS.length;
+                return;
+            }
+            this._probeAttempts[slot] = attempt + 1;
+            this._probeInFlight = slot;
             try {
-                // From the start of the first track, so the clip carries its
-                // own container header and decodes standalone.
                 const clip = await buildClip(
-                    id, track.startSeconds,
-                    Math.min(track.endSeconds, track.startSeconds + CHANNEL_PROBE_SECONDS),
+                    id, from,
+                    Math.min(track.endSeconds, from + CHANNEL_PROBE_SECONDS),
                     this.manifest,
                 );
                 if (!clip || id !== this.sessionId) return;
@@ -663,7 +832,7 @@ export default {
                 }
                 const loudest = Math.max(...levels, 0);
                 const quietest = Math.min(...levels, loudest);
-                this.channelProbe = {
+                this._recordProbe(track.index, {
                     channels: buffer.numberOfChannels,
                     // Both halves matter: a recording of a silent room has
                     // every channel below the threshold and is not one-sided,
@@ -671,21 +840,24 @@ export default {
                     // audio nobody has heard yet.
                     oneSided: buffer.numberOfChannels > 1 &&
                         loudest > SILENT_CHANNEL_RMS && quietest <= SILENT_CHANNEL_RMS,
-                };
+                    // Silence cannot answer the question either way: a muted
+                    // opening and a dead channel decode identically. Say so,
+                    // so a later stretch of the same track gets a look.
+                    inconclusive: loudest <= SILENT_CHANNEL_RMS,
+                });
                 this.channelProbeFailed = false;
-                // NOT _applyChannelRepair(). This runs from reload() and from
-                // refreshManifest(), neither of which is a user gesture, and
-                // building the graph needs an AudioContext: on iOS one created
-                // outside a gesture starts suspended and cannot be resumed
-                // without one. Since an element that has been given a
-                // MediaElementAudioSourceNode outputs through the graph
-                // permanently, building it here does not merely fail to
-                // correct the audio — it can take playback to silent, for the
-                // whole session, with nothing on screen to explain it.
-                //
-                // The finding is recorded and _play() applies it, which is the
-                // rule this file already states and is the only caller that is
+                // Reconfigures an EXISTING graph so an answer that arrives
+                // mid-playback takes effect, but never builds one: this runs
+                // from reload(), from refreshManifest() and from a segment
+                // load, none of which is a user gesture. On iOS an
+                // AudioContext created outside one starts suspended and
+                // cannot be resumed without one, and an element that has been
+                // given a MediaElementAudioSourceNode outputs through the
+                // graph PERMANENTLY — so building it here does not merely
+                // fail to correct the audio, it can take playback to silent
+                // for the whole session. _play() is the only caller that is
                 // always a gesture.
+                this._applyChannelRepair({ build: false });
             } catch (e) {
                 // The correction is all that is lost, so playback continues —
                 // but NOT silently. "No correction needed" and "the correction
@@ -694,7 +866,14 @@ export default {
                 // device this feature is used on.
                 this.channelProbeFailed = true;
                 console.debug('Could not probe recording channels:', e && e.message);
+            } finally {
+                if (this._probeInFlight === slot) this._probeInFlight = null;
             }
+        },
+
+        // Vue 2 cannot see a key added to an object in place.
+        _recordProbe(trackIndex, probe) {
+            this.channelProbes = { ...this.channelProbes, [trackIndex]: probe };
         },
 
         // Routes playback through a downmix when, and only when, the recording
@@ -704,13 +883,16 @@ export default {
         // element can only ever be given one MediaElementAudioSourceNode — and
         // once it has one, its sound comes out of the graph rather than the
         // element, so this is never built speculatively.
-        _applyChannelRepair() {
+        _applyChannelRepair({ build = true } = {}) {
             const needed = !!(this.channelProbe && this.channelProbe.oneSided);
-            if (!needed && !this._mixNode) {
-                this.channelRepair = false;
-                return;
+            if (!this._mixNode) {
+                // Nothing is routed through a graph yet, so playback is
+                // whatever the file is. Building one is a permanent change to
+                // how this element makes sound, so it happens only when a
+                // correction is actually needed AND the caller is a gesture.
+                if (!needed || !build) { this.channelRepair = false; return; }
+                if (!this._buildRepairGraph()) return;
             }
-            if (!this._mixNode && !this._buildRepairGraph()) return;
             // 'explicit' + one channel is what forces the downmix; 'max' hands
             // whatever the file has straight through again.
             this._mixNode.channelCountMode = needed ? 'explicit' : 'max';
@@ -736,7 +918,11 @@ export default {
                 mix.connect(ctx.destination);
                 this._sourceNode = source;
                 this._mixNode = mix;
-                if (ctx.state === 'suspended' && ctx.resume) ctx.resume().catch(() => {});
+                // Resuming is _resumeGraph()'s job, on EVERY play rather than
+                // only at construction: a context can be suspended long after
+                // it was built — the browser suspends one whose page is
+                // backgrounded — and a suspended context in front of the
+                // element is silence, not a missing correction.
                 return true;
             } catch (e) {
                 console.warn('Could not correct one-sided playback:', e && e.message);
@@ -794,13 +980,43 @@ export default {
             this.currentSeconds = targetSeconds;
         },
 
+        // Everything the correction needs doing from a user gesture: build the
+        // graph if this recording needs one, and resume the context if it has
+        // been suspended since the last time.
+        _prepareAudioGraph() {
+            this._applyChannelRepair();
+            this._resumeGraph();
+        },
+
+        // A suspended AudioContext in front of the element produces no sound at
+        // all, so this runs on every play rather than once at construction. A
+        // resume that does not take is reported rather than swallowed: it is
+        // the difference between "uncorrected" and "silent".
+        _resumeGraph() {
+            const ctx = this._audioCtx;
+            if (!ctx || !this._mixNode) { this.channelRepairStalled = false; return; }
+            if (ctx.state !== 'suspended') { this.channelRepairStalled = false; return; }
+            if (!ctx.resume) { this.channelRepairStalled = true; return; }
+            const done = ctx.resume();
+            if (done && done.then) {
+                done.then(
+                    () => { this.channelRepairStalled = ctx.state === 'suspended'; },
+                    () => { this.channelRepairStalled = true; },
+                );
+            } else {
+                this.channelRepairStalled = ctx.state === 'suspended';
+            }
+        },
+
         _play() {
             const audio = this.$refs.audio;
             if (!audio) return;
             // Here rather than at load, because building the graph needs an
-            // AudioContext and iOS only starts one in a user gesture — which
-            // every route to _play() is.
-            this._applyChannelRepair();
+            // AudioContext and iOS only starts one in a user gesture. Not every
+            // route here is one — onLoadedMetadata reaches it several awaits
+            // after the tap, and onEnded reaches it with no tap at all — which
+            // is why playFrom() and togglePlay() prime it synchronously too.
+            this._prepareAudioGraph();
             const started = audio.play();
             if (started && started.catch) {
                 started.catch(e => { this.error = `Could not play: ${this._playFailureDetail(audio, e)}`; });
@@ -832,6 +1048,8 @@ export default {
             const audio = this.$refs.audio;
             if (!audio) return;
             if (this.playing) { audio.pause(); return; }
+            // Synchronously, while the tap is still current — see playFrom().
+            this._prepareAudioGraph();
             if (this.segmentIndex === null) {
                 const first = this.manifest.segments.slice()
                     .sort((a, b) => a.index - b.index)[0];
@@ -869,6 +1087,38 @@ export default {
             const audio = this.$refs.audio;
             if (!audio || !audio.getAttribute('src')) return;
             this.error = 'This browser could not play the recorded audio.';
+        },
+
+        // Relative seeking, which is what the skip buttons and the arrow keys
+        // both do. Keeps playing if it was playing; a seek is not a transport
+        // change.
+        seekBy(deltaSeconds) {
+            if (!this.totalSeconds) return;
+            const target = Math.min(this.totalSeconds,
+                Math.max(0, this.currentSeconds + deltaSeconds));
+            return this.playFrom(target, { autoplay: this.playing });
+        },
+
+        onStripKey(event) {
+            const coarse = event.shiftKey ? COARSE_SKIP_SECONDS : SKIP_SECONDS;
+            const handlers = {
+                ArrowLeft: () => this.seekBy(-coarse),
+                ArrowDown: () => this.seekBy(-coarse),
+                ArrowRight: () => this.seekBy(coarse),
+                ArrowUp: () => this.seekBy(coarse),
+                PageDown: () => this.seekBy(-COARSE_SKIP_SECONDS),
+                PageUp: () => this.seekBy(COARSE_SKIP_SECONDS),
+                Home: () => this.playFrom(0, { autoplay: this.playing }),
+                End: () => this.playFrom(this.totalSeconds, { autoplay: this.playing }),
+                Enter: () => this.togglePlay(),
+                ' ': () => this.togglePlay(),
+            };
+            const handler = handlers[event.key];
+            if (!handler) return;
+            // Only for keys this actually acts on: swallowing everything would
+            // take Tab off the control the user just focused.
+            event.preventDefault();
+            handler();
         },
 
         onStripClick(event) {
@@ -934,6 +1184,41 @@ export default {
     background: rgba(128, 128, 128, 0.18);
     overflow: hidden;
     cursor: pointer;
+}
+
+/* It is focusable now, so it has to show that it is. */
+.audioStrip:focus-visible {
+    outline: 2px solid currentColor;
+    outline-offset: 2px;
+}
+
+.audioStripTick {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: rgba(255, 255, 255, 0.55);
+    pointer-events: none;
+}
+
+/* Labels sit under the strip, anchored at their tick. The first and last are
+   nudged inside so neither runs off the edge at phone width. */
+.audioStripScale {
+    position: relative;
+    height: 14px;
+    width: 100%;
+}
+.audioStripScale span {
+    position: absolute;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.audioStripScale span:first-child {
+    transform: none;
+}
+.audioStripScale span:last-child {
+    transform: translateX(-100%);
 }
 
 .audioStripBlock {

@@ -415,19 +415,38 @@
             </v-alert>
         </v-card>
 
-        <!-- The session recording, when there is one. Above the table because
-             the timeline strip is what makes the list navigable. -->
-        <v-card v-if="viewMode !== 'file' && audioSessionId" class="pa-5 my-3">
+        <!-- The session recording, when there IS one. Above the table because
+             the timeline strip is what makes the list navigable.
+             This used to appear for every session, recording or not — a
+             full-height card of backup explanation and Delete buttons about
+             audio that did not exist, which at phone width pushed the tune
+             list off the first screen of every session ever saved. -->
+        <v-card v-if="viewMode !== 'file' && hasSessionRecording" class="pa-5 my-3">
             <h2 class="text-h6 mb-2">
                 Session recording
             </h2>
-            <DropboxBackup :session-id="audioSessionId" :active="isOpenSession(activeSession)" class="mb-3" />
+            <!-- Transport and timeline FIRST. Backup is housekeeping; playing
+                 the evening back is what the card is for. -->
             <SessionAudioPlayer
                 ref="audioPlayer"
                 :session-id="audioSessionId"
                 :detections="activeDetections"
                 :listening="viewMode === 'live' && live.capturing"
             />
+            <v-expansion-panels v-model="storagePanel" flat class="mt-3">
+                <v-expansion-panel>
+                    <!-- Collapsed, but never silent: the backup state travels
+                         in the header, so closing the panel cannot hide the
+                         fact that a session is not backed up. -->
+                    <v-expansion-panel-header class="px-0">
+                        Storage and backup
+                        <span class="text--secondary caption ml-2">{{ sessionBackupLabel }}</span>
+                    </v-expansion-panel-header>
+                    <v-expansion-panel-content>
+                        <DropboxBackup :session-id="audioSessionId" :active="isOpenSession(activeSession)" />
+                    </v-expansion-panel-content>
+                </v-expansion-panel>
+            </v-expansion-panels>
         </v-card>
 
         <!-- Results. One table, but the two modes keep their own list. -->
@@ -590,6 +609,7 @@ import VolumeMeter from '@/components/VolumeMeter.vue';
 import LiveScoreFollow from '@/components/LiveScoreFollow.vue';
 import DropboxBackup from '@/components/DropboxBackup.vue';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
+import { backupStatus, sessionConflictMessage } from '@/services/dropbox.js';
 import sessionRecorder from '@/services/sessionRecorder.js';
 import { listManifests, playbackReadManifest, reclaimOrphans } from '@/services/sessionAudioStore.js';
 import { clearLastShown } from '@/js/liveScoreFollow.mjs';
@@ -697,6 +717,10 @@ export default {
             // records: a playable recording needs a local or Dropbox manifest,
             // not just a tune list synced from another device.
             audioSessionIDs: [],
+            // Which expansion panel is open, i.e. undefined for none. Storage
+            // is collapsed by default and opened only when something in it
+            // needs a decision.
+            storagePanel: undefined,
             // Which stretches of the active session's audio are on disk.
             // See _rangesFor() — a recording can have holes.
             audioRanges: [],
@@ -726,7 +750,8 @@ export default {
         // moment on disk", so the coverage has to be recomputed when it
         // changes — otherwise opening a past session inherits the live one's
         // figure and offers ▶ on rows whose audio is not there.
-        audioSessionId() { this.refreshAudioSessions(); },
+        audioSessionId() { this.refreshAudioSessions(); this.storagePanel = undefined; },
+        sessionNeedsReview(value) { if (value) this.storagePanel = 0; },
         viewMode(newVal) {
             if (newVal !== 'file') this.lastSessionView = newVal;
             if (newVal !== 'live') this.followMode = false;
@@ -772,6 +797,27 @@ export default {
             const session = this.activeSession;
             if (!session || !session.id) return '';
             return session.id;
+        },
+        // Whether there is audio for this session, or audio on its way.
+        //
+        // audioSessionIDs covers both: refreshAudioSessions() falls back to the
+        // cloud manifest for a session whose local copy has gone. The recording
+        // switch is the second half — a session recording right now has nothing
+        // on disk for its first three minutes, and a card that appeared part
+        // way through would be its own kind of surprise.
+        hasSessionRecording() {
+            if (!this.audioSessionId) return false;
+            if (this.audioSessionIDs.includes(this.audioSessionId)) return true;
+            return this.viewMode === 'live' && this.recordAudio && this.isOpenSession(this.activeSession);
+        },
+        sessionBackupLabel() {
+            return this.audioSessionId ? backupStatus(this.audioSessionId) : '';
+        },
+        // A conflict is the one backup state that is waiting on the user, so
+        // it is also the one that may open the panel by itself. Everything
+        // else retries on its own and says so in the header.
+        sessionNeedsReview() {
+            return this.audioSessionId ? !!sessionConflictMessage(this.audioSessionId) : false;
         },
         activeAcceptedWindows() {
             if (this.viewMode === 'history') return 0;

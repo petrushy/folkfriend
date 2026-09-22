@@ -132,12 +132,31 @@ export class DropboxClient {
         }
     }
 
-    async folders() {
+    async list(path) {
         let page;
-        try { page = await this.request('files/list_folder', { path: '/sessions' }); }
+        try { page = await this.request('files/list_folder', { path }); }
         catch (e) { if (e.code === 'missing') return []; throw e; }
         const entries = [...page.entries];
         while (page.has_more) { page = await this.request('files/list_folder/continue', { cursor: page.cursor }); entries.push(...page.entries); }
-        return entries.filter(e => e['.tag'] === 'folder');
+        return entries;
+    }
+
+    async folders() { return (await this.list('/sessions')).filter(e => e['.tag'] === 'folder'); }
+
+    // Sessions whose cloud copy has been deleted, as a SHARED fact.
+    //
+    // "Delete Dropbox copy" used to be recorded only in the deleting device's
+    // own IndexedDB, so any other device still holding the local audio simply
+    // uploaded it again on its next pass — the deletion undone by a machine
+    // that was never told about it. The name carries everything needed, so one
+    // listing answers for every session rather than a read per session.
+    async deletedSessions() {
+        const ids = new Set();
+        for (const entry of await this.list('/deleted')) {
+            if (entry['.tag'] !== 'file') continue;
+            const match = /^([a-zA-Z0-9_-]{1,200})\.json$/.exec(entry.name || '');
+            if (match) ids.add(match[1]);
+        }
+        return ids;
     }
 }

@@ -5,6 +5,33 @@ export const sessionPath = id => {
 };
 const jsonBlob = value => new Blob([JSON.stringify(value)], { type: 'application/json' });
 
+// A deletion is a SHARED fact, so it is recorded in Dropbox rather than only in
+// the deleting device's IndexedDB.
+//
+// "Delete Dropbox copy" removed the cloud files and wrote a local exclusion —
+// and any other device still holding that session's local audio uploaded it
+// all again on its next verification pass, because nothing had told it. The
+// marker outlives the folder it describes, which is why it lives beside
+// /sessions rather than inside it.
+export const DELETED_FOLDER = '/deleted';
+export const deletionPath = id => `${DELETED_FOLDER}/${sessionPath(id).slice('/sessions/'.length)}.json`;
+export const deletionRecord = id => ({ schema: 1, sessionId: id, deletedAt: Date.now() });
+
+// What a person needs in front of them to choose between two copies of a
+// session. Deliberately small: the point is to answer "which of these is the
+// one I want", not to diff tune lists on a phone.
+export function sessionSummary(session) {
+    if (!session) return null;
+    return {
+        id: session.id,
+        name: session.name || '',
+        tunes: Array.isArray(session.tunes) ? session.tunes.length : 0,
+        startedAt: session.startedAt || 0,
+        endedAt: session.endedAt || null,
+        updatedAt: validNumber(session.updatedAt) ? session.updatedAt : 0,
+    };
+}
+
 // Whole recordings live in a FLAT folder with readable names, because their
 // whole purpose is to be opened by something that is not FolkFriend: a player
 // app, the Files app, a phone plugged into a laptop. Nobody wants to dig
