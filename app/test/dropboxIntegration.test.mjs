@@ -587,3 +587,26 @@ await test('one conflicted session does not block the metadata sync of the next'
     assert.equal(api.backupStatus('s2'), 'Backed up');
     assert.equal((await f.client.json('/sessions/s2/session.json')).value.session.name, 'Renamed');
 });
+
+await test('whole recording waits for a durable final segment even after endedAt is saved', async () => {
+    const { f, api } = await load();
+    f.sessions[0].endedAt = 2;
+    f.locals[0].finalizedAt = null;
+    await api.setWholeRecordings(true);
+    assert.ok(!f.client.writes.some(p => p.startsWith('/recordings/')));
+    assert.equal(api.backupStatus('s1'), 'Syncing');
+    f.locals[0].finalizedAt = Date.now();
+    await api.syncDropbox(true);
+    assert.equal(f.client.writes.filter(p => p.startsWith('/recordings/')).length, 1);
+    assert.equal(api.backupStatus('s1'), 'Backed up');
+});
+
+await test('legacy manifest cannot finalize while the recorder still owns it', async () => {
+    const { f, api } = await load({ active: true });
+    f.sessions[0].endedAt = 2;
+    await api.setWholeRecordings(true);
+    assert.ok(!f.client.writes.some(p => p.startsWith('/recordings/')));
+    f.recorder.sessionId = null; f.recorder.isActive = false; f.recorder.isRecording = false;
+    await api.syncDropbox(true);
+    assert.equal(f.client.writes.filter(p => p.startsWith('/recordings/')).length, 1);
+});

@@ -1105,6 +1105,29 @@ await test('end() flushes the last segment before closing', async () => {
     assert.equal(Math.round(manifest.totalSeconds), 20);
 });
 
+await test('finalization waits for pending storage and is cleared before recording resumes', async () => {
+    await resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    mic.__setStream();
+    await recorder.ensureRecording();
+    feed(recorders[recorders.length - 1], 20);
+    let release;
+    recorder._writeChain = new Promise(resolve => { release = resolve; });
+    const finishing = recorder.end();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    assert.equal((await store.readManifest('s1')).finalizedAt, null);
+    release();
+    await finishing;
+    const finished = await store.readManifest('s1');
+    assert.ok(finished.finalizedAt > 0);
+    assert.equal(finished.segments.length, 1);
+    await recorder.resume('s1');
+    assert.equal((await store.readManifest('s1')).finalizedAt, null);
+    await recorder.ensureRecording();
+    await recorder.end();
+});
+
 await test('the recorder announces its state so the UI cannot disagree with it', async () => {
     await resetAll();
     const recorder = await freshRecorder();

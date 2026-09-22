@@ -193,7 +193,7 @@ export async function backupSession(client, session, local, readSegment, extensi
 // a whole file would pull every segment back DOWN from Dropbox only to push the
 // same bytes up again.
 export async function backupWholeRecordings(client, session, manifest, buildClip, extension, existing = []) {
-    if (!session.endedAt) return existing;
+    if (!session.endedAt || manifest.finalizedAt === null) return existing;
 
     const inventoryPath = `${sessionPath(session.id)}/whole-recordings.json`;
     let inventory = await client.json(inventoryPath);
