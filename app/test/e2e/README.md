@@ -112,3 +112,15 @@ and deletes the selected session. It verifies IndexedDB after each edit and
 fails on Vue warnings. It does not use a real microphone or your browser data.
 A mobile screenshot is written to the system temporary directory as
 `folkfriend-session-workspace-mobile.png`.
+
+### Session audio chain
+
+Run `npm run test:session-audio-chain` from `app/`. This needs Chrome and Node
+22+, but no production build, microphone permission, or Dropbox account. It
+records generated one-sided tones with each supported WebM/Opus and MP4 encoder,
+uses the real recorder and IndexedDB store (with a three-second segment interval),
+decodes the assembled clips, and compares complete export bytes to the original
+MediaRecorder output. It also renders the actual player template in Vue and
+checks that changing sessions preserves the audio element and its repair graph.
+The test bypasses autoplay policy; it does not establish iPhone gesture behavior
+or Safari AAC/MP4 compatibility.
