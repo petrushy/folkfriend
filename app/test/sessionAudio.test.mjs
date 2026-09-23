@@ -739,6 +739,30 @@ await test('complete exports reject an unrecorded hole inside a track', async ()
     await assert.rejects(store.buildClip('s1', 0, 6, manifest, { requireComplete: true }), /missing or unreadable/);
 });
 
+await test('failed manifest deletion preserves all audio and can be retried', async () => {
+    await seedTwoSegments();
+    idb.__failDeletes.add(store.manifestKey('s1'));
+    await assert.rejects(store.deleteSessionAudio('s1'), /delete failed/);
+    assert.ok(await store.readManifest('s1'));
+    assert.ok(await store.readSegment('s1', 0));
+    assert.ok(await store.readSegment('s1', 1));
+    idb.__failDeletes.clear();
+    await store.deleteSessionAudio('s1');
+    assert.equal(await store.readManifest('s1'), null);
+    assert.equal(await store.readSegment('s1', 0), null);
+    assert.equal(await store.readSegment('s1', 1), null);
+});
+
+await test('a failed payload deletion after the manifest is gone leaves reclaimable orphans', async () => {
+    await seedTwoSegments();
+    idb.__failDeletes.add(store.segmentKey('s1', 1));
+    await store.deleteSessionAudio('s1');
+    assert.equal(await store.readManifest('s1'), null);
+    assert.ok(await store.readSegment('s1', 1));
+    idb.__failDeletes.clear();
+    assert.equal(await store.reclaimOrphans(), 1);
+});
+
 await test('export ranges are one per track', async () => {
     await resetAll();
     await seedManifest();

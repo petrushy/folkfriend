@@ -129,6 +129,16 @@ Deleting the session itself deletes its local audio but leaves its Dropbox copy.
 Dropbox restore can therefore recover a session deliberately removed locally.
 Close an open recording session before deleting its audio through these controls.
 
+Cloud deletion leaves a shared marker outside the session folder. Uploaders
+check it before writing and again after their final remote write, and reconcile
+late uploads instead of reporting them backed up. While the app is open, a
+five-minute reconciliation pass also removes residue from an uploader that
+crashed, even if no local session remains. It retains unfamiliar manifests and
+ambiguous legacy filenames. Retry backup explicitly removes the shared marker.
+Deletion is eventually reconciled across devices; it cannot cancel a Dropbox
+request already in flight on another device.
+
+
 ## Verification
 
 `npm --prefix app test` includes `app/test/dropbox.test.mjs` and `app/test/dropboxIntegration.test.mjs`, covering interrupted
