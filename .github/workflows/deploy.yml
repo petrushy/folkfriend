@@ -54,9 +54,51 @@ jobs:
       # app/public/res/ (it is gitignored — far too large to commit), so it has
       # to be fetched before `cargo test`. It is removed again before the app
       # build; see "Drop the tune index" below.
+      #
+      # Cached, because this is by far the biggest consumer of the data host's
+      # download quota: ~84 MB per run (legacy blob + per-dataset files), on
+      # every push and every PR commit, while the data itself changes rarely.
+      # The two manifests are a few hundred bytes and carry the version, date
+      # and size of every file, so they are fetched first and hashed as the
+      # key — new data on the host means a new key and a fresh download.
+      - name: Fetch tune data manifests
+        working-directory: app
+        run: |
+          mkdir -p public/res
+          for f in datasets.json nud-meta.json; do
+            curl -fsSL --compressed --retry 3 -o "public/res/$f" \
+              "https://folkfriend-data.web.app/$f"
+          done
+
+      # restore/save rather than plain actions/cache: that saves at the END of
+      # the job, by which point "Drop the tune data" below has moved these
+      # files out of public/res/, so it would never store anything.
+      - name: Restore tune data from cache
+        id: tune-data-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            app/public/res/folkfriend-non-user-data.json
+            app/public/res/thesession.json
+            app/public/res/folkwiki.json
+            app/public/res/norbeck.json
+          key: tune-data-${{ hashFiles('app/public/res/datasets.json', 'app/public/res/nud-meta.json') }}
+
       - name: Download tune index
+        if: steps.tune-data-cache.outputs.cache-hit != 'true'
         working-directory: app
         run: bash download_tune_data.sh
+
+      - name: Save tune data to cache
+        if: steps.tune-data-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            app/public/res/folkfriend-non-user-data.json
+            app/public/res/thesession.json
+            app/public/res/folkwiki.json
+            app/public/res/norbeck.json
+          key: ${{ steps.tune-data-cache.outputs.cache-primary-key }}
 
       # --release because these run full queries over a 42 MB index; in debug
       # the NW alignment pass is slow enough to dominate the job.

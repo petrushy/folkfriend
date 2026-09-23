@@ -19,7 +19,10 @@ fetch () {
 	name="$1"
 	required="$2"
 	tmp="$(mktemp "$name.tmp.XXXXXX")"
-	if wget -q -O "$tmp" "$BASE/$name"; then
+	# --compressed: Firebase gzips JSON when asked, and neither wget nor curl
+	# asks by default. The index compresses several-fold, and this script runs
+	# on every CI build, so an uncompressed fetch is most of the hosting quota.
+	if curl -fsSL --compressed --retry 3 -o "$tmp" "$BASE/$name"; then
 		mv "$tmp" "$name"
 		echo "  fetched $name ($(wc -c < "$name" | tr -d ' ') bytes)"
 	else
