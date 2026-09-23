@@ -40,7 +40,14 @@ for note in "${NOTES[@]}"; do
     # Download to a temporary name and move into place only on success, so an
     # interrupted run can never leave a half-written file that the check above
     # would then accept.
-    curl -sf "$BASE/${note}.mp3" -o "$dest_file.part"
+    #
+    # Retried, because one dropped connection among 88 downloads otherwise
+    # fails the whole CI deploy (seen: curl exit 35, an SSL connect error, on
+    # a single note). --retry-all-errors covers connection errors, which plain
+    # --retry does not, and --max-time bounds each attempt so a stalled
+    # transfer is retried rather than hanging the job.
+    curl -sf --retry 4 --retry-all-errors --retry-delay 2 --max-time 60 \
+      "$BASE/${note}.mp3" -o "$dest_file.part"
     mv "$dest_file.part" "$dest_file"
   fi
 done
