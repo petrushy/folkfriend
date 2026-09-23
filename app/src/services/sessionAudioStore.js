@@ -474,7 +474,9 @@ export async function deleteSessionAudio(sessionId) {
     if (!sessionId) return;
     return withSession(sessionId, async () => {
         const manifest = (await get(manifestKey(sessionId))) || null;
-        try { await del(manifestKey(sessionId)); } catch (e) { /* fall through */ }
+        // A failed commit-marker delete must leave every referenced payload
+        // intact. Report it so the caller can retry instead of claiming success.
+        await del(manifestKey(sessionId));
         const indices = manifest && Array.isArray(manifest.segments)
             ? manifest.segments.map(s => s.index)
             : [];

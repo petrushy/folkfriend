@@ -436,6 +436,20 @@ Three hours of a pub records the conversations of everyone in it.
 - Deleted with the session it belongs to, from every delete path, because that
   is done in `store.deleteLiveSession()` rather than at the call sites.
 
+## Complete exports and finalization
+
+Playback can use an available prefix if a later segment is missing. Export and
+whole-recording backup instead require every segment in the requested track;
+missing, unreadable, or truncated payloads produce an error rather than a
+shortened file. A new manifest carries `finalizedAt: null` until the recorder's
+final write has drained. Recording again clears this marker before capture.
+Dropbox waits for completion before publishing the optional whole-file copy;
+legacy manifests without the field remain supported once their recorder closes.
+
+Deleting local audio first removes its manifest. If that operation fails, the
+error reaches the UI and no segment is removed. Once the manifest is gone,
+failed payload deletions leave orphans that the normal sweep can reclaim.
+
 ## Known limitations
 
 - **A web app stops running when the phone locks**, so recording pauses with
