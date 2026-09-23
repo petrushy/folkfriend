@@ -157,7 +157,9 @@
         </v-alert>
 
         </template>
-        <audio v-if="manifest"
+        <!-- Keep the element alive across session reloads: the Web Audio
+             source is permanently attached to this exact DOM node. -->
+        <audio
             ref="audio"
             preload="metadata"
             @loadedmetadata="onLoadedMetadata"
