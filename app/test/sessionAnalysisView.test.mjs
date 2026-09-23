@@ -1336,7 +1336,7 @@ await test('the row under the playhead is the transport: ⏸ pauses, ▶ resumes
     vm.playDetection(a);
     assert.deepEqual(calls, ['toggle']);
 
-    // Between tunes nothing is current, so every row starts its tune.
+    // With no transport row (nothing playable yet), every row starts its tune.
     calls.length = 0;
     vm.playback = { playing: true, detectionId: null };
     vm.playDetection(a);
