@@ -505,12 +505,29 @@ export default {
             if (this.currentDetection) return this.currentDetection.title || 'Unknown tune';
             return this.playing ? 'Playing' : 'Ready';
         },
+        // The row that acts as the transport in the tune list. Unlike
+        // currentDetection this is never null while there are tunes: between
+        // two tunes it stays on the one that last started, and before the
+        // first it is the first — otherwise there are stretches of playback
+        // no row can stop, which is exactly what the row button is for.
+        transportDetection() {
+            if (this.currentDetection) return this.currentDetection;
+            let previous = null;
+            let first = null;
+            for (const d of this.playableDetections) {
+                const from = this.audioSpan(d).from;
+                if (!first || from < this.audioSpan(first).from) first = d;
+                if (from <= this.currentSeconds
+                    && (!previous || from >= this.audioSpan(previous).from)) previous = d;
+            }
+            return previous || first;
+        },
         // What the tune list needs to turn that row's ▶ into ⏸: playback
         // carries on into the next tune, so the pause button moves with it.
         playbackState() {
             return {
                 playing: this.playing,
-                detectionId: this.currentDetection ? this.currentDetection.id : null,
+                detectionId: this.transportDetection ? this.transportDetection.id : null,
             };
         },
     },
