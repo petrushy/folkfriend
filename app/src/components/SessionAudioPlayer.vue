@@ -492,17 +492,34 @@ export default {
                 };
             });
         },
-        nowPlayingLabel() {
+        // The tune under the playhead, or null between tunes. The last match
+        // wins where two spans touch, since playback moves forward.
+        currentDetection() {
             const current = this.playableDetections.filter(d => {
                 const span = this.audioSpan(d);
                 return span.from <= this.currentSeconds && span.to >= this.currentSeconds;
             });
-            if (current.length) return current[current.length - 1].title || 'Unknown tune';
+            return current.length ? current[current.length - 1] : null;
+        },
+        nowPlayingLabel() {
+            if (this.currentDetection) return this.currentDetection.title || 'Unknown tune';
             return this.playing ? 'Playing' : 'Ready';
+        },
+        // What the tune list needs to turn that row's ▶ into ⏸: playback
+        // carries on into the next tune, so the pause button moves with it.
+        playbackState() {
+            return {
+                playing: this.playing,
+                detectionId: this.currentDetection ? this.currentDetection.id : null,
+            };
         },
     },
     watch: {
         sessionId() { this.reload(); },
+        playbackState: {
+            handler(state) { this.$emit('playback', state); },
+            immediate: true,
+        },
     },
     created() {
         this.reload();

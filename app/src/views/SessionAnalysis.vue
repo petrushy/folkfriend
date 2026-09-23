@@ -432,6 +432,7 @@
                 :session-id="audioSessionId"
                 :detections="activeDetections"
                 :listening="viewMode === 'live' && live.capturing"
+                @playback="playback = $event"
             />
             <v-expansion-panels v-model="storagePanel" flat class="mt-3">
                 <v-expansion-panel>
@@ -527,11 +528,12 @@
                                         v-if="hasAudioFor(detection)"
                                         icon
                                         small
-                                        aria-label="Listen to this tune in the recording"
+                                        :aria-label="isPlayingDetection(detection) ? 'Pause the recording' : 'Listen to this tune in the recording'"
+                                        :color="isCurrentDetection(detection) ? 'primary' : undefined"
                                         @click="playDetection(detection)"
                                     >
                                         <v-icon small>
-                                            {{ icons.play }}
+                                            {{ isPlayingDetection(detection) ? icons.pause : icons.play }}
                                         </v-icon>
                                     </v-btn>
                                     <v-btn icon small :aria-label="isTuneFavourited(detection) ? 'Remove favourite' : 'Add favourite'"
@@ -600,7 +602,7 @@
 import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
 import {
-    mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble, mdiStar, mdiStarOutline, mdiPlay,
+    mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble, mdiStar, mdiStarOutline, mdiPlay, mdiPause,
 } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
@@ -710,7 +712,11 @@ export default {
                 star: mdiStar,
                 starOutline: mdiStarOutline,
                 play: mdiPlay,
+                pause: mdiPause,
             },
+            // What the recording player reports: whether it is playing, and
+            // which tune the playhead is in. Drives the per-row ▶/⏸.
+            playback: { playing: false, detectionId: null },
             // Session ids known to have a recording, so the picker can mark
             // them and the player is only mounted when there is something to
             // play. Read from the audio manifests rather than from the session
@@ -1632,9 +1638,20 @@ export default {
                 detection.audioStartSeconds >= range.from && detection.audioStartSeconds < range.to);
         },
 
+        // The row under the playhead acts as the transport: ⏸ while playing,
+        // and ▶ after a pause RESUMES where it stopped rather than jumping
+        // back to the tune's start. Any other row starts that tune.
+        isCurrentDetection(detection) {
+            return this.playback.detectionId !== null && this.playback.detectionId === detection.id;
+        },
+        isPlayingDetection(detection) {
+            return this.playback.playing && this.isCurrentDetection(detection);
+        },
         playDetection(detection) {
             const player = this.$refs.audioPlayer;
-            if (player) player.playTune(detection);
+            if (!player) return;
+            if (this.isCurrentDetection(detection)) player.togglePlay();
+            else player.playTune(detection);
         },
 
         async refreshAudioSessions() {

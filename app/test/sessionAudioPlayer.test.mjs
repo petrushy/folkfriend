@@ -1086,6 +1086,27 @@ await test('a seek never runs off either end of the recording', async () => {
     assert.deepEqual(vm.playRequests, [0, 600]);
 });
 
+await test('playbackState names the tune under the playhead, and follows it into the next', async () => {
+    // The tune list turns that row's ▶ into ⏸ from this. Playback carries on
+    // past the end of a tune, so the state must move to the next row rather
+    // than stay on the one that was tapped.
+    const vm = await mountPlayer({ segments: [{ index: 0, startSeconds: 0, durationSeconds: 600 }] });
+    vm.detections = [
+        { id: 'a', title: 'A', audioStartSeconds: 20, audioAnchorSeconds: 15, audioEndSeconds: 100 },
+        { id: 'b', title: 'B', audioStartSeconds: 130, audioAnchorSeconds: 125, audioEndSeconds: 200 },
+    ];
+    vm.playing = true;
+    vm.currentSeconds = 50;
+    assert.deepEqual(vm.playbackState, { playing: true, detectionId: 'a' });
+    vm.currentSeconds = 150;
+    assert.deepEqual(vm.playbackState, { playing: true, detectionId: 'b' });
+    vm.currentSeconds = 110;   // between tunes: no row is current
+    assert.deepEqual(vm.playbackState, { playing: true, detectionId: null });
+    vm.playing = false;
+    vm.currentSeconds = 150;
+    assert.deepEqual(vm.playbackState, { playing: false, detectionId: 'b' });
+});
+
 await rm(tmpDir, { recursive: true, force: true });
 
 await test('export requests complete audio and reports a read failure instead of sharing a prefix', async () => {

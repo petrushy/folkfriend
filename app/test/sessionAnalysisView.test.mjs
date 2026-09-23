@@ -1307,6 +1307,42 @@ await test('with no session open the switch shows what the next one will do', as
     assert.equal(vm._recordAudioState(), false);
 });
 
+await test('the row under the playhead is the transport: ⏸ pauses, ▶ resumes in place', async () => {
+    // Playing a tune from the list used to leave its ▶ unchanged, so stopping
+    // meant scrolling back up to the player. The current row now toggles;
+    // any other row starts its own tune.
+    const { vm, settle } = await mountView();
+    await settle();
+    const calls = [];
+    vm.$refs = { audioPlayer: {
+        togglePlay: () => calls.push('toggle'),
+        playTune: (d) => calls.push(`tune:${d.id}`),
+    } };
+    const a = { id: 'a' };
+    const b = { id: 'b' };
+
+    vm.playback = { playing: true, detectionId: 'a' };
+    assert.equal(vm.isPlayingDetection(a), true);
+    assert.equal(vm.isPlayingDetection(b), false);
+    vm.playDetection(a);
+    vm.playDetection(b);
+    assert.deepEqual(calls, ['toggle', 'tune:b']);
+
+    // Paused inside tune A: A shows ▶ again, and tapping it resumes rather
+    // than jumping back to the tune's start.
+    calls.length = 0;
+    vm.playback = { playing: false, detectionId: 'a' };
+    assert.equal(vm.isPlayingDetection(a), false);
+    vm.playDetection(a);
+    assert.deepEqual(calls, ['toggle']);
+
+    // Between tunes nothing is current, so every row starts its tune.
+    calls.length = 0;
+    vm.playback = { playing: true, detectionId: null };
+    vm.playDetection(a);
+    assert.deepEqual(calls, ['tune:a']);
+});
+
 await rm(tmpDir, { recursive: true, force: true });
 
 console.log(`\n${passed} passed, ${failed} failed`);
