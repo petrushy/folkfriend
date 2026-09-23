@@ -124,6 +124,18 @@
                 ({{ formatSecondsAsDuration(track.durationSeconds) }})
             </v-btn>
         </div>
+        <!-- The share sheet needs a user gesture, and building the file for a
+             long part outlasts the one that asked for it. The file is kept
+             ready and a fresh tap finishes the job. -->
+        <v-alert v-if="readyExport" type="info" dense text class="mt-2 mb-0">
+            <div>{{ readyExport.name }} is ready.</div>
+            <div class="d-flex flex-wrap mt-1" style="gap: 8px;">
+                <v-btn v-if="readyExport.canShare" small text color="primary"
+                    @click="shareReadyExport">Share…</v-btn>
+                <v-btn small text color="primary" @click="downloadReadyExport">Download</v-btn>
+                <v-btn small text @click="readyExport = null">Cancel</v-btn>
+            </div>
+        </v-alert>
         <p v-if="tracks.length > 1" class="caption text--secondary mb-0 mt-1">
             The session was paused (or the microphone was reacquired) {{ tracks.length - 1 }}
             {{ tracks.length === 2 ? 'time' : 'times' }}, so the recording exports as
@@ -284,6 +296,9 @@ export default {
             currentSeconds: 0,
             error: '',
             exportingIndex: null,
+            // { file, name, canShare } — an export whose file is built but
+            // whose share could not run in the gesture that started it.
+            readyExport: null,
             // Which stored segment the <audio> element currently holds.
             segmentIndex: null,
             // THE ORIGIN OF THE LOADED CLIP'S MEDIA TIMELINE, in session-audio
@@ -531,6 +546,7 @@ export default {
 
         async reload() {
             this.teardown();
+            this.readyExport = null;
             this.manifest = null;
             this.error = '';
             this.currentSeconds = 0;
@@ -1241,6 +1257,7 @@ export default {
         async exportTrack(track) {
             this.exportingIndex = track.index;
             this.error = '';
+            this.readyExport = null;
             try {
                 const clip = await buildClip(
                     this.sessionId, track.startSeconds, track.endSeconds, this.manifest,
@@ -1257,18 +1274,31 @@ export default {
                 const file = new File([clip.blob], name,
                     { type: clip.mimeType || 'application/octet-stream' });
 
-                if (navigator.canShare && navigator.canShare({ files: [file] })) {
-                    await navigator.share({ files: [file], title: name });
+                const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+                if (!canShare) {
+                    this._downloadFile(file);
                     return;
                 }
-                const url = URL.createObjectURL(clip.blob);
-                const link = document.createElement('a');
-                link.href = url;
-                link.download = name;
-                document.body.appendChild(link);
-                link.click();
-                document.body.removeChild(link);
-                setTimeout(() => URL.revokeObjectURL(url), 30_000);
+                // navigator.share() needs TRANSIENT user activation, which
+                // lasts a few seconds from the tap. Building a clip of a long
+                // part (IndexedDB reads, or a Dropbox download) routinely
+                // outlasts it, and the share is then refused with
+                // NotAllowedError. Rather than fail, keep the finished file
+                // and let a fresh tap share or download it.
+                const activation = navigator.userActivation;
+                if (activation && !activation.isActive) {
+                    this.readyExport = { file, name, canShare };
+                    return;
+                }
+                try {
+                    await navigator.share({ files: [file], title: name });
+                } catch (e) {
+                    if (e && e.name === 'NotAllowedError') {
+                        this.readyExport = { file, name, canShare };
+                        return;
+                    }
+                    throw e;
+                }
             } catch (e) {
                 // A share the user dismissed is not a failure worth reporting.
                 if (e && e.name === 'AbortError') return;
@@ -1276,6 +1306,38 @@ export default {
             } finally {
                 this.exportingIndex = null;
             }
+        },
+
+        // Called straight from a tap, with no await before share(): the whole
+        // point is to spend the fresh gesture before it lapses.
+        shareReadyExport() {
+            const ready = this.readyExport;
+            if (!ready) return Promise.resolve();
+            this.error = '';
+            return navigator.share({ files: [ready.file], title: ready.name })
+                .then(() => { this.readyExport = null; })
+                .catch((e) => {
+                    if (e && e.name === 'AbortError') return;
+                    this.error = `Could not share the recording: ${(e && e.message) || e}`;
+                });
+        },
+
+        downloadReadyExport() {
+            const ready = this.readyExport;
+            if (!ready) return;
+            this._downloadFile(ready.file);
+            this.readyExport = null;
+        },
+
+        _downloadFile(file) {
+            const url = URL.createObjectURL(file);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = file.name;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(url), 30_000);
         },
     },
 };

@@ -1102,5 +1102,70 @@ await test('export requests complete audio and reports a read failure instead of
     store.__setClipFactory(null);
 });
 
+function withNavigator(nav, fn) {
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { value: nav, configurable: true, writable: true });
+    return Promise.resolve().then(fn).finally(() => {
+        if (saved) Object.defineProperty(globalThis, 'navigator', saved);
+        else delete globalThis.navigator;
+    });
+}
+
+function fakeShareNavigator({ active, refuse }) {
+    const shared = [];
+    return {
+        shared,
+        userActivation: { get isActive() { return active(); } },
+        canShare: () => true,
+        share: async (data) => {
+            if (refuse && refuse()) {
+                const e = new Error("Must be handling a user gesture to perform a share request.");
+                e.name = 'NotAllowedError';
+                throw e;
+            }
+            shared.push(data);
+        },
+    };
+}
+
+const EXPORT_TRACK = { index: 0, startSeconds: 0, endSeconds: 180 };
+const clipOf = () => async () => ({ blob: new Blob(['x']), mimeType: 'audio/mp4' });
+
+await test('an export whose gesture lapsed while building is kept for a fresh tap, not failed', async () => {
+    const vm = await mountPlayer(GAPPY);
+    store.__setClipFactory(clipOf());
+    let active = true;
+    const nav = fakeShareNavigator({ active: () => active });
+    await withNavigator(nav, async () => {
+        const pending = vm.exportTrack(EXPORT_TRACK);
+        active = false; // the clip took longer than the tap's activation
+        await pending;
+        assert.equal(vm.error, '');
+        assert.equal(nav.shared.length, 0, 'must not call share() without activation');
+        assert.ok(vm.readyExport, 'the built file is kept');
+        active = true; // the user taps Share
+        await vm.shareReadyExport();
+        assert.equal(nav.shared.length, 1);
+        assert.match(nav.shared[0].files[0].name, /\.m4a$|\.mp4$/);
+        assert.equal(vm.readyExport, null);
+    });
+    store.__setClipFactory(null);
+});
+
+await test('a share refused for want of a gesture offers the file again rather than reporting an error', async () => {
+    const vm = await mountPlayer(GAPPY);
+    store.__setClipFactory(clipOf());
+    // No userActivation API (older browsers): only the rejection tells us.
+    const nav = fakeShareNavigator({ active: () => true, refuse: () => true });
+    delete nav.userActivation;
+    await withNavigator(nav, async () => {
+        await vm.exportTrack(EXPORT_TRACK);
+        assert.equal(vm.error, '');
+        assert.ok(vm.readyExport);
+        assert.equal(vm.exportingIndex, null);
+    });
+    store.__setClipFactory(null);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);
