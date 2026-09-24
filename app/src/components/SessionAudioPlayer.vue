@@ -123,6 +123,9 @@
                 {{ tracks.length > 1 ? `Export part ${track.index + 1}` : 'Export audio' }}
                 ({{ formatSecondsAsDuration(track.durationSeconds) }})
             </v-btn>
+            <v-btn text small :loading="checking" @click="runCheck">
+                Check recording
+            </v-btn>
         </div>
         <!-- The share sheet needs a user gesture, and building the file for a
              long part outlasts the one that asked for it. The file is kept
@@ -169,6 +172,45 @@
         </v-alert>
 
         </template>
+        <!-- The recording check. Reads every stored piece on THIS device and
+             says which ones read, so a playback failure on a phone with no
+             console can be diagnosed in one tap instead of one error at a
+             time. The report is copyable for exactly that reason. -->
+        <v-dialog v-model="checkOpen" max-width="600" scrollable>
+            <v-card>
+                <v-card-title class="text-h6">Recording check</v-card-title>
+                <v-card-text>
+                    <div v-if="checking">
+                        <p class="mb-2">Reading every piece of this recording…</p>
+                        <v-progress-linear
+                            :value="checkProgress.total ? 100 * checkProgress.done / checkProgress.total : 0"
+                        />
+                        <p class="caption mt-1 mb-0">
+                            {{ checkProgress.done }} of {{ checkProgress.total || '?' }}
+                        </p>
+                    </div>
+                    <v-alert v-else-if="checkError" type="error" dense text class="mb-0">
+                        The check itself failed: {{ checkError }}
+                    </v-alert>
+                    <template v-else-if="checkSummary">
+                        <v-alert :type="checkSummary.level" dense text>
+                            {{ checkSummary.verdict }}
+                        </v-alert>
+                        <p class="caption mb-1">
+                            Copy the report and paste it anywhere to share exactly what
+                            this device found.
+                        </p>
+                        <pre class="checkReport">{{ checkText }}</pre>
+                    </template>
+                </v-card-text>
+                <v-card-actions>
+                    <span v-if="checkCopied" class="caption text--secondary ml-2">{{ checkCopied }}</span>
+                    <v-spacer />
+                    <v-btn text :disabled="!checkText" @click="copyCheckReport">Copy report</v-btn>
+                    <v-btn text color="primary" @click="checkOpen = false">Close</v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
         <!-- Keep the element alive across session reloads: the Web Audio
              source is permanently attached to this exact DOM node. -->
         <audio
@@ -190,7 +232,10 @@ import eventBus from '@/eventBus.js';
 import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';
 import {
     playbackReadManifest as readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor,
+    inspectRecording,
 } from '@/services/sessionAudioStore.js';
+import { summariseCheck, formatCheckReport } from '@/js/recordingCheck.mjs';
+import ffConfig from '@/ffConfig.js';
 
 // Fallback for a session recorded before detections carried their own playback
 // anchor. Half the live default window (10 s), which is what the anchor works
@@ -364,6 +409,14 @@ export default {
             // carry enough to say WHICH half of the system is at fault.
             clipShape: '',
             clipHeaderBytes: 0,
+            // The recording check: see inspectRecording().
+            checkOpen: false,
+            checking: false,
+            checkProgress: { done: 0, total: 0 },
+            checkSummary: null,
+            checkText: '',
+            checkError: '',
+            checkCopied: '',
             icons: { play: mdiPlay, pause: mdiPause, rewind: mdiRewind15, forward: mdiFastForward15 },
             SKIP_SECONDS,
         };
@@ -1158,6 +1211,63 @@ export default {
             return parts.join(', ');
         },
 
+        async runCheck() {
+            if (this.checking || !this.sessionId) return;
+            const sessionId = this.sessionId;
+            this.checkOpen = true;
+            this.checking = true;
+            this.checkProgress = { done: 0, total: 0 };
+            this.checkSummary = null;
+            this.checkText = '';
+            this.checkError = '';
+            this.checkCopied = '';
+            try {
+                const report = await inspectRecording(sessionId, {
+                    onProgress: (done, total) => { this.checkProgress = { done, total }; },
+                });
+                if (sessionId !== this.sessionId) return;
+                this.checkSummary = summariseCheck(report);
+                this.checkText = formatCheckReport(report, this._checkEnvironment());
+            } catch (e) {
+                this.checkError = (e && e.message) || String(e);
+            } finally {
+                this.checking = false;
+            }
+        },
+
+        // What this browser says about the container, next to what the
+        // recording holds: "can play: audio/mp4 maybe" rules one half out.
+        _checkEnvironment() {
+            const audio = this.$refs.audio;
+            const canPlay = audio && typeof audio.canPlayType === 'function'
+                ? ['audio/mp4', 'audio/webm'].map(t => `${t} ${audio.canPlayType(t) || 'no'}`).join(', ')
+                : '';
+            return {
+                appVersion: ffConfig.FRONTEND_VERSION || '',
+                userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+                canPlay,
+            };
+        },
+
+        async copyCheckReport() {
+            if (!this.checkText) return;
+            try {
+                await navigator.clipboard.writeText(this.checkText);
+                this.checkCopied = 'Copied.';
+                return;
+            } catch (e) { /* fall through to the share sheet */ }
+            try {
+                if (navigator.share) {
+                    await navigator.share({ title: 'FolkFriend recording check', text: this.checkText });
+                    this.checkCopied = '';
+                    return;
+                }
+            } catch (e) {
+                if (e && e.name === 'AbortError') return;
+            }
+            this.checkCopied = 'Could not copy. Select the text and copy it by hand.';
+        },
+
         async togglePlay() {
             const audio = this.$refs.audio;
             if (!audio) return;
@@ -1478,5 +1588,21 @@ export default {
     width: 2px;
     background: #000;
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
+}
+
+.checkReport {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 50vh;
+    overflow-y: auto;
+    margin: 0;
+    padding: 8px;
+    background: rgba(128, 128, 128, 0.1);
+    border-radius: 4px;
+    user-select: text;
+    -webkit-user-select: text;
 }
 </style>

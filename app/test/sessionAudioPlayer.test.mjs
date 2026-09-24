@@ -61,7 +61,14 @@ export let __tracks = [];
 export function __setTracks(t) { __tracks = t; }
 export function trackRanges() { return __tracks; }
 export function formatBytes(n) { return String(n); }
-export function fileExtensionFor() { return 'm4a'; }`;
+export function fileExtensionFor() { return 'm4a'; }
+export let __report = null;
+export async function inspectRecording(sessionId, { onProgress } = {}) {
+    if (onProgress) { onProgress(0, 2); onProgress(2, 2); }
+    return __report;
+}
+export function __setReport(r) { __report = r; }`;
+const FAKE_FFCONFIG = `export default { FRONTEND_VERSION: '9.9.9-test' };`;
 
 async function loadPlayer() {
     await mkdir(tmpDir, { recursive: true });
@@ -69,6 +76,10 @@ async function loadPlayer() {
     await writeFile(path.join(tmpDir, 'fake-mdi.mjs'), FAKE_MDI);
     await writeFile(path.join(tmpDir, 'fake-session-analysis.mjs'), FAKE_SESSION_ANALYSIS);
     await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), FAKE_AUDIO_STORE);
+    await writeFile(path.join(tmpDir, 'fake-ffconfig.mjs'), FAKE_FFCONFIG);
+    // Real, not faked: it is pure, and it is what turns the report into words.
+    await writeFile(path.join(tmpDir, 'recordingCheck.mjs'),
+        await readFile(path.join(srcDir, 'js', 'recordingCheck.mjs'), 'utf8'));
 
     const sfc = await readFile(path.join(srcDir, 'components', 'SessionAudioPlayer.vue'), 'utf8');
     const open = sfc.indexOf('<script>');
@@ -81,6 +92,8 @@ async function loadPlayer() {
         ["from '@mdi/js'", "from './fake-mdi.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
+        ["from '@/js/recordingCheck.mjs'", "from './recordingCheck.mjs'"],
+        ["from '@/ffConfig.js'", "from './fake-ffconfig.mjs'"],
     ]) {
         assert.ok(source.includes(from), `expected ${JSON.stringify(from)} in the SFC`);
         source = source.split(from).join(to);
@@ -1194,6 +1207,40 @@ await test('a share refused for want of a gesture offers the file again rather t
         assert.equal(vm.exportingIndex, null);
     });
     store.__setClipFactory(null);
+});
+
+console.log('\nSessionAudioPlayer — the recording check');
+
+await test('Check recording opens the dialog with a verdict and a copyable report', async () => {
+    const vm = await mountPlayer({ totalSeconds: 180, segments: [], tracks: [] });
+    vm.$refs.audio = { canPlayType: t => (t === 'audio/mp4' ? 'maybe' : '') };
+    store.__setReport({
+        sessionId: 's1', checkedAt: 0,
+        manifest: { state: 'ok', mimeType: 'audio/mp4', totalSeconds: 180, bytes: 1000 },
+        tracks: [],
+        segments: [{ index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 180,
+            expectedBytes: 1000, stored: 'blob', size: 1000, readableBytes: 0,
+            error: 'NotReadableError', shape: '', inCloud: true }],
+        cloud: { configured: true, state: 'ok', listed: 1 },
+        storage: null,
+    });
+    await vm.runCheck();
+    assert.equal(vm.checkOpen, true);
+    assert.equal(vm.checking, false);
+    assert.equal(vm.checkSummary.level, 'warning');
+    assert.deepEqual(vm.checkProgress, { done: 2, total: 2 });
+    assert.match(vm.checkText, /App 9\.9\.9-test/);
+    assert.match(vm.checkText, /Can play: audio\/mp4 maybe, audio\/webm no/);
+    assert.match(vm.checkText, /FAILS at 0 kB \(NotReadableError\)/);
+});
+
+await test('a check that throws says the CHECK failed, not the recording', async () => {
+    const vm = await mountPlayer({ totalSeconds: 180, segments: [], tracks: [] });
+    store.__setReport(null);
+    await vm.runCheck();
+    assert.equal(vm.checking, false);
+    assert.ok(vm.checkError, 'an error is shown');
+    assert.equal(vm.checkSummary, null);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

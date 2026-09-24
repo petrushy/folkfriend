@@ -894,6 +894,88 @@ await test('an unreadable track header is taken from the backed-up copy', async 
     }
 });
 
+console.log('\nsessionAudioStore — the recording check');
+
+// Unreadable once a read reaches past `readableBytes` — the device failure the
+// check exists to locate.
+function damagedBlob(real, readableBytes) {
+    const view = (from, to) => ({
+        size: to - from,
+        type: real.type,
+        slice: (a = 0, b = to - from) => view(from + a, from + Math.min(b, to - from)),
+        arrayBuffer: async () => {
+            if (to > readableBytes) {
+                const e = new Error('The I/O read operation failed.');
+                e.name = 'NotReadableError';
+                throw e;
+            }
+            return real.slice(from, to).arrayBuffer();
+        },
+    });
+    return view(0, real.size);
+}
+
+await test('the check reads every piece and says which cannot be read, and whether the backup has it', async () => {
+    await seedTwoSegments();
+    const key = store.segmentKey('s1', 1);
+    const { data, ...rest } = await idb.get(key);
+    const damaged = { ...rest, blob: damagedBlob(new Blob([data]), 2) };
+    await idb.set(key, damaged);
+    let downloads = 0;
+    store.configureCloudAudio({
+        manifest: async () => ({ segments: [{ index: 0 }, { index: 1 }], tracks: [] }),
+        segment: async () => { downloads++; return null; },
+    });
+    const progress = [];
+    let report;
+    try {
+        report = await store.inspectRecording('s1', { onProgress: (d, t) => progress.push([d, t]) });
+    } finally {
+        store.configureCloudAudio(null);
+    }
+    assert.equal(report.manifest.state, 'ok');
+    assert.equal(report.cloud.state, 'ok');
+    const [first, second] = report.segments;
+    assert.equal(first.stored, 'bytes');
+    assert.equal(first.readableBytes, first.size, 'a healthy piece reads to its end');
+    assert.equal(first.error, null);
+    assert.equal(second.stored, 'blob', 'the older storage format is named');
+    assert.equal(second.error, 'NotReadableError');
+    assert.ok(second.readableBytes < second.size, 'and where it stops reading is reported');
+    assert.equal(second.inCloud, true);
+    assert.equal(report.tracks[0].init.stored, 'bytes');
+    assert.deepEqual(progress[progress.length - 1], [2, 2]);
+
+    // Strictly read-only: nothing downloaded, nothing repaired.
+    assert.equal(downloads, 0);
+    assert.equal((await idb.get(key)).blob, damaged.blob);
+});
+
+await test('the check reports a missing piece and a backup it could not reach', async () => {
+    await seedTwoSegments();
+    await idb.del(store.segmentKey('s1', 1));
+    store.configureCloudAudio({
+        manifest: async () => { throw new Error('offline'); },
+        segment: async () => null,
+    });
+    let report;
+    try {
+        report = await store.inspectRecording('s1');
+    } finally {
+        store.configureCloudAudio(null);
+    }
+    assert.equal(report.segments[1].stored, 'missing');
+    assert.equal(report.segments[1].inCloud, null, 'unknown, not "not in backup"');
+    assert.match(report.cloud.state, /unavailable: offline/);
+});
+
+await test('the check on a session with no recording says so rather than failing', async () => {
+    await resetAll();
+    const report = await store.inspectRecording('nothing-here');
+    assert.equal(report.manifest.state, 'absent');
+    assert.deepEqual(report.segments, []);
+});
+
 await test('complete exports reject an unrecorded hole inside a track', async () => {
     await seedTwoSegments();
     const manifest = await store.readManifest('s1');

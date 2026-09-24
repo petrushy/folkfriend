@@ -1556,7 +1556,21 @@ The message only says a backed-up copy "could not be fetched" when one was
 actually tried.
 
 ⚠️ The WebKit behaviour is inferred from the empty shape plus the failed probe,
-not measured on the device. If a fresh recording made after this still fails
+not measured on the device.
+
+**"Check recording" (the player's diagnostic).** Asked for after the fourth
+round of one-error-at-a-time diagnosis. `inspectRecording()` reads EVERY byte
+of every stored segment and track header, in 256 kB steps so a failing Blob is
+located rather than just flagged, and cross-references the Dropbox manifest
+(never downloading audio). It is strictly read-only — it does not repair,
+which is playback's job. `recordingCheck.mjs` turns the report into a verdict
+and a plain-text report the dialog offers to **copy**, so the whole state of a
+recording on the phone reaches whoever is diagnosing it in one paste: app
+version, user agent, `canPlayType`, storage and persistence, per-part header
+state, and one line per piece (`#12 · part 2 · 36:00 · blob · 1435 kB · FAILS
+at 512 kB (NotReadableError) · moof+mdat · in backup`). The verdict never says
+playback will fetch from the backup unless the backup is confirmed to hold
+every unreadable piece; an unreachable backup counts as not covered. If a fresh recording made after this still fails
 the same way, the bytes really are the problem and this was not it.
 
 #### A read of the whole chain (September 2026)
