@@ -712,7 +712,9 @@ async function containerHeader(initBlob) {
         return null;
     }
     const cut = firstMediaOffset(bytes);
-    return cut > 0 && cut < initBlob.size ? initBlob.slice(0, cut) : initBlob;
+    // From the bytes already read, never a slice of the stored Blob: see
+    // readRange() for why the stored file is not trusted past a read.
+    return new Blob([cut > 0 && cut < bytes.length ? bytes.subarray(0, cut) : bytes]);
 }
 
 // Where the audio starts inside a track's first chunk, or -1.
@@ -814,6 +816,34 @@ function correctedMimeType(head, labelled) {
     return containerOf(labelled) === sniffed ? labelled : sniffed;
 }
 
+// `{ bytes }` for the range, or `{ error }` naming why it could not be read.
+async function readRange(blob, from, to) {
+    try {
+        return { bytes: new Uint8Array(await blob.slice(from, to).arrayBuffer()) };
+    } catch (e) {
+        return { error: (e && (e.name || e.message)) || String(e) };
+    }
+}
+
+// Replaces a stored segment whose Blob could not be read with the verified
+// backed-up copy, as bytes, so the next play is local and works offline.
+//
+// Only ever over an existing record — a segment deleted meanwhile stays
+// deleted — and never allowed to fail playback: the clip is already built from
+// the downloaded copy.
+function healSegment(sessionId, index, blob) {
+    withSession(sessionId, async () => {
+        const key = segmentKey(sessionId, index);
+        const record = await get(key);
+        if (!record || record.data) return;
+        const data = await blob.arrayBuffer();
+        if (data.byteLength !== record.bytes) return;
+        const healed = { ...record, mimeType: blob.type || record.mimeType || '', data };
+        delete healed.blob;
+        await set(key, healed);
+    }).catch(e => console.warn('Could not repair stored session audio:', e && e.message));
+}
+
 // A track's header from the backed-up copy, for when this device's own copy
 // cannot be read. The cloud manifest carries it as base64 inside the JSON,
 // which is why it survives where a stored Blob did not.
@@ -832,9 +862,9 @@ async function cloudHeader(sessionId, trackIndex) {
 // device cannot read it. Different from "missing" (interrupted delete) and
 // from "this browser will not play it", both of which read the same on screen
 // without it.
-function unreadableAudio(what) {
+function unreadableAudio(what, triedCloud) {
     const error = new Error(`The audio saved on this device can no longer be read (${what})` +
-        (cloudAudio ? ' and no backed-up copy could be fetched.' : '.'));
+        (triedCloud ? ' and no backed-up copy could be fetched.' : '.'));
     error.code = 'unreadable';
     return error;
 }
@@ -894,21 +924,52 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         if (meta.trackIndex !== trackIndex) break;   // never cross a track
         if (requireComplete && meta.startSeconds > coveredTo + 0.001) throw incomplete();
         const local = await readSegment(sessionId, meta.index);
-        let segment = local && local.blob ? local : null;
-        // Missing here, or here and unreadable (see storableBytes): either way
-        // a backed-up copy is the audio, and it is verified against its hash
-        // on the way in.
+        const wantedOf = seg => chunkSpans(seg)
+            .filter(s => s.endSeconds > fromSeconds && s.startSeconds < toSeconds);
+
+        // The bytes this clip needs from this segment are READ here, not
+        // merely sliced. A Blob stored in IndexedDB on WebKit can be readable
+        // at its start and not further in — seen in the field as some tunes
+        // playing and others not from the same recording — so the only test
+        // that means anything is reading exactly the range that will be
+        // played. What is read is memory, so the finished clip no longer
+        // depends on the stored file at all.
+        let segment = null;
+        let wanted = null;
+        let bytes = null;
+        let failure = local && local.unreadable || null;
+        if (local && local.blob) {
+            wanted = wantedOf(local);
+            if (!wanted.length) continue;
+            const read = await readRange(local.blob, wanted[0].from, wanted[wanted.length - 1].to);
+            if (read.bytes) { segment = local; bytes = read.bytes; } else failure = read.error;
+        }
+        // Missing here, or here and unreadable: either way a backed-up copy is
+        // the audio, and it is verified against its hash on the way in.
+        let triedCloud = false;
         if (!segment && cloudAudio) {
+            triedCloud = true;
+            let remote = null;
             try {
-                segment = await cloudAudio.segment(sessionId, meta.index);
+                remote = await cloudAudio.segment(sessionId, meta.index);
             } catch (e) {
                 // Only swallowed when the local copy explains the failure
                 // better than the network does.
-                if (!(local && local.unreadable)) throw e;
+                if (!failure) throw e;
+            }
+            if (remote && remote.blob) {
+                wanted = wantedOf(remote);
+                if (!wanted.length) continue;
+                const read = await readRange(remote.blob, wanted[0].from, wanted[wanted.length - 1].to);
+                if (read.bytes) {
+                    segment = remote;
+                    bytes = read.bytes;
+                    if (failure) healSegment(sessionId, meta.index, remote.blob);
+                }
             }
         }
-        if (!segment && local && local.unreadable) {
-            if (!parts.length) throw unreadableAudio(local.unreadable);
+        if (!segment && failure) {
+            if (!parts.length) throw unreadableAudio(failure, triedCloud);
             break;
         }
         // A segment the manifest names but that is not on disk means an
@@ -922,10 +983,6 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
             !Array.isArray(segment.chunks) ||
             segment.chunks.reduce((n, c) => n + c.bytes, 0) !== meta.bytes)) throw incomplete();
 
-        const spans = chunkSpans(segment);
-        const wanted = spans.filter(s => s.endSeconds > fromSeconds && s.startSeconds < toSeconds);
-        if (!wanted.length) continue;
-
         // The track's first chunk carries the container header AND its first
         // second of audio, so it is stored in the segment like any other chunk.
         // Prepending the init blob to a clip that already begins there would
@@ -933,12 +990,12 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         if (clipStart === null && !wanted[0].init && track.init) {
             let header = await containerHeader(track.init);
             if (!header) header = await cloudHeader(sessionId, trackIndex);
-            if (!header) throw unreadableAudio('the recording\'s header');
+            if (!header) throw unreadableAudio('the recording\'s header', !!cloudAudio);
             headerBytes = header.size || 0;
             parts.push(header);
         }
 
-        parts.push(segment.blob.slice(wanted[0].from, wanted[wanted.length - 1].to));
+        parts.push(new Blob([bytes]));
         if (clipStart === null) clipStart = wanted[0].startSeconds;
         clipEnd = wanted[wanted.length - 1].endSeconds;
         coveredTo = clipEnd;
@@ -961,7 +1018,7 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     const labelled = track.mimeType || manifest.mimeType || '';
     const head = await readHead(parts);
     // Nothing above could read these bytes, so no player will either.
-    if (!head) throw unreadableAudio('the assembled clip');
+    if (!head) throw unreadableAudio('the assembled clip', false);
     const mimeType = correctedMimeType(head, labelled);
     return {
         blob: new Blob(parts, { type: mimeType || 'application/octet-stream' }),

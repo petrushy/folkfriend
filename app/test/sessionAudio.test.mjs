@@ -806,9 +806,72 @@ await test('an unreadable stored Blob with no other copy SAYS it is unreadable',
     const { data, ...rest } = await idb.get(key);
     await idb.set(key, { ...rest, blob: unreadableBlob(data.byteLength) });
     await assert.rejects(store.buildClip('s1', 0, 3), e =>
-        e.code === 'unreadable' && /can no longer be read \(NotReadableError\)/.test(e.message));
+        e.code === 'unreadable' && /can no longer be read \(NotReadableError\)\.$/.test(e.message));
     await assert.rejects(store.buildClip('s1', 0, 6, null, { requireComplete: true }),
         e => e.code === 'unreadable');
+});
+
+// Readable at the start and not further in: every 16-byte probe passes and
+// the range a tune needs does not. Seen in the field as some tunes playing
+// and others not, from the same recording.
+function partlyReadableBlob(real, readableBytes) {
+    const failing = size => {
+        const fail = async () => {
+            const e = new Error('The I/O read operation failed.');
+            e.name = 'NotReadableError';
+            throw e;
+        };
+        const blob = { size, type: real.type, arrayBuffer: fail, text: fail };
+        blob.slice = (a = 0, b = size) => failing(Math.max(0, Math.min(b, size) - a));
+        return blob;
+    };
+    return {
+        size: real.size,
+        type: real.type,
+        slice: (from = 0, to = real.size) => (from < readableBytes
+            ? real.slice(from, to)
+            : failing(Math.max(0, Math.min(to, real.size) - from))),
+        arrayBuffer: () => real.arrayBuffer(),
+    };
+}
+
+await test('a stored Blob readable only at its start is replaced where it fails, and repaired', async () => {
+    await seedTwoSegments();
+    const key = store.segmentKey('s1', 1);
+    const { data, ...rest } = await idb.get(key);
+    // 'b3' readable, 'b4b5' not.
+    await idb.set(key, { ...rest, blob: partlyReadableBlob(new Blob([data]), 2) });
+
+    const early = await store.buildClip('s1', 3, 4);
+    assert.equal(await early.blob.text(), 'H0b3', 'the readable range plays from the local copy');
+
+    let fetched = 0;
+    store.configureCloudAudio({
+        manifest: async () => null,
+        segment: async () => { fetched++; return { ...rest, blob: new Blob([data]) }; },
+    });
+    try {
+        const late = await store.buildClip('s1', 4, 6);
+        assert.equal(fetched, 1, 'the failing range comes from the backed-up copy');
+        assert.equal(await late.blob.text(), 'H0b4b5');
+        await new Promise(resolve => setTimeout(resolve, 0));
+        const healed = await idb.get(key);
+        assert.ok(healed.data instanceof ArrayBuffer && !healed.blob,
+            'and the local copy is rewritten as bytes');
+    } finally {
+        store.configureCloudAudio(null);
+    }
+    const again = await store.buildClip('s1', 4, 6);
+    assert.equal(await again.blob.text(), 'H0b4b5', 'so it plays locally from now on');
+});
+
+await test('a failure with no backed-up copy does not claim one was tried', async () => {
+    await seedTwoSegments();
+    const key = store.segmentKey('s1', 1);
+    const { data, ...rest } = await idb.get(key);
+    await idb.set(key, { ...rest, blob: partlyReadableBlob(new Blob([data]), 2) });
+    await assert.rejects(store.buildClip('s1', 4, 6), e =>
+        e.code === 'unreadable' && !/backed-up/.test(e.message));
 });
 
 await test('an unreadable track header is taken from the backed-up copy', async () => {

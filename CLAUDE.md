@@ -1544,6 +1544,17 @@ of container work could not fix it.
 - **With no other copy it says so**: an error with `code: 'unreadable'` naming
   the reason, never a decoder's "format not supported".
 
+**A 16-byte probe was not enough** (the next field report): *"can no longer be
+read (the assembled clip)"* while some tunes of the same recording played. So a
+stored Blob can be readable at its start and not further in — every probe
+passed, the cloud copy was never tried, and the clip failed only when its head
+was read. `buildClip` now **reads the exact byte range each clip needs** and
+builds the clip from those bytes in memory; a range that cannot be read is
+taken from Dropbox, and the verified download is written back over the bad
+record as bytes (`healSegment`), so the next play is local and works offline.
+The message only says a backed-up copy "could not be fetched" when one was
+actually tried.
+
 ⚠️ The WebKit behaviour is inferred from the empty shape plus the failed probe,
 not measured on the device. If a fresh recording made after this still fails
 the same way, the bytes really are the problem and this was not it.
