@@ -645,6 +645,8 @@ export default {
             return {
                 playing: this.playing,
                 detectionId: this.transportDetection ? this.transportDetection.id : null,
+                // For the mini player shown on other pages.
+                label: this.nowPlayingLabel,
             };
         },
     },

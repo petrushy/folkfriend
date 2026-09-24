@@ -210,6 +210,32 @@
                  as well. -->
             <SessionStatusBar />
             <router-view />
+            <!-- The session recording keeps playing on other pages (e.g. a
+                 tune's score), so it needs a way to be paused from them. -->
+            <div v-if="miniPlayerOpen && !playerHost.shown" class="sessionMiniPlayer">
+                <v-btn icon small :aria-label="playerHost.playback.playing ? 'Pause recording' : 'Play recording'"
+                       @click="toggleSessionPlayback">
+                    <v-icon>{{ playerHost.playback.playing ? icons.pause : icons.play }}</v-icon>
+                </v-btn>
+                <span class="sessionMiniPlayerLabel" @click="openSessionPlayer">
+                    Session recording · {{ playerHost.playback.label || 'Playing' }}
+                </span>
+                <v-btn icon small aria-label="Stop recording playback" @click="closeSessionPlayer">
+                    <v-icon small>{{ icons.close }}</v-icon>
+                </v-btn>
+            </div>
+            <!-- The ONE session-audio player. It is shown inside the Session
+                 Analysis page while that page is open, and parked here the
+                 rest of the time so playback carries on. -->
+            <div ref="playerHome" class="d-none">
+                <SessionAudioPlayer
+                    ref="sessionPlayer"
+                    :session-id="playerHost.sessionId"
+                    :detections="playerHost.detections"
+                    :listening="playerHost.listening"
+                    @playback="playerHost.playback = $event"
+                />
+            </div>
         </v-main>
 
         <!-- Persistent banner when a new app version is available -->
@@ -257,6 +283,8 @@ import {
     mdiMenu,
     mdiMicrophone,
     mdiMusicNote,
+    mdiPause,
+    mdiPlay,
     mdiStar,
     mdiWaveform,
     // mdiShareVariant,
@@ -264,10 +292,12 @@ import {
 import utils from '@/js/utils.js';
 import TuneBackgroundDialog from '@/components/TuneBackgroundDialog.vue';
 import SessionStatusBar from '@/components/SessionStatusBar.vue';
+import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
+import { playerHost, registerPlayer } from '@/services/sessionPlayerHost.js';
 
 export default {
     name: 'App',
-    components: { TuneBackgroundDialog, SessionStatusBar },
+    components: { TuneBackgroundDialog, SessionStatusBar, SessionAudioPlayer },
     data: () => ({
         drawer: null,
         menu: null,
@@ -283,6 +313,10 @@ export default {
         swRegistration: null,
         syncErrorSnackbar: false,
         syncErrorText: '',
+        playerHost,
+        // The mini player appears once something has played, and stays
+        // (paused or not) until closed, so a pause is never a dead end.
+        miniPlayerOpen: false,
         icons: {
             chevronLeft: mdiChevronLeft,
             cog: mdiCog,
@@ -297,13 +331,19 @@ export default {
             menu: mdiMenu,
             microphone: mdiMicrophone,
             musicNote: mdiMusicNote,
+            pause: mdiPause,
+            play: mdiPlay,
             star: mdiStar,
             waveform: mdiWaveform,
             // shareVariant: mdiShareVariant,
         },
         isPWA: utils.checkStandalone(),
     }),
+    watch: {
+        'playerHost.playback.playing'(playing) { if (playing) this.miniPlayerOpen = true; },
+    },
     mounted: function () {
+        registerPlayer(this.$refs.sessionPlayer, this.$refs.playerHome);
         initSetup().then();
 
         // We cannot interrupt long running queries in WASM so we prevent the
@@ -362,6 +402,18 @@ export default {
         });
     },
     methods: {
+        toggleSessionPlayback() {
+            const player = this.$refs.sessionPlayer;
+            if (player) player.togglePlay();
+        },
+        closeSessionPlayer() {
+            const player = this.$refs.sessionPlayer;
+            if (player && player.playing && player.$refs.audio) player.$refs.audio.pause();
+            this.miniPlayerOpen = false;
+        },
+        openSessionPlayer() {
+            if (this.$route.name !== 'session-analysis') this.$router.push({ name: 'session-analysis' });
+        },
         reloadApp() {
             // A new service worker installs into the "waiting" state and will
             // not take control while the old one still controls a client.
@@ -480,5 +532,30 @@ html, body {
     padding-right: 0;
     margin-left: auto;
     margin-right: auto;
+}
+.sessionMiniPlayer {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    z-index: 6;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    border-radius: 24px;
+    background: #fff;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+    max-width: 560px;
+    margin: 0 auto;
+}
+.sessionMiniPlayerLabel {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    cursor: pointer;
+    font-size: 14px;
 }
 </style>
