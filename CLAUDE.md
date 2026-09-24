@@ -1609,6 +1609,38 @@ has in the backup, because per-session statuses are set by the upload loop,
 which skips sessions with no local audio. The label is wrong for this case and
 is not yet fixed.
 
+#### Downloads fixed, then "the clock moves but there is no sound" (September 2026)
+
+With the cache fix in, the check report showed every played piece downloaded
+and stored as bytes, reading cleanly. Tunes late in a part then played with a
+running clock and no sound. Two independent causes can produce exactly that,
+and neither can be told apart from here:
+
+1. **The one-channel correction's AudioContext was only resumed from
+   `'suspended'`.** iOS also has **`'interrupted'`** (a call, Siri, the lock
+   screen), and a context left there in front of the element is silence with a
+   running clock. `_resumeGraph()` now resumes from any state but `running` /
+   `closed`.
+2. **Where the element puts a mid-part clip.** Seeking by the TRACK's timeline
+   was measured in Chromium only. If WebKit rebases a clip to start at zero,
+   that seek lands past the end of the audio — early tunes in a part play,
+   later ones do not, which is the symptom reported. `_decideTimeline()` reads
+   the element's **duration**: the clip's length means rebased
+   (`clipOriginSeconds` = clip start), the part's reach means track timeline.
+
+   ⚠️ **`buffered` starting at 0 is NOT evidence of rebasing** — measured in
+   Chromium with real MediaRecorder MP4: a clip 6 s into a part reports
+   duration 7.25 (the part's reach) *and* buffered `[0, 7.25]`. The first
+   draft used it and would have broken every Chrome seek; a test pins the
+   measured case. With no evidence (duration `Infinity`) the track timeline is
+   kept and labelled `track (assumed)`.
+
+The check report now has a **Playback** section (`playbackDiagnostics()`): the
+loaded clip's span, the timeline decision, the element's duration / seekable /
+buffered / currentTime / readyState / error, where the last seek was aimed and
+where it landed, and the audio graph's state. If the silence survives both
+fixes, that section says which half it is.
+
 #### A read of the whole chain (September 2026)
 
 Asked for after the third field failure in a row. Three defects found, each
