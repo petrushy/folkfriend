@@ -252,6 +252,17 @@ import {
 } from '@/services/sessionAudioStore.js';
 import { summariseCheck, formatCheckReport } from '@/js/recordingCheck.mjs';
 import ffConfig from '@/ffConfig.js';
+import {
+    nowPlayingInfo, adjacentTune, applyMetadata, applyPlaybackState, applyPosition,
+    applyActionHandlers, clearMediaSession,
+} from '@/js/mediaSession.mjs';
+
+function browserNavigator() {
+    return typeof navigator !== 'undefined' ? navigator : null;
+}
+function mediaMetadataCtor() {
+    return typeof MediaMetadata !== 'undefined' ? MediaMetadata : null;
+}
 
 // Fallback for a session recorded before detections carried their own playback
 // anchor. Half the live default window (10 s), which is what the anchor works
@@ -380,6 +391,8 @@ export default {
     props: {
         sessionId: { type: String, default: '' },
         detections: { type: Array, default: () => [] },
+        // For the lock screen's "Now Playing" card only.
+        sessionName: { type: String, default: '' },
         // Whether the session this belongs to is currently recording. Purely
         // for the warning above — playback and capture are independent.
         listening: { type: Boolean, default: false },
@@ -639,6 +652,10 @@ export default {
             }
             return previous || first;
         },
+        // What the phone's lock screen shows: see js/mediaSession.mjs.
+        mediaInfo() {
+            return nowPlayingInfo({ detection: this.currentDetection, sessionName: this.sessionName });
+        },
         // What the tune list needs to turn that row's ▶ into ⏸: playback
         // carries on into the next tune, so the pause button moves with it.
         playbackState() {
@@ -652,6 +669,14 @@ export default {
     },
     watch: {
         sessionId() { this.reload(); },
+        mediaInfo() { if (this._mediaSessionActive) this._syncMediaSession(); },
+        playing(playing) {
+            // Claimed on the first play, not at mount: a player that has never
+            // played must not put a card on the lock screen, and while a live
+            // session is listening nothing should look like media.
+            if (playing) this._mediaSessionActive = true;
+            if (this._mediaSessionActive) this._syncMediaSession();
+        },
         playbackState: {
             handler(state) { this.$emit('playback', state); },
             immediate: true,
@@ -685,6 +710,7 @@ export default {
         eventBus.$off('sessionAudioState', this._onAudioState);
         eventBus.$off('dropboxStateChanged', this._onAudioState);
         eventBus.$off('dropboxConnected', this._onDropboxConnected);
+        if (this._mediaSessionActive) clearMediaSession(browserNavigator());
         this.teardown();
         if (this._audioCtx && this._audioCtx.close) {
             this._audioCtx.close().catch(() => {});
@@ -1488,6 +1514,59 @@ export default {
             // position the ▶ buttons jump to stay the same scale.
             this.currentSeconds = this.clipOriginSeconds +
                 audio.currentTime / this.driftRatio;
+            // The card's scrubber extrapolates on its own between updates, so
+            // once a second is plenty; a seek resets it through the same path.
+            const now = Date.now();
+            if (this._mediaSessionActive && !(now - (this._lastPositionAt || 0) < 1000)) {
+                this._lastPositionAt = now;
+                this._syncPosition();
+            }
+        },
+
+        // The lock screen / Control Centre card. Its title is the tune under
+        // the playhead, its scrubber the whole session, and its buttons reach
+        // this player — next / previous move between recognised tunes.
+        _syncMediaSession() {
+            const nav = browserNavigator();
+            this._mediaMetadata = applyMetadata(nav, mediaMetadataCtor(),
+                this.mediaInfo, this._mediaMetadata);
+            applyPlaybackState(nav, this.playing);
+            if (!this._mediaHandlersSet) {
+                this._mediaHandlersSet = true;
+                applyActionHandlers(nav, {
+                    play: () => { if (!this.playing) this.togglePlay(); },
+                    pause: () => { if (this.playing) this.togglePlay(); },
+                    seekbackward: (d) => this.seekBy(-((d && d.seekOffset) || SKIP_SECONDS)),
+                    seekforward: (d) => this.seekBy((d && d.seekOffset) || SKIP_SECONDS),
+                    seekto: (d) => {
+                        if (!d || typeof d.seekTime !== 'number') return;
+                        this.playFrom(Math.min(this.totalSeconds, Math.max(0, d.seekTime)),
+                            { autoplay: this.playing });
+                    },
+                    previoustrack: () => this.skipTune(-1),
+                    nexttrack: () => this.skipTune(1),
+                });
+            }
+            this._syncPosition();
+        },
+
+        _syncPosition() {
+            const audio = this.$refs.audio;
+            applyPosition(browserNavigator(), {
+                duration: this.totalSeconds,
+                position: this.currentSeconds,
+                playbackRate: audio && audio.playbackRate,
+            });
+        },
+
+        // Next / previous recognised tune. Previous restarts the current tune
+        // when well into it, as in any music player.
+        skipTune(direction) {
+            const spans = this.playableDetections.map(d => ({ detection: d, ...this.audioSpan(d) }));
+            const target = adjacentTune(spans, this.currentSeconds, direction);
+            if (!target) return;
+            this._lastPositionAt = 0;
+            return this.playTune(target.detection);
         },
 
         // Segments are separate files, so continuous playback has to walk them.

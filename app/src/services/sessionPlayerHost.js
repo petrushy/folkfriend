@@ -18,6 +18,8 @@ export const playerHost = Vue.observable({
     // deliberately LEFT as it was when the view goes away, which is what
     // lets the recording carry on.
     sessionId: '',
+    // For the lock screen's "Now Playing" card.
+    sessionName: '',
     detections: [],
     listening: false,
     // What the player reports: { playing, detectionId, label }.

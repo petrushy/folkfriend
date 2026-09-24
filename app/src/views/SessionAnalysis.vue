@@ -1678,6 +1678,8 @@ export default {
             if (slot) {
                 playerHost.sessionId = this.audioSessionId;
                 playerHost.detections = this.activeDetections;
+                playerHost.sessionName = this.activeSession
+                    ? (this.activeSession.name || this.sessionLabel(this.activeSession)) : '';
                 playerHost.listening = this.viewMode === 'live' && this.live.capturing;
                 showPlayerIn(slot);
             } else if (playerHost.shown) {

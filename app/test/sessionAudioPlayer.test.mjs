@@ -80,6 +80,8 @@ async function loadPlayer() {
     // Real, not faked: it is pure, and it is what turns the report into words.
     await writeFile(path.join(tmpDir, 'recordingCheck.mjs'),
         await readFile(path.join(srcDir, 'js', 'recordingCheck.mjs'), 'utf8'));
+    await writeFile(path.join(tmpDir, 'mediaSession.mjs'),
+        await readFile(path.join(srcDir, 'js', 'mediaSession.mjs'), 'utf8'));
 
     const sfc = await readFile(path.join(srcDir, 'components', 'SessionAudioPlayer.vue'), 'utf8');
     const open = sfc.indexOf('<script>');
@@ -94,6 +96,7 @@ async function loadPlayer() {
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from '@/js/recordingCheck.mjs'", "from './recordingCheck.mjs'"],
         ["from '@/ffConfig.js'", "from './fake-ffconfig.mjs'"],
+        ["from '@/js/mediaSession.mjs'", "from './mediaSession.mjs'"],
     ]) {
         assert.ok(source.includes(from), `expected ${JSON.stringify(from)} in the SFC`);
         source = source.split(from).join(to);
@@ -1390,6 +1393,91 @@ await test('turning the correction off replaces the element and never rebuilds t
     vm._play();
     assert.equal(audioEnv.sourceNodes, 2, 'back on: the next play builds it again');
     assert.equal(vm.channelRepair, true);
+});
+
+console.log('\nSessionAudioPlayer — the lock screen\'s Now Playing card');
+
+const CONTINUOUS = {
+    sessionId: 's1', totalSeconds: 540, mimeType: 'audio/mp4',
+    tracks: [{ index: 0, startSeconds: 0, durationSeconds: 540 }],
+    segments: [
+        { index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 180 },
+        { index: 1, trackIndex: 0, startSeconds: 180, durationSeconds: 180 },
+        { index: 2, trackIndex: 0, startSeconds: 360, durationSeconds: 180 },
+    ],
+};
+const SET = [
+    { id: 'a', title: 'The Kesh', audioStartSeconds: 25, audioAnchorSeconds: 20, audioEndSeconds: 120 },
+    { id: 'b', title: 'Morning Dew', audioStartSeconds: 145, audioAnchorSeconds: 140, audioEndSeconds: 260 },
+    { id: 'c', title: 'Silver Spear', audioStartSeconds: 305, audioAnchorSeconds: 300, audioEndSeconds: 400 },
+];
+
+function fakeNavigator() {
+    const handlers = {};
+    const positions = [];
+    return {
+        handlers, positions,
+        mediaSession: {
+            metadata: null, playbackState: 'none',
+            setActionHandler(action, fn) { handlers[action] = fn; },
+            setPositionState(state) { positions.push(state); },
+        },
+    };
+}
+
+async function withMediaSession(fn) {
+    const nav = fakeNavigator();
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', { value: nav, configurable: true });
+    globalThis.MediaMetadata = class { constructor(init) { Object.assign(this, init); } };
+    try { await fn(nav); } finally {
+        if (saved) Object.defineProperty(globalThis, 'navigator', saved);
+        else delete globalThis.navigator;
+        delete globalThis.MediaMetadata;
+    }
+}
+
+await test('the card is titled with the tune under the playhead, on the session timeline', async () => {
+    await withMediaSession(async (nav) => {
+        const vm = await mountPlayer(CONTINUOUS);
+        vm.detections = SET;
+        vm.sessionName = 'Thu 24 Sep · The Cobblestone';
+        vm.currentSeconds = 150;
+        vm.playing = true;
+        vm._mediaSessionActive = true;
+        vm._syncMediaSession();
+        assert.equal(nav.mediaSession.metadata.title, 'Morning Dew');
+        assert.equal(nav.mediaSession.metadata.album, 'Thu 24 Sep · The Cobblestone');
+        assert.equal(nav.mediaSession.playbackState, 'playing');
+        assert.deepEqual(nav.positions.at(-1), { duration: 540, position: 150, playbackRate: 1 },
+            'the whole evening, not the loaded three-minute clip');
+    });
+});
+
+await test('next and previous move between recognised tunes', async () => {
+    await withMediaSession(async (nav) => {
+        const vm = await mountPlayer(CONTINUOUS);
+        vm.detections = SET;
+        vm.currentSeconds = 150;  // 10 s into Morning Dew
+        vm._syncMediaSession();
+        await nav.handlers.nexttrack();
+        await nav.handlers.previoustrack();
+        vm.currentSeconds = 142;  // just started Morning Dew
+        await nav.handlers.previoustrack();
+        assert.deepEqual(vm.playRequests, [300, 140, 20],
+            'next → Silver Spear; previous well into a tune restarts it; near its start goes back one');
+    });
+});
+
+await test('no next tune after the last one', async () => {
+    await withMediaSession(async (nav) => {
+        const vm = await mountPlayer(CONTINUOUS);
+        vm.detections = SET;
+        vm.currentSeconds = 350;
+        vm._syncMediaSession();
+        await nav.handlers.nexttrack();
+        assert.deepEqual(vm.playRequests, []);
+    });
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
