@@ -1053,3 +1053,166 @@ export function trackRanges(manifest) {
         durationSeconds: track.durationSeconds,
     })).filter(t => t.durationSeconds > 0).sort((a, b) => a.startSeconds - b.startSeconds);
 }
+
+// ---- the recording check ---------------------------------------------------
+//
+// Reads every byte of a session's stored audio and reports, per segment,
+// whether this device can actually read it — and, where it cannot, whether the
+// Dropbox backup holds a copy.
+//
+// It exists because playback failures on the phone arrive one error message at
+// a time, and each message describes only the one clip that failed. This
+// answers the whole recording in one tap, on the device, with no console:
+// which pieces are stored how, which read, where a failing one stops reading,
+// and what the bytes at its start are.
+//
+// Strictly read-only. It never repairs, deletes or downloads audio; the cloud
+// half only reads the backup's manifest, which is small and usually cached.
+
+// How much is read at a time. A failing Blob is located to within this, and no
+// more than this is ever held in memory for a stored Blob.
+const CHECK_STEP_BYTES = 256 * 1024;
+
+// How far into `blob` can be read, stepping from the start.
+async function readableExtent(blob) {
+    let offset = 0;
+    while (offset < blob.size) {
+        const end = Math.min(blob.size, offset + CHECK_STEP_BYTES);
+        try {
+            await blob.slice(offset, end).arrayBuffer();
+        } catch (e) {
+            return { readable: offset, error: (e && (e.name || e.message)) || String(e) };
+        }
+        offset = end;
+    }
+    return { readable: blob.size, error: null };
+}
+
+async function headShape(blob) {
+    try {
+        return describeContainer(new Uint8Array(await blob.slice(0, 256).arrayBuffer()));
+    } catch (e) {
+        return '';
+    }
+}
+
+async function inspectPayload(value, type) {
+    if (!value) return { stored: 'none', size: 0, readableBytes: 0, error: null, shape: '' };
+    const inline = !(typeof Blob !== 'undefined' && value instanceof Blob) &&
+        (value instanceof ArrayBuffer || ArrayBuffer.isView(value));
+    const blob = asBlob(value, type);
+    if (!blob || typeof blob.slice !== 'function') {
+        return { stored: 'unknown', size: 0, readableBytes: 0, error: 'not audio data', shape: '' };
+    }
+    const extent = await readableExtent(blob);
+    return {
+        stored: inline ? 'bytes' : 'blob',
+        size: blob.size || 0,
+        readableBytes: extent.readable,
+        error: extent.error,
+        shape: extent.readable > 0 ? await headShape(blob) : '',
+    };
+}
+
+export async function inspectRecording(sessionId, { onProgress = null } = {}) {
+    const report = {
+        sessionId,
+        checkedAt: Date.now(),
+        manifest: null,
+        tracks: [],
+        segments: [],
+        cloud: { configured: !!cloudAudio, state: 'not configured', listed: 0 },
+        storage: null,
+    };
+
+    const probe = await probeManifest(sessionId);
+    report.manifest = { state: probe.state };
+    if (probe.state !== 'ok') return report;
+    const manifest = probe.manifest;
+    Object.assign(report.manifest, {
+        mimeType: manifest.mimeType || '',
+        bitsPerSecond: manifest.bitsPerSecond || 0,
+        totalSeconds: manifest.totalSeconds || 0,
+        bytes: manifest.bytes || 0,
+        finalized: !!manifest.finalizedAt,
+        stopped: manifest.stopped ? (manifest.stopped.reason || 'yes') : null,
+    });
+
+    // The backup's own list, so a local failure can be said to be recoverable
+    // or not. Only the manifest — nothing is downloaded.
+    const inCloud = new Set();
+    if (cloudAudio) {
+        try {
+            const remote = await cloudAudio.manifest(sessionId);
+            if (remote && Array.isArray(remote.segments)) {
+                remote.segments.forEach(s => inCloud.add(s.index));
+                report.cloud.state = 'ok';
+                report.cloud.listed = inCloud.size;
+            } else {
+                report.cloud.state = 'not backed up';
+            }
+        } catch (e) {
+            report.cloud.state = `unavailable: ${(e && e.message) || e}`;
+        }
+    }
+
+    for (const track of (manifest.tracks || []).slice().sort((a, b) => a.index - b.index)) {
+        report.tracks.push({
+            index: track.index,
+            startSeconds: track.startSeconds || 0,
+            durationSeconds: track.durationSeconds || 0,
+            mimeType: track.mimeType || '',
+            channels: track.channels || null,
+            init: await inspectPayload(track.init, track.mimeType || manifest.mimeType),
+        });
+    }
+
+    const metas = manifest.segments.slice().sort((a, b) => a.index - b.index);
+    for (let i = 0; i < metas.length; i++) {
+        const meta = metas[i];
+        if (onProgress) onProgress(i, metas.length);
+        const entry = {
+            index: meta.index,
+            trackIndex: meta.trackIndex,
+            startSeconds: meta.startSeconds,
+            durationSeconds: meta.durationSeconds,
+            expectedBytes: meta.bytes || 0,
+            inCloud: cloudAudio && report.cloud.state === 'ok' ? inCloud.has(meta.index) : null,
+        };
+        let record;
+        try {
+            record = await get(segmentKey(sessionId, meta.index));
+        } catch (e) {
+            report.segments.push({ ...entry, stored: 'unreadable record',
+                size: 0, readableBytes: 0, error: (e && (e.name || e.message)) || String(e), shape: '' });
+            continue;
+        }
+        if (!record) {
+            report.segments.push({ ...entry, stored: 'missing', size: 0, readableBytes: 0, error: null, shape: '' });
+            continue;
+        }
+        const payload = await inspectPayload(record.data || record.blob, record.mimeType || '');
+        const chunkBytes = Array.isArray(record.chunks)
+            ? record.chunks.reduce((n, c) => n + (c.bytes || 0), 0) : null;
+        report.segments.push({
+            ...entry,
+            ...payload,
+            chunksMatch: chunkBytes === null ? null : chunkBytes === entry.expectedBytes,
+            startsTrack: !!(record.chunks && record.chunks[0] && record.chunks[0].init),
+        });
+    }
+    if (onProgress) onProgress(metas.length, metas.length);
+
+    if (typeof navigator !== 'undefined' && navigator.storage) {
+        const storage = {};
+        try {
+            const { usage, quota } = await navigator.storage.estimate();
+            Object.assign(storage, { usage, quota });
+        } catch (e) { /* not reported */ }
+        try {
+            if (navigator.storage.persisted) storage.persisted = await navigator.storage.persisted();
+        } catch (e) { /* not reported */ }
+        report.storage = storage;
+    }
+    return report;
+}
