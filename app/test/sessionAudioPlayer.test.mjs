@@ -1342,5 +1342,51 @@ await test('the check report carries the player\'s state', async () => {
     assert.match(text, /audio graph: none/);
 });
 
+await test('the correction declares a PLAYBACK audio session before building its graph (iOS silent switch)', async () => {
+    // Web Audio defaults to the "ambient" session on iOS, which the ring/silent
+    // switch mutes; the plain element it replaces is not muted. Without this
+    // the correction is silence with a running clock on a phone set to silent.
+    const session = { type: 'auto' };
+    let typeWhenContextBuilt = null;
+    await withNavigator({ audioSession: session }, async () => {
+        const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+        const Real = globalThis.window.AudioContext;
+        globalThis.window.AudioContext = class extends Real {
+            constructor() { super(); typeWhenContextBuilt = session.type; }
+        };
+        try { vm._play(); } finally { globalThis.window.AudioContext = Real; }
+        assert.equal(vm.channelRepair, true);
+        assert.equal(typeWhenContextBuilt, 'playback');
+        session.type = 'ambient';   // something else reset it
+        vm._resumeGraph();
+        assert.equal(session.type, 'playback', 'and again on every play');
+        assert.match(vm.playbackDiagnostics().join('\n'), /audio session: playback/);
+    });
+});
+
+await test('turning the correction off replaces the element and never rebuilds the graph', async () => {
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    vm.$refs.audio.removeAttribute = () => {};
+    vm._play();
+    const ctx = audioEnv.contexts[0];
+    assert.equal(audioEnv.sourceNodes, 1);
+    vm.currentSeconds = 42;
+    vm.playing = true;
+    const key = vm.audioKey;
+    await vm.setChannelRepairOff(true);
+    assert.equal(ctx.state, 'closed');
+    assert.equal(vm.audioKey, key + 1, 'a fresh <audio>: the old one is bound to the graph for good');
+    assert.equal(vm.channelRepair, false);
+    assert.deepEqual(vm.playRequests, [42], 'and playback carries on where it was');
+    vm._play();
+    assert.equal(audioEnv.sourceNodes, 1, 'no second graph');
+    assert.equal(vm.channelRepair, false);
+
+    await vm.setChannelRepairOff(false);
+    vm._play();
+    assert.equal(audioEnv.sourceNodes, 2, 'back on: the next play builds it again');
+    assert.equal(vm.channelRepair, true);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

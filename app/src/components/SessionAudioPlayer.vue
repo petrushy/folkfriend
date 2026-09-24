@@ -153,6 +153,19 @@
             This recording has sound on one channel only. Playback here is corrected to
             both speakers; an exported copy of it keeps the original channels.
             Recordings made from now on are corrected as they are recorded.
+            <!-- The correction is the one part of playback that goes through
+                 Web Audio, which iOS treats differently from a plain media
+                 element (the ring/silent switch, the audio session). If it
+                 goes silent there is no other way out: the element is bound
+                 to the graph for good, so the escape swaps in a new one. -->
+            <a href="#" class="noCorrectionLink" @click.prevent="setChannelRepairOff(true)">
+                No sound? Play without the correction.</a>
+        </p>
+        <p v-else-if="channelRepairOff && channelProbe && channelProbe.oneSided"
+           class="caption text--secondary mb-0 mt-2">
+            Playing without the one-channel correction, so this recording comes out of
+            one speaker.
+            <a href="#" @click.prevent="setChannelRepairOff(false)">Correct it to both speakers.</a>
         </p>
         <!-- Not cosmetic: one-sided playback with no correction is exactly
              what this looks like, and without this line it is indistinguishable
@@ -212,9 +225,12 @@
             </v-card>
         </v-dialog>
         <!-- Keep the element alive across session reloads: the Web Audio
-             source is permanently attached to this exact DOM node. -->
+             source is permanently attached to this exact DOM node. The key
+             changes only when the user turns the correction OFF, which is
+             the one way to detach it: a new element. -->
         <audio
             ref="audio"
+            :key="audioKey"
             preload="metadata"
             @loadedmetadata="onLoadedMetadata"
             @timeupdate="onTimeUpdate"
@@ -279,6 +295,40 @@ const CHANNEL_PROBE_OFFSETS_SECONDS = [0, 30, 120];
 // order of magnitude as SILENT_RMS in mic.js: a channel carrying real audio is
 // orders of magnitude above it, and a dead one is exact zeroes.
 const SILENT_CHANNEL_RMS = 1e-5;
+
+// iOS gives Web Audio the "ambient" audio session by default, and ambient
+// audio obeys the ring/silent switch — a plain <audio> element does not. So
+// the one-channel correction, which routes the element through an
+// AudioContext, is SILENT on a phone set to silent, while the element reports
+// itself playing and the clock runs. Declaring playback (Safari 16.4+) makes
+// it behave like the element it replaced. Harmless where unsupported.
+function setPlaybackAudioSession() {
+    try {
+        const session = typeof navigator !== 'undefined' && navigator.audioSession;
+        if (session && session.type !== 'playback') session.type = 'playback';
+    } catch (e) { /* not settable here */ }
+}
+
+function audioSessionType() {
+    try {
+        const session = typeof navigator !== 'undefined' && navigator.audioSession;
+        return session ? String(session.type) : 'not available';
+    } catch (e) { return 'unreadable'; }
+}
+
+const REPAIR_OFF_KEY = 'sessionAudioNoChannelRepair';
+
+function readRepairOff() {
+    try { return typeof localStorage !== 'undefined' && localStorage.getItem(REPAIR_OFF_KEY) === '1'; }
+    catch (e) { return false; }
+}
+
+function writeRepairOff(off) {
+    try {
+        if (off) localStorage.setItem(REPAIR_OFF_KEY, '1');
+        else localStorage.removeItem(REPAIR_OFF_KEY);
+    } catch (e) { /* a per-device convenience; losing it costs one tap */ }
+}
 
 // Decodes a clip to PCM without needing a playback AudioContext — an
 // OfflineAudioContext can be constructed with no user gesture, which a probe
@@ -404,6 +454,11 @@ export default {
             // the graph permanently, so a suspended context is SILENCE, not a
             // missing correction.
             channelRepairStalled: false,
+            // The user turned the one-channel correction off on this device
+            // (it went silent here). Per-device, remembered in localStorage.
+            channelRepairOff: readRepairOff(),
+            // Bumped to replace the <audio> element — see setChannelRepairOff.
+            audioKey: 0,
             // The probe could not answer. Distinct from "answered: nothing to
             // correct", because the two sound entirely different out of a
             // phone and only one of them is worth telling someone about.
@@ -1024,7 +1079,8 @@ export default {
         // once it has one, its sound comes out of the graph rather than the
         // element, so this is never built speculatively.
         _applyChannelRepair({ build = true } = {}) {
-            const needed = !!(this.channelProbe && this.channelProbe.oneSided);
+            const needed = !this.channelRepairOff &&
+                !!(this.channelProbe && this.channelProbe.oneSided);
             if (!this._mixNode) {
                 // Nothing is routed through a graph yet, so playback is
                 // whatever the file is. Building one is a permanent change to
@@ -1050,6 +1106,9 @@ export default {
                 (window.AudioContext || window.webkitAudioContext);
             if (!audio || !Ctx) return false;
             try {
+                // BEFORE the context exists, so it is created in the right
+                // session rather than moved into it.
+                setPlaybackAudioSession();
                 const ctx = this._audioCtx || new Ctx();
                 this._audioCtx = ctx;
                 const source = ctx.createMediaElementSource(audio);
@@ -1179,7 +1238,8 @@ export default {
         // be, on the one device where there is no console to ask.
         playbackDiagnostics() {
             const audio = this.$refs.audio;
-            if (!audio || this.segmentIndex === null) return ['No clip loaded yet — play something first, then check.'];
+            const session = `audio session: ${audioSessionType()}${this.channelRepairOff ? ', correction turned off on this device' : ''}`;
+            if (!audio || this.segmentIndex === null) return ['No clip loaded yet — play something first, then check.', session];
             const ranges = r => {
                 try {
                     return r && r.length
@@ -1197,10 +1257,39 @@ export default {
                 `element: duration ${n(audio.duration)}, now ${n(audio.currentTime)}, seekable ${ranges(audio.seekable)}, buffered ${ranges(audio.buffered)}`,
                 `element: ${audio.paused ? 'paused' : 'playing'}, readyState ${audio.readyState}, networkState ${audio.networkState}, error ${audio.error ? audio.error.code : 'none'}, muted ${!!audio.muted}, volume ${n(audio.volume)}`,
                 seek ? `last seek: to ${n(seek.target)} s → element ${n(seek.applied)} s, landed at ${n(seek.landed)} s` : 'last seek: none',
+                session,
                 ctx
                     ? `audio graph: ${ctx.state}, correction ${this.channelRepair ? 'on' : 'off'}${this._mixNode ? `, gain ${n(this._mixNode.gain.value)}, ${this._mixNode.channelCountMode}/${this._mixNode.channelCount}` : ''}`
                     : 'audio graph: none (plays straight from the element)',
             ];
+        },
+
+        // Turning the correction OFF has to replace the element: once it has
+        // been given a MediaElementAudioSourceNode its sound comes out of the
+        // graph for good, so closing the context would leave it silent.
+        // Playback carries on from where it was.
+        async setChannelRepairOff(off) {
+            const at = this.currentSeconds;
+            const wasPlaying = this.playing;
+            this.channelRepairOff = !!off;
+            writeRepairOff(this.channelRepairOff);
+            if (!off) {
+                // Turning it back ON needs nothing now: the next play is a
+                // gesture and builds the graph.
+                if (wasPlaying) this._prepareAudioGraph();
+                return;
+            }
+            this.teardown();
+            const ctx = this._audioCtx;
+            this._audioCtx = null;
+            this._mixNode = null;
+            this._sourceNode = null;
+            this.channelRepair = false;
+            this.channelRepairStalled = false;
+            if (ctx && ctx.close) ctx.close().catch(() => {});
+            this.audioKey++;
+            if (this.$nextTick) await this.$nextTick();
+            if (this.covers(at)) this.playFrom(at, { autoplay: wasPlaying });
         },
 
         // Everything the correction needs doing from a user gesture: build the
@@ -1218,6 +1307,7 @@ export default {
         _resumeGraph() {
             const ctx = this._audioCtx;
             if (!ctx || !this._mixNode) { this.channelRepairStalled = false; return; }
+            setPlaybackAudioSession();
             // Not only 'suspended': iOS has 'interrupted' (a call, Siri, the
             // lock screen), and a context left there in front of the element
             // is silence with a running clock.
