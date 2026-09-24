@@ -722,7 +722,7 @@ await test('complete exports reject missing, unreadable, or truncated segments',
         if (fault === 'unreadable') idb.__failReads.add(key);
         if (fault === 'truncated') {
             const value = await idb.get(key);
-            await idb.set(key, { ...value, blob: value.blob.slice(0, 1) });
+            await idb.set(key, { ...value, data: value.data.slice(0, 1) });
         }
         await assert.rejects(store.buildClip('s1', 0, 6, null, { requireComplete: true }), /missing or unreadable/);
     }
@@ -730,6 +730,105 @@ await test('complete exports reject missing, unreadable, or truncated segments',
     const clip = await store.buildClip('s1', 0, 6, null, { requireComplete: true });
     assert.equal(clip.endSeconds, 6);
     assert.equal(await clip.blob.text(), 'H0a1a2b3b4b5');
+});
+
+// What WebKit hands back for a Blob stored in IndexedDB whose backing file it
+// can no longer reach: the size still answers, every read fails.
+function unreadableBlob(size) {
+    const fail = async () => {
+        const e = new Error('The I/O read operation failed.');
+        e.name = 'NotReadableError';
+        throw e;
+    };
+    const blob = { size, type: 'audio/mp4', arrayBuffer: fail, text: fail };
+    blob.slice = () => blob;
+    return blob;
+}
+
+await test('audio is stored as bytes, never as a Blob', async () => {
+    // A Blob in IndexedDB is a reference to a separate file on WebKit, and on
+    // iOS that file can become unreadable — the record survives, the audio
+    // does not. Bytes live inside the record itself.
+    await seedTwoSegments();
+    const raw = await idb.get(store.segmentKey('s1', 0));
+    assert.ok(raw.data instanceof ArrayBuffer, 'the payload is an ArrayBuffer');
+    assert.equal(raw.blob, undefined, 'and no Blob is stored beside it');
+    const rawManifest = await idb.get(store.manifestKey('s1'));
+    assert.ok(rawManifest.tracks[0].init instanceof ArrayBuffer, 'the track header too');
+
+    // Readers still see Blobs.
+    const segment = await store.readSegment('s1', 0);
+    assert.equal(await segment.blob.text(), 'H0a1a2');
+    const manifest = await store.readManifest('s1');
+    assert.equal(await manifest.tracks[0].init.text(), 'H0');
+});
+
+await test('a recording stored as Blobs before this still plays', async () => {
+    await seedTwoSegments();
+    for (const index of [0, 1]) {
+        const key = store.segmentKey('s1', index);
+        const { data, ...rest } = await idb.get(key);
+        await idb.set(key, { ...rest, blob: new Blob([data]) });
+    }
+    const clip = await store.buildClip('s1', 4, 6);
+    assert.equal(await clip.blob.text(), 'H0b4b5');
+});
+
+await test('an unreadable stored Blob is replaced by the backed-up copy', async () => {
+    await seedTwoSegments();
+    const key = store.segmentKey('s1', 0);
+    const { data, ...rest } = await idb.get(key);
+    await idb.set(key, { ...rest, blob: unreadableBlob(data.byteLength) });
+    const asked = [];
+    store.configureCloudAudio({
+        manifest: async () => null,
+        segment: async (id, index) => {
+            asked.push(index);
+            return { ...rest, blob: new Blob([data]) };
+        },
+    });
+    try {
+        const clip = await store.buildClip('s1', 0, 3);
+        assert.deepEqual(asked, [0], 'only the unreadable segment is fetched');
+        assert.equal(await clip.blob.text(), 'H0a1a2');
+        assert.equal(clip.shape, '', 'the fake bytes are not a real container');
+    } finally {
+        store.configureCloudAudio(null);
+    }
+});
+
+await test('an unreadable stored Blob with no other copy SAYS it is unreadable', async () => {
+    // Not "format not supported", which is what the element reports when it
+    // is handed bytes it cannot read, and which sends the reader to the wrong
+    // half of the system entirely.
+    await seedTwoSegments();
+    const key = store.segmentKey('s1', 0);
+    const { data, ...rest } = await idb.get(key);
+    await idb.set(key, { ...rest, blob: unreadableBlob(data.byteLength) });
+    await assert.rejects(store.buildClip('s1', 0, 3), e =>
+        e.code === 'unreadable' && /can no longer be read \(NotReadableError\)/.test(e.message));
+    await assert.rejects(store.buildClip('s1', 0, 6, null, { requireComplete: true }),
+        e => e.code === 'unreadable');
+});
+
+await test('an unreadable track header is taken from the backed-up copy', async () => {
+    await seedTwoSegments();
+    const raw = await idb.get(store.manifestKey('s1'));
+    await idb.set(store.manifestKey('s1'), {
+        ...raw, tracks: raw.tracks.map(t => ({ ...t, init: unreadableBlob(2) })),
+    });
+    await assert.rejects(store.buildClip('s1', 4, 6), e => e.code === 'unreadable',
+        'never prepends bytes nobody can read');
+    store.configureCloudAudio({
+        manifest: async () => ({ tracks: [{ index: 0, init: new Blob(['H0']) }] }),
+        segment: async () => null,
+    });
+    try {
+        const clip = await store.buildClip('s1', 4, 6);
+        assert.equal(await clip.blob.text(), 'H0b4b5');
+    } finally {
+        store.configureCloudAudio(null);
+    }
 });
 
 await test('complete exports reject an unrecorded hole inside a track', async () => {
