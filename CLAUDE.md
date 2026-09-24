@@ -1641,6 +1641,37 @@ buffered / currentTime / readyState / error, where the last seek was aimed and
 where it landed, and the audio graph's state. If the silence survives both
 fixes, that section says which half it is.
 
+#### Everything healthy and still silent: the iPhone's silent switch (September 2026)
+
+The next report had every part of the chain healthy: element `playing`,
+readyState 4, no error, not muted, landed exactly where it was sought, graph
+`running`, correction on. It still made no sound, and now even the first minute
+that had played before was silent. The one thing that had changed was
+**correction on**: the playback was now going through Web Audio.
+
+**iOS gives Web Audio the "ambient" audio session by default, and ambient audio
+obeys the ring/silent switch. A plain `<audio>` element does not.** So on a
+phone set to silent, the correction takes audible playback and makes it
+silence, while every readout says it is playing. That fits the report exactly,
+but it is inferred, not measured on the device.
+
+- `setPlaybackAudioSession()` sets `navigator.audioSession.type = 'playback'`
+  (Safari 16.4+) before the context is built and again on every play. Where
+  the API is missing, it does nothing.
+- **An escape, because nothing else can undo the graph:** "No sound? Play
+  without the correction" turns it off on this device (localStorage,
+  `sessionAudioNoChannelRepair`). Closing the context is not enough, since an
+  element given a `MediaElementAudioSourceNode` outputs through the graph for
+  ever. So it swaps in a new element (`audioKey` on the `<audio>`) and carries
+  on from the same second.
+- The check report prints `audio session: <type>`, including when no clip has
+  loaded yet.
+
+> **Rule: anything routed through Web Audio on iOS must declare its audio
+> session.** Otherwise a feature meant to improve playback is silent on every
+> phone set to silent. That is the usual state of a phone in a pub, and
+> nothing on screen will explain it.
+
 #### A read of the whole chain (September 2026)
 
 Asked for after the third field failure in a row. Three defects found, each
