@@ -18,6 +18,8 @@ let player = sfc.split('<script>')[1].split('</script>')[0]
     .replace("import eventBus from '@/eventBus.js';", 'const eventBus = window.testBus;')
     .replace("import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';", 'const formatSecondsAsDuration = s => String(Math.round(s));')
     .replace("from '@/services/sessionAudioStore.js'", "from '/store.js'")
+    .replace("from '@/js/recordingCheck.mjs'", "from '/recordingCheck.js'")
+    .replace("import ffConfig from '@/ffConfig.js';", "const ffConfig = { FRONTEND_VERSION: 'e2e' };")
     .replace('export default {', 'const component = {');
 player += `\ncomponent.template = ${JSON.stringify(template)}; export default component;`;
 const store = read('src/services/sessionAudioStore.js')
@@ -33,6 +35,7 @@ const recorder = read('src/services/sessionRecorder.js')
     };`);
 const routes = new Map([
     ['/store.js', store], ['/recorder.js', recorder], ['/player.js', player],
+    ['/recordingCheck.js', read('src/js/recordingCheck.mjs')],
     ['/vue.js', read('node_modules/vue/dist/vue.js')],
     ['/idb.js', read('node_modules/idb-keyval/dist/index.js')],
 ]);
