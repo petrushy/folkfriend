@@ -1099,6 +1099,9 @@ await test('a seek never runs off either end of the recording', async () => {
     assert.deepEqual(vm.playRequests, [0, 600]);
 });
 
+// What the tune list reads; the label is for the mini player and has its own case.
+const transport = ({ playing, detectionId }) => ({ playing, detectionId });
+
 await test('playbackState names the tune under the playhead, follows it into the next, and never leaves playback unstoppable', async () => {
     // The tune list turns that row's ▶ into ⏸ from this. Playback carries on
     // past the end of a tune, so the state must move to the next row rather
@@ -1110,22 +1113,23 @@ await test('playbackState names the tune under the playhead, follows it into the
     ];
     vm.playing = true;
     vm.currentSeconds = 50;
-    assert.deepEqual(vm.playbackState, { playing: true, detectionId: 'a' });
+    assert.deepEqual(transport(vm.playbackState), { playing: true, detectionId: 'a' });
+    assert.equal(vm.playbackState.label, 'A', 'the mini player on other pages names the tune');
     vm.currentSeconds = 150;
-    assert.deepEqual(vm.playbackState, { playing: true, detectionId: 'b' });
+    assert.deepEqual(transport(vm.playbackState), { playing: true, detectionId: 'b' });
     // Between tunes the one that last started keeps the transport, or the
     // audio there could not be stopped from the list at all.
     vm.currentSeconds = 110;
-    assert.deepEqual(vm.playbackState, { playing: true, detectionId: 'a' });
+    assert.deepEqual(transport(vm.playbackState), { playing: true, detectionId: 'a' });
     assert.equal(vm.nowPlayingLabel, 'Playing');   // but it is not claimed as playing
     // Before the first tune, the first tune's row is the one to stop from.
     vm.currentSeconds = 5;
-    assert.deepEqual(vm.playbackState, { playing: true, detectionId: 'a' });
+    assert.deepEqual(transport(vm.playbackState), { playing: true, detectionId: 'a' });
     vm.currentSeconds = 300;   // after the last
-    assert.deepEqual(vm.playbackState, { playing: true, detectionId: 'b' });
+    assert.deepEqual(transport(vm.playbackState), { playing: true, detectionId: 'b' });
     vm.playing = false;
     vm.currentSeconds = 150;
-    assert.deepEqual(vm.playbackState, { playing: false, detectionId: 'b' });
+    assert.deepEqual(transport(vm.playbackState), { playing: false, detectionId: 'b' });
 });
 
 await rm(tmpDir, { recursive: true, force: true });

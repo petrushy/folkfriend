@@ -308,6 +308,18 @@ export async function reclaimOrphans() { return 0; }
 `);
     // The view reads the backup label and whether a session's backup is
     // waiting on a decision, so the header can say so with the panel closed.
+    // The shared player (App.vue owns it). State on globalThis so a test can
+    // drive what the player reports and stand in for the player itself.
+    await writeFile(path.join(tmpDir, 'fake-player-host.mjs'), `
+        globalThis.__playerHost = globalThis.__playerHost || {
+            sessionId: '', detections: [], listening: false, shown: false,
+            playback: { playing: false, detectionId: null, label: '' },
+        };
+        export const playerHost = globalThis.__playerHost;
+        export function sessionPlayer() { return globalThis.__sessionPlayer || null; }
+        export function showPlayerIn(slot) { playerHost.shown = !!slot; }
+        export function parkPlayer() { playerHost.shown = false; }
+    `);
     await writeFile(path.join(tmpDir, 'fake-dropbox.mjs'), `
 export const __state = { label: 'Local only', conflict: '' };
 export function backupStatus() { return __state.label; }
@@ -330,7 +342,7 @@ export function sessionConflictMessage() { return __state.conflict; }
         ["from '@/components/VolumeMeter.vue'", "from './fake-component.mjs'"],
         ["from '@/components/LiveScoreFollow.vue'", "from './fake-component.mjs'"],
         ["from '@/components/DropboxBackup.vue'", "from './fake-component.mjs'"],
-        ["from '@/components/SessionAudioPlayer.vue'", "from './fake-component.mjs'"],
+        ["from '@/services/sessionPlayerHost.js'", "from './fake-player-host.mjs'"],
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from '@/services/sessionRecorder.js'", "from './fake-recorder.mjs'"],
         ["from '@/js/liveScoreFollow.mjs'", "from './fake-follow.mjs'"],
@@ -1314,14 +1326,14 @@ await test('the row under the playhead is the transport: ⏸ pauses, ▶ resumes
     const { vm, settle } = await mountView();
     await settle();
     const calls = [];
-    vm.$refs = { audioPlayer: {
+    globalThis.__sessionPlayer = {
         togglePlay: () => calls.push('toggle'),
         playTune: (d) => calls.push(`tune:${d.id}`),
-    } };
+    };
     const a = { id: 'a' };
     const b = { id: 'b' };
 
-    vm.playback = { playing: true, detectionId: 'a' };
+    globalThis.__playerHost.playback = { playing: true, detectionId: 'a' };
     assert.equal(vm.isPlayingDetection(a), true);
     assert.equal(vm.isPlayingDetection(b), false);
     vm.playDetection(a);
@@ -1331,16 +1343,34 @@ await test('the row under the playhead is the transport: ⏸ pauses, ▶ resumes
     // Paused inside tune A: A shows ▶ again, and tapping it resumes rather
     // than jumping back to the tune's start.
     calls.length = 0;
-    vm.playback = { playing: false, detectionId: 'a' };
+    globalThis.__playerHost.playback = { playing: false, detectionId: 'a' };
     assert.equal(vm.isPlayingDetection(a), false);
     vm.playDetection(a);
     assert.deepEqual(calls, ['toggle']);
 
     // With no transport row (nothing playable yet), every row starts its tune.
     calls.length = 0;
-    vm.playback = { playing: true, detectionId: null };
+    globalThis.__playerHost.playback = { playing: true, detectionId: null };
     vm.playDetection(a);
     assert.deepEqual(calls, ['tune:a']);
+});
+
+await test('leaving the page parks the shared player instead of stopping it', async () => {
+    // Opening a tune's score is a route change that destroys this view. The
+    // player used to live here and died with it, stopping the recording
+    // mid-tune; now the view only lends it a place on screen.
+    const { vm, component, settle } = await mountView();
+    await settle();
+    const host = globalThis.__playerHost;
+    host.sessionId = '';
+    vm.$refs = { playerSlot: {} };
+    Object.defineProperty(vm, 'audioSessionId', { get: () => 'session-a', configurable: true });
+    vm._placePlayer();
+    assert.equal(host.sessionId, 'session-a');
+    assert.equal(host.shown, true);
+    component.beforeDestroy.call(vm);
+    assert.equal(host.shown, false, 'parked');
+    assert.equal(host.sessionId, 'session-a', 'and still on the same recording, so it keeps playing');
 });
 
 await rm(tmpDir, { recursive: true, force: true });

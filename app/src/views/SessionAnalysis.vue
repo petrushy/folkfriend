@@ -427,13 +427,11 @@
             </h2>
             <!-- Transport and timeline FIRST. Backup is housekeeping; playing
                  the evening back is what the card is for. -->
-            <SessionAudioPlayer
-                ref="audioPlayer"
-                :session-id="audioSessionId"
-                :detections="activeDetections"
-                :listening="viewMode === 'live' && live.capturing"
-                @playback="playback = $event"
-            />
+            <!-- The player itself lives in App.vue so that playback survives
+                 leaving this page (opening a tune's score is a route change).
+                 This is where it is shown while the page is on screen; see
+                 sessionPlayerHost.js. -->
+            <div ref="playerSlot" />
             <v-expansion-panels v-model="storagePanel" flat class="mt-3">
                 <v-expansion-panel>
                     <!-- Collapsed, but never silent: the backup state travels
@@ -610,7 +608,7 @@ import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
 import LiveScoreFollow from '@/components/LiveScoreFollow.vue';
 import DropboxBackup from '@/components/DropboxBackup.vue';
-import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
+import { playerHost, sessionPlayer, showPlayerIn, parkPlayer } from '@/services/sessionPlayerHost.js';
 import { backupStatus, sessionConflictMessage } from '@/services/dropbox.js';
 import sessionRecorder from '@/services/sessionRecorder.js';
 import { listManifests, playbackReadManifest, reclaimOrphans } from '@/services/sessionAudioStore.js';
@@ -665,7 +663,7 @@ const emptyLiveState = () => ({
 
 export default {
     name: 'SessionAnalysisView',
-    components: { VolumeMeter, LiveScoreFollow, SessionAudioPlayer, DropboxBackup },
+    components: { VolumeMeter, LiveScoreFollow, DropboxBackup },
     data() {
         return {
             dragActive: false,
@@ -716,7 +714,6 @@ export default {
             },
             // What the recording player reports: whether it is playing, and
             // which tune the playhead is in. Drives the per-row ▶/⏸.
-            playback: { playing: false, detectionId: null },
             // Session ids known to have a recording, so the picker can mark
             // them and the player is only mounted when there is something to
             // play. Read from the audio manifests rather than from the session
@@ -799,6 +796,10 @@ export default {
                 : 'Record this session\'s audio (unavailable)';
         },
         // The player resolves local audio first, then the connected Dropbox copy.
+        // What the shared player reports, for the ▶/⏸ on each row.
+        playback() {
+            return playerHost.playback;
+        },
         audioSessionId() {
             const session = this.activeSession;
             if (!session || !session.id) return '';
@@ -986,7 +987,19 @@ export default {
         this._initialise();
         eventBus.$emit('parentViewActivated');
     },
+    mounted() {
+        this._placePlayer();
+    },
+    // After every render, because the recording card is conditional: when it
+    // appears the player moves in, and when it goes the player has to be
+    // taken out again before it is lost with the card's DOM.
+    updated() {
+        this._placePlayer();
+    },
     beforeDestroy() {
+        // Parked, never stopped: leaving this page is not a request to stop
+        // listening to the recording.
+        parkPlayer();
         this._pcm = null;
         this._destroyed = true;
         store.state.sessionWorkspace = this.selectedSession && (this.viewMode === 'history' || this.pendingSessionPatch) ? {
@@ -1648,10 +1661,28 @@ export default {
             return this.playback.playing && this.isCurrentDetection(detection);
         },
         playDetection(detection) {
-            const player = this.$refs.audioPlayer;
+            const player = sessionPlayer();
             if (!player) return;
             if (this.isCurrentDetection(detection)) player.togglePlay();
             else player.playTune(detection);
+        },
+
+        // Hands the shared player what this page shows, and puts it on screen.
+        //
+        // The session is only ever SET here, never cleared on the way out: a
+        // player whose session is blanked when the page goes away is exactly
+        // the stop this replaced. A different session on screen does replace
+        // it, as it did when the player lived in this page.
+        _placePlayer() {
+            const slot = this.$refs && this.$refs.playerSlot;
+            if (slot) {
+                playerHost.sessionId = this.audioSessionId;
+                playerHost.detections = this.activeDetections;
+                playerHost.listening = this.viewMode === 'live' && this.live.capturing;
+                showPlayerIn(slot);
+            } else if (playerHost.shown) {
+                parkPlayer();
+            }
         },
 
         async refreshAudioSessions() {

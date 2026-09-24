@@ -1672,6 +1672,32 @@ but it is inferred, not measured on the device.
 > phone set to silent. That is the usual state of a phone in a pub, and
 > nothing on screen will explain it.
 
+#### Playback keeps going on other pages (September 2026)
+
+With sound finally working, the next report was that playback stopped when a
+tune's score was opened. That is a route change, and the player lived inside
+the Session Analysis view, so the view, the player and its `<audio>` element
+were all destroyed with it.
+
+**There is now ONE player, owned by `App.vue` for the life of the app**
+(`services/sessionPlayerHost.js`). The view borrows it: `_placePlayer()` (run
+in `mounted` and `updated`) hands it the session, detections and listening
+state and moves its element into the recording card's `playerSlot`.
+`parkPlayer()` moves it back into a hidden holder in `App.vue` when the view
+is destroyed, or when the card goes away. A mini player at the bottom of every
+other page pauses, resumes or closes it, and returns to the session.
+
+- **Moving the element does not pause it.** The HTML spec pauses a media
+  element only if it is still out of the document at the next stable state.
+  `appendChild` is an atomic move, and both removal paths (the route change and
+  the card's `v-if`) put it back in the same task.
+- **The session is set by the view and never cleared on the way out.** Clearing
+  it on destroy would be exactly the stop this replaced; a test pins it.
+- **Why not `<keep-alive>` on the view:** the view does real work on
+  entry and exit (the `?follow=1` auto-start, saving `sessionWorkspace`,
+  cancelling file analysis on navigation), and caching it would silently
+  change all of it. Keeping only the player alive changes nothing else.
+
 #### A read of the whole chain (September 2026)
 
 Asked for after the third field failure in a row. Three defects found, each
