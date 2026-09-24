@@ -969,6 +969,62 @@ await test('the check reports a missing piece and a backup it could not reach', 
     assert.match(report.cloud.state, /unavailable: offline/);
 });
 
+// The device that did not make the recording has no manifest or segments of
+// its own and plays everything from the backup. That was the iPhone all along.
+async function backupOnlyRecording() {
+    await seedTwoSegments();
+    const manifest = await store.readManifest('s1');
+    const segments = [];
+    for (const meta of manifest.segments) {
+        const record = await store.readSegment('s1', meta.index);
+        segments.push({ ...meta, chunks: record.chunks, blob: record.blob });
+    }
+    await resetAll();
+    return { manifest, segments };
+}
+
+await test('a backup copy that cannot be read is reported as that, never as "missing"', async () => {
+    const { manifest, segments } = await backupOnlyRecording();
+    store.configureCloudAudio({
+        manifest: async () => manifest,
+        segment: async (id, index) => {
+            const seg = segments.find(s => s.index === index);
+            return index === 1 ? { ...seg, blob: damagedBlob(seg.blob, 2) } : seg;
+        },
+    });
+    try {
+        const first = await store.buildClip('s1', 0, 3, manifest);
+        assert.equal(await first.blob.text(), 'H0a1a2', 'a readable piece plays');
+        await assert.rejects(store.buildClip('s1', 4, 6, manifest), e =>
+            e.code === 'unreadable' && /backed-up audio for this part could not be read/.test(e.message));
+    } finally {
+        store.configureCloudAudio(null);
+    }
+});
+
+await test('the check on a device with no copy of its own inspects the backup it plays from', async () => {
+    const { manifest, segments } = await backupOnlyRecording();
+    store.configureCloudAudio({
+        manifest: async () => manifest,
+        segment: async () => { throw new Error('the check must not download'); },
+        cached: async (id, index) => (index === 0
+            ? { payload: await segments[0].blob.arrayBuffer(), mimeType: 'audio/mp4' }
+            : null),
+    });
+    let report;
+    try {
+        report = await store.inspectRecording('s1');
+    } finally {
+        store.configureCloudAudio(null);
+    }
+    assert.equal(report.source, 'backup');
+    assert.equal(report.manifest.state, 'backup');
+    assert.equal(report.cloud.listed, 2);
+    assert.equal(report.segments[0].stored, 'cached bytes');
+    assert.equal(report.segments[0].readableBytes, report.segments[0].size);
+    assert.equal(report.segments[1].stored, 'not cached');
+});
+
 await test('the check on a session with no recording says so rather than failing', async () => {
     await resetAll();
     const report = await store.inspectRecording('nothing-here');

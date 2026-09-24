@@ -313,20 +313,24 @@ export async function remoteManifest(id) {
     } catch (e) { report(e, id); throw e; }
 }
 // A cache entry as a segment with a readable Blob, or null to download again.
-// Entries written before the cache stored bytes hold a Blob, which WebKit may
-// no longer be able to read.
-async function cachedSegment(entry) {
-    if (!entry) return null;
-    if (entry.data) {
-        const { data, ...rest } = entry;
-        return { ...rest, blob: asBlob(data, entry.mimeType) };
-    }
-    if (!entry.blob) return null;
-    try { await entry.blob.slice(0, 16).arrayBuffer(); return entry; } catch (e) { return null; }
+//
+// Entries written before the cache stored bytes hold a Blob, and those are
+// NEVER trusted, however they probe. This cache is where the iPhone's playback
+// failures actually lived: a device that did not make the recording plays it
+// entirely from here, and a WebKit Blob stored in IndexedDB can read at its
+// start and fail further in — so a partial probe passed, the first minute
+// played, and every later clip failed. Re-downloading one segment costs about
+// a megabyte and a hash check; trusting a Blob that may be unreadable costs the
+// recording.
+function cachedSegment(entry, meta) {
+    if (!entry || !entry.data) return null;
+    if (meta && meta.bytes && entry.data.byteLength !== meta.bytes) return null;
+    const { data, ...rest } = entry;
+    return { ...rest, blob: asBlob(data, entry.mimeType) };
 }
 const cachedSize = entry => (entry && (entry.data ? entry.data.byteLength : entry.blob && entry.blob.size)) || 0;
 
-async function remoteSegment(id, index) {
+export async function remoteSegment(id, index) {
     const requestedAccount = account;
     const manifest = await remoteManifest(id);
     if (!manifest) return null;
@@ -334,8 +338,11 @@ async function remoteSegment(id, index) {
     if (!meta) return null;
     const cacheKey = `${cachePrefix}${account}:${id}:${meta.contentHash}`;
     const cached = await get(cacheKey);
-    const hit = cached && await cachedSegment(cached.segment);
+    const hit = cached && cachedSegment(cached.segment, meta);
     if (hit) { await set(cacheKey, { ...cached, used: Date.now() }).catch(() => {}); return hit; }
+    // An entry this build will not use is dropped, not left to be misread by
+    // anything else that looks in the cache. The download below replaces it.
+    if (cached) await del(cacheKey).catch(() => {});
     try {
         const segment = await downloadSegment(client, manifest, index);
         if (account !== requestedAccount || !dropboxState.enabled) throw new Error('Dropbox connection changed. Open the session again.');
@@ -561,8 +568,23 @@ export async function resolveSessionConflict(id, keep = 'local') {
     retryAt = 0;
     return syncDropbox(true);
 }
+// What this device has cached of one backed-up segment, for the recording
+// check: the stored payload itself (bytes, or a legacy Blob) or null. Reads
+// only IndexedDB — the backup's manifest is usually cached too, and nothing is
+// downloaded either way.
+export async function cachedSegmentPayload(id, index) {
+    const manifest = await remoteManifest(id);
+    const meta = manifest && manifest.segments.find(s => s.index === index);
+    if (!meta) return null;
+    const cached = await get(`${cachePrefix}${account}:${id}:${meta.contentHash}`);
+    const entry = cached && cached.segment;
+    if (!entry) return null;
+    return { payload: entry.data || entry.blob || null, mimeType: entry.mimeType || '' };
+}
+
 export function startDropbox() {
-    configureCloudAudio({ manifest: remoteManifest, segment: remoteSegment, remove: removeDropboxCopyIfPresent });
+    configureCloudAudio({ manifest: remoteManifest, segment: remoteSegment, remove: removeDropboxCopyIfPresent,
+        cached: cachedSegmentPayload });
     const schedule = () => syncDropbox();
     // Listens to the recorder's event (a segment landed, so there is something
     // new to back up) but announces itself on its own — see changed().
