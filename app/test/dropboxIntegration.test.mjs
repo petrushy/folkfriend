@@ -49,7 +49,14 @@ class FakeClient {
         if (!f) return null;
         this.files.delete(from); this.files.set(to, f); this.moves.push([from, to]); return f;
     }
+    downloads = 0;
     async request(endpoint, args) {
+        if (endpoint === 'files/download') {
+            const file = this.files.get(args.path);
+            if (!file) throw new DropboxError('Not found.', 'missing');
+            this.downloads++;
+            return { blob: file.blob, metadata: {} };
+        }
         if (endpoint === 'files/delete_v2') {
             const { path } = args;
             this.deletes.push(path);
@@ -683,3 +690,36 @@ await test('unreadable or unknown deletion markers never authorize cleanup', asy
     assert.deepEqual(f.client.deletes, []);
     assert.ok(f.client.files.has('/sessions/s1/audio-manifest.json'));
 });
+
+// The device that did NOT make a recording plays it entirely from here, so a
+// download cache that stores something unreadable is the whole failure. On an
+// iPhone that is what happened: cached WebKit Blobs read at their start and
+// failed further in, so the first minute played and every later clip reported
+// its audio missing.
+await test('a cached download stored as a Blob is never trusted: it is fetched again and re-cached as bytes', async () => {
+    const { f, api } = await load(); await api.syncDropbox(true);
+    const manifest = await api.remoteManifest('s1');
+    const meta = manifest.segments[0];
+    const cacheKey = `dropboxCache:account-1:s1:${meta.contentHash}`;
+    const fail = async () => { const e = new Error('The I/O read operation failed.'); e.name = 'NotReadableError'; throw e; };
+    // Readable at its start, as the device's were — a probe would pass.
+    const legacy = { size: meta.bytes, type: 'audio/mp4', arrayBuffer: fail, text: fail,
+        slice: (a = 0, b = meta.bytes) => (a < 4 ? new Blob(['head'.slice(a, b)]) : legacy) };
+    f.db.set(cacheKey, { segment: { ...meta, sessionId: 's1', blob: legacy }, used: 0 });
+    const legacyPayload = await api.cachedSegmentPayload('s1', 0);
+    assert.equal(legacyPayload.payload, legacy, 'the check can see what is cached, format and all');
+
+    const downloadsBefore = f.client.downloads;
+    const segment = await api.remoteSegment('s1', 0);
+    assert.equal(f.client.downloads, downloadsBefore + 1, 'the Blob entry was not used');
+    assert.equal(await segment.blob.text(), 'headerpayload');
+    await new Promise(resolve => setTimeout(resolve, 20));
+    const entry = f.db.get(cacheKey);
+    assert.ok(entry.segment.data instanceof ArrayBuffer && !entry.segment.blob, 're-cached as bytes');
+
+    const again = await api.remoteSegment('s1', 0);
+    assert.equal(f.client.downloads, downloadsBefore + 1, 'and the bytes entry is used from then on');
+    assert.equal(await again.blob.text(), 'headerpayload');
+});
+console.log(`${passed} Dropbox coordinator tests passed in total`);
+

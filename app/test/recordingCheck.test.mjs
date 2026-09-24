@@ -88,6 +88,30 @@ test('no recording on this device is its own answer', () => {
     assert.match(s.verdict, /no recording/);
 });
 
+test('a recording played from the backup says so, and is not called missing', () => {
+    const r = report([
+        good(0, { stored: 'cached bytes' }),
+        good(1, { stored: 'not cached', size: 0, readableBytes: 0, shape: '' }),
+        good(2, { stored: 'cached blob' }),
+    ]);
+    r.source = 'backup';
+    r.manifest.state = 'backup';
+    const s = summariseCheck(r);
+    assert.equal(s.level, 'info');
+    assert.match(s.verdict, /no copy of its own: it plays this recording from the Dropbox backup \(3 pieces, 2 downloaded/);
+    assert.match(s.verdict, /1 downloaded piece is in the old format/);
+    const text = formatCheckReport(r);
+    assert.match(text, /Stored on this device: no \(played from the Dropbox backup\)/);
+    assert.match(text, /#1 · part 1 · 3:00 · not cached · 1 kB in backup/);
+    assert.doesNotMatch(text, /no recording/);
+});
+
+test('no local copy and an unreachable backup names the backup state', () => {
+    const s = summariseCheck({ manifest: { state: 'absent' }, segments: [],
+        cloud: { configured: true, state: 'unavailable: offline' } });
+    assert.match(s.verdict, /Dropbox backup: unavailable: offline/);
+});
+
 test('the report text carries what is needed to diagnose it remotely', () => {
     const text = formatCheckReport(report([good(0), broken(1)]),
         { appVersion: '3.13.1', userAgent: 'iPhone test', canPlay: 'audio/mp4 maybe' });

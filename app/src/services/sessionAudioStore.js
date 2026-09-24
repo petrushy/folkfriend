@@ -869,6 +869,12 @@ function unreadableAudio(what, triedCloud) {
     return error;
 }
 
+function unreadableBackup(what) {
+    const error = new Error(`The backed-up audio for this part could not be read on this device (${what}).`);
+    error.code = 'unreadable';
+    return error;
+}
+
 // The first bytes of an assembled clip, or null if they cannot be read.
 async function readHead(parts) {
     try {
@@ -947,6 +953,7 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         // Missing here, or here and unreadable: either way a backed-up copy is
         // the audio, and it is verified against its hash on the way in.
         let triedCloud = false;
+        let cloudFailure = null;
         if (!segment && cloudAudio) {
             triedCloud = true;
             let remote = null;
@@ -965,11 +972,21 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
                     segment = remote;
                     bytes = read.bytes;
                     if (failure) healSegment(sessionId, meta.index, remote.blob);
+                } else {
+                    // Said, not dropped: a backup copy that cannot be read
+                    // presented as "that part of the recording is missing",
+                    // which is exactly how the last round of this was hidden.
+                    failure = failure || read.error;
+                    cloudFailure = read.error;
                 }
             }
         }
         if (!segment && failure) {
-            if (!parts.length) throw unreadableAudio(failure, triedCloud);
+            if (!parts.length) {
+                throw cloudFailure && !(local && local.unreadable)
+                    ? unreadableBackup(cloudFailure)
+                    : unreadableAudio(failure, triedCloud);
+            }
             break;
         }
         // A segment the manifest names but that is not on disk means an
@@ -1114,6 +1131,87 @@ async function inspectPayload(value, type) {
     };
 }
 
+async function inspectBackupOnly(sessionId, report, onProgress) {
+    let remote;
+    try {
+        remote = await cloudAudio.manifest(sessionId);
+    } catch (e) {
+        report.cloud.state = `unavailable: ${(e && e.message) || e}`;
+        return report;
+    }
+    if (!remote || !Array.isArray(remote.segments)) {
+        report.cloud.state = 'not backed up';
+        return report;
+    }
+    report.source = 'backup';
+    report.cloud.state = 'ok';
+    report.cloud.listed = remote.segments.length;
+    report.manifest = {
+        state: 'backup',
+        mimeType: remote.mimeType || '',
+        bitsPerSecond: remote.bitsPerSecond || 0,
+        totalSeconds: remote.totalSeconds || 0,
+        bytes: remote.bytes || 0,
+        finalized: !!remote.finalizedAt,
+        stopped: remote.stopped ? (remote.stopped.reason || 'yes') : null,
+    };
+    for (const track of (remote.tracks || []).slice().sort((a, b) => a.index - b.index)) {
+        report.tracks.push({
+            index: track.index,
+            startSeconds: track.startSeconds || 0,
+            durationSeconds: track.durationSeconds || 0,
+            mimeType: track.mimeType || '',
+            channels: track.channels || null,
+            init: await inspectPayload(track.init, track.mimeType || remote.mimeType),
+        });
+    }
+    const metas = remote.segments.slice().sort((a, b) => a.index - b.index);
+    for (let i = 0; i < metas.length; i++) {
+        const meta = metas[i];
+        if (onProgress) onProgress(i, metas.length);
+        const entry = {
+            index: meta.index,
+            trackIndex: meta.trackIndex,
+            startSeconds: meta.startSeconds,
+            durationSeconds: meta.durationSeconds,
+            expectedBytes: meta.bytes || 0,
+            inCloud: true,
+        };
+        let cached = null;
+        try {
+            cached = typeof cloudAudio.cached === 'function'
+                ? await cloudAudio.cached(sessionId, meta.index) : null;
+        } catch (e) {
+            report.segments.push({ ...entry, stored: 'cache unreadable', size: 0, readableBytes: 0,
+                error: (e && (e.name || e.message)) || String(e), shape: '' });
+            continue;
+        }
+        if (!cached || !cached.payload) {
+            report.segments.push({ ...entry, stored: 'not cached', size: 0, readableBytes: 0, error: null, shape: '' });
+            continue;
+        }
+        const payload = await inspectPayload(cached.payload, cached.mimeType);
+        report.segments.push({ ...entry, ...payload,
+            stored: payload.stored === 'bytes' ? 'cached bytes' : 'cached blob' });
+    }
+    if (onProgress) onProgress(metas.length, metas.length);
+    await addStorage(report);
+    return report;
+}
+
+async function addStorage(report) {
+    if (typeof navigator === 'undefined' || !navigator.storage) return;
+    const storage = {};
+    try {
+        const { usage, quota } = await navigator.storage.estimate();
+        Object.assign(storage, { usage, quota });
+    } catch (e) { /* not reported */ }
+    try {
+        if (navigator.storage.persisted) storage.persisted = await navigator.storage.persisted();
+    } catch (e) { /* not reported */ }
+    report.storage = storage;
+}
+
 export async function inspectRecording(sessionId, { onProgress = null } = {}) {
     const report = {
         sessionId,
@@ -1121,12 +1219,19 @@ export async function inspectRecording(sessionId, { onProgress = null } = {}) {
         manifest: null,
         tracks: [],
         segments: [],
-        cloud: { configured: !!cloudAudio, state: 'not configured', listed: 0 },
+        cloud: { configured: !!cloudAudio, state: cloudAudio ? 'not checked' : 'not connected', listed: 0 },
         storage: null,
     };
 
     const probe = await probeManifest(sessionId);
     report.manifest = { state: probe.state };
+    report.source = 'local';
+    // No copy of its own is the ordinary state for a device that did not make
+    // the recording — it plays entirely from the backup, through the download
+    // cache. Stopping here said "no recording" about audio that was playing.
+    if (probe.state === 'absent' && cloudAudio) {
+        return inspectBackupOnly(sessionId, report, onProgress);
+    }
     if (probe.state !== 'ok') return report;
     const manifest = probe.manifest;
     Object.assign(report.manifest, {
@@ -1202,17 +1307,6 @@ export async function inspectRecording(sessionId, { onProgress = null } = {}) {
         });
     }
     if (onProgress) onProgress(metas.length, metas.length);
-
-    if (typeof navigator !== 'undefined' && navigator.storage) {
-        const storage = {};
-        try {
-            const { usage, quota } = await navigator.storage.estimate();
-            Object.assign(storage, { usage, quota });
-        } catch (e) { /* not reported */ }
-        try {
-            if (navigator.storage.persisted) storage.persisted = await navigator.storage.persisted();
-        } catch (e) { /* not reported */ }
-        report.storage = storage;
-    }
+    await addStorage(report);
     return report;
 }

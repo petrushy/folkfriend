@@ -8,7 +8,11 @@
 
 // A segment that could be played from this device as it stands.
 export function segmentReadable(segment) {
+    // Played from the backup: nothing cached here is not a fault, it is
+    // downloaded on demand.
+    if (segment.stored === 'not cached') return true;
     return segment.stored !== 'missing' && segment.stored !== 'unreadable record' &&
+        segment.stored !== 'cache unreadable' &&
         !segment.error && segment.size > 0 && segment.readableBytes >= segment.size &&
         (!segment.expectedBytes || segment.size === segment.expectedBytes);
 }
@@ -24,6 +28,22 @@ export function summariseCheck(report) {
 
     let level;
     let verdict;
+    if (report.source === 'backup') {
+        const cached = segments.filter(s => s.stored !== 'not cached').length;
+        const stale = segments.filter(s => s.stored === 'cached blob').length;
+        const badCache = segments.filter(s => s.stored !== 'not cached' && s.stored !== 'cached blob' &&
+            !segmentReadable(s)).length;
+        level = badCache ? 'warning' : 'info';
+        verdict = `This device has no copy of its own: it plays this recording from the Dropbox backup ` +
+            `(${segments.length} pieces, ${cached} downloaded to this device).`;
+        if (stale) {
+            verdict += ` ${stale} downloaded ${stale === 1 ? 'piece is' : 'pieces are'} in the old format, ` +
+                'which this device cannot always read; they are downloaded again when played.';
+        }
+        if (badCache) verdict += ` ${badCache} downloaded ${badCache === 1 ? 'piece' : 'pieces'} could not be read.`;
+        return { level, verdict, total: segments.length, bad: stale + badCache, recoverable: stale + badCache,
+            lost: 0, tracksBad: 0, legacy: stale };
+    }
     if (!report.manifest || report.manifest.state !== 'ok') {
         level = 'error';
         verdict = {
@@ -31,6 +51,9 @@ export function summariseCheck(report) {
             unreadable: 'The recording\'s index could not be read on this device.',
             unsupported: 'This recording was saved by a newer version of the app.',
         }[report.manifest && report.manifest.state] || 'The recording could not be checked.';
+        if (report.manifest && report.manifest.state === 'absent' && report.cloud && report.cloud.configured) {
+            verdict += ` Dropbox backup: ${report.cloud.state}.`;
+        }
     } else if (!segments.length) {
         level = 'info';
         verdict = 'The recording has no saved audio yet.';
@@ -72,7 +95,11 @@ const kb = n => `${Math.round((n || 0) / 1024)} kB`;
 
 export function segmentLine(s) {
     const parts = [`#${s.index}`, `part ${s.trackIndex + 1}`, clock(s.startSeconds), s.stored];
-    if (s.stored !== 'missing' && s.stored !== 'unreadable record') {
+    if (s.stored === 'not cached') {
+        parts.push(`${kb(s.expectedBytes)} in backup`);
+        return parts.join(' · ');
+    }
+    if (s.stored !== 'missing' && s.stored !== 'unreadable record' && s.stored !== 'cache unreadable') {
         parts.push(kb(s.size));
         if (s.expectedBytes && s.size !== s.expectedBytes) parts.push(`expected ${kb(s.expectedBytes)}`);
     }
@@ -103,7 +130,8 @@ export function formatCheckReport(report, env = {}) {
     lines.push('', summary.verdict, '');
 
     const m = report.manifest || {};
-    if (m.state === 'ok') {
+    if (m.state === 'ok' || m.state === 'backup') {
+        if (m.state === 'backup') lines.push('Stored on this device: no (played from the Dropbox backup)');
         lines.push(`Recording: ${m.mimeType || 'unknown format'}, ` +
             `${m.bitsPerSecond ? Math.round(m.bitsPerSecond / 1000) + ' kbps, ' : ''}` +
             `${clock(m.totalSeconds)}, ${kb(m.bytes)}` +
@@ -121,7 +149,7 @@ export function formatCheckReport(report, env = {}) {
             `${st.quota != null ? kb(st.quota) : '?'}` +
             `${st.persisted === true ? ', protected' : st.persisted === false ? ', not protected' : ''}`);
     }
-    if (summary.legacy) {
+    if (summary.legacy && report.source !== 'backup') {
         lines.push(`${summary.legacy} ${summary.legacy === 1 ? 'piece is' : 'pieces are'} ` +
             'stored in the older format (a browser file reference).');
     }

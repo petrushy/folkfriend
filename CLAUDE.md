@@ -1573,6 +1573,42 @@ playback will fetch from the backup unless the backup is confirmed to hold
 every unreadable piece; an unreachable backup counts as not covered. If a fresh recording made after this still fails
 the same way, the bytes really are the problem and this was not it.
 
+#### The iPhone never had the recording — it was the Dropbox cache all along (September 2026)
+
+The first copyable check report from the device settled it: *"This device holds
+no recording for this session"*. The session was recorded on another device, so
+**the iPhone had no manifest and no segments of its own and played everything
+from the Dropbox backup**, through `remoteSegment`'s download cache in
+IndexedDB. That cache stored each downloaded segment **as a Blob** — the same
+WebKit hazard fixed for local segments two rounds earlier, in the one place
+those fixes never reached. Every symptom in this section fits: no container
+shape (the first bytes could not be read), the channel probe failing, and
+finally *"That part of the recording is missing"* past the first minute — the
+legacy cache entry passed a 16-byte probe, `readRange` then failed on it, and
+the failure was recorded only for LOCAL reads, so the loop fell through to
+"missing".
+
+- **A cached Blob is never trusted** (`cachedSegment`): only a bytes entry of
+  the manifest's size is used; anything else is deleted and downloaded again —
+  about a megabyte and a hash check per segment, once.
+- **A backup copy that cannot be read says so** (`unreadableBackup`) rather than
+  reading as a missing part.
+- **The check covers a device with no copy of its own**: it inspects the backup
+  manifest and what this device has cached of each piece (`cached bytes` /
+  `cached blob` / `not cached`), via the provider's `cached()`, without
+  downloading. It also stopped printing "Dropbox: not configured" when it had
+  merely not looked.
+
+> **Rule: a device that did not make a recording plays it through a different
+> store.** Any fix to how audio is stored or read has to reach the download
+> cache too — and a diagnostic that stops at "no local copy" is looking in the
+> wrong place for exactly the device most likely to be reporting a problem.
+
+⚠️ `backupStatus()` still reads **"Local only"** for a session this device only
+has in the backup, because per-session statuses are set by the upload loop,
+which skips sessions with no local audio. The label is wrong for this case and
+is not yet fixed.
+
 #### A read of the whole chain (September 2026)
 
 Asked for after the third field failure in a row. Three defects found, each
