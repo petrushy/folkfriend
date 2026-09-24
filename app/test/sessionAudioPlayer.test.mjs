@@ -1243,5 +1243,104 @@ await test('a check that throws says the CHECK failed, not the recording', async
     assert.equal(vm.checkSummary, null);
 });
 
+console.log('\nSessionAudioPlayer — where the element puts a clip');
+
+// Reported from an iPhone: tunes near a part's start play, later ones run the
+// clock in silence. The data had downloaded and read perfectly. Seeking by the
+// TRACK's timeline into a clip the browser has rebased to zero lands past the
+// end of the audio, and that looks exactly like this.
+function fakeElement({ duration, buffered = null }) {
+    const seeks = [];
+    return {
+        seeks,
+        seekable: { length: 1, start: () => 0, end: () => duration },
+        buffered: buffered
+            ? { length: 1, start: () => buffered[0], end: () => buffered[1] }
+            : { length: 0 },
+        duration,
+        load() {},
+        set currentTime(v) { seeks.push(v); },
+        get currentTime() { return seeks[seeks.length - 1] || 0; },
+    };
+}
+const LATE_CLIP = {
+    blob: new Blob(['audio']), mimeType: 'audio/mp4',
+    startSeconds: 1800, endSeconds: 1980, trackStartSeconds: 600,
+};
+const LATE_SEGMENT = { index: 9, trackIndex: 1, startSeconds: 1800, durationSeconds: 180 };
+
+await test('a clip the browser rebased to zero is sought within itself', async () => {
+    const vm = await mountPlayer(GAPPY);
+    vm.$refs.audio = fakeElement({ duration: 180 });     // the clip's own length
+    store.__setClip(LATE_CLIP);
+    await vm._loadSegment(LATE_SEGMENT, 1850, false);
+    vm.onLoadedMetadata();
+    assert.equal(vm.timelineMode, 'clip');
+    assert.equal(vm.$refs.audio.seeks.at(-1), 50, '50 s into the clip, not 1250 s into the part');
+    vm.$refs.audio.currentTime = 60;
+    vm.onTimeUpdate();
+    assert.equal(vm.currentSeconds, 1860, 'and the clock reads session time');
+});
+
+await test('buffered data from zero does NOT mean rebased (measured in Chromium)', async () => {
+    // A real MediaRecorder MP4 clip 6 s into a part, in Chromium: duration
+    // 7.25 — the part's reach — and buffered [0, 7.25]. Reading "buffered
+    // starts at zero" as rebased would have broken every Chrome seek.
+    const vm = await mountPlayer(GAPPY);
+    vm.$refs.audio = fakeElement({ duration: 1380, buffered: [0, 1380] });
+    store.__setClip(LATE_CLIP);
+    await vm._loadSegment(LATE_SEGMENT, 1850, false);
+    vm.onLoadedMetadata();
+    assert.equal(vm.timelineMode, 'track');
+    assert.equal(vm.$refs.audio.seeks.at(-1), 1250);
+});
+
+await test('with no evidence either way the track timeline is kept, and says it was assumed', async () => {
+    const vm = await mountPlayer(GAPPY);
+    vm.$refs.audio = fakeElement({ duration: Infinity });
+    store.__setClip(LATE_CLIP);
+    await vm._loadSegment(LATE_SEGMENT, 1850, false);
+    vm.onLoadedMetadata();
+    assert.equal(vm.timelineMode, 'track (assumed)');
+    assert.equal(vm.$refs.audio.seeks.at(-1), 1250);
+});
+
+await test('a clip on the track\'s own timeline is still sought by the track (Chromium)', async () => {
+    const vm = await mountPlayer(GAPPY);
+    vm.$refs.audio = fakeElement({ duration: 1380, buffered: [1200, 1380] });
+    store.__setClip(LATE_CLIP);
+    await vm._loadSegment(LATE_SEGMENT, 1850, false);
+    vm.onLoadedMetadata();
+    assert.equal(vm.timelineMode, 'track');
+    assert.equal(vm.$refs.audio.seeks.at(-1), 1250);
+});
+
+await test('an interrupted audio graph (iOS) is resumed on play, not left silent', async () => {
+    resetAudioEnv();
+    const vm = await mountPlayer(GAPPY);
+    const ctx = new FakeAudioContext();
+    ctx.state = 'interrupted';
+    vm._audioCtx = ctx;
+    vm._mixNode = new FakeGain();
+    vm._resumeGraph();
+    await settle();
+    assert.equal(ctx.resumeCalls, 1);
+    assert.equal(ctx.state, 'running');
+    assert.equal(vm.channelRepairStalled, false);
+});
+
+await test('the check report carries the player\'s state', async () => {
+    const vm = await mountPlayer(GAPPY);
+    assert.match(vm.playbackDiagnostics()[0], /No clip loaded/);
+    vm.$refs.audio = fakeElement({ duration: 180 });
+    store.__setClip(LATE_CLIP);
+    await vm._loadSegment(LATE_SEGMENT, 1850, false);
+    vm.onLoadedMetadata();
+    const text = vm.playbackDiagnostics().join('\n');
+    assert.match(text, /timeline: clip, origin 1800\.0 s/);
+    assert.match(text, /last seek: to 1850\.0 s → element 50\.0 s, landed at 50\.0 s/);
+    assert.match(text, /audio graph: none/);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

@@ -154,6 +154,9 @@ export function formatCheckReport(report, env = {}) {
             'stored in the older format (a browser file reference).');
     }
 
+    if (env.playback && env.playback.length) {
+        lines.push('', 'Playback (the clip last loaded):', ...env.playback);
+    }
     if ((report.tracks || []).length) {
         lines.push('', 'Parts:');
         for (const t of report.tracks) {

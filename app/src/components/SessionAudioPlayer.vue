@@ -356,6 +356,15 @@ export default {
             // hour in. Seeking as though it began at zero is what made the
             // timeline work near the start of a session and not further in.
             trackStartSeconds: 0,
+            // Where the ELEMENT's time zero sits, in session seconds. The
+            // track's start where the browser honours the fragments' own
+            // timestamps (measured in Chromium), the clip's own start where it
+            // rebases a clip to begin at zero. The two cannot be told apart
+            // from the bytes, only from what the element reports — see
+            // _decideTimeline(). Getting it wrong seeks past the end of the
+            // audio: the clock runs and nothing sounds.
+            clipOriginSeconds: 0,
+            timelineMode: '',
             // Where the browser says the clip's timeline begins. Used only as
             // a floor, never as the origin: Chromium reports 0 for a WebM
             // whose audio starts an hour in, so it cannot answer that question
@@ -866,6 +875,11 @@ export default {
                 this._probeChannels(this.currentTrackIndex);
                 this._applyChannelRepair({ build: false });
                 this.trackStartSeconds = clip.trackStartSeconds || 0;
+                this.clipOriginSeconds = this.trackStartSeconds;
+                this.timelineMode = '';
+                this._clipStartSeconds = clip.startSeconds || 0;
+                this._clipEndSeconds = clip.endSeconds || 0;
+                this._lastSeek = null;
                 this._clipMediaEndSeconds =
                     Math.max(0, clip.endSeconds - (clip.trackStartSeconds || 0));
                 this.driftRatio = 1;
@@ -893,6 +907,7 @@ export default {
                 ? audio.seekable.start(0)
                 : 0;
             this.timelineBase = Number.isFinite(start) ? start : 0;
+            this._decideTimeline(audio);
             this._measureDrift(audio);
             if (this.pendingSeekSeconds !== null) {
                 this._seekWithin(this.pendingSeekSeconds);
@@ -1098,11 +1113,94 @@ export default {
         _seekWithin(targetSeconds) {
             const audio = this.$refs.audio;
             if (!audio) return;
-            // Measured from the TRACK's start, which is where the clip's own
-            // timestamps are measured from.
-            const local = (targetSeconds - this.trackStartSeconds) * this.driftRatio;
-            try { audio.currentTime = Math.max(this.timelineBase, local); } catch (e) { /* not seekable yet */ }
+            // Measured from wherever the element's own timeline starts — the
+            // track's start, or the clip's where the browser rebased it.
+            const local = (targetSeconds - this.clipOriginSeconds) * this.driftRatio;
+            const applied = Math.max(this.timelineBase, local);
+            try { audio.currentTime = applied; } catch (e) { /* not seekable yet */ }
+            this._lastSeek = { target: targetSeconds, applied, landed: audio.currentTime };
             this.currentSeconds = targetSeconds;
+        },
+
+        // Which timeline this clip is on, from what the element reports.
+        //
+        // A clip cut from partway into a track carries that track's
+        // timestamps. Chromium honours them — a clip an hour in plays from an
+        // hour in — and that is what this player was built and measured
+        // against. Reported from an iPhone: tunes near a track's start play,
+        // later ones run the clock in silence. That is what seeking by the
+        // track's timeline into a clip the browser has REBASED to zero looks
+        // like: the seek lands past the end of the audio.
+        //
+        // The evidence is the element's duration: the clip's length says
+        // rebased, the track's reach says not. Buffered data only counts when
+        // it starts at the clip's place on the track (see below). With no
+        // evidence, the measured Chromium behaviour stands, and the check
+        // report shows what the element said so the next step is informed.
+        _decideTimeline(audio) {
+            const intoTrack = this._clipStartSeconds - this.trackStartSeconds;
+            const length = this._clipEndSeconds - this._clipStartSeconds;
+            const tolerance = Math.max(3, 0.1 * length);
+            let mode = '';
+            if (!(intoTrack > tolerance) || !(length > 0)) {
+                mode = 'track';          // the two readings coincide
+            } else {
+                const buffered = audio.buffered;
+                let bufferedStart = null;
+                try {
+                    if (buffered && buffered.length) bufferedStart = buffered.start(0);
+                } catch (e) { /* not available */ }
+                const duration = audio.duration;
+                // Buffered data starting AT the clip's place on the track is
+                // evidence; buffered data starting at zero is NOT. Measured in
+                // Chromium: a clip 6 s into a part reports duration 7.25 (the
+                // part's reach, i.e. track timeline) and buffered [0, 7.25].
+                if (Number.isFinite(bufferedStart) && bufferedStart > tolerance &&
+                    Math.abs(bufferedStart - intoTrack) <= tolerance) {
+                    mode = 'track';
+                } else if (Number.isFinite(duration) && Math.abs(duration - length) <= tolerance) {
+                    mode = 'clip';
+                } else if (Number.isFinite(duration) && Math.abs(duration - (intoTrack + length)) <= tolerance) {
+                    mode = 'track';
+                }
+            }
+            this.timelineMode = mode || 'track (assumed)';
+            if (mode === 'clip') {
+                this.clipOriginSeconds = this._clipStartSeconds;
+                this._clipMediaEndSeconds = length;
+            } else {
+                this.clipOriginSeconds = this.trackStartSeconds;
+            }
+        },
+
+        // The player's state, for the recording check: what the element was
+        // given, where it was told to go, where it went and whether anything
+        // is in the way of sound. Everything a silent-but-running clock could
+        // be, on the one device where there is no console to ask.
+        playbackDiagnostics() {
+            const audio = this.$refs.audio;
+            if (!audio || this.segmentIndex === null) return ['No clip loaded yet — play something first, then check.'];
+            const ranges = r => {
+                try {
+                    return r && r.length
+                        ? Array.from({ length: r.length }, (_, i) => `${r.start(i).toFixed(1)}–${r.end(i).toFixed(1)}`).join(' ')
+                        : 'none';
+                } catch (e) { return 'unavailable'; }
+            };
+            const n = v => (Number.isFinite(v) ? v.toFixed(1) : String(v));
+            const ctx = this._audioCtx;
+            const seek = this._lastSeek;
+            return [
+                `piece #${this.segmentIndex}, part ${(this.currentTrackIndex || 0) + 1}; clip ${n(this._clipStartSeconds)}–${n(this._clipEndSeconds)} s of the session, part starts ${n(this.trackStartSeconds)} s`,
+                `clip ${this.clipMimeType || '?'}, ${Math.round((this.clipBytes || 0) / 1024)} kB, ${this.clipShape || 'shape unknown'}, ${this._clipFromTrackStart ? 'from part start' : `hdr ${this.clipHeaderBytes} B`}`,
+                `timeline: ${this.timelineMode || 'not decided'}, origin ${n(this.clipOriginSeconds)} s, drift ×${n(this.driftRatio)}`,
+                `element: duration ${n(audio.duration)}, now ${n(audio.currentTime)}, seekable ${ranges(audio.seekable)}, buffered ${ranges(audio.buffered)}`,
+                `element: ${audio.paused ? 'paused' : 'playing'}, readyState ${audio.readyState}, networkState ${audio.networkState}, error ${audio.error ? audio.error.code : 'none'}, muted ${!!audio.muted}, volume ${n(audio.volume)}`,
+                seek ? `last seek: to ${n(seek.target)} s → element ${n(seek.applied)} s, landed at ${n(seek.landed)} s` : 'last seek: none',
+                ctx
+                    ? `audio graph: ${ctx.state}, correction ${this.channelRepair ? 'on' : 'off'}${this._mixNode ? `, gain ${n(this._mixNode.gain.value)}, ${this._mixNode.channelCountMode}/${this._mixNode.channelCount}` : ''}`
+                    : 'audio graph: none (plays straight from the element)',
+            ];
         },
 
         // Everything the correction needs doing from a user gesture: build the
@@ -1120,16 +1218,22 @@ export default {
         _resumeGraph() {
             const ctx = this._audioCtx;
             if (!ctx || !this._mixNode) { this.channelRepairStalled = false; return; }
-            if (ctx.state !== 'suspended') { this.channelRepairStalled = false; return; }
+            // Not only 'suspended': iOS has 'interrupted' (a call, Siri, the
+            // lock screen), and a context left there in front of the element
+            // is silence with a running clock.
+            if (ctx.state === 'running' || ctx.state === 'closed') {
+                this.channelRepairStalled = ctx.state === 'closed';
+                return;
+            }
             if (!ctx.resume) { this.channelRepairStalled = true; return; }
             const done = ctx.resume();
             if (done && done.then) {
                 done.then(
-                    () => { this.channelRepairStalled = ctx.state === 'suspended'; },
+                    () => { this.channelRepairStalled = ctx.state !== 'running'; },
                     () => { this.channelRepairStalled = true; },
                 );
             } else {
-                this.channelRepairStalled = ctx.state === 'suspended';
+                this.channelRepairStalled = ctx.state !== 'running';
             }
         },
 
@@ -1246,6 +1350,7 @@ export default {
                 appVersion: ffConfig.FRONTEND_VERSION || '',
                 userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
                 canPlay,
+                playback: this.playbackDiagnostics(),
             };
         },
 
@@ -1289,7 +1394,7 @@ export default {
             if (!audio || this.segmentIndex === null) return;
             // The inverse of the seek, so the clock the user reads and the
             // position the ▶ buttons jump to stay the same scale.
-            this.currentSeconds = this.trackStartSeconds +
+            this.currentSeconds = this.clipOriginSeconds +
                 audio.currentTime / this.driftRatio;
         },
 
