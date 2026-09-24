@@ -1518,6 +1518,36 @@ Dropbox a second download of the whole track — and the two raced on
 `_loadGeneration`, so which clip the element ended up holding was undefined.
 `_retryingFromTrackStart` makes the second one join the first silently.
 
+#### "Format not supported" was really "cannot read the bytes" (September 2026)
+
+From the field, on a track-start clip (`hdr 0 B`): *"format not supported,
+audio/mp4;codecs=mp4a.40.2, 1435 kB"*, and **no container shape** in the
+message, although `describeContainer` had shipped. An empty shape means
+`readHead` could not read the clip's first bytes at all; the channel probe
+failing on the same session ("could not examine the recording's channels") is
+the same fault, seen from a second reader.
+
+**Segments were stored in IndexedDB as `Blob`s.** WebKit stores such a Blob as
+a separate file beside the database, and on iOS that reference can stop being
+readable: the record is there, `size` answers, and every read fails. The media
+element then reports it as an unsupported format, which is why three rounds
+of container work could not fix it.
+
+- **Payloads are stored as `ArrayBuffer`s** (`data` on the segment record, the
+  track's `init` in the manifest, and the Dropbox download cache), which are
+  serialised into the record itself. `readSegment` / `readManifest` rehydrate
+  Blobs, so nothing downstream changed.
+- **Old recordings are still Blobs.** `readSegment` tests a few bytes and
+  returns `{ blob: null, unreadable }` rather than a Blob nothing can read, and
+  `buildClip` then takes that segment (or the track header, from the cloud
+  manifest's `initBase64`) from **Dropbox**, hash-verified.
+- **With no other copy it says so**: an error with `code: 'unreadable'` naming
+  the reason, never a decoder's "format not supported".
+
+⚠️ The WebKit behaviour is inferred from the empty shape plus the failed probe,
+not measured on the device. If a fresh recording made after this still fails
+the same way, the bytes really are the problem and this was not it.
+
 #### A read of the whole chain (September 2026)
 
 Asked for after the third field failure in a row. Three defects found, each

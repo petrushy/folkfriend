@@ -4,7 +4,7 @@ import { get, set, del, keys } from 'idb-keyval';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
 import recorder from '@/services/sessionRecorder.js';
-import { listManifests, readManifest, readSegment, buildClip, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
+import { listManifests, readManifest, readSegment, buildClip, asBlob, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
 import { DropboxClient, DropboxError, base64url } from './dropboxClient.mjs';
 import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateWholeRecordings, validateManifest, validateSession, mayReplaceRemoteSession, sessionPath, deletionPath, deletionRecord, sessionSummary } from './dropboxBackup.mjs';
 
@@ -312,6 +312,20 @@ export async function remoteManifest(id) {
         return playableManifest(manifest);
     } catch (e) { report(e, id); throw e; }
 }
+// A cache entry as a segment with a readable Blob, or null to download again.
+// Entries written before the cache stored bytes hold a Blob, which WebKit may
+// no longer be able to read.
+async function cachedSegment(entry) {
+    if (!entry) return null;
+    if (entry.data) {
+        const { data, ...rest } = entry;
+        return { ...rest, blob: asBlob(data, entry.mimeType) };
+    }
+    if (!entry.blob) return null;
+    try { await entry.blob.slice(0, 16).arrayBuffer(); return entry; } catch (e) { return null; }
+}
+const cachedSize = entry => (entry && (entry.data ? entry.data.byteLength : entry.blob && entry.blob.size)) || 0;
+
 async function remoteSegment(id, index) {
     const requestedAccount = account;
     const manifest = await remoteManifest(id);
@@ -320,7 +334,8 @@ async function remoteSegment(id, index) {
     if (!meta) return null;
     const cacheKey = `${cachePrefix}${account}:${id}:${meta.contentHash}`;
     const cached = await get(cacheKey);
-    if (cached) { await set(cacheKey, { ...cached, used: Date.now() }).catch(() => {}); return cached.segment; }
+    const hit = cached && await cachedSegment(cached.segment);
+    if (hit) { await set(cacheKey, { ...cached, used: Date.now() }).catch(() => {}); return hit; }
     try {
         const segment = await downloadSegment(client, manifest, index);
         if (account !== requestedAccount || !dropboxState.enabled) throw new Error('Dropbox connection changed. Open the session again.');
@@ -330,13 +345,17 @@ async function remoteSegment(id, index) {
             for (const k of await keys()) if (typeof k === 'string' && k.startsWith(cachePrefix)) {
                 const value = await get(k); if (value) entries.push({ k, ...value });
             }
-            let bytes = entries.reduce((n, e) => n + e.segment.blob.size, 0);
+            let bytes = entries.reduce((n, e) => n + cachedSize(e.segment), 0);
             for (const entry of entries.sort((a, b) => a.used - b.used)) {
                 if (bytes + segment.blob.size <= CACHE_LIMIT) break;
-                await del(entry.k); bytes -= entry.segment.blob.size;
+                await del(entry.k); bytes -= cachedSize(entry.segment);
             }
             const room = await headroomBytes();
-            if (segment.blob.size <= CACHE_LIMIT && room !== null && room >= segment.blob.size) await set(cacheKey, { segment, used: Date.now() });
+            if (segment.blob.size <= CACHE_LIMIT && room !== null && room >= segment.blob.size) {
+                // As bytes, not a Blob — see storableBytes() in sessionAudioStore.js.
+                const { blob, ...rest } = segment;
+                await set(cacheKey, { segment: { ...rest, mimeType: blob.type || '', data: await blob.arrayBuffer() }, used: Date.now() });
+            }
         }).catch(() => {}); // Never delay playback behind the upload/cache queue.
         return segment;
     } catch (e) { report(e, id); throw e; }

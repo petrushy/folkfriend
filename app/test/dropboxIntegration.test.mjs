@@ -102,6 +102,7 @@ export const readSegment = async () => ({ blob: new Blob(['headerpayload']), chu
 // "Export audio" uses — one continuous file per track.
 export const buildClip = async () => ({ blob: new Blob(['headerpayload']), mimeType: 'audio/mp4', startSeconds: 0, endSeconds: 3, trackIndex: 0 });
 export const fileExtensionFor = () => 'm4a';
+export const asBlob = (value, type = '') => (value instanceof Blob ? value : new Blob([value], { type }));
 export const headroomBytes = async () => 10000000;
 export const deleteSessionAudio = async id => { f.locals = f.locals.filter(m => m.sessionId !== id); f.deletedLocal.push(id); };
 export const configureCloudAudio = p => { f.provider = p; };

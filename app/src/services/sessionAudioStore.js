@@ -208,6 +208,48 @@ export function formatBytes(bytes) {
     return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
 }
 
+// ---- payload encoding -----------------------------------------------------
+//
+// Audio is stored in IndexedDB as an ArrayBuffer, never as a Blob.
+//
+// WebKit keeps a Blob stored in IndexedDB as a separate file beside the
+// database and hands back a reference to it, and on iOS that reference can
+// stop being readable: the record is still there, `size` still answers, and
+// every read fails. The first thing this was seen as was a clip iOS refused to
+// play with "The operation is not supported" and no container shape at all —
+// the shape could not be sniffed because the first bytes could not be read.
+// The channel probe failed on the same session for the same reason. An
+// ArrayBuffer is serialised into the record itself, so there is no second
+// file to lose.
+//
+// Reads accept both, because every recording made before this carries Blobs.
+async function storableBytes(value) {
+    if (value && typeof value.arrayBuffer === 'function') return value.arrayBuffer();
+    return value || null;
+}
+
+export function asBlob(value, type = '') {
+    if (!value) return null;
+    if (typeof Blob !== 'undefined' && value instanceof Blob) return value;
+    if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+        return new Blob([value], { type: type || '' });
+    }
+    return value;
+}
+
+// Null when a stored Blob can be read, otherwise the error that says why not.
+// A few bytes are enough: the failure is in reaching the backing file at all.
+async function unreadableReason(blob) {
+    if (!blob || typeof blob.slice !== 'function') return 'no audio data';
+    if (!blob.size) return null;
+    try {
+        await blob.slice(0, 16).arrayBuffer();
+        return null;
+    } catch (e) {
+        return (e && (e.name || e.message)) || String(e);
+    }
+}
+
 // ---- reads ----------------------------------------------------------------
 //
 // Reads never throw, in the manner of tuneIndexStore: a failure resolves to
@@ -250,11 +292,22 @@ export async function readManifest(sessionId) {
         const manifest = await get(manifestKey(sessionId));
         if (!manifest || manifest.schema !== AUDIO_SCHEMA_VERSION) return null;
         if (!Array.isArray(manifest.segments) || !Array.isArray(manifest.tracks)) return null;
-        return manifest;
+        return withInitBlobs(manifest);
     } catch (e) {
         console.warn('Could not read session audio manifest:', e && e.message);
         return null;
     }
+}
+
+// Tracks carry their initialisation bytes, stored as an ArrayBuffer since the
+// Blob problem above; every reader downstream expects a Blob.
+function withInitBlobs(manifest) {
+    return {
+        ...manifest,
+        tracks: manifest.tracks.map(t => (t && t.init && !(t.init instanceof Blob)
+            ? { ...t, init: asBlob(t.init, t.mimeType || manifest.mimeType) }
+            : t)),
+    };
 }
 
 // The three answers readManifest() collapses into null, kept apart.
@@ -288,13 +341,31 @@ export async function probeManifest(sessionId) {
     return { state: 'ok', manifest: raw };
 }
 
+// A segment record with its payload as a Blob, or null when nothing is stored.
+//
+// A record whose payload cannot be read comes back with `blob: null` and the
+// reason in `unreadable`, rather than as null: "this device holds the segment
+// but cannot read it" is the one case where another copy (Dropbox) is the
+// answer, and the caller needs to be able to say which it was.
 export async function readSegment(sessionId, index) {
+    let record;
     try {
-        return (await get(segmentKey(sessionId, index))) || null;
+        record = (await get(segmentKey(sessionId, index))) || null;
     } catch (e) {
         console.warn('Could not read session audio segment:', e && e.message);
         return null;
     }
+    if (!record) return null;
+    const { data, ...rest } = record;
+    if (data) return { ...rest, blob: asBlob(data, record.mimeType) };
+    // Written before payloads were stored as bytes: a Blob, which WebKit may
+    // no longer be able to read.
+    const reason = await unreadableReason(record.blob);
+    if (reason) {
+        console.warn('Stored session audio could not be read:', reason);
+        return { ...rest, blob: null, unreadable: reason };
+    }
+    return record;
 }
 
 export async function listManifests() {
@@ -405,6 +476,12 @@ export function createManifest({ sessionId, mimeType, bitsPerSecond, channels = 
 // leaves a manifest pointing at audio that does not exist, which presents to
 // the user as a player that breaks partway through.
 export async function appendSegment(sessionId, segment, trackPatch = null) {
+    // Outside the chain: reading a few hundred kB out of a fresh Blob need not
+    // hold up a delete or a sweep. See storableBytes() for why bytes at all.
+    const data = await storableBytes(segment.blob);
+    const patch = trackPatch && trackPatch.init
+        ? { ...trackPatch, init: await storableBytes(trackPatch.init) }
+        : trackPatch;
     return withSession(sessionId, async () => {
         const manifest = (await get(manifestKey(sessionId))) || null;
         if (!manifest) throw new Error('no manifest for this session');
@@ -417,14 +494,15 @@ export async function appendSegment(sessionId, segment, trackPatch = null) {
             durationSeconds: segment.durationSeconds,
             bytes: segment.bytes,
             chunks: segment.chunks,
-            blob: segment.blob,
+            mimeType: (segment.blob && segment.blob.type) || '',
+            data,
         });
 
         const next = {
             ...manifest,
             updatedAt: Date.now(),
             finalizedAt: null,
-            tracks: trackPatch ? mergeTrack(manifest.tracks, trackPatch) : manifest.tracks,
+            tracks: patch ? mergeTrack(manifest.tracks, patch) : manifest.tracks,
             segments: [...manifest.segments, {
                 index: segment.index,
                 trackIndex: segment.trackIndex,
@@ -437,7 +515,7 @@ export async function appendSegment(sessionId, segment, trackPatch = null) {
             bytes: (manifest.bytes || 0) + (segment.bytes || 0),
         };
         await set(manifestKey(sessionId), next);
-        return next;
+        return withInitBlobs(next);
     });
 }
 
@@ -623,13 +701,15 @@ function chunkSpans(segment) {
 // clip that plays with the old ambiguity is far better than one that does not
 // play at all, and a container this does not recognise is exactly the case
 // where guessing would produce the latter.
+// Null when the init blob cannot be read at all — prepending bytes nobody can
+// read would only move the failure to the decoder, where it says nothing.
 async function containerHeader(initBlob) {
     if (!initBlob || !initBlob.size) return initBlob;
     let bytes;
     try {
         bytes = new Uint8Array(await initBlob.arrayBuffer());
     } catch (e) {
-        return initBlob;
+        return null;
     }
     const cut = firstMediaOffset(bytes);
     return cut > 0 && cut < initBlob.size ? initBlob.slice(0, cut) : initBlob;
@@ -734,6 +814,31 @@ function correctedMimeType(head, labelled) {
     return containerOf(labelled) === sniffed ? labelled : sniffed;
 }
 
+// A track's header from the backed-up copy, for when this device's own copy
+// cannot be read. The cloud manifest carries it as base64 inside the JSON,
+// which is why it survives where a stored Blob did not.
+async function cloudHeader(sessionId, trackIndex) {
+    if (!cloudAudio) return null;
+    try {
+        const manifest = await cloudAudio.manifest(sessionId);
+        const track = manifest && (manifest.tracks || []).find(t => t.index === trackIndex);
+        return track && track.init ? await containerHeader(track.init) : null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// The failure a player can act on: the audio is on this device and this
+// device cannot read it. Different from "missing" (interrupted delete) and
+// from "this browser will not play it", both of which read the same on screen
+// without it.
+function unreadableAudio(what) {
+    const error = new Error(`The audio saved on this device can no longer be read (${what})` +
+        (cloudAudio ? ' and no backed-up copy could be fetched.' : '.'));
+    error.code = 'unreadable';
+    return error;
+}
+
 // The first bytes of an assembled clip, or null if they cannot be read.
 async function readHead(parts) {
     try {
@@ -788,8 +893,24 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     for (const meta of overlapping) {
         if (meta.trackIndex !== trackIndex) break;   // never cross a track
         if (requireComplete && meta.startSeconds > coveredTo + 0.001) throw incomplete();
-        const segment = await readSegment(sessionId, meta.index) ||
-            (cloudAudio ? await cloudAudio.segment(sessionId, meta.index) : null);
+        const local = await readSegment(sessionId, meta.index);
+        let segment = local && local.blob ? local : null;
+        // Missing here, or here and unreadable (see storableBytes): either way
+        // a backed-up copy is the audio, and it is verified against its hash
+        // on the way in.
+        if (!segment && cloudAudio) {
+            try {
+                segment = await cloudAudio.segment(sessionId, meta.index);
+            } catch (e) {
+                // Only swallowed when the local copy explains the failure
+                // better than the network does.
+                if (!(local && local.unreadable)) throw e;
+            }
+        }
+        if (!segment && local && local.unreadable) {
+            if (!parts.length) throw unreadableAudio(local.unreadable);
+            break;
+        }
         // A segment the manifest names but that is not on disk means an
         // interrupted delete. Stop here rather than splicing a hole into the
         // middle of a clip, which would play as a glitch or not at all.
@@ -810,7 +931,9 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         // Prepending the init blob to a clip that already begins there would
         // write the header twice, which is not a file any decoder will accept.
         if (clipStart === null && !wanted[0].init && track.init) {
-            const header = await containerHeader(track.init);
+            let header = await containerHeader(track.init);
+            if (!header) header = await cloudHeader(sessionId, trackIndex);
+            if (!header) throw unreadableAudio('the recording\'s header');
             headerBytes = header.size || 0;
             parts.push(header);
         }
@@ -837,6 +960,8 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     // carry the bad label for ever, so the repair belongs here.
     const labelled = track.mimeType || manifest.mimeType || '';
     const head = await readHead(parts);
+    // Nothing above could read these bytes, so no player will either.
+    if (!head) throw unreadableAudio('the assembled clip');
     const mimeType = correctedMimeType(head, labelled);
     return {
         blob: new Blob(parts, { type: mimeType || 'application/octet-stream' }),
