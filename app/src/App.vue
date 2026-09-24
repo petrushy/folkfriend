@@ -232,6 +232,7 @@
                     ref="sessionPlayer"
                     :session-id="playerHost.sessionId"
                     :detections="playerHost.detections"
+                    :session-name="playerHost.sessionName"
                     :listening="playerHost.listening"
                     @playback="playerHost.playback = $event"
                 />
