@@ -74,10 +74,24 @@ backed up.
    The popup prevents authentication from navigating away from a live recording.
    A blocked popup reports an error and leaves recording running.
 
-OAuth uses state and S256 PKCE, short-lived online access tokens, and no refresh
-token. Tokens and consent are device-local, outside settings exports and Firestore.
-They are stored in localStorage to survive reloads until expiry. Expiry or revocation
-shows Reconnect required; reconnection retries uploads and pending playback.
+OAuth uses state and S256 PKCE with **offline** access: a four-hour access token
+plus a refresh token, which `dropboxAuth.mjs` trades for a new access token
+shortly before each one expires. No app secret is involved — PKCE lets the refresh
+request carry only the refresh token and the public app key. A device therefore
+connects once and stays connected, rather than dropping to Reconnect required a few
+hours later (which is how the first, online-only version behaved, and why backups
+and cross-device playback quietly stopped).
+
+Credentials are device-local, outside settings exports and Firestore, in
+localStorage. A refresh that fails on the network keeps them and retries on the
+next pass; only Dropbox refusing the grant (revoked, or the app's access removed)
+shows Reconnect required. Disconnect revokes the grant at Dropbox as well as
+forgetting it locally, best-effort, since a refresh token is a long-lived
+credential. Anyone with access to this browser's storage can reach the app folder
+until then — the app folder only, by the app's registration.
+
+A grant made before this change has no refresh token: it works until it expires
+and then asks for one reconnect, after which it is offline access.
 See the [Dropbox OAuth guide](https://developers.dropbox.com/oauth-guide).
 
 ## Files and safety

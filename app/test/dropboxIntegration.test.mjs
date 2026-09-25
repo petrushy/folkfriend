@@ -50,7 +50,9 @@ class FakeClient {
         this.files.delete(from); this.files.set(to, f); this.moves.push([from, to]); return f;
     }
     downloads = 0;
-    async request(endpoint, args) {
+    requests = [];
+    async request(endpoint, args, body, options) {
+        this.requests.push({ endpoint, token: options && options.token });
         if (endpoint === 'files/download') {
             const file = this.files.get(args.path);
             if (!file) throw new DropboxError('Not found.', 'missing');
@@ -71,13 +73,13 @@ let sequence = 0;
 // session records (which is what Firebase sync means), but its own IndexedDB
 // and its own copy of the audio — which is the whole point, since what one
 // device knows about a deletion is exactly what the other one does not.
-async function load({ enabled = true, expired = false, active = false, shareWith = null } = {}) {
+async function load({ enabled = true, expired = false, active = false, shareWith = null, refreshToken = null } = {}) {
     const f = { db: new Map(), client: shareWith ? shareWith.client : new FakeClient(),
         sessions: shareWith ? shareWith.sessions : [{ id: 's1', startedAt: 1, name: 'Original', tunes: [] }],
         locals: [structuredClone(local)], recorder: { sessionId: active ? 's1' : null, isActive: active, isRecording: active }, deletedLocal: [], events: [] };
     globalThis.__dropboxFixture = f;
     const storage = new Map([['folkfriend.dropbox.enabled', String(enabled)], ['folkfriend.dropbox.account', 'account-1'],
-        ['folkfriend.dropbox.auth', JSON.stringify({ accessToken: 'test', expiresAt: expired ? 0 : Date.now() + 1000000 })]]);
+        ['folkfriend.dropbox.auth', JSON.stringify({ accessToken: 'test', expiresAt: expired ? 0 : Date.now() + 1000000, ...(refreshToken ? { refreshToken } : {}) })]]);
     globalThis.localStorage = { getItem: k => storage.get(k) || null, setItem: (k, v) => storage.set(k, v), removeItem: k => storage.delete(k) };
     const index = sequence++;
     const fakeURL = new URL(`fake-${index}.mjs`, directory);
@@ -124,6 +126,7 @@ export { DropboxError, base64url } from ${JSON.stringify(new URL('dropboxClient.
         .replace("from 'idb-keyval'", `from '${fakeURL.href}'`)
         .replace("from '@/services/sessionAudioStore.js'", `from '${fakeURL.href}'`)
         .replace("from './dropboxClient.mjs'", `from '${fakeURL.href}'`)
+        .replace("from './dropboxAuth.mjs'", `from '${new URL('dropboxAuth.mjs', services).href}'`)
         .replace("from './dropboxStorage.mjs'", `from '${new URL('dropboxStorage.mjs', services).href}'`)
         .replace("from './dropboxBackup.mjs'", `from '${new URL('dropboxBackup.mjs', services).href}'`);
     const target = new URL(`coordinator-${index}.mjs`, directory); await writeFile(target, source);
@@ -720,6 +723,26 @@ await test('a cached download stored as a Blob is never trusted: it is fetched a
     const again = await api.remoteSegment('s1', 0);
     assert.equal(f.client.downloads, downloadsBefore + 1, 'and the bytes entry is used from then on');
     assert.equal(await again.blob.text(), 'headerpayload');
+});
+
+await test('an expired access token with a refresh token is still connected, and backs up', async () => {
+    // The whole point of offline access: the four-hour access token running
+    // out is not a reason to stop backing up. The coordinator must not decide
+    // "reconnect" from the access token's expiry alone.
+    const { f, api } = await load({ expired: true, refreshToken: 'refresh-1' });
+    assert.equal(api.dropboxState.connected, true);
+    await api.syncDropbox(true);
+    assert.equal(api.backupStatus('s1'), 'Backed up');
+    assert.ok(f.client.writes.length > 0);
+});
+await test('disconnect revokes the grant at Dropbox, not only on this device', async () => {
+    const { f, api } = await load({ refreshToken: 'refresh-1' });
+    await api.disconnectDropbox();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    const revoke = f.client.requests.find(r => r.endpoint === 'auth/token/revoke');
+    assert.ok(revoke, 'a long-lived credential must be ended where it is honoured');
+    assert.equal(revoke.token.refreshToken, 'refresh-1', 'with the grant being forgotten, not a new one');
+    assert.equal(localStorage.getItem('folkfriend.dropbox.auth'), null);
 });
 console.log(`${passed} Dropbox coordinator tests passed in total`);
 
