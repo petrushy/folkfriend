@@ -1222,6 +1222,31 @@ await test('a speed the engine refuses resets to normal and says so', async () =
     assert.equal(vm.playbackRate, 1, 'the slider must not claim a speed nothing is using');
     assert.equal(audio.playbackRate, 1);
     assert.match(vm.error, /cannot play at 40% speed/);
+    // From 100% the bound value never changed, so only a remount moves the
+    // thumb back. Checked in a real browser by e2e/playback-speed.mjs.
+    assert.equal(vm.speedSliderKey, 1, 'the slider is remounted to show the real speed');
+});
+
+await test('a speed that works after a refused one takes the refusal message down', async () => {
+    const vm = await mountPlayer(GAPPY);
+    const audio = rateElement({ refuseRate: 0.4 });
+    vm.$refs.audio = audio;
+    vm.setPlaybackRate(0.4);
+    vm.setPlaybackRate(0.6);
+    assert.equal(audio.playbackRate, 0.6);
+    assert.equal(vm.error, '', 'a stale "cannot play at 40%" would contradict what is playing');
+});
+
+await test('a working speed never clears an unrelated playback error', async () => {
+    const vm = await mountPlayer(GAPPY);
+    const audio = rateElement({ refuseRate: 0.4 });
+    vm.$refs.audio = audio;
+    vm.setPlaybackRate(0.4);
+    vm.error = 'Could not play: format not supported';   // arrived since
+    vm.setPlaybackRate(0.6);
+    assert.equal(vm.error, 'Could not play: format not supported');
+    vm.setPlaybackRate(0.8);
+    assert.equal(vm.error, 'Could not play: format not supported');
 });
 
 await test('choosing a speed before anything is loaded is kept for the first play', async () => {

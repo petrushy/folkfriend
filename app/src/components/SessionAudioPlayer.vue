@@ -43,7 +43,13 @@
             >
                 Speed {{ speedPercent }}%
             </v-btn>
+            <!-- Keyed so a refused speed can put the thumb back. A refusal
+                 sets the rate and resets it within one update, so from 100%
+                 the bound value never changes and Vuetify keeps showing the
+                 speed that was refused. Remounting is the public way to
+                 make it re-read the value. -->
             <v-slider
+                :key="speedSliderKey"
                 :value="speedPercent"
                 :min="PLAYBACK_RATE_MIN * 100"
                 :max="PLAYBACK_RATE_MAX * 100"
@@ -532,6 +538,11 @@ export default {
             // player, deliberately not saved: a recording opened next week
             // quietly playing at 60% would read as a broken recording.
             playbackRate: 1,
+            // Bumped to remount the slider — see the template.
+            speedSliderKey: 0,
+            // The message a refused speed put up, so a later speed that works
+            // can take down THAT message and nothing else.
+            speedError: '',
             icons: { play: mdiPlay, pause: mdiPause, rewind: mdiRewind15, forward: mdiFastForward15 },
             SKIP_SECONDS,
             PLAYBACK_RATE_MIN,
@@ -1410,12 +1421,18 @@ export default {
                 audio.mozPreservesPitch = true;
                 audio.defaultPlaybackRate = rate;
                 audio.playbackRate = rate;
+                // Only the speed's own complaint: a playback error that
+                // arrived since is still true and still worth reading.
+                if (this.speedError && this.error === this.speedError) this.error = '';
+                this.speedError = '';
             } catch (e) {
                 // A rate the engine refuses throws NotSupportedError. Say so
                 // rather than leave a slider claiming a speed nothing is using.
                 this.playbackRate = 1;
                 try { audio.defaultPlaybackRate = 1; audio.playbackRate = 1; } catch (e2) { /* as it was */ }
-                this.error = `This browser cannot play at ${Math.round(rate * 100)}% speed.`;
+                this.speedError = `This browser cannot play at ${Math.round(rate * 100)}% speed.`;
+                this.error = this.speedError;
+                this.speedSliderKey++;
             }
         },
 
