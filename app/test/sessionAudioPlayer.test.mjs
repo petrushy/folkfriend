@@ -1086,6 +1086,101 @@ await test('a seek never runs off either end of the recording', async () => {
     assert.deepEqual(vm.playRequests, [0, 600]);
 });
 
+console.log('\nSessionAudioPlayer — playback speed');
+
+// An element that behaves as the spec says on load(): playbackRate goes back
+// to defaultPlaybackRate. A fake that simply keeps whatever was assigned would
+// pass against a player that forgets the speed at every segment boundary.
+function rateElement({ refuseRate = null } = {}) {
+    let rate = 1;
+    return {
+        defaultPlaybackRate: 1,
+        preservesPitch: false,
+        get playbackRate() { return rate; },
+        set playbackRate(value) {
+            if (refuseRate !== null && value === refuseRate) {
+                const e = new Error('The operation is not supported.');
+                e.name = 'NotSupportedError';
+                throw e;
+            }
+            rate = value;
+        },
+        load() { rate = this.defaultPlaybackRate; },
+        play() { return Promise.resolve(); },
+        seekable: { length: 0 },
+        duration: 600,
+        set currentTime(v) {},
+        get currentTime() { return 0; },
+    };
+}
+
+await test('a chosen speed is applied with pitch preserved', async () => {
+    const vm = await mountPlayer(GAPPY);
+    const audio = rateElement();
+    vm.$refs.audio = audio;
+    vm.setPlaybackRate(0.6);
+    assert.equal(vm.playbackRate, 0.6);
+    assert.equal(audio.playbackRate, 0.6);
+    assert.equal(audio.preservesPitch, true, 'a slower tune must not also be a lower one');
+    assert.equal(vm.speedPercent, 60);
+});
+
+await test('the speed survives a segment change', async () => {
+    // load() is what a segment change does, every three minutes.
+    const vm = await mountPlayer(GAPPY);
+    const audio = rateElement();
+    vm.$refs.audio = audio;
+    vm.setPlaybackRate(0.5);
+    audio.load();
+    assert.equal(audio.playbackRate, 0.5, 'defaultPlaybackRate carries it across load()');
+    vm.pendingSeekSeconds = null;
+    vm.onLoadedMetadata();
+    assert.equal(audio.playbackRate, 0.5);
+});
+
+await test('play re-applies the speed even if the element lost it', async () => {
+    const vm = await mountPlayer(GAPPY);
+    const audio = rateElement();
+    vm.$refs.audio = audio;
+    vm.setPlaybackRate(0.75);
+    audio.defaultPlaybackRate = 1;       // an engine that resets both
+    audio.load();
+    vm._play();
+    assert.equal(audio.playbackRate, 0.75);
+});
+
+await test('the speed is clamped to the offered range and snapped to its steps', async () => {
+    const vm = await mountPlayer(GAPPY);
+    vm.$refs.audio = rateElement();
+    vm.setPlaybackRate(0.1);
+    assert.equal(vm.playbackRate, 0.4);
+    vm.setPlaybackRate(3);
+    assert.equal(vm.playbackRate, 1.3);
+    vm.setPlaybackRate(0.72);
+    assert.equal(vm.playbackRate, 0.7, 'no 0.7000000000000001');
+    vm.setPlaybackRate('nonsense');
+    assert.equal(vm.playbackRate, 0.7, 'garbage leaves the speed alone');
+});
+
+await test('a speed the engine refuses resets to normal and says so', async () => {
+    const vm = await mountPlayer(GAPPY);
+    const audio = rateElement({ refuseRate: 0.4 });
+    vm.$refs.audio = audio;
+    vm.setPlaybackRate(0.4);
+    assert.equal(vm.playbackRate, 1, 'the slider must not claim a speed nothing is using');
+    assert.equal(audio.playbackRate, 1);
+    assert.match(vm.error, /cannot play at 40% speed/);
+});
+
+await test('choosing a speed before anything is loaded is kept for the first play', async () => {
+    const vm = await mountPlayer(GAPPY);
+    vm.setPlaybackRate(0.55);            // no element yet
+    const audio = rateElement();
+    vm.$refs.audio = audio;
+    vm._play();
+    assert.equal(audio.playbackRate, 0.55);
+});
+
 await rm(tmpDir, { recursive: true, force: true });
 
 await test('export requests complete audio and reports a read failure instead of sharing a prefix', async () => {
