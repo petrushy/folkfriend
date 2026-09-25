@@ -2605,11 +2605,11 @@ await test('an imported file is stored in pieces with the manifest last, finishe
     assert.equal(second.chunks[0].init, undefined);
 });
 
-await test('any moment of an imported recording plays from the WHOLE file', async () => {
+await test('any moment of an imported M4A plays from the WHOLE file', async () => {
     // A byte range from the middle of an M4A is not a file, so the clip is
     // always the entire track and the browser seeks inside it.
     await resetAll();
-    const file = importFile(store.IMPORT_PIECE_BYTES * 2 + 1000);
+    const file = importFile(store.IMPORT_PIECE_BYTES * 2 + 1000, { name: 'Tuesday.m4a', type: 'audio/mp4' });
     await store.importAudioFile('imp', file, { durationSeconds: 600 });
 
     const original = new Uint8Array(await file.arrayBuffer());
@@ -2621,11 +2621,49 @@ await test('any moment of an imported recording plays from the WHOLE file', asyn
         assert.equal(clip.startSeconds, 0);
         assert.equal(clip.trackStartSeconds, 0);
         assert.equal(clip.headerBytes, 0, 'no header prepended to a file that has its own');
-        assert.equal(clip.mimeType, 'audio/mpeg');
+        assert.equal(clip.mimeType, 'audio/mp4');
     }
     // The complete-file path the Dropbox whole-recording upload takes.
     const whole = await store.buildClip('imp', 0, 600, null, { requireComplete: true });
     assert.equal(whole.blob.size, file.size);
+});
+
+await test('an imported MP3 plays ONE piece at a time, on the piece\'s own timeline', async () => {
+    // MP3 frames resynchronise, so a piece is itself a playable file. Found in
+    // the field: a 133 MB import played from Dropbox had to download every
+    // piece before a note, through a 32 MB cache, on every tap.
+    await resetAll();
+    const file = importFile(store.IMPORT_PIECE_BYTES * 2 + 1000);
+    const manifest = await store.importAudioFile('imp', file, { durationSeconds: 600 });
+    const second = manifest.segments[1];
+
+    const clip = await store.buildClip('imp', second.startSeconds + 10, second.startSeconds + 20);
+    const original = new Uint8Array(await file.arrayBuffer());
+    const bytes = new Uint8Array(await clip.blob.arrayBuffer());
+    assert.equal(bytes.length, store.IMPORT_PIECE_BYTES, 'one piece, not the whole file');
+    const from = store.IMPORT_PIECE_BYTES;
+    assert.ok(bytes.every((b, i) => b === original[from + i]), 'and exactly that piece\'s bytes');
+    assert.equal(clip.startSeconds, second.startSeconds);
+    // Raw MP3 carries no timestamps, so the element's zero is where the
+    // slice starts; the clip says so rather than leaving it to be guessed.
+    assert.equal(clip.trackStartSeconds, second.startSeconds);
+
+    // The whole-recording export still concatenates every piece back into
+    // exactly the original file.
+    const whole = await store.buildClip('imp', 0, 600, null, { requireComplete: true });
+    const all = new Uint8Array(await whole.blob.arrayBuffer());
+    assert.equal(all.length, original.length);
+    assert.ok(all.every((b, i) => b === original[i]));
+    assert.equal(whole.trackStartSeconds, 0);
+});
+
+await test('only frame-synchronised containers are sliced', () => {
+    assert.equal(store.playsWhole({ wholeFile: true, mimeType: 'audio/mpeg' }), false);
+    assert.equal(store.playsWhole({ wholeFile: true, mimeType: 'audio/aac' }), false);
+    for (const type of ['audio/mp4', 'audio/wav', 'audio/flac', 'audio/ogg', '']) {
+        assert.equal(store.playsWhole({ wholeFile: true, mimeType: type }), true, type || 'unknown');
+    }
+    assert.equal(store.playsWhole({ mimeType: 'audio/mp4' }), false, 'a live recording is never whole-file');
 });
 
 await test('an imported recording too large to keep is refused before anything is written', async () => {

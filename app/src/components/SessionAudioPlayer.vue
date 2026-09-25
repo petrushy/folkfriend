@@ -247,7 +247,7 @@ import { mdiPlay, mdiPause, mdiRewind15, mdiFastForward15 } from '@mdi/js';
 import eventBus from '@/eventBus.js';
 import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';
 import {
-    playbackReadManifest as readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor,
+    playbackReadManifest as readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor, playsWhole,
     inspectRecording,
 } from '@/services/sessionAudioStore.js';
 import { summariseCheck, formatCheckReport } from '@/js/recordingCheck.mjs';
@@ -976,7 +976,7 @@ export default {
                 this.pendingSeekSeconds = seekSeconds;
                 this._autoplayAfterLoad = autoplay;
                 this._loadedSegment = segment;
-                this._loadedWholeFile = !!(track && track.wholeFile);
+                this._loadedWholeFile = playsWhole(track);
                 this._loadedSeekSeconds = seekSeconds;
                 this._clipFromTrackStart = fromTrackStart;
                 audio.src = this.objectUrl;

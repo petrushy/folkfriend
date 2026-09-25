@@ -1138,6 +1138,22 @@ Five things worth knowing:
    MediaRecorder writes a header plus independently appendable chunks; an MP3,
    M4A or WAV is none of that — a byte range from the middle of an M4A is not a
    file. So the browser gets the whole file and seeks inside it natively.
+
+   **Except MP3 and ADTS AAC** (`playsWhole()`), found on the first device test:
+   a 133 MB MP3 played on a phone that had it only in Dropbox had to download
+   all 33 pieces before a note, through a 32 MB download cache — so every tap
+   started the whole download again and nothing played. Those containers are
+   self-synchronising frames, so a piece is itself a playable file: they play
+   piece by piece like a live recording, and `buildClip` reports the piece's
+   own start as `trackStartSeconds`, since raw MP3 carries no timestamps and
+   the element's zero is where the slice begins. Decided at READ time from the
+   stored container, so earlier imports get it without being re-imported.
+
+   ⚠️ **M4A/WAV/FLAC imports played from Dropbox still download the whole
+   file**, through the same 32 MB cache. The fix for those is streaming the
+   whole-recording copy through a Dropbox temporary link (range requests, no
+   download), which needs "whole recordings" on at the device that imported
+   it — not built.
 2. **It is still stored in 4 MB pieces** (`IMPORT_PIECE_BYTES`), each a
    segment with one chunk, so IndexedDB writes stay small and each Dropbox
    segment fits a single-request upload and the 60 s download deadline. A
