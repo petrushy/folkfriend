@@ -11,6 +11,7 @@
         "test:e2e": "node test/e2e/settings-wiring.mjs && node test/e2e/offline-index.mjs && node test/e2e/unreachable-host.mjs && node test/e2e/recovery.mjs",
         "test:rules": "firebase emulators:exec --only firestore --project demo-folkfriend-rules \"node test/firestoreRules.test.mjs\"",
         "test:session-audio-chain": "node test/e2e/session-audio-chain.mjs",
+        "test:playback-speed": "node test/e2e/playback-speed.mjs",
         "test:session-workspace": "node test/e2e/session-workspace.mjs"
     },
     "dependencies": {
