@@ -28,6 +28,34 @@
             </div>
         </div>
 
+        <!-- Slowing a tune down to learn it. The stretch is the browser's own
+             (playbackRate with preservesPitch), so its quality is whatever the
+             platform provides — see setPlaybackRate(). Tapping the label puts
+             it back to normal speed, which is the one value worth a shortcut. -->
+        <div class="d-flex align-center playerSpeed" style="gap: 8px;">
+            <v-btn
+                text
+                small
+                class="px-1 playerSpeedLabel"
+                :aria-label="`Playback speed ${speedPercent}%. Reset to normal speed`"
+                :disabled="playbackRate === 1"
+                @click="setPlaybackRate(1)"
+            >
+                Speed {{ speedPercent }}%
+            </v-btn>
+            <v-slider
+                :value="speedPercent"
+                :min="PLAYBACK_RATE_MIN * 100"
+                :max="PLAYBACK_RATE_MAX * 100"
+                :step="PLAYBACK_RATE_STEP * 100"
+                dense
+                hide-details
+                aria-label="Playback speed"
+                class="ma-0"
+                @input="setPlaybackRate($event / 100)"
+            />
+        </div>
+
         <!-- The strip IS the link between the tune list and the recording:
              every detection with an audio offset is a block you can tap. -->
         <!-- A slider, not a decorated div. It was click-only: no keyboard
@@ -283,6 +311,12 @@ const BLOCK_COLOURS = ['#1976d2', '#43a047', '#8e24aa', '#ef6c00', '#00838f', '#
 const SKIP_SECONDS = 15;
 // Shift, and Page Up/Down, for getting across an evening.
 const COARSE_SKIP_SECONDS = 60;
+// The speed control's range. Below about 40% every time-stretch smears badly
+// enough to stop being useful for learning a tune, and speeding up is only
+// worth a little — for skimming, not for listening.
+const PLAYBACK_RATE_MIN = 0.4;
+const PLAYBACK_RATE_MAX = 1.3;
+const PLAYBACK_RATE_STEP = 0.05;
 // How many labelled marks go under the strip. Five (four intervals) is what
 // fits at phone width without the labels colliding.
 const TICK_COUNT = 5;
@@ -494,12 +528,20 @@ export default {
             checkText: '',
             checkError: '',
             checkCopied: '',
+            // Playback speed, 1 = as recorded. Held for the life of the
+            // player, deliberately not saved: a recording opened next week
+            // quietly playing at 60% would read as a broken recording.
+            playbackRate: 1,
             icons: { play: mdiPlay, pause: mdiPause, rewind: mdiRewind15, forward: mdiFastForward15 },
             SKIP_SECONDS,
+            PLAYBACK_RATE_MIN,
+            PLAYBACK_RATE_MAX,
+            PLAYBACK_RATE_STEP,
         };
     },
     computed: {
         totalSeconds() { return this.manifest ? this.manifest.totalSeconds : 0; },
+        speedPercent() { return Math.round(this.playbackRate * 100); },
         // What was measured about the stretch being played, or null while
         // unknown. An inconclusive answer is kept — it is what stops the probe
         // running for ever — but it claims nothing.
@@ -998,6 +1040,7 @@ export default {
             this.timelineBase = Number.isFinite(start) ? start : 0;
             this._decideTimeline(audio);
             this._measureDrift(audio);
+            this._applyPlaybackRate();
             if (this.pendingSeekSeconds !== null) {
                 this._seekWithin(this.pendingSeekSeconds);
                 this.pendingSeekSeconds = null;
@@ -1330,6 +1373,52 @@ export default {
             if (this.covers(at)) this.playFrom(at, { autoplay: wasPlaying });
         },
 
+        setPlaybackRate(rate) {
+            const value = Number(rate);
+            if (!Number.isFinite(value)) return;
+            const stepped = Math.round(value / PLAYBACK_RATE_STEP) * PLAYBACK_RATE_STEP;
+            // Rounded to hundredths: 0.05 steps in floating point otherwise
+            // produce 0.7000000000000001, which then never equals 0.7.
+            this.playbackRate = Math.round(
+                Math.min(PLAYBACK_RATE_MAX, Math.max(PLAYBACK_RATE_MIN, stepped)) * 100) / 100;
+            this._applyPlaybackRate();
+        },
+
+        // Puts the chosen speed on the element. Re-applied at every load and
+        // every play, not just when the slider moves:
+        //
+        // - load() resets playbackRate to defaultPlaybackRate, and a segment
+        //   change is a load() — every three minutes. Setting only
+        //   playbackRate would snap back to normal speed at the first segment
+        //   boundary. Setting the default too covers that, and re-applying at
+        //   loadedmetadata covers any engine that resets both.
+        // - preservesPitch is the whole point: without it a slower tune is also
+        //   a lower one. It is true by default in current browsers, but older
+        //   WebKit only knows the prefixed name and Firefox shipped it prefixed
+        //   first, so all three are set.
+        //
+        // Nothing else needs to know about the speed. Seeking, the strip, the
+        // clock and segment handover all work in audio.currentTime, which is a
+        // position in the RECORDING whatever the rate.
+        _applyPlaybackRate() {
+            const audio = this.$refs.audio;
+            if (!audio) return;
+            const rate = this.playbackRate;
+            try {
+                audio.preservesPitch = true;
+                audio.webkitPreservesPitch = true;
+                audio.mozPreservesPitch = true;
+                audio.defaultPlaybackRate = rate;
+                audio.playbackRate = rate;
+            } catch (e) {
+                // A rate the engine refuses throws NotSupportedError. Say so
+                // rather than leave a slider claiming a speed nothing is using.
+                this.playbackRate = 1;
+                try { audio.defaultPlaybackRate = 1; audio.playbackRate = 1; } catch (e2) { /* as it was */ }
+                this.error = `This browser cannot play at ${Math.round(rate * 100)}% speed.`;
+            }
+        },
+
         // Everything the correction needs doing from a user gesture: build the
         // graph if this recording needs one, and resume the context if it has
         // been suspended since the last time.
@@ -1374,6 +1463,7 @@ export default {
             // after the tap, and onEnded reaches it with no tap at all — which
             // is why playFrom() and togglePlay() prime it synchronously too.
             this._prepareAudioGraph();
+            this._applyPlaybackRate();
             const started = audio.play();
             if (started && started.catch) {
                 started.catch(e => {
@@ -1780,6 +1870,17 @@ export default {
 <style scoped>
 .playerClock {
     font-variant-numeric: tabular-nums;
+}
+
+.playerSpeed {
+    max-width: 420px;
+}
+
+/* Fixed width so the slider does not shift as the percentage changes digits. */
+.playerSpeedLabel {
+    min-width: 96px !important;
+    font-variant-numeric: tabular-nums;
+    text-transform: none;
 }
 
 .audioStrip {
