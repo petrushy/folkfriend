@@ -1117,6 +1117,67 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Session Tools: importing a recording as a Past Session (September 2026)
+
+The Session Analysis page is now called **Session Tools** (label only — the
+route is still `/session-analysis`, so bookmarks and the installed PWA's links
+keep working). Its file tab, now **Import recording**, can save an analysed
+file to Past Sessions with its audio, where it plays back from the tune list
+and is backed up to Dropbox exactly like a session recorded live.
+
+`js/sessionImport.mjs` is the pure half (the record, the start-time guess, the
+tune list), `services/sessionImport.js` the orchestration, and
+`sessionAudioStore.importAudioFile()` the storage. Tests:
+`test/sessionImport.test.mjs` (15), plus cases in `sessionAudio`, `dropbox`,
+`sessionAudioPlayer` and `sessionAnalysisView`.
+
+Five things worth knowing:
+
+1. **An imported file is ONE track marked `wholeFile`, and `buildClip()`
+   always returns all of it.** A live recording can be cut into clips because
+   MediaRecorder writes a header plus independently appendable chunks; an MP3,
+   M4A or WAV is none of that — a byte range from the middle of an M4A is not a
+   file. So the browser gets the whole file and seeks inside it natively.
+2. **It is still stored in 4 MB pieces** (`IMPORT_PIECE_BYTES`), each a
+   segment with one chunk, so IndexedDB writes stay small and each Dropbox
+   segment fits a single-request upload and the 60 s download deadline. A
+   piece's time span is its share of the bytes — exact for CBR, approximate
+   otherwise, and irrelevant either way, since every piece yields the same
+   clip. The player therefore **seeks within a loaded whole file instead of
+   reloading it** on a piece change, **advances by clip end, not by next
+   index**, and **never runs the channel probe on one** (it would decode the
+   whole file, and one-sided capture cannot have happened to it).
+3. **Record first, audio second.** The tune list is what cannot be recovered
+   without re-analysing; the audio is a copy of a file the user has. A failure
+   to keep the audio (too large — `MAX_IMPORT_AUDIO_BYTES`, 300 MB, since
+   playback holds the whole file in memory — or not enough headroom above the
+   reserve) saves the session anyway and says why. The reverse would orphan
+   audio no record points at.
+4. **Saving is offered only once the scan is complete**, and it saves the ROWS
+   ON SCREEN — a tune chosen from the dropdown and an edited start time are
+   what the user is looking at. An edited start moves the tune in the list and
+   keeps its length; the audio offsets stay as analysed, since they say where
+   the tune was heard in the file. File analysis now stamps `audioSeconds`
+   (the window's end, as the live recorder does), which is what gives those
+   rows their ▶.
+5. **The Dropbox validators had to learn new extensions.** They accepted only
+   what MediaRecorder writes (`m4a|webm|ogg|bin`), so an imported MP3's backup
+   would have been refused as "Unfamiliar Dropbox segment" on its next read.
+   `AUDIO_EXTENSIONS` in `dropboxBackup.mjs` now includes `mp3|wav|flac|aac`,
+   and `fileExtensionFor` names them — matched exactly, so the impossible
+   `audio/mp3;codecs=mp4a.40.2` label still gets `.bin`. ⚠️ An **older build**
+   reading such a backup still refuses it; that only affects imported sessions
+   on a device that has not updated.
+
+The start time defaults to the file's modification time minus its length (a
+recorder writes as it goes, so the file date is when recording ended), shown in
+an editable field because a copied file carries the copy's date.
+
+⚠️ **Still bounded by the analysis, not the storage**: decoding a whole file to
+PCM in the browser is the memory ceiling, as before. Three hours of audio is
+~2 GB of float PCM at 48 kHz, which a phone will not survive; that limit
+predates this change and is what to fix next if people import long sessions.
+
 ### The detection LED — is what is on screen still true? (September 2026)
 
 Reported from a session: "Listening" and a tune count look *exactly the same*

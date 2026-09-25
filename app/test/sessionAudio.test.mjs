@@ -2567,5 +2567,122 @@ await test('finishing a session closes the recording', async () => {
     assert.ok(laRecorder.__state.ended >= 1);
 });
 
+
+console.log('\nsessionAudioStore — imported recordings');
+
+// A file whose bytes say where they came from, so a clip can be checked
+// byte-for-byte against the original rather than merely by length.
+function importFile(bytes, { name = 'Tuesday at the Cobblestone.mp3', type = 'audio/mpeg' } = {}) {
+    const data = new Uint8Array(bytes);
+    for (let i = 0; i < data.length; i++) data[i] = (i * 7 + (i >> 12)) % 251;
+    return new File([data], name, { type, lastModified: 1_750_000_000_000 });
+}
+
+await test('an imported file is stored in pieces with the manifest last, finished and whole', async () => {
+    await resetAll();
+    const file = importFile(store.IMPORT_PIECE_BYTES * 2 + 1000);
+    const manifest = await store.importAudioFile('imp', file, { durationSeconds: 600 });
+
+    assert.equal(manifest.segments.length, 3);
+    assert.deepEqual(manifest.tracks.map(t => [t.index, t.wholeFile, t.startSeconds, t.durationSeconds]),
+        [[0, true, 0, 600]]);
+    assert.equal(manifest.mimeType, 'audio/mpeg');
+    assert.equal(manifest.bytes, file.size);
+    assert.equal(manifest.totalSeconds, 600);
+    assert.ok(manifest.finalizedAt, 'nothing will be appended, so it is final on arrival');
+    // The pieces tile the recording with no gaps, or a tune in a gap would
+    // get no ▶ at all.
+    let at = 0;
+    for (const seg of manifest.segments) {
+        assert.ok(Math.abs(seg.startSeconds - at) < 1e-9, `piece ${seg.index} starts where the last ended`);
+        at = seg.startSeconds + seg.durationSeconds;
+    }
+    assert.ok(Math.abs(at - 600) < 1e-9);
+    // Only the first piece carries the header, so buildClip never prepends one.
+    const first = await store.readSegment('imp', 0);
+    const second = await store.readSegment('imp', 1);
+    assert.equal(first.chunks[0].init, true);
+    assert.equal(second.chunks[0].init, undefined);
+});
+
+await test('any moment of an imported recording plays from the WHOLE file', async () => {
+    // A byte range from the middle of an M4A is not a file, so the clip is
+    // always the entire track and the browser seeks inside it.
+    await resetAll();
+    const file = importFile(store.IMPORT_PIECE_BYTES * 2 + 1000);
+    await store.importAudioFile('imp', file, { durationSeconds: 600 });
+
+    const original = new Uint8Array(await file.arrayBuffer());
+    for (const moment of [1, 300, 590]) {
+        const clip = await store.buildClip('imp', moment, moment + 5);
+        const bytes = new Uint8Array(await clip.blob.arrayBuffer());
+        assert.equal(bytes.length, original.length, `clip for ${moment}s is the whole file`);
+        assert.ok(bytes.every((b, i) => b === original[i]), `and identical to it at ${moment}s`);
+        assert.equal(clip.startSeconds, 0);
+        assert.equal(clip.trackStartSeconds, 0);
+        assert.equal(clip.headerBytes, 0, 'no header prepended to a file that has its own');
+        assert.equal(clip.mimeType, 'audio/mpeg');
+    }
+    // The complete-file path the Dropbox whole-recording upload takes.
+    const whole = await store.buildClip('imp', 0, 600, null, { requireComplete: true });
+    assert.equal(whole.blob.size, file.size);
+});
+
+await test('an imported recording too large to keep is refused before anything is written', async () => {
+    await resetAll();
+    let sliced = false;
+    const huge = {
+        name: 'field-recording.wav', type: 'audio/wav', size: store.MAX_IMPORT_AUDIO_BYTES + 1,
+        slice() { sliced = true; throw new Error('must not be read'); },
+    };
+    await assert.rejects(store.importAudioFile('imp', huge, { durationSeconds: 3600 }),
+        e => e.code === 'too-large' && /MP3 or M4A/.test(e.message));
+    assert.equal(sliced, false);
+    assert.equal(idb.__db.size, 0);
+});
+
+await test('an import that would eat into the reserve is refused', async () => {
+    await resetAll();
+    setQuota(store.STORAGE_RESERVE_BYTES + 1000, 0);
+    await assert.rejects(store.importAudioFile('imp', importFile(5000), { durationSeconds: 10 }),
+        e => e.code === 'storage');
+    assert.equal(idb.__db.size, 0);
+});
+
+await test('an import never writes over an existing recording', async () => {
+    await resetAll();
+    await store.importAudioFile('imp', importFile(5000), { durationSeconds: 10 });
+    await assert.rejects(store.importAudioFile('imp', importFile(6000), { durationSeconds: 12 }),
+        e => e.code === 'exists');
+    assert.equal((await store.readManifest('imp')).bytes, 5000);
+});
+
+await test('an import that fails part way leaves no manifest and takes its pieces back', async () => {
+    await resetAll();
+    idb.__failWrites.add(store.segmentKey('imp', 2));
+    await assert.rejects(store.importAudioFile('imp',
+        importFile(store.IMPORT_PIECE_BYTES * 2 + 10), { durationSeconds: 60 }),
+        e => e.code === 'storage');
+    assert.equal(await store.readManifest('imp'), null);
+    assert.equal(idb.__db.size, 0, `left behind: ${[...idb.__db.keys()]}`);
+});
+
+await test('imported types are canonical, and name the right export extension', () => {
+    const typeOf = (name, type = '') => store.importedMimeType({ name, type });
+    assert.equal(typeOf('a.mp3'), 'audio/mpeg');
+    assert.equal(typeOf('a.m4a', 'audio/x-m4a'), 'audio/mp4');
+    assert.equal(typeOf('a.wav', 'audio/x-wav'), 'audio/wav');
+    assert.equal(typeOf('a.WAV'), 'audio/wav');
+    assert.equal(typeOf('a.flac'), 'audio/flac');
+    assert.equal(typeOf('a.opus'), 'audio/ogg');
+    // A declared type outranks the extension.
+    assert.equal(typeOf('a.bin', 'audio/mpeg'), 'audio/mpeg');
+    assert.equal(store.fileExtensionFor('audio/mpeg'), 'mp3');
+    assert.equal(store.fileExtensionFor('audio/wav'), 'wav');
+    assert.equal(store.fileExtensionFor('audio/x-m4a'), 'm4a');
+    // Still no claim for the impossible label a browser once reported.
+    assert.equal(store.fileExtensionFor('audio/mp3;codecs=mp4a.40.2'), 'bin');
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

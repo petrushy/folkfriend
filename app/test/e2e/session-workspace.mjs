@@ -104,7 +104,7 @@ try {
     await openSaved('Sunday session 239');
     assert.equal(await evaluate(`document.querySelectorAll('tbody tr').length`), 4, 'Only the selected session is rendered');
     console.log('✓ Search 240 sessions and open one shared editor');
-    await click('File recording');
+    await click('Import recording');
     await until(() => evaluate(`!![...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Choose Audio')`), 'file view');
     await click('Sessions');
     await until(() => evaluate(`document.querySelector('input[maxlength="160"]')?.value === 'Sunday session 239'`), 'return to selected session');

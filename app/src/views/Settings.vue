@@ -102,7 +102,7 @@
             </p>
             <p>
                 <strong>Whether to record is chosen per session</strong>, on the
-                <router-link to="/session-analysis">Session Analysis</router-link> page —
+                <router-link to="/session-analysis">Session Tools</router-link> page —
                 it is the sort of thing that changes from one evening to the next. What is
                 here is the part that does not: quality, and what is already stored.
             </p>

@@ -141,6 +141,12 @@ class FileSessionAnalysisService {
                     displayName: normalized.displayName,
                     score: normalized.score,
                     alternatives: normalized.alternatives,
+                    // Where this window ENDS in the file — the same stamp a
+                    // live window gets from the recorder's clock, so the
+                    // detections carry the audio offsets the player seeks by
+                    // if the recording is saved as a session. For a file the
+                    // two clocks are one: time in the file.
+                    audioSeconds: endSample / sampleRate,
                 });
 
                 this.detections = buildSessionDetections(this._windowMatches, options);

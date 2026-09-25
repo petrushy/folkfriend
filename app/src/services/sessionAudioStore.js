@@ -192,10 +192,35 @@ export function fileExtensionFor(mimeType) {
     // exported as .m4a — right by accident, for a label that is wrong.
     const container = containerOf(mimeType);
     if (!container) return 'bin';
-    if (container.includes('mp4')) return 'm4a';
+    if (container.includes('mp4') || container.includes('m4a')) return 'm4a';
     if (container.includes('ogg')) return 'ogg';
     if (container.includes('webm') || container.includes('matroska')) return 'webm';
+    // Only reachable from an IMPORTED recording: no MediaRecorder writes any
+    // of these. Matched exactly, so the impossible 'audio/mp3;codecs=mp4a.40.2'
+    // a browser once reported for AAC-in-MP4 still gets no claim at all.
+    if (container === 'audio/mpeg') return 'mp3';
+    if (container === 'audio/wav') return 'wav';
+    if (container === 'audio/flac') return 'flac';
+    if (container === 'audio/aac') return 'aac';
     return 'bin';
+}
+
+// The canonical media type of an imported file, from its declared type and
+// then its extension. Canonical because the same file arrives as audio/x-m4a,
+// audio/m4a or audio/mp4 depending on the platform, as audio/x-wav or
+// audio/wave, and — from some file pickers — with no type at all.
+export function importedMimeType(file) {
+    const type = containerOf(file && file.type);
+    const ext = (String((file && file.name) || '').match(/\.([a-z0-9]+)$/i) || [])[1];
+    const is = (types, exts) => types.includes(type) || (!type && exts.includes((ext || '').toLowerCase()));
+    if (is(['audio/mpeg', 'audio/mp3', 'audio/x-mp3', 'audio/mpeg3'], ['mp3'])) return 'audio/mpeg';
+    if (is(['audio/mp4', 'audio/x-m4a', 'audio/m4a', 'video/mp4'], ['m4a', 'mp4'])) return 'audio/mp4';
+    if (is(['audio/aac', 'audio/x-aac'], ['aac'])) return 'audio/aac';
+    if (is(['audio/wav', 'audio/x-wav', 'audio/wave', 'audio/vnd.wave'], ['wav', 'wave'])) return 'audio/wav';
+    if (is(['audio/flac', 'audio/x-flac'], ['flac'])) return 'audio/flac';
+    if (is(['audio/ogg', 'application/ogg'], ['ogg', 'oga', 'opus'])) return 'audio/ogg';
+    if (is(['audio/webm', 'video/webm'], ['webm'])) return 'audio/webm';
+    return type || '';
 }
 
 export function bytesPerHour(kbps) { return (kbps * 1000 / 8) * 3600; }
@@ -516,6 +541,133 @@ export async function appendSegment(sessionId, segment, trackPatch = null) {
         };
         await set(manifestKey(sessionId), next);
         return withInitBlobs(next);
+    });
+}
+
+// ---- imported recordings ---------------------------------------------------
+//
+// A recording made elsewhere and brought in through Session Tools, stored so
+// that it plays, seeks and backs up exactly like one the app recorded.
+//
+// It cannot be stored the way a live recording is. MediaRecorder output is a
+// header followed by independently appendable chunks, which is what lets a
+// live recording be cut into three-minute clips. An uploaded MP3, M4A or WAV is
+// none of that: a byte range from the middle of an M4A is not a file at all,
+// and a WAV slice has no header. So an imported file is ONE track marked
+// `wholeFile`, and buildClip() always hands back the whole of it — the browser
+// then seeks inside a complete, ordinary audio file, which it does perfectly.
+//
+// It is still STORED in pieces, because everything downstream is built around
+// small records: one IndexedDB write per few megabytes rather than a single
+// transaction the size of the file, and Dropbox segments that fit its
+// single-request upload and a download deadline. A piece's time span is its
+// share of the bytes. That is exact for constant-bitrate audio and approximate
+// otherwise, and it does not matter which: the spans only decide which piece
+// "covers" a moment, and every piece of a whole-file track yields the same clip.
+export const IMPORT_PIECE_BYTES = 4 * 1024 * 1024;
+
+// Above this the file is not kept. Playback holds the whole file in memory —
+// read from storage and then assembled — so this is roughly what a phone has
+// to spare twice over. Three hours of MP3 at 192 kbps fits; an hour of
+// uncompressed WAV does not, and the message says to convert it.
+export const MAX_IMPORT_AUDIO_BYTES = 300 * 1024 * 1024;
+
+export class ImportAudioError extends Error {
+    constructor(message, code) {
+        super(message);
+        this.code = code;
+    }
+}
+
+// Stores `file` as the recording of `sessionId`. Payload first, manifest last,
+// exactly as appendSegment() does, so an interrupted import leaves orphans for
+// reclaimOrphans() and never a manifest naming audio that is not there.
+export async function importAudioFile(sessionId, file, { durationSeconds } = {}) {
+    if (!file || !file.size) throw new ImportAudioError('The recording is empty.', 'empty');
+    if (!(durationSeconds > 0)) throw new ImportAudioError('The recording\'s length is unknown.', 'duration');
+    if (file.size > MAX_IMPORT_AUDIO_BYTES) {
+        throw new ImportAudioError(
+            `The file is ${formatBytes(file.size)}, more than the ${formatBytes(MAX_IMPORT_AUDIO_BYTES)} that can be kept. ` +
+            'Convert it to MP3 or M4A to keep the audio.', 'too-large');
+    }
+    const headroom = await headroomBytes();
+    if (headroom !== null && headroom < file.size) {
+        throw new ImportAudioError('Not enough free storage to keep this recording.', 'storage');
+    }
+    // Never over an existing recording, and never on a guess that there is
+    // none — see probeManifest().
+    const probe = await probeManifest(sessionId);
+    if (probe.state !== 'absent') {
+        throw new ImportAudioError('This session already has a recording.', 'exists');
+    }
+
+    const mimeType = importedMimeType(file);
+    const total = file.size;
+    return withSession(sessionId, async () => {
+        const written = [];
+        const segments = [];
+        try {
+            for (let from = 0, index = 0; from < total; from += IMPORT_PIECE_BYTES, index++) {
+                const to = Math.min(total, from + IMPORT_PIECE_BYTES);
+                const startSeconds = durationSeconds * from / total;
+                const meta = {
+                    index,
+                    trackIndex: 0,
+                    startSeconds,
+                    durationSeconds: durationSeconds * to / total - startSeconds,
+                    bytes: to - from,
+                };
+                const data = await file.slice(from, to).arrayBuffer();
+                await set(segmentKey(sessionId, index), {
+                    sessionId,
+                    ...meta,
+                    // One chunk per piece, and only the first carries the
+                    // file's header — which is what tells buildClip() never
+                    // to prepend one.
+                    chunks: [{ startSeconds, bytes: meta.bytes, ...(index === 0 ? { init: true } : {}) }],
+                    mimeType,
+                    data,
+                });
+                written.push(index);
+                segments.push(meta);
+            }
+            const manifest = {
+                ...createManifest({
+                    sessionId,
+                    mimeType,
+                    bitsPerSecond: Math.round(total * 8 / durationSeconds),
+                }),
+                source: 'import',
+                sourceFileName: String(file.name || ''),
+                tracks: [{
+                    index: 0,
+                    startSeconds: 0,
+                    durationSeconds,
+                    init: null,
+                    mimeType,
+                    wholeFile: true,
+                }],
+                segments,
+                totalSeconds: durationSeconds,
+                bytes: total,
+                // Complete on arrival: nothing will ever be appended, so the
+                // whole-file Dropbox copy need not wait for anything.
+                finalizedAt: Date.now(),
+            };
+            await set(manifestKey(sessionId), manifest);
+            return withInitBlobs(manifest);
+        } catch (e) {
+            // Nothing names these yet, so they are ours to take back — and
+            // leaving 300 MB for the next sweep is not a kindness.
+            for (const index of written) {
+                try { await del(segmentKey(sessionId, index)); } catch (err) { /* swept later */ }
+            }
+            const message = (e && e.message) || String(e);
+            if (/quota/i.test(message) || (e && e.name === 'QuotaExceededError')) {
+                throw new ImportAudioError('Not enough free storage to keep this recording.', 'storage');
+            }
+            throw e;
+        }
     });
 }
 
@@ -907,7 +1059,7 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     const manifest = manifestIn || await readManifest(sessionId);
     if (!manifest) return null;
 
-    const overlapping = manifest.segments
+    let overlapping = manifest.segments
         .filter(s => s.startSeconds + s.durationSeconds > fromSeconds && s.startSeconds < toSeconds)
         .sort((a, b) => a.index - b.index);
     if (!overlapping.length) return null;
@@ -915,6 +1067,17 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     const trackIndex = overlapping[0].trackIndex;
     const track = manifest.tracks.find(t => t.index === trackIndex);
     if (!track) return null;
+
+    // An imported file is only a file when it is whole — see importAudioFile().
+    // Whatever was asked for, the clip is the entire track, and the timeline
+    // below (trackStartSeconds) is what maps a moment into it.
+    if (track.wholeFile) {
+        overlapping = manifest.segments
+            .filter(s => s.trackIndex === trackIndex)
+            .sort((a, b) => a.index - b.index);
+        fromSeconds = Math.min(...overlapping.map(s => s.startSeconds));
+        toSeconds = Math.max(...overlapping.map(s => s.startSeconds + s.durationSeconds));
+    }
 
     const parts = [];
     let clipStart = null;
@@ -1068,6 +1231,7 @@ export function trackRanges(manifest) {
         startSeconds: track.startSeconds,
         endSeconds: track.startSeconds + track.durationSeconds,
         durationSeconds: track.durationSeconds,
+        wholeFile: !!track.wholeFile,
     })).filter(t => t.durationSeconds > 0).sort((a, b) => a.startSeconds - b.startSeconds);
 }
 

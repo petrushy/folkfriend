@@ -66,6 +66,9 @@ export function recordingFileName(session, trackIndex, trackCount, extension) {
     const part = trackCount > 1 ? ` (part ${trackIndex + 1})` : '';
     return `${RECORDINGS_FOLDER}/${safeName(`${stamp} ${session.name || ''}`)}${part} [${session.id}-track-${trackIndex}].${extension}`;
 }
+// Every extension fileExtensionFor() can produce. The last four only ever come
+// from an imported recording, which is stored as the file it arrived as.
+const AUDIO_EXTENSIONS = 'm4a|webm|ogg|mp3|wav|flac|aac|bin';
 // A remote inventory is published before creating/moving whole recordings.
 // Keep old paths too: interrupted renames and retries remain discoverable.
 export function validateWholeRecordings(value, id) {
@@ -73,7 +76,7 @@ export function validateWholeRecordings(value, id) {
     if (!value || value.schema !== 1 || value.sessionId !== id || !Array.isArray(value.paths) ||
         value.paths.some(path => typeof path !== 'string' || !path.startsWith('/recordings/') ||
             path.slice('/recordings/'.length).includes('/') ||
-            !new RegExp('\\[' + id + '-track-[0-9]+\\]\\.(m4a|webm|ogg|bin)$').test(path))) {
+            !new RegExp('\\[' + id + '-track-[0-9]+\\]\\.(' + AUDIO_EXTENSIONS + ')$').test(path))) {
         throw new DropboxError('Unfamiliar Dropbox recording inventory. No files were changed.', 'unsupported');
     }
     return value.paths;
@@ -91,7 +94,7 @@ export function validateManifest(m, id) {
             !validNumber(s.startSeconds) || !validNumber(s.durationSeconds) || !validNumber(s.bytes) ||
             !Array.isArray(s.chunks) || s.chunks.some(c => !validNumber(c.bytes) || !validNumber(c.startSeconds)) ||
             s.chunks.reduce((n, c) => n + c.bytes, 0) !== s.bytes ||
-            !/^[0-9a-f]{64}$/.test(s.contentHash) || !/^segments\/\d+\.(m4a|webm|ogg|bin)$/.test(s.file)) {
+            !/^[0-9a-f]{64}$/.test(s.contentHash) || !new RegExp('^segments/\\d+\\.(' + AUDIO_EXTENSIONS + ')$').test(s.file)) {
             throw new DropboxError('Unfamiliar Dropbox segment.', 'unsupported');
         }
         indices.add(s.index);

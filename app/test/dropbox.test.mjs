@@ -218,3 +218,24 @@ await test('whole-recording backup refuses an incomplete export before publishin
     assert.equal(requestedComplete, true);
     assert.equal(c.files.size, 0);
 });
+
+await test('an imported MP3 backs up under its own extension, and the cloud copy validates', async () => {
+    // The validators used to allow only what MediaRecorder writes, so an
+    // imported session's backup was refused as "Unfamiliar Dropbox segment" on
+    // the very next read — by this device and by every other one.
+    const c = new FakeDropbox(); c.uploadLarge = c.upload.bind(c);
+    const finished = { ...session, endedAt: 100 };
+    const mp3 = { ...local, mimeType: 'audio/mpeg',
+        tracks: [{ index: 0, init: null, mimeType: 'audio/mpeg', startSeconds: 0, durationSeconds: 3, wholeFile: true }] };
+    const mp3Segment = { ...segment, chunks: [{ bytes: blob.size, startSeconds: 0, init: true }] };
+    const manifest = await backupSession(c, finished, mp3, async () => mp3Segment, () => 'mp3');
+    assert.equal(manifest.segments[0].file, 'segments/000000.mp3');
+    assert.equal(manifest.tracks[0].wholeFile, true, 'another device must know to play it whole');
+    validateManifest(JSON.parse(await c.files.get(`${root}/audio-manifest.json`).blob.text()), session.id);
+    const [path] = await backupWholeRecordings(c, finished, manifest,
+        async () => ({ blob: new Blob(['ID3']), mimeType: 'audio/mpeg' }), () => 'mp3');
+    assert.match(path, /\.mp3$/);
+    // A second pass re-reads the inventory it wrote, which must validate too.
+    await backupWholeRecordings(c, finished, manifest,
+        async () => ({ blob: new Blob(['ID3']), mimeType: 'audio/mpeg' }), () => 'mp3', [path]);
+});
