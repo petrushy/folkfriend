@@ -62,6 +62,9 @@ export function __setTracks(t) { __tracks = t; }
 export function trackRanges() { return __tracks; }
 export function formatBytes(n) { return String(n); }
 export function fileExtensionFor() { return 'm4a'; }
+export function playsWhole(track) {
+    return !!(track && track.wholeFile) && !['audio/mpeg', 'audio/aac'].includes(String(track.mimeType || '').split(';')[0]);
+}
 export let __report = null;
 export async function inspectRecording(sessionId, { onProgress } = {}) {
     if (onProgress) { onProgress(0, 2); onProgress(2, 2); }
@@ -1496,8 +1499,8 @@ console.log('\nimported recordings play whole');
 // sessionAudioStore.importAudioFile() lays it out. buildClip() hands back the
 // entire file for a moment in any of them.
 const IMPORTED = {
-    sessionId: 's1', mimeType: 'audio/mpeg', totalSeconds: 600,
-    tracks: [{ index: 0, startSeconds: 0, durationSeconds: 600, wholeFile: true, mimeType: 'audio/mpeg' }],
+    sessionId: 's1', mimeType: 'audio/mp4', totalSeconds: 600,
+    tracks: [{ index: 0, startSeconds: 0, durationSeconds: 600, wholeFile: true, mimeType: 'audio/mp4' }],
     segments: [
         { index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 200, bytes: 4 },
         { index: 1, trackIndex: 0, startSeconds: 200, durationSeconds: 200, bytes: 4 },
@@ -1553,6 +1556,38 @@ await test('the end of a whole file is the end, not a cue to replay its next pie
     await vm.onEnded();
     assert.equal(store.__clipCalls.length, 0, 'nothing reloaded');
     assert.equal(vm.playing, false);
+});
+
+await test('an imported MP3 loads the piece a tune is in, and seeks inside that piece', async () => {
+    // Each piece is its own playable clip, so moving to another piece loads
+    // it — 4 MB, rather than the whole recording — and the seek is measured
+    // from the piece's start, because that is where the element's zero is.
+    const MP3 = {
+        ...IMPORTED, mimeType: 'audio/mpeg',
+        tracks: [{ ...IMPORTED.tracks[0], mimeType: 'audio/mpeg' }],
+    };
+    const vm = await mountPlayer(MP3);
+    __setTracksFor(MP3);
+    vm.playFrom = vm.__realPlayFrom;
+    const seeks = [];
+    vm.$refs.audio = wholeFileElement(seeks);
+    vm.$refs.audio.duration = 200;
+    vm.$refs.audio.seekable = { length: 1, start: () => 0, end: () => 200 };
+    store.__clipCalls.length = 0;
+    store.__setClipFactory((id, from, to) => ({
+        blob: new Blob(['frames']), mimeType: 'audio/mpeg',
+        startSeconds: from, endSeconds: to, trackIndex: 0, trackStartSeconds: from,
+    }));
+
+    await vm.playFrom(30, { autoplay: false });
+    vm.onLoadedMetadata();
+    assert.equal(seeks[seeks.length - 1], 30);
+
+    await vm.playFrom(450, { autoplay: false });
+    assert.equal(store.__clipCalls.length, 2, 'the third piece is loaded on its own');
+    assert.deepEqual(store.__clipCalls[1].slice(1), [400, 600]);
+    vm.onLoadedMetadata();
+    assert.equal(seeks[seeks.length - 1], 50, '450 s is 50 s into the piece that starts at 400');
 });
 
 await test('an imported file is never decoded whole for the channel probe', async () => {

@@ -572,6 +572,24 @@ export const IMPORT_PIECE_BYTES = 4 * 1024 * 1024;
 // uncompressed WAV does not, and the message says to convert it.
 export const MAX_IMPORT_AUDIO_BYTES = 300 * 1024 * 1024;
 
+// Whether a whole-file track has to be PLAYED whole.
+//
+// MP3 and ADTS AAC are streams of self-synchronising frames: a decoder handed
+// bytes from the middle finds the next frame header and plays from there. So a
+// 4 MB piece of an MP3 is itself a playable file, and requiring the whole file
+// for every play was pure cost — worst on a device playing the recording from
+// Dropbox, which had to download all of it (133 MB, found in the field for a
+// 95-minute import) before a note, through a download cache a quarter that
+// size, so every tap started the download again.
+//
+// Decided at READ time from the stored container, so recordings already
+// imported get it without being imported again. M4A, WAV, FLAC and Ogg keep the
+// whole-file rule: their pieces are not files.
+const SLICEABLE_CONTAINERS = ['audio/mpeg', 'audio/aac'];
+export function playsWhole(track) {
+    return !!(track && track.wholeFile) && !SLICEABLE_CONTAINERS.includes(containerOf(track.mimeType));
+}
+
 export class ImportAudioError extends Error {
     constructor(message, code) {
         super(message);
@@ -1071,7 +1089,7 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     // An imported file is only a file when it is whole — see importAudioFile().
     // Whatever was asked for, the clip is the entire track, and the timeline
     // below (trackStartSeconds) is what maps a moment into it.
-    if (track.wholeFile) {
+    if (playsWhole(track)) {
         overlapping = manifest.segments
             .filter(s => s.trackIndex === trackIndex)
             .sort((a, b) => a.index - b.index);
@@ -1218,7 +1236,12 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         // timestamps are the TRACK's, not the clip's — it begins with that
         // track's initialisation bytes — so this is what a seek is measured
         // from, never clipStart.
-        trackStartSeconds: track.startSeconds || 0,
+        //
+        // Except a slice of an imported MP3/AAC stream: those bytes carry no
+        // timestamps at all, so the element's timeline starts at zero where
+        // the slice does. Saying so here, rather than leaving the player to
+        // detect it, means there is no ambiguity for it to resolve.
+        trackStartSeconds: track.wholeFile && !playsWhole(track) ? clipStart : (track.startSeconds || 0),
     };
 }
 
