@@ -20,8 +20,11 @@ const CHUNK_BYTES = 8 * 1024 * 1024;
 
 export class DropboxClient {
     constructor({ token, fetcher = (...args) => fetch(...args) }) { this.token = token; this.fetcher = fetcher; }
-    async request(endpoint, args, body) {
-        const token = this.token();
+    // `token()` may be async: it can refresh an access token near its end
+    // (dropboxAuth.mjs). `options.token` pins specific credentials, which a
+    // disconnect uses to revoke the grant it is about to forget.
+    async request(endpoint, args, body, options = {}) {
+        const token = options.token || await this.token();
         if (!token || token.expiresAt <= Date.now() + 30000) throw new DropboxError('Reconnect Dropbox to continue.', 'auth');
         const content = endpoint === 'files/download' || endpoint.startsWith('files/upload');
         const headers = { Authorization: `Bearer ${token.accessToken}` };
@@ -39,6 +42,16 @@ export class DropboxClient {
             const response = await this.fetcher(`https://${content ? 'content' : 'api'}.dropboxapi.com/2/${endpoint}`, {
                 method: 'POST', headers, body: content ? body : JSON.stringify(args), signal: controller.signal,
             });
+            // An access token can be rejected before its stated expiry — the
+            // grant was reissued elsewhere, a clock is off. With a refresh
+            // token that is one retry with fresh credentials, not a reconnect.
+            if (response.status === 401 && !options.retried && !options.token) {
+                const fresh = await this.token({ force: true });
+                if (fresh && fresh.accessToken !== token.accessToken) {
+                    clearTimeout(timer);
+                    return this.request(endpoint, args, body, { retried: true });
+                }
+            }
             if (!response.ok) {
                 const detail = await response.text();
                 const code = /missing_scope/.test(detail) ? 'scope' : response.status === 401 ? 'auth' : response.status === 429 ? 'rate' :

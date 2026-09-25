@@ -1959,6 +1959,45 @@ them instances of rules this feature had already learned:
    only, never from the reclamation sweeps: a local tidy-up must not destroy the
    user's own Dropbox files.
 
+#### Staying connected: offline access and a refresh token (September 2026)
+
+Reported from the field as "the imported session synced but the phone has no
+audio". Neither device was connected to Dropbox any more. `connectDropbox`
+asked for `token_access_type: 'online'` — a four-hour access token and nothing
+to renew it with — so every device dropped to **Reconnect required** a few
+hours after connecting, and from then on nothing was backed up and no other
+device could fetch its audio. Nothing on screen outside the storage panel said
+so.
+
+It asks for **offline** access now, and `services/dropboxAuth.mjs` trades the
+refresh token for a new access token five minutes before each expires. PKCE
+means the refresh carries only the refresh token and the public app key — no
+secret in the build. Three rules, each pinned in `test/dropboxAuth.test.mjs`
+and verified by reinstating the bug:
+
+1. **A refresh that fails on the network is not a refusal.** Offline, a
+   captive portal or a Dropbox 5xx/429 keeps the credentials and reports a
+   transient error; only 400/401 from the token endpoint (a revoked grant) is
+   `'auth'`. Treating the first as the second is the reconnect-every-flight
+   behaviour this replaces — the lenient-read-as-absence rule again, applied to
+   credentials.
+2. **One refresh at a time**, shared by every caller that finds the token stale.
+   Two TABS refreshing is harmless (Dropbox does not rotate refresh tokens), and
+   a tab adopts another's refreshed token from the `storage` event without
+   tearing its backup state down.
+3. **A refresh landing after a disconnect is not saved.** And Disconnect
+   **revokes** the grant at Dropbox (`auth/token/revoke`, which also ends the
+   refresh token), best-effort and not blocking — a refresh token is a
+   long-lived credential and forgetting it locally does not end it.
+
+The transport retries a 401 once with forced-fresh credentials before calling it
+an auth failure, and the coordinator decides "connected" by
+`credentialsUsable()` — a refresh token counts even when the access token beside
+it has expired, which the old `expiresAt` checks did not know.
+
+A grant from before this change has no refresh token, works until it expires,
+and then needs one last reconnect.
+
 #### A fifth: "The Dropbox session has changed" on a device that changed nothing
 
 Reported from the field (September 2026) — an iPhone showing a session recorded

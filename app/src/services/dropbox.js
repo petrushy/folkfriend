@@ -6,6 +6,7 @@ import store from '@/services/store.js';
 import recorder from '@/services/sessionRecorder.js';
 import { listManifests, readManifest, readSegment, buildClip, asBlob, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
 import { DropboxClient, DropboxError, base64url } from './dropboxClient.mjs';
+import { authFromTokenResponse, createTokenSource, credentialsUsable } from './dropboxAuth.mjs';
 import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateWholeRecordings, validateManifest, validateSession, mayReplaceRemoteSession, sessionPath, deletionPath, deletionRecord, sessionSummary } from './dropboxBackup.mjs';
 
 // Public OAuth identifier, deliberately shipped with the browser app.
@@ -27,7 +28,7 @@ let auth;
 try { auth = JSON.parse(stored(AUTH_KEY)); } catch (_) { auth = null; }
 let account = stored(ACCOUNT_KEY) || '';
 export const dropboxState = Vue.observable({ configured: !!APP_KEY, enabled: stored(ENABLED_KEY) === 'true',
-    connected: !!auth && auth.expiresAt > Date.now() + 30000, busy: false, error: '', sessions: {}, revision: 0, storage: emptyStorage(),
+    connected: credentialsUsable(auth), busy: false, error: '', sessions: {}, revision: 0, storage: emptyStorage(),
     // Sessions whose backup is blocked by a newer copy in Dropbox, id → why.
     // Kept apart from `sessions` because a conflict is the one backup failure
     // the user can actually do something about, and the view needs to know
@@ -44,7 +45,18 @@ export function setWholeRecordings(enabled) {
     if (enabled) { retryAt = 0; return syncDropbox(true); }
     return Promise.resolve();
 }
-const client = new DropboxClient({ token: () => dropboxState.enabled ? auth : null });
+// Renews the access token from the stored refresh token as it nears expiry,
+// so a device stays connected rather than dropping to "Reconnect required"
+// four hours after connecting. See dropboxAuth.mjs.
+const tokens = createTokenSource({
+    appKey: APP_KEY,
+    load: () => (dropboxState.enabled ? auth : null),
+    save: next => {
+        auth = next;
+        try { localStorage.setItem(AUTH_KEY, json(auth)); } catch (_) { /* kept in memory for this session */ }
+    },
+});
+const client = new DropboxClient({ token: options => tokens.token(options) });
 let queue = Promise.resolve();
 let retryAt = 0;
 let deletionCheckAt = 0;
@@ -153,7 +165,7 @@ export async function connectDropbox({ includeSpaceUsage = stored(SPACE_KEY) ===
             }, 1000);
             window.addEventListener('message', receive);
             popup.location.href = `https://www.dropbox.com/oauth2/authorize?${new URLSearchParams({ client_id: APP_KEY, response_type: 'code',
-                redirect_uri: redirect, state, code_challenge: challenge, code_challenge_method: 'S256', token_access_type: 'online',
+                redirect_uri: redirect, state, code_challenge: challenge, code_challenge_method: 'S256', token_access_type: 'offline',
                 scope: 'files.metadata.read files.content.read files.content.write' + (includeSpaceUsage ? ' account_info.read' : '') })}`;
         });
         const response = await fetch('https://api.dropboxapi.com/oauth2/token', { method: 'POST', body: new URLSearchParams({
@@ -161,12 +173,13 @@ export async function connectDropbox({ includeSpaceUsage = stored(SPACE_KEY) ===
         }) });
         if (!response.ok) throw new Error('Dropbox authorization failed. Please reconnect.');
         const result = await response.json();
-        if (!result.access_token || !result.account_id || !(result.expires_in > 0)) throw new Error('Invalid Dropbox authorization response.');
+        if (!result.account_id) throw new Error('Invalid Dropbox authorization response.');
+        const granted = authFromTokenResponse(result);
         await serialize(async () => {
             account = result.account_id;
             dropboxState.storage = emptyStorage();
             localStorage.setItem(SPACE_KEY, String(includeSpaceUsage));
-            auth = { accessToken: result.access_token, expiresAt: Date.now() + result.expires_in * 1000 };
+            auth = granted;
             localStorage.setItem(AUTH_KEY, json(auth)); localStorage.setItem(ACCOUNT_KEY, account); localStorage.setItem(ENABLED_KEY, 'true');
             dropboxState.enabled = true; dropboxState.connected = true; dropboxState.sessions = {}; dropboxState.error = ''; retryAt = 0;
         });
@@ -176,9 +189,22 @@ export async function connectDropbox({ includeSpaceUsage = stored(SPACE_KEY) ===
 }
 export async function disconnectDropbox() {
     // Stop scheduling immediately; wait for the one in-flight request chain.
+    const previous = auth;
     dropboxState.enabled = false;
     await serialize(async () => {
+        // A refresh token is a long-lived credential, so Disconnect has to end
+        // the grant at Dropbox, not only forget it here. Revoking an access
+        // token also revokes the refresh token it came from. Best-effort and
+        // never awaited past taking the token: being offline must not stop
+        // someone disconnecting, and the local copy is gone either way.
+        let revokeWith = null;
+        if (previous && previous.refreshToken) {
+            try { revokeWith = await tokens.token({ auth: previous }); } catch (_) { /* offline */ }
+        }
         auth = null; localStorage.removeItem(AUTH_KEY); localStorage.setItem(ENABLED_KEY, 'false');
+        if (revokeWith) {
+            Promise.resolve(client.request('auth/token/revoke', null, undefined, { token: revokeWith })).catch(() => {});
+        }
         dropboxState.storage = emptyStorage(); localStorage.removeItem(SPACE_KEY);
         dropboxState.connected = false; dropboxState.sessions = {}; dropboxState.error = ''; changed();
     });
@@ -189,7 +215,7 @@ export function syncDropbox(force = false) {
     dropboxState.busy = true;
     return serialize(async () => {
         try {
-            if (!auth || auth.expiresAt <= Date.now() + 30000) throw new DropboxError('Reconnect Dropbox to continue.', 'auth');
+            if (!credentialsUsable(auth)) throw new DropboxError('Reconnect Dropbox to continue.', 'auth');
             dropboxState.error = '';
             const sessions = await store.getLiveSessionsStrict();
             const manifests = await listManifests();
@@ -594,13 +620,24 @@ export function startDropbox() {
     window.addEventListener('online', () => { retryAt = 0; schedule(); });
     window.addEventListener('storage', event => {
         if (![AUTH_KEY, ACCOUNT_KEY, ENABLED_KEY].includes(event.key)) return;
+        // Another tab refreshing its access token rewrites AUTH_KEY every few
+        // hours. Same grant, new token: adopt it quietly rather than tearing
+        // this tab's backup state down and rebuilding it.
+        if (event.key === AUTH_KEY) {
+            let next = null;
+            try { next = JSON.parse(event.newValue); } catch (_) { next = null; }
+            if (next && auth && next.refreshToken && next.refreshToken === auth.refreshToken) {
+                auth = next;
+                return;
+            }
+        }
         dropboxState.enabled = false;
         dropboxState.storage = emptyStorage();
         serialize(async () => {
             try { auth = JSON.parse(stored(AUTH_KEY)); } catch (_) { auth = null; }
             account = stored(ACCOUNT_KEY) || '';
             dropboxState.enabled = stored(ENABLED_KEY) === 'true';
-            dropboxState.connected = !!auth && auth.expiresAt > Date.now() + 30000;
+            dropboxState.connected = credentialsUsable(auth);
             dropboxState.sessions = {}; changed();
         }).then(schedule);
     });
