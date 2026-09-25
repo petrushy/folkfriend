@@ -1,7 +1,7 @@
 <template>
     <v-container class="viewContainerWrapper session-analysis">
         <h1 class="my-2">
-            Session Analysis
+            Session Tools
         </h1>
 
         <!-- Three modes do not fit on one phone row, and v-btn-toggle does not
@@ -15,7 +15,7 @@
             class="mb-4 mode-toggle"
         >
             <v-btn value="file" small>
-                File recording
+                Import recording
             </v-btn>
             <v-btn value="session" small>
                 <v-icon left small>{{ icons.microphone }}</v-icon>
@@ -110,10 +110,13 @@
 
         <v-card v-if="viewMode === 'file'" class="pa-5 my-3">
             <h2 class="text-h6 mb-3">
-                Import
+                Import a recording
             </h2>
             <p class="mb-4">
-                Drop a long recording to detect tune starts. Add a Transcribe! <code>.xsc</code> file if you also want to export updated markers.
+                Drop a recording of a session to find the tunes in it. Once it is analysed you can save it
+                to Past Sessions with its audio, so it plays back from the tune list and is backed up to
+                Dropbox like a session recorded here. Add a Transcribe! <code>.xsc</code> file if you also
+                want to export updated markers.
             </p>
 
             <div
@@ -583,6 +586,76 @@
             </p>
         </v-card>
 
+        <!-- An analysed file becomes a Past Session here. Below the tune list
+             because the list is what is being saved: corrections made in it
+             (a different tune chosen, a start time edited) are saved with it. -->
+        <v-card v-if="canOfferImportSave" class="pa-5 my-3">
+            <h2 class="text-h6 mb-2">
+                Save to Past Sessions
+            </h2>
+            <template v-if="!importSave.savedSessionId">
+                <p class="text--secondary">
+                    Saves this tune list as a session, alongside the ones recorded live. Check the tune
+                    list first — your corrections are saved with it, and it can be edited later too.
+                </p>
+                <div class="d-flex flex-wrap" style="gap: 16px;">
+                    <v-text-field
+                        v-model="importSave.name"
+                        label="Session name"
+                        maxlength="160"
+                        hint="Leave empty to name it by date"
+                        persistent-hint
+                        :disabled="importSave.saving"
+                        style="min-width: 240px; flex: 2 1 240px;"
+                    />
+                    <v-text-field
+                        v-model="importSave.recordedAt"
+                        label="Recorded"
+                        type="datetime-local"
+                        hint="Guessed from the file's date"
+                        persistent-hint
+                        :disabled="importSave.saving"
+                        style="min-width: 200px; flex: 1 1 200px;"
+                    />
+                </div>
+                <v-switch
+                    v-model="importSave.keepAudio"
+                    inset
+                    dense
+                    hide-details
+                    class="mt-4"
+                    :disabled="importSave.saving"
+                    :label="`Keep the audio (${formatFileSize(audioFile.size)})`"
+                />
+                <p class="caption text--secondary mt-1">
+                    Stored on this device so the session plays back from its tune list, and backed up to
+                    Dropbox if backup is on. It records whoever was in the room, like a live recording.
+                </p>
+                <v-btn
+                    color="primary"
+                    :loading="importSave.saving"
+                    :disabled="importSave.saving || !importRecordedAtValid"
+                    @click="saveImportToSessions"
+                >
+                    Save to Past Sessions
+                </v-btn>
+            </template>
+            <template v-else>
+                <p class="mb-3">
+                    Saved as <strong>{{ importSave.savedName }}</strong><span v-if="importSave.audioKept"> with its audio</span>.
+                </p>
+                <v-btn color="primary" @click="openImportedSession">
+                    Open session
+                </v-btn>
+            </template>
+            <v-alert v-if="importSave.audioNote" type="warning" dense text class="mt-4 mb-0">
+                {{ importSave.audioNote }}
+            </v-alert>
+            <v-alert v-if="importSave.error" type="error" dense text class="mt-4 mb-0">
+                {{ importSave.error }}
+            </v-alert>
+        </v-card>
+
         <v-card v-if="viewMode !== 'file' && activeSession && !activeDetections.length" class="pa-5 my-3">
             <h2 class="text-h6">No tunes in this session yet</h2>
             <p class="mb-0 text--secondary">{{ viewMode === 'live' ? 'The session is saved. Recognised tunes will appear here while listening.' : 'The session is saved with an empty tune list.' }}</p>
@@ -613,6 +686,10 @@ import { backupStatus, sessionConflictMessage } from '@/services/dropbox.js';
 import sessionRecorder from '@/services/sessionRecorder.js';
 import { listManifests, playbackReadManifest, reclaimOrphans } from '@/services/sessionAudioStore.js';
 import { clearLastShown } from '@/js/liveScoreFollow.mjs';
+import { saveImportedSession } from '@/services/sessionImport.js';
+import {
+    defaultImportStart, fromDateTimeLocal, nameFromFileName, toDateTimeLocal,
+} from '@/js/sessionImport.mjs';
 import {
     buildTuneListText,
     buildTuneOptions,
@@ -634,6 +711,20 @@ const emptyFileState = () => ({
     exportError: '',
     summary: { acceptedWindows: 0, durationSeconds: 0, options: null },
     progress: { current: 0, total: 0, currentTimeSeconds: 0 },
+});
+
+// The "Save to Past Sessions" form for an analysed file. Per file: choosing
+// another recording starts it again.
+const emptyImportSave = () => ({
+    name: '',
+    recordedAt: '',
+    keepAudio: true,
+    saving: false,
+    savedSessionId: null,
+    savedName: '',
+    audioKept: false,
+    audioNote: '',
+    error: '',
 });
 
 const emptyLiveState = () => ({
@@ -691,6 +782,7 @@ export default {
             // other's results and the "stage" of whichever ran last decided
             // what BOTH panels displayed.
             file: emptyFileState(),
+            importSave: emptyImportSave(),
             live: emptyLiveState(),
             followMode: false,
             pastSessions: [],
@@ -838,6 +930,15 @@ export default {
         canAnalyzeFile() {
             return !!this.audioFile && !this.isFileAnalyzing && this.indexLoaded;
         },
+        // Only once the scan is complete: a partial list saved mid-scan would
+        // be a session missing its second half, with nothing saying so.
+        canOfferImportSave() {
+            return this.viewMode === 'file' && !!this.audioFile && this.file.stage === 'done' &&
+                (this.file.detections.length > 0 || !!this.importSave.savedSessionId);
+        },
+        importRecordedAtValid() {
+            return Number.isFinite(fromDateTimeLocal(this.importSave.recordedAt));
+        },
         isFileAnalyzing() {
             return this.file.stage === 'decoding' || this.file.stage === 'analyzing';
         },
@@ -939,6 +1040,7 @@ export default {
         // File analysis events
         this._onFileStage = (stage) => {
             this.file.stage = stage;
+            if (stage === 'done') this._prefillImportSave();
             if (stage === 'done' || stage === 'idle') this.persistState();
         };
         this._onFileOptions = ({ windowSeconds, stepSeconds, durationSeconds }) => {
@@ -1161,7 +1263,7 @@ export default {
             if (!saved) return;
             if (saved.version !== SESSION_ANALYSIS_STATE_VERSION) {
                 store.clearSessionAnalysisState();
-                this.file.error = 'Saved Session Analysis results were from an older format and have been cleared. Please run the analysis again.';
+                this.file.error = 'Saved Session Tools results were from an older format and have been cleared. Please run the analysis again.';
                 return;
             }
 
@@ -1190,6 +1292,8 @@ export default {
                 currentTimeSeconds: 0,
             };
 
+            this.importSave = { ...emptyImportSave(), ...(saved.importSave || {}), saving: false };
+
             if (this.file.stage === 'decoding' || this.file.stage === 'analyzing') {
                 this.file.stage = this.file.detections.length ? 'done' : 'idle';
                 if (!this.file.error && !this.file.detections.length) {
@@ -1213,6 +1317,9 @@ export default {
                 detections: this.file.detections.map(detection => ({ ...detection })),
                 analysisSummary: { ...this.file.summary },
                 progress: { ...this.file.progress },
+                // Additive, so no version bump: an older saved state simply
+                // has no form, and gets a fresh one.
+                importSave: { ...this.importSave, saving: false },
             });
         },
         formatFileSize(bytes) {
@@ -1277,6 +1384,61 @@ export default {
         },
         resetFileResults() {
             this.file = emptyFileState();
+            this.importSave = emptyImportSave();
+        },
+
+        // ---- saving an imported file as a session ---------------------------
+
+        // Fills in what can be guessed, never over what the user has typed.
+        _prefillImportSave() {
+            if (!this.audioFile || this.importSave.savedSessionId) return;
+            if (!this.importSave.name) this.importSave.name = nameFromFileName(this.audioFile.name);
+            if (!this.importSave.recordedAt) {
+                this.importSave.recordedAt = toDateTimeLocal(
+                    defaultImportStart(this.audioFile, this.file.summary.durationSeconds));
+            }
+        },
+        async saveImportToSessions() {
+            if (this.importSave.saving || this.importSave.savedSessionId || !this.audioFile) return;
+            const form = this.importSave;
+            form.error = '';
+            form.audioNote = '';
+            form.saving = true;
+            try {
+                const { session, audio } = await saveImportedSession({
+                    file: this.audioFile,
+                    rows: this.file.detections,
+                    durationSeconds: this.file.summary.durationSeconds,
+                    startedAt: fromDateTimeLocal(form.recordedAt),
+                    name: form.name,
+                    keepAudio: form.keepAudio,
+                });
+                form.savedSessionId = session.id;
+                form.savedName = session.name || this.sessionLabel(session);
+                form.audioKept = audio.kept;
+                // The session IS saved; only the recording is missing. Said
+                // as a warning beside the success, not as a failure of the
+                // save — the tune list was the part worth keeping.
+                if (form.keepAudio && !audio.kept) {
+                    form.audioNote = `Saved without its audio: ${audio.error}`;
+                }
+                await this.refreshPastSessions();
+            } catch (e) {
+                form.error = `Could not save the session: ${(e && e.message) || e}`;
+            } finally {
+                form.saving = false;
+                this.persistState();
+            }
+        },
+        async openImportedSession() {
+            const id = this.importSave.savedSessionId;
+            if (!id) return;
+            if (!this.pastSessions.some(s => s.id === id)) await this.refreshPastSessions();
+            if (!this.pastSessions.some(s => s.id === id)) {
+                this.importSave.error = 'That session is no longer in Past Sessions.';
+                return;
+            }
+            this.selectSession(id);
         },
 
         // ---- live session controls ----------------------------------------

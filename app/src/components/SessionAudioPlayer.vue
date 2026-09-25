@@ -835,7 +835,12 @@ export default {
             }
             this.error = '';
 
-            if (this.segmentIndex === segment.index) {
+            // An imported recording is loaded WHOLE (see buildClip()), so a
+            // moment in any of its pieces is already in the element; reloading
+            // it would re-read the entire file for every seek.
+            const inLoadedWholeFile = this.segmentIndex !== null && this._loadedWholeFile &&
+                segment.trackIndex === this.currentTrackIndex;
+            if (this.segmentIndex === segment.index || inLoadedWholeFile) {
                 // CANCELS an older load that has not landed yet.
                 //
                 // segmentIndex names the segment currently IN the element, and
@@ -971,6 +976,7 @@ export default {
                 this.pendingSeekSeconds = seekSeconds;
                 this._autoplayAfterLoad = autoplay;
                 this._loadedSegment = segment;
+                this._loadedWholeFile = !!(track && track.wholeFile);
                 this._loadedSeekSeconds = seekSeconds;
                 this._clipFromTrackStart = fromTrackStart;
                 audio.src = this.objectUrl;
@@ -1018,6 +1024,10 @@ export default {
             const id = this.sessionId;
             const track = this.tracks.find(t => t.index === trackIndex) || this.tracks[0];
             if (!track) return;
+            // An imported file was not captured by this app, so the one-sided
+            // capture this corrects cannot have happened to it — and probing it
+            // would decode the WHOLE file, since that is the only clip it has.
+            if (track.wholeFile) return;
 
             if (!this._probeAttempts) this._probeAttempts = {};
             const settled = this.channelProbes[track.index];
@@ -1574,10 +1584,14 @@ export default {
         // not gapless, and a segment boundary is audible as a brief break.
         async onEnded() {
             if (!this.manifest || this.segmentIndex === null) return;
+            // The first piece that begins where the loaded clip ENDS, not the
+            // next index: a clip can span several pieces (a whole imported
+            // file spans all of its own), and the next index would replay them.
             const next = this.manifest.segments
                 .slice()
                 .sort((a, b) => a.index - b.index)
-                .find(s => s.index > this.segmentIndex);
+                .find(s => s.index > this.segmentIndex &&
+                    s.startSeconds >= (this._clipEndSeconds || 0) - 0.5);
             if (!next) { this.playing = false; return; }
             await this._loadSegment(next, next.startSeconds, true);
         },

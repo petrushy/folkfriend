@@ -62,7 +62,7 @@
                         </v-list-item-action>
                         <v-list-item-content>
                             <v-list-item-title class="navBarEntry">
-                                Session Analysis
+                                Session Tools
                             </v-list-item-title>
                         </v-list-item-content>
                     </v-list-item>

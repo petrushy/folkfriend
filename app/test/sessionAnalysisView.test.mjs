@@ -288,6 +288,23 @@ async function writeFakes() {
     await writeFile(path.join(tmpDir, 'fake-session-analysis.mjs'), FAKE_SESSION_ANALYSIS);
     await writeFile(path.join(tmpDir, 'fake-follow.mjs'), FAKE_FOLLOW);
     await writeFile(path.join(tmpDir, 'fake-component.mjs'), FAKE_VUE_COMPONENT);
+    await writeFile(path.join(tmpDir, 'fake-session-import.mjs'), `
+import store from './fake-store.mjs';
+export const __calls = [];
+export const __next = { audio: { kept: true, error: '', code: '' }, fail: null };
+export function __reset() {
+    __calls.length = 0;
+    __next.audio = { kept: true, error: '', code: '' };
+    __next.fail = null;
+}
+export async function saveImportedSession(args) {
+    __calls.push(args);
+    if (__next.fail) throw __next.fail;
+    const session = { id: 'session-imported', startedAt: args.startedAt, name: args.name || 'Dated', tunes: [] };
+    await store.upsertLiveSession(session);
+    return { session, audio: __next.audio };
+}
+`);
     // Session audio is covered by sessionAudio.test.mjs against the real
     // store; here it only has to resolve, and report that nothing is recorded.
     await writeFile(path.join(tmpDir, 'fake-recorder.mjs'), `
@@ -348,6 +365,10 @@ export function sessionConflictMessage() { return __state.conflict; }
         ["from '@/js/liveScoreFollow.mjs'", "from './fake-follow.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
         ["from '@/services/dropbox.js'", "from './fake-dropbox.mjs'"],
+        ["from '@/services/sessionImport.js'", "from './fake-session-import.mjs'"],
+        // The pure helper is used for real: its date and name rules are what
+        // the form is pre-filled with, and faking them would test nothing.
+        ["from '@/js/sessionImport.mjs'", `from '${path.join(srcDir, 'js', 'sessionImport.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in the SFC`);
@@ -1371,6 +1392,114 @@ await test('leaving the page parks the shared player instead of stopping it', as
     component.beforeDestroy.call(vm);
     assert.equal(host.shown, false, 'parked');
     assert.equal(host.sessionId, 'session-a', 'and still on the same recording, so it keeps playing');
+});
+
+
+console.log('\nsaving an imported recording');
+
+async function mountAnalysedFile() {
+    const mounted = await mountView({ indexLoaded: true });
+    await mounted.settle();
+    const imports = await import(path.join(tmpDir, 'fake-session-import.mjs'));
+    imports.__reset();
+    const { vm, bus } = mounted;
+    vm.viewMode = 'file';
+    vm.audioFile = { name: 'Tuesday session.m4a', size: 2048, lastModified: new Date(2026, 8, 22, 23, 0).getTime() };
+    vm.file.summary.durationSeconds = 3600;
+    bus.__fire('fileAnalysisUpdate', [
+        { id: 'f1', tuneId: 1, settingId: '10', title: 'Reel', startSeconds: 0, endSeconds: 60, bestScore: 0.8 },
+    ], 3);
+    return { ...mounted, imports };
+}
+
+await test('saving is offered only once the whole file has been scanned', async () => {
+    const { vm, bus } = await mountAnalysedFile();
+    bus.__fire('fileAnalysisStage', 'analyzing');
+    assert.equal(vm.canOfferImportSave, false, 'a half-scanned list would be a session missing its end');
+    bus.__fire('fileAnalysisStage', 'done');
+    assert.equal(vm.canOfferImportSave, true);
+});
+
+await test('the form is pre-filled from the file, never over what was typed', async () => {
+    const { vm, bus } = await mountAnalysedFile();
+    bus.__fire('fileAnalysisStage', 'done');
+    assert.equal(vm.importSave.name, 'Tuesday session');
+    // Ends at the file's date, so starts an hour before it.
+    assert.equal(vm.importSave.recordedAt, '2026-09-22T22:00');
+
+    vm.importSave.name = 'The Cobblestone';
+    vm.importSave.recordedAt = '2026-09-22T21:30';
+    bus.__fire('fileAnalysisStage', 'done');
+    assert.equal(vm.importSave.name, 'The Cobblestone');
+    assert.equal(vm.importSave.recordedAt, '2026-09-22T21:30');
+});
+
+await test('saving hands over the rows on screen, the file and the chosen date', async () => {
+    const { vm, bus, imports } = await mountAnalysedFile();
+    bus.__fire('fileAnalysisStage', 'done');
+    vm.importSave.recordedAt = '2026-09-22T21:30';
+    await vm.saveImportToSessions();
+
+    assert.equal(imports.__calls.length, 1);
+    const call = imports.__calls[0];
+    assert.equal(call.file, vm.audioFile);
+    assert.equal(call.rows, vm.file.detections, 'the corrected rows, not the service\'s list');
+    assert.equal(call.durationSeconds, 3600);
+    assert.equal(call.startedAt, new Date(2026, 8, 22, 21, 30).getTime());
+    assert.equal(call.keepAudio, true, 'the audio is kept unless the user says not to');
+    assert.equal(vm.importSave.savedSessionId, 'session-imported');
+    assert.ok(vm.pastSessions.some(s => s.id === 'session-imported'), 'and it is in Past Sessions');
+
+    await vm.saveImportToSessions();
+    assert.equal(imports.__calls.length, 1, 'a second tap does not save a second copy');
+});
+
+await test('a session saved without its audio says so, as a warning beside the success', async () => {
+    const { vm, bus, imports } = await mountAnalysedFile();
+    bus.__fire('fileAnalysisStage', 'done');
+    imports.__next.audio = { kept: false, error: 'Not enough free storage to keep this recording.', code: 'storage' };
+    await vm.saveImportToSessions();
+    assert.equal(vm.importSave.savedSessionId, 'session-imported');
+    assert.equal(vm.importSave.error, '');
+    assert.match(vm.importSave.audioNote, /without its audio: Not enough free storage/);
+});
+
+await test('a failed save is reported and can be tried again', async () => {
+    const { vm, bus, imports } = await mountAnalysedFile();
+    bus.__fire('fileAnalysisStage', 'done');
+    imports.__next.fail = new Error('disk full');
+    await vm.saveImportToSessions();
+    assert.equal(vm.importSave.savedSessionId, null);
+    assert.match(vm.importSave.error, /disk full/);
+    assert.equal(vm.importSave.saving, false);
+    imports.__next.fail = null;
+    await vm.saveImportToSessions();
+    assert.equal(vm.importSave.savedSessionId, 'session-imported');
+});
+
+await test('an unreadable date blocks the save rather than inventing one', async () => {
+    const { vm, bus } = await mountAnalysedFile();
+    bus.__fire('fileAnalysisStage', 'done');
+    vm.importSave.recordedAt = '';
+    assert.equal(vm.importRecordedAtValid, false);
+});
+
+await test('the saved session opens in Past Sessions', async () => {
+    const { vm, bus } = await mountAnalysedFile();
+    bus.__fire('fileAnalysisStage', 'done');
+    await vm.saveImportToSessions();
+    await vm.openImportedSession();
+    assert.equal(vm.viewMode, 'history');
+    assert.equal(vm.selectedSession.id, 'session-imported');
+});
+
+await test('choosing another file starts the form again', async () => {
+    const { vm, bus } = await mountAnalysedFile();
+    bus.__fire('fileAnalysisStage', 'done');
+    await vm.saveImportToSessions();
+    vm.setAudioFile({ name: 'another.mp3', size: 10 });
+    assert.equal(vm.importSave.savedSessionId, null);
+    assert.equal(vm.importSave.name, '');
 });
 
 await rm(tmpDir, { recursive: true, force: true });

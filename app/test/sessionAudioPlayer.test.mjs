@@ -1480,5 +1480,88 @@ await test('no next tune after the last one', async () => {
     });
 });
 
+
+// trackRanges() is faked, so a test that needs the player to see a manifest's
+// tracks says so.
+function __setTracksFor(manifest) {
+    store.__setTracks(manifest.tracks.map(t => ({
+        index: t.index, startSeconds: t.startSeconds, endSeconds: t.startSeconds + t.durationSeconds,
+        durationSeconds: t.durationSeconds, wholeFile: !!t.wholeFile,
+    })));
+}
+
+console.log('\nimported recordings play whole');
+
+// An imported file: one whole-file track stored as three pieces, which is how
+// sessionAudioStore.importAudioFile() lays it out. buildClip() hands back the
+// entire file for a moment in any of them.
+const IMPORTED = {
+    sessionId: 's1', mimeType: 'audio/mpeg', totalSeconds: 600,
+    tracks: [{ index: 0, startSeconds: 0, durationSeconds: 600, wholeFile: true, mimeType: 'audio/mpeg' }],
+    segments: [
+        { index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 200, bytes: 4 },
+        { index: 1, trackIndex: 0, startSeconds: 200, durationSeconds: 200, bytes: 4 },
+        { index: 2, trackIndex: 0, startSeconds: 400, durationSeconds: 200, bytes: 4 },
+    ],
+};
+
+function wholeFileElement(seeks) {
+    return {
+        seekable: { length: 1, start: () => 0, end: () => 600 },
+        duration: 600,
+        load() {},
+        play: () => Promise.resolve(),
+        pause() {},
+        set currentTime(v) { seeks.push(v); },
+        get currentTime() { return seeks[seeks.length - 1] || 0; },
+    };
+}
+
+await test('a seek into another piece of a loaded whole file does not load it again', async () => {
+    // Each piece names the same clip, so reloading on a piece change re-reads
+    // the entire file — hundreds of megabytes — for every tap on the timeline.
+    const vm = await mountPlayer(IMPORTED);
+    __setTracksFor(IMPORTED);
+    vm.playFrom = vm.__realPlayFrom;
+    const seeks = [];
+    vm.$refs.audio = wholeFileElement(seeks);
+    store.__clipCalls.length = 0;
+    store.__setClip({ blob: new Blob(['ID3!']), mimeType: 'audio/mpeg', startSeconds: 0, endSeconds: 600,
+        trackIndex: 0, trackStartSeconds: 0 });
+
+    await vm.playFrom(30, { autoplay: false });
+    vm.onLoadedMetadata();
+    assert.equal(store.__clipCalls.length, 1);
+    assert.equal(seeks[seeks.length - 1], 30);
+
+    await vm.playFrom(500, { autoplay: false });
+    assert.equal(store.__clipCalls.length, 1, 'still the one clip');
+    assert.equal(seeks[seeks.length - 1], 500, 'sought inside it, on the file\'s own timeline');
+});
+
+await test('the end of a whole file is the end, not a cue to replay its next piece', async () => {
+    const vm = await mountPlayer(IMPORTED);
+    __setTracksFor(IMPORTED);
+    vm.playFrom = vm.__realPlayFrom;
+    vm.$refs.audio = wholeFileElement([]);
+    store.__setClip({ blob: new Blob(['ID3!']), mimeType: 'audio/mpeg', startSeconds: 0, endSeconds: 600,
+        trackIndex: 0, trackStartSeconds: 0 });
+    await vm.playFrom(10, { autoplay: false });
+    store.__clipCalls.length = 0;
+    vm.playing = true;
+
+    await vm.onEnded();
+    assert.equal(store.__clipCalls.length, 0, 'nothing reloaded');
+    assert.equal(vm.playing, false);
+});
+
+await test('an imported file is never decoded whole for the channel probe', async () => {
+    const vm = await mountPlayer(IMPORTED);
+    __setTracksFor(IMPORTED);
+    store.__clipCalls.length = 0;
+    await vm._probeChannels(0);
+    assert.equal(store.__clipCalls.length, 0);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);
