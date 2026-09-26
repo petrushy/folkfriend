@@ -227,6 +227,8 @@
                     :setting="row.setting"
                     :tune-i-d="row.tuneID"
                     :source-url="row.sourceUrl"
+                    :recording-count="recordingCount(row.tuneID)"
+                    @playRecording="playRecording($event, row.name)"
                     @favouriteItemClicked="loadFavouriteItem"
                     @unstar="removeFavourite"
                     @toggle="toggleSelected"
@@ -285,6 +287,8 @@
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
+                            :recording-count="recordingCount(row.tuneID)"
+                            @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
@@ -339,6 +343,8 @@
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
+                            :recording-count="recordingCount(row.tuneID)"
+                            @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
@@ -396,6 +402,8 @@
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
+                            :recording-count="recordingCount(row.tuneID)"
+                            @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
@@ -434,6 +442,32 @@
         >
             {{ snackbarText }}
         </v-snackbar>
+
+        <!-- Which session to play a favourite from, when several recorded it -->
+        <v-dialog
+            v-model="recordingPicker.open"
+            max-width="400"
+        >
+            <v-card>
+                <v-card-title class="text-subtitle-1">Play {{ recordingPicker.name }} from…</v-card-title>
+                <v-list dense>
+                    <v-list-item
+                        v-for="entry in recordingPicker.entries"
+                        :key="entry.sessionId"
+                        @click="playRecordingEntry(entry)"
+                    >
+                        <v-list-item-content>
+                            <v-list-item-title>{{ entry.sessionName }}</v-list-item-title>
+                            <v-list-item-subtitle>{{ formatSessionDate(entry.startedAt) }}</v-list-item-subtitle>
+                        </v-list-item-content>
+                    </v-list-item>
+                </v-list>
+                <v-card-actions>
+                    <v-spacer />
+                    <v-btn text @click="recordingPicker.open = false">Cancel</v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
 
         <!-- Manage tags dialog -->
         <v-dialog
@@ -571,6 +605,11 @@ import utils from '@/js/utils';
 import { settingSourceUrl } from '@/js/source.mjs';
 import { windowRows, windowGroups, INITIAL_ROW_BUDGET, ROW_BUDGET_STEP } from '@/js/rowWindow.mjs';
 import router from '@/router/index.js';
+import { indexRecordingsByTune, sessionDetections, formatSessionDate } from '@/js/tuneRecordings.mjs';
+import { listManifests } from '@/services/sessionAudioStore.js';
+import { dropboxState } from '@/services/dropbox.js';
+import { playSessionTuneLooped } from '@/services/sessionPlayerHost.js';
+import liveAnalysisService from '@/services/liveAnalysis.js';
 
 const FILTER_STATE_KEY = 'favouritesFilterState';
 
@@ -602,6 +641,11 @@ export default {
             // filtering must not hit IndexedDB per row.
             sightings: [],
             places: [],
+            // tuneId → saved sessions with a playable recording of it. Built
+            // once per load (tuneRecordings.mjs), never scanned per row.
+            recordingsByTune: new Map(),
+            // "Which session?" when more than one recorded the tune.
+            recordingPicker: { open: false, name: '', entries: [] },
             nameFilter: typeof persisted.nameFilter === 'string' ? persisted.nameFilter : '',
             groupBy: ['tag', 'date', 'place'].includes(persisted.groupBy) ? persisted.groupBy : null,
             collapsedTagGroups: new Set(Array.isArray(persisted.collapsedTagGroups) ? persisted.collapsedTagGroups : []),
@@ -876,8 +920,10 @@ export default {
         eventBus.$emit('parentViewActivated');
         this.loadFavourites();
         this.loadPlaces();
+        this.loadRecordings();
         eventBus.$on('syncComplete', this.loadFavourites);
         eventBus.$on('sightingsChanged', this.loadPlaces);
+        eventBus.$on('liveSessionsChanged', this.loadRecordings);
     },
     mounted() {
         // No IntersectionObserver (a genuinely old browser) means no way to
@@ -905,6 +951,7 @@ export default {
     beforeDestroy() {
         eventBus.$off('syncComplete', this.loadFavourites);
         eventBus.$off('sightingsChanged', this.loadPlaces);
+        eventBus.$off('liveSessionsChanged', this.loadRecordings);
         if (this._rowObserver) this._rowObserver.disconnect();
         this._rowObserver = null;
         this._observedSentinel = null;
@@ -1019,6 +1066,90 @@ export default {
             }
             this.selectedIDs = next;
         },
+        // Which saved sessions can play each tune, for the ▶ on a row.
+        //
+        // Playable means this device holds the audio, or Dropbox is connected
+        // and may hold it (a session recorded on another device). The offsets
+        // on a saved tune only say a recording existed SOMEWHERE, and a ▶ that
+        // can only fail is worse than none. Nothing here touches the network.
+        async loadRecordings() {
+            try {
+                const [sessions, manifests] = await Promise.all([
+                    store.getLiveSessions(),
+                    listManifests(),
+                ]);
+                const local = new Set(manifests
+                    .filter(m => m.segments && m.segments.length)
+                    .map(m => m.sessionId));
+                const cloud = dropboxState.enabled && dropboxState.connected;
+                this._sessionsById = new Map(sessions.map(s => [s.id, s]));
+                this.recordingsByTune = indexRecordingsByTune(sessions, id => local.has(id) || cloud);
+            } catch (e) {
+                // No ▶ rather than a broken list.
+                this.recordingsByTune = new Map();
+            }
+        },
+        recordingCount(tuneID) {
+            if (!tuneID) return 0;
+            const entries = this.recordingsByTune.get(String(tuneID));
+            return entries ? entries.length : 0;
+        },
+        playRecording(tuneID, name) {
+            const entries = this.recordingsByTune.get(String(tuneID)) || [];
+            if (entries.length === 1) {
+                this.playRecordingEntry(entries[0]);
+            } else if (entries.length > 1) {
+                this.recordingPicker = { open: true, name: name || '', entries };
+            }
+        },
+        // Starts the tune looped and opens its session in Session Tools, where
+        // the full player is — timeline, speed, volume — and the whole tune
+        // list around it.
+        //
+        // Playback starts HERE, from the tap, so the player can prepare audio
+        // while that still counts as a user gesture; the navigation follows.
+        // Session Tools then shows the session the player already holds, so
+        // nothing reloads.
+        async playRecordingEntry(entry) {
+            this.recordingPicker.open = false;
+            const session = this._sessionsById && this._sessionsById.get(entry.sessionId);
+            if (!session) return this.showMessage('That session is no longer saved.');
+
+            // Session Tools may be holding an edit to another session that
+            // failed to save. Replacing its workspace would lose that edit, so
+            // play here instead and say why the page was not opened.
+            const workspace = store.state.sessionWorkspace;
+            const sameSession = workspace && workspace.session && workspace.session.id === session.id;
+            const blocked = workspace && workspace.pending && !sameSession;
+
+            const playing = playSessionTuneLooped({
+                sessionId: session.id,
+                sessionName: entry.sessionName,
+                detections: sessionDetections(session),
+                detectionId: entry.detectionId,
+            }, blocked ? { onError: message => this.showMessage(message) } : {});
+
+            if (blocked) {
+                const result = await playing;
+                this.showMessage(result.ok
+                    ? 'Playing here — Session Tools has unsaved changes to another session.'
+                    : result.error);
+                return;
+            }
+            // The session being listened to right now is shown live, never as
+            // a stored copy (Session Tools refuses that too: its autosave would
+            // write over the edit). Any other session opens as a past session.
+            if (session.id === liveAnalysisService.sessionId) store.state.sessionWorkspace = null;
+            else if (!sameSession) store.state.sessionWorkspace = { session: { ...session }, detections: null, pending: null };
+            // Errors from here on are shown by the player itself, on that page.
+            this.$router.push({ name: 'session-analysis' }).catch(() => {});
+            await playing;
+        },
+        showMessage(text) {
+            this.snackbarText = text;
+            this.snackbar = true;
+        },
+        formatSessionDate,
         async loadPlaces() {
             if (!store.userSettings.geoTagDetections) {
                 this.sightings = [];

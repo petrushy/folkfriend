@@ -56,6 +56,7 @@ const FAKE_UTILS = `export default { utcToString: (t) => 'at ' + t };`;
 const FAKE_MDI = `
 export const mdiStar = 'star';
 export const mdiTagPlusOutline = 'tag-plus';
+export const mdiPlayCircleOutline = 'play';
 `;
 const FAKE_COMPONENT = `export default { name: 'stub' };`;
 
