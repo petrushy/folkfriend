@@ -57,6 +57,7 @@ const FAKE_MDI = `
 export const mdiStar = 'star';
 export const mdiTagPlusOutline = 'tag-plus';
 export const mdiPlayCircleOutline = 'play';
+export const mdiPauseCircleOutline = 'pause';
 `;
 const FAKE_COMPONENT = `export default { name: 'stub' };`;
 

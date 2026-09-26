@@ -45,10 +45,11 @@
             v-if="recordingCount > 0"
             icon
             class="mr-0"
-            :aria-label="recordingCount > 1 ? `Play ${name} from a session recording (${recordingCount} sessions)` : `Play ${name} from the session recording, looped`"
+            :aria-label="recordingPlaying ? `Pause ${name}` : (recordingCount > 1 ? `Play ${name} from a session recording (${recordingCount} sessions)` : `Play ${name} from the session recording, looped`)"
+            :aria-pressed="recordingPlaying ? 'true' : 'false'"
             @click.stop="$emit('playRecording', tuneID)"
         >
-            <v-icon color="primary">{{ icons.play }}</v-icon>
+            <v-icon color="primary">{{ recordingPlaying ? icons.pause : icons.play }}</v-icon>
         </v-btn>
 
         <!-- Tune background (i) — outside the clickable container so it does not navigate -->
@@ -87,7 +88,7 @@
 </template>
 
 <script>
-import { mdiStar, mdiTagPlusOutline, mdiPlayCircleOutline } from '@mdi/js';
+import { mdiStar, mdiTagPlusOutline, mdiPlayCircleOutline, mdiPauseCircleOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
 import utils from '@/js/utils';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
@@ -127,6 +128,9 @@ export default {
         // How many saved sessions hold a playable recording of this TUNE (any
         // setting of it). Zero hides the ▶.
         recordingCount: { type: Number, default: 0 },
+        // This tune is what the session player is playing right now: the ▶
+        // becomes a pause, and the same tap stops it.
+        recordingPlaying: { type: Boolean, default: false },
     },
     data() {
         return {
@@ -140,6 +144,7 @@ export default {
                 star: mdiStar,
                 plus: mdiTagPlusOutline,
                 play: mdiPlayCircleOutline,
+                pause: mdiPauseCircleOutline,
             },
         };
     },
