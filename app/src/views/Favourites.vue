@@ -343,6 +343,7 @@
                     :tune-i-d="row.tuneID"
                     :source-url="row.sourceUrl"
                     :recording-count="recordingCount(row.tuneID)"
+                    :recording-playing="isRecordingPlaying(row.tuneID)"
                     @playRecording="playRecording($event, row.name)"
                     @favouriteItemClicked="loadFavouriteItem"
                     @unstar="removeFavourite"
@@ -403,6 +404,7 @@
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
                             :recording-count="recordingCount(row.tuneID)"
+                            :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @unstar="removeFavourite"
@@ -459,6 +461,7 @@
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
                             :recording-count="recordingCount(row.tuneID)"
+                            :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @unstar="removeFavourite"
@@ -518,6 +521,7 @@
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
                             :recording-count="recordingCount(row.tuneID)"
+                            :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @unstar="removeFavourite"
@@ -724,7 +728,7 @@ import router from '@/router/index.js';
 import { indexRecordingsByTune, sessionDetections, formatSessionDate } from '@/js/tuneRecordings.mjs';
 import { listManifests } from '@/services/sessionAudioStore.js';
 import { dropboxState } from '@/services/dropbox.js';
-import { playSessionTuneLooped } from '@/services/sessionPlayerHost.js';
+import { playSessionTuneLooped, playerHost, sessionPlayer } from '@/services/sessionPlayerHost.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 
 const FILTER_STATE_KEY = 'favouritesFilterState';
@@ -812,6 +816,15 @@ export default {
         };
     },
     computed: {
+        // The tune the shared session player is sounding right now, whoever
+        // started it — its row shows a pause instead of the ▶.
+        playingRecordingTuneID() {
+            const playback = playerHost.playback;
+            if (!playback || !playback.playing || !playback.detectionId) return null;
+            const detection = (playerHost.detections || []).find(d => d.id === playback.detectionId);
+            return detection && detection.tuneId !== undefined && detection.tuneId !== null
+                ? String(detection.tuneId) : null;
+        },
         groupByLabel() {
             if (this.groupBy === 'tag') return 'Grouped by tag';
             if (this.groupBy === 'date') return 'Grouped by date';
@@ -1239,7 +1252,17 @@ export default {
             const entries = this.recordingsByTune.get(String(tuneID));
             return entries ? entries.length : 0;
         },
+        isRecordingPlaying(tuneID) {
+            return !!tuneID && this.playingRecordingTuneID === String(tuneID);
+        },
         playRecording(tuneID, name) {
+            // The same button stops it: a tap on a playing row pauses, and the
+            // tune stays loaded, so the mini player can resume it.
+            if (this.isRecordingPlaying(tuneID)) {
+                const player = sessionPlayer();
+                if (player && player.playing) player.togglePlay();
+                return;
+            }
             const entries = this.recordingsByTune.get(String(tuneID)) || [];
             if (entries.length === 1) {
                 this.playRecordingEntry(entries[0]);
@@ -1247,14 +1270,14 @@ export default {
                 this.recordingPicker = { open: true, name: name || '', entries };
             }
         },
-        // Starts the tune looped and opens its session in Session Tools, where
-        // the full player is — timeline, speed, volume — and the whole tune
-        // list around it.
+        // Plays the tune looped, HERE. Opening Session Tools on every tap made
+        // listening jumpy — often one just wants to hear it and carry on. The
+        // mini player carries it on every page, and Session Tools is handed
+        // this session, so opening it (the mini player's label, or the menu)
+        // shows the session being played with its speed and volume controls.
         //
-        // Playback starts HERE, from the tap, so the player can prepare audio
-        // while that still counts as a user gesture; the navigation follows.
-        // Session Tools then shows the session the player already holds, so
-        // nothing reloads.
+        // Playback starts from the tap, so the player can prepare audio while
+        // that still counts as a user gesture.
         async playRecordingEntry(entry) {
             this.recordingPicker.open = false;
             const session = this._sessionsById && this._sessionsById.get(entry.sessionId);
@@ -1262,7 +1285,7 @@ export default {
 
             // Session Tools may be holding an edit to another session that
             // failed to save. Replacing its workspace would lose that edit, so
-            // play here instead and say why the page was not opened.
+            // it is left alone — the tune still plays here.
             const workspace = store.state.sessionWorkspace;
             const sameSession = workspace && workspace.session && workspace.session.id === session.id;
             const blocked = workspace && workspace.pending && !sameSession;
@@ -1272,23 +1295,18 @@ export default {
                 sessionName: entry.sessionName,
                 detections: sessionDetections(session),
                 detectionId: entry.detectionId,
-            }, blocked ? { onError: message => this.showMessage(message) } : {});
+            }, { onError: message => this.showMessage(message) });
 
-            if (blocked) {
-                const result = await playing;
-                this.showMessage(result.ok
-                    ? 'Playing here — Session Tools has unsaved changes to another session.'
-                    : result.error);
-                return;
+            if (!blocked) {
+                // The session being listened to right now is shown live, never
+                // as a stored copy (Session Tools refuses that too: its autosave
+                // would write over the edit). Any other session opens as a
+                // past session.
+                if (session.id === liveAnalysisService.sessionId) store.state.sessionWorkspace = null;
+                else if (!sameSession) store.state.sessionWorkspace = { session: { ...session }, detections: null, pending: null };
             }
-            // The session being listened to right now is shown live, never as
-            // a stored copy (Session Tools refuses that too: its autosave would
-            // write over the edit). Any other session opens as a past session.
-            if (session.id === liveAnalysisService.sessionId) store.state.sessionWorkspace = null;
-            else if (!sameSession) store.state.sessionWorkspace = { session: { ...session }, detections: null, pending: null };
-            // Errors from here on are shown by the player itself, on that page.
-            this.$router.push({ name: 'session-analysis' }).catch(() => {});
-            await playing;
+            const result = await playing;
+            if (!result.ok) this.showMessage(result.error);
         },
         showMessage(text) {
             this.snackbarText = text;
