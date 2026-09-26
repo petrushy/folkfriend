@@ -101,9 +101,13 @@
             </div>
         </div>
 
-        <!-- Tag filter bar -->
+        <!-- Filter bar: tune type, key and tags on one row, to keep it short.
+             Types and keys are picked from a menu rather than laid out as
+             chips — with Swedish tunes in the mix there can be dozens of types,
+             and every key besides — so only the ACTIVE ones sit in the bar,
+             each as a chip closed to remove it. Tags stay as toggle chips. -->
         <div
-            v-if="allTags.length > 0"
+            v-if="typeFilterOptions.length > 0 || keyFilterOptions.length > 0 || allTags.length > 0"
             class="tag-filter-bar mb-3"
         >
             <div
@@ -111,6 +115,116 @@
                 style="gap:6px"
             >
                 <span class="caption grey--text mr-1">Filter:</span>
+                <v-chip
+                    v-for="type in activeTypes"
+                    :key="'type-' + type"
+                    small
+                    color="primary"
+                    close
+                    :close-icon="icons.close"
+                    @click:close="toggleActiveType(type)"
+                >
+                    {{ typeLabelFor(type) }}
+                </v-chip>
+                <v-chip
+                    v-for="key in activeKeys"
+                    :key="'key-' + key"
+                    small
+                    color="primary"
+                    close
+                    :close-icon="icons.close"
+                    @click:close="toggleActiveKey(key)"
+                >
+                    {{ keyLabelFor(key) }}
+                </v-chip>
+                <v-menu
+                    v-if="typeFilterOptions.length > 0"
+                    v-model="typeMenu"
+                    :close-on-content-click="false"
+                    offset-y
+                    max-height="360"
+                    min-width="180"
+                >
+                    <template #activator="{ on }">
+                        <v-chip
+                            small
+                            outlined
+                            v-on="on"
+                        >
+                            <v-icon
+                                x-small
+                                left
+                            >
+                                {{ icons.plus }}
+                            </v-icon>
+                            Type
+                        </v-chip>
+                    </template>
+                    <v-list dense>
+                        <v-list-item
+                            v-for="option in typeFilterOptions"
+                            :key="option.value"
+                            @click="toggleActiveType(option.value)"
+                        >
+                            <v-list-item-action class="my-0 mr-3">
+                                <v-icon
+                                    small
+                                    :color="activeTypes.includes(option.value) ? 'primary' : undefined"
+                                >
+                                    {{ activeTypes.includes(option.value) ? icons.checkboxOn : icons.checkboxOff }}
+                                </v-icon>
+                            </v-list-item-action>
+                            <v-list-item-title>{{ option.label }}</v-list-item-title>
+                            <v-list-item-action-text class="ml-3">
+                                {{ option.count }}
+                            </v-list-item-action-text>
+                        </v-list-item>
+                    </v-list>
+                </v-menu>
+                <v-menu
+                    v-if="keyFilterOptions.length > 0"
+                    v-model="keyMenu"
+                    :close-on-content-click="false"
+                    offset-y
+                    max-height="360"
+                    min-width="180"
+                >
+                    <template #activator="{ on }">
+                        <v-chip
+                            small
+                            outlined
+                            v-on="on"
+                        >
+                            <v-icon
+                                x-small
+                                left
+                            >
+                                {{ icons.plus }}
+                            </v-icon>
+                            Key
+                        </v-chip>
+                    </template>
+                    <v-list dense>
+                        <v-list-item
+                            v-for="option in keyFilterOptions"
+                            :key="option.value"
+                            @click="toggleActiveKey(option.value)"
+                        >
+                            <v-list-item-action class="my-0 mr-3">
+                                <v-icon
+                                    small
+                                    :color="activeKeys.includes(option.value) ? 'primary' : undefined"
+                                >
+                                    {{ activeKeys.includes(option.value) ? icons.checkboxOn : icons.checkboxOff }}
+                                </v-icon>
+                            </v-list-item-action>
+                            <v-list-item-title>{{ option.label }}</v-list-item-title>
+                            <v-list-item-action-text class="ml-3">
+                                {{ option.count }}
+                            </v-list-item-action-text>
+                        </v-list-item>
+                    </v-list>
+                </v-menu>
                 <v-chip
                     v-for="tag in allTags"
                     :key="tag"
@@ -123,15 +237,16 @@
                     {{ tag }}
                 </v-chip>
                 <v-btn
-                    v-if="activeTags.length > 0"
+                    v-if="activeTypes.length > 0 || activeKeys.length > 0 || activeTags.length > 0"
                     x-small
                     text
-                    @click="activeTags = []"
+                    @click="clearFilterChips"
                 >
                     Clear
                 </v-btn>
                 <v-spacer />
                 <v-btn
+                    v-if="allTags.length > 0"
                     x-small
                     text
                     color="grey"
@@ -596,13 +711,14 @@
 </template>
 
 <script>
-import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline } from '@mdi/js';
+import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
 import FavouriteRow from '@/components/FavouriteRow';
 import utils from '@/js/utils';
 import { settingSourceUrl } from '@/js/source.mjs';
+import { typeOptions, keyOptions, keyLabel, typeLabel, matchesFacets } from '@/js/favouriteFacets.mjs';
 import { windowRows, windowGroups, INITIAL_ROW_BUDGET, ROW_BUDGET_STEP } from '@/js/rowWindow.mjs';
 import router from '@/router/index.js';
 import { indexRecordingsByTune, sessionDetections, formatSessionDate } from '@/js/tuneRecordings.mjs';
@@ -637,6 +753,10 @@ export default {
             selectedIDs: new Set(),
             activeTags: Array.isArray(persisted.activeTags) ? persisted.activeTags : [],
             activePlaceIDs: Array.isArray(persisted.activePlaceIDs) ? persisted.activePlaceIDs : [],
+            activeTypes: Array.isArray(persisted.activeTypes) ? persisted.activeTypes : [],
+            activeKeys: Array.isArray(persisted.activeKeys) ? persisted.activeKeys : [],
+            typeMenu: false,
+            keyMenu: false,
             // Sightings and places, loaded once and refreshed on the event —
             // filtering must not hit IndexedDB per row.
             sightings: [],
@@ -684,6 +804,10 @@ export default {
                 sort: mdiSort,
                 mapMarker: mdiMapMarker,
                 groupPlace: mdiMapMarkerMultipleOutline,
+                close: mdiClose,
+                plus: mdiPlus,
+                checkboxOn: mdiCheckboxMarked,
+                checkboxOff: mdiCheckboxBlankOutline,
             },
         };
     },
@@ -703,6 +827,9 @@ export default {
             const needle = (this.nameFilter || '').trim().toLowerCase();
             const filtered = this.favouriteItems.filter(item => {
                 if (this.activeTags.length > 0 && !this.activeTags.every(t => (item.tags || []).includes(t))) return false;
+                // OR within type and within key (a setting has only one of
+                // each), AND between them — see favouriteFacets.mjs.
+                if (!matchesFacets(item, this.activeTypes, this.activeKeys)) return false;
                 // OR across places, unlike tags which are AND. Selecting two
                 // places means "heard at either" — the useful reading, since a
                 // tune heard at *both* of two named pubs is a rare thing to ask
@@ -780,6 +907,14 @@ export default {
                 .filter(place => counts.has(place.id))
                 .map(place => ({ ...place, matchCount: counts.get(place.id) }))
                 .sort((a, b) => b.matchCount - a.matchCount || a.name.localeCompare(b.name));
+        },
+        // Over ALL favourites, like the place chips, so the options do not
+        // vanish from under the user as other filters narrow the list.
+        typeFilterOptions() {
+            return typeOptions(this.favouriteItems);
+        },
+        keyFilterOptions() {
+            return keyOptions(this.favouriteItems);
         },
         allTags() {
             const tags = new Set();
@@ -909,6 +1044,8 @@ export default {
         // paying to render 200 rows of a list that now has three.
         activeTags: { handler() { this._persistFilterState(); this._resetRowBudget(); }, deep: true },
         activePlaceIDs: { handler() { this._persistFilterState(); this._resetRowBudget(); }, deep: true },
+        activeTypes: { handler() { this._persistFilterState(); this._resetRowBudget(); }, deep: true },
+        activeKeys: { handler() { this._persistFilterState(); this._resetRowBudget(); }, deep: true },
         nameFilter() { this._persistFilterState(); this._resetRowBudget(); },
         groupBy() { this._persistFilterState(); this._resetRowBudget(); },
         sortBy() { this._persistFilterState(); this._resetRowBudget(); },
@@ -996,6 +1133,8 @@ export default {
                 sessionStorage.setItem(FILTER_STATE_KEY, JSON.stringify({
                     activeTags: this.activeTags,
                     activePlaceIDs: this.activePlaceIDs,
+                    activeTypes: this.activeTypes,
+                    activeKeys: this.activeKeys,
                     nameFilter: this.nameFilter,
                     groupBy: this.groupBy,
                     sortBy: this.sortBy,
@@ -1031,6 +1170,12 @@ export default {
                 const tagSet = new Set();
                 items.forEach(i => (i.tags || []).forEach(t => tagSet.add(t)));
                 this.activeTags = this.activeTags.filter(t => tagSet.has(t));
+                // Same for a type or key whose last favourite was removed —
+                // it would filter the list with no chip left to clear it.
+                const types = new Set(typeOptions(items).map(o => o.value));
+                const keys = new Set(keyOptions(items).map(o => o.value));
+                if (this.activeTypes.some(t => !types.has(t))) this.activeTypes = this.activeTypes.filter(t => types.has(t));
+                if (this.activeKeys.some(k => !keys.has(k))) this.activeKeys = this.activeKeys.filter(k => keys.has(k));
             });
         },
         cycleGroupBy() {
@@ -1172,6 +1317,27 @@ export default {
             const i = this.activePlaceIDs.indexOf(placeID);
             if (i >= 0) this.activePlaceIDs.splice(i, 1);
             else this.activePlaceIDs.push(placeID);
+        },
+        toggleActiveType(type) {
+            const i = this.activeTypes.indexOf(type);
+            if (i >= 0) this.activeTypes.splice(i, 1);
+            else this.activeTypes.push(type);
+        },
+        toggleActiveKey(key) {
+            const i = this.activeKeys.indexOf(key);
+            if (i >= 0) this.activeKeys.splice(i, 1);
+            else this.activeKeys.push(key);
+        },
+        keyLabelFor(key) {
+            return keyLabel(key);
+        },
+        clearFilterChips() {
+            this.activeTypes = [];
+            this.activeKeys = [];
+            this.activeTags = [];
+        },
+        typeLabelFor(type) {
+            return typeLabel(type);
         },
         toggleActiveTag(tag) {
             const i = this.activeTags.indexOf(tag);
