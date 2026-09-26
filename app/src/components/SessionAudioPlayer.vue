@@ -45,34 +45,75 @@
              (playbackRate with preservesPitch), so its quality is whatever the
              platform provides — see setPlaybackRate(). Tapping the label puts
              it back to normal speed, which is the one value worth a shortcut. -->
-        <div class="d-flex align-center playerSpeed" style="gap: 8px;">
-            <v-btn
-                text
-                small
-                class="px-1 playerSpeedLabel"
-                :aria-label="`Playback speed ${speedPercent}%. Reset to normal speed`"
-                :disabled="playbackRate === 1"
-                @click="setPlaybackRate(1)"
-            >
-                Speed {{ speedPercent }}%
-            </v-btn>
-            <!-- Keyed so a refused speed can put the thumb back. A refusal
-                 sets the rate and resets it within one update, so from 100%
-                 the bound value never changes and Vuetify keeps showing the
-                 speed that was refused. Remounting is the public way to
-                 make it re-read the value. -->
-            <v-slider
-                :key="speedSliderKey"
-                :value="speedPercent"
-                :min="PLAYBACK_RATE_MIN * 100"
-                :max="PLAYBACK_RATE_MAX * 100"
-                :step="PLAYBACK_RATE_STEP * 100"
-                dense
-                hide-details
-                aria-label="Playback speed"
-                class="ma-0"
-                @input="setPlaybackRate($event / 100)"
-            />
+        <div class="d-flex flex-wrap align-center playerAdjust">
+            <div class="d-flex align-center playerSpeed" style="gap: 8px;">
+                <v-btn
+                    text
+                    small
+                    class="px-1 playerSpeedLabel"
+                    :aria-label="`Playback speed ${speedPercent}%. Reset to normal speed`"
+                    :disabled="playbackRate === 1"
+                    @click="setPlaybackRate(1)"
+                >
+                    Speed {{ speedPercent }}%
+                </v-btn>
+                <!-- Keyed so a refused speed can put the thumb back. A refusal
+                     sets the rate and resets it within one update, so from 100%
+                     the bound value never changes and Vuetify keeps showing the
+                     speed that was refused. Remounting is the public way to
+                     make it re-read the value. -->
+                <v-slider
+                    :key="speedSliderKey"
+                    :value="speedPercent"
+                    :min="PLAYBACK_RATE_MIN * 100"
+                    :max="PLAYBACK_RATE_MAX * 100"
+                    :step="PLAYBACK_RATE_STEP * 100"
+                    dense
+                    hide-details
+                    aria-label="Playback speed"
+                    class="ma-0"
+                    @input="setPlaybackRate($event / 100)"
+                />
+            </div>
+
+            <!-- Loudness, beside the speed because both are for listening back
+                 to one tune. Above 100% (and on iOS, anything other than 100%)
+                 is only possible through Web Audio — see playbackLevel.mjs. -->
+            <div class="d-flex align-center playerVolume" style="gap: 8px;">
+                <v-btn
+                    text
+                    small
+                    class="px-1 playerVolumeLabel"
+                    :aria-label="`Volume ${volumePercent}%. Reset to normal volume`"
+                    :disabled="volume === 1"
+                    @click="setVolume(1)"
+                >
+                    Volume {{ volumePercent }}%
+                </v-btn>
+                <v-slider
+                    :value="volumePercent"
+                    :min="VOLUME_MIN * 100"
+                    :max="VOLUME_MAX * 100"
+                    :step="VOLUME_STEP * 100"
+                    dense
+                    hide-details
+                    aria-label="Volume"
+                    class="ma-0"
+                    @input="setVolume($event / 100)"
+                />
+                <v-btn
+                    small
+                    :text="!normalize"
+                    :depressed="normalize"
+                    :color="normalize ? 'primary' : undefined"
+                    class="px-2 playerNormalize"
+                    :aria-pressed="normalize ? 'true' : 'false'"
+                    aria-label="Normalize loudness"
+                    @click="setNormalize(!normalize)"
+                >
+                    Normalize
+                </v-btn>
+            </div>
         </div>
 
         <!-- The strip IS the link between the tune list and the recording:
@@ -216,6 +257,12 @@
             one speaker.
             <a href="#" @click.prevent="setChannelRepairOff(false)">Correct it to both speakers.</a>
         </p>
+        <!-- The same escape for the volume and normalize stages, which go
+             through the same graph for the same reason. -->
+        <p v-if="audioGraphBuilt && !channelRepair" class="caption text--secondary mb-0 mt-2">
+            <a href="#" class="noProcessingLink" @click.prevent="playWithoutProcessing">
+                No sound? Play without volume processing.</a>
+        </p>
         <!-- Not cosmetic: one-sided playback with no correction is exactly
              what this looks like, and without this line it is indistinguishable
              from a recording that genuinely has nothing to correct. -->
@@ -229,8 +276,9 @@
              uncorrected sound. Saying nothing here would present as playback
              that runs with no audio at all. -->
         <v-alert v-if="channelRepairStalled" type="warning" dense text class="mt-2 mb-0">
-            This device's audio engine is suspended, so the one-channel correction
-            cannot play. Tap play again, or reload the page.
+            This device's audio engine is suspended, so playback through it (volume,
+            normalizing or the one-channel correction) cannot be heard. Tap play again,
+            or reload the page.
         </v-alert>
 
         </template>
@@ -295,6 +343,9 @@
 import { mdiPlay, mdiPause, mdiRewind15, mdiFastForward15, mdiRepeat, mdiRepeatOff } from '@mdi/js';
 import eventBus from '@/eventBus.js';
 import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';
+import {
+    VOLUME_MIN, VOLUME_MAX, VOLUME_STEP, clampVolume, rmsOf, nextLevel, levelStageGain,
+} from '@/js/playbackLevel.mjs';
 import {
     playbackReadManifest as readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor, playsWhole,
     inspectRecording,
@@ -386,6 +437,26 @@ function audioSessionType() {
 }
 
 const REPAIR_OFF_KEY = 'sessionAudioNoChannelRepair';
+// Normalize is remembered per device: it is a way of listening, not a property
+// of one recording, and it never makes anything louder than the limiter
+// allows. The VOLUME is not remembered, for the same reason the speed is not —
+// a recording opened next week at 200% would arrive as a shock.
+const NORMALIZE_KEY = 'sessionAudioNormalize';
+// How often the level is read while normalizing. Ten a second is plenty for a
+// level that settles over tenths of a second at the fastest.
+const LEVEL_SAMPLE_MS = 100;
+
+function readNormalize() {
+    try { return typeof localStorage !== 'undefined' && localStorage.getItem(NORMALIZE_KEY) === '1'; }
+    catch (e) { return false; }
+}
+
+function writeNormalize(on) {
+    try {
+        if (on) localStorage.setItem(NORMALIZE_KEY, '1');
+        else localStorage.removeItem(NORMALIZE_KEY);
+    } catch (e) { /* a per-device convenience */ }
+}
 
 function readRepairOff() {
     try { return typeof localStorage !== 'undefined' && localStorage.getItem(REPAIR_OFF_KEY) === '1'; }
@@ -561,6 +632,14 @@ export default {
             // The message a refused speed put up, so a later speed that works
             // can take down THAT message and nothing else.
             speedError: '',
+            // Playback volume, 1 = as recorded, up to 2. Applied by a GainNode,
+            // never by audio.volume — see playbackLevel.mjs.
+            volume: 1,
+            normalize: readNormalize(),
+            // Whether the element has been routed through Web Audio. Reactive
+            // copy of "a graph exists", for the escape link; the nodes
+            // themselves live off `this` where Vue does not observe them.
+            audioGraphBuilt: false,
             // The tune being looped, `{ detectionId, title, from, to }` in
             // session-audio seconds, or null. Held as a span rather than read
             // from currentDetection: once the playhead jumps back, the tune
@@ -576,11 +655,15 @@ export default {
             PLAYBACK_RATE_MIN,
             PLAYBACK_RATE_MAX,
             PLAYBACK_RATE_STEP,
+            VOLUME_MIN,
+            VOLUME_MAX,
+            VOLUME_STEP,
         };
     },
     computed: {
         totalSeconds() { return this.manifest ? this.manifest.totalSeconds : 0; },
         speedPercent() { return Math.round(this.playbackRate * 100); },
+        volumePercent() { return Math.round(this.volume * 100); },
         // What was measured about the stretch being played, or null while
         // unknown. An inconclusive answer is kept — it is what stops the probe
         // running for ever — but it claims nothing.
@@ -757,6 +840,7 @@ export default {
             // session is listening nothing should look like media.
             if (playing) this._mediaSessionActive = true;
             if (this._mediaSessionActive) this._syncMediaSession();
+            this._syncLevelMeter();
         },
         playbackState: {
             handler(state) { this.$emit('playback', state); },
@@ -793,12 +877,11 @@ export default {
         eventBus.$off('dropboxConnected', this._onDropboxConnected);
         if (this._mediaSessionActive) clearMediaSession(browserNavigator());
         this.teardown();
+        this._stopLevelMeter();
         if (this._audioCtx && this._audioCtx.close) {
             this._audioCtx.close().catch(() => {});
-            this._audioCtx = null;
-            this._mixNode = null;
-            this._sourceNode = null;
         }
+        this._forgetGraph();
     },
     methods: {
         formatSecondsAsDuration,
@@ -820,6 +903,8 @@ export default {
             this.currentTrackIndex = 0;
             this.channelProbeFailed = false;
             this.channelRepairStalled = false;
+            // A different recording has a different level.
+            this._levels = {};
             this._applyChannelRepair();
             if (!this.sessionId) return;
             const id = this.sessionId;
@@ -1281,10 +1366,11 @@ export default {
             if (!this._mixNode) {
                 // Nothing is routed through a graph yet, so playback is
                 // whatever the file is. Building one is a permanent change to
-                // how this element makes sound, so it happens only when a
-                // correction is actually needed AND the caller is a gesture.
-                if (!needed || !build) { this.channelRepair = false; return; }
-                if (!this._buildRepairGraph()) return;
+                // how this element makes sound, so it happens only when
+                // something actually needs it — the correction, a volume other
+                // than 100%, or normalizing — AND the caller is a gesture.
+                if (!(needed || this._levelStageNeeded()) || !build) { this.channelRepair = false; return; }
+                if (!this._buildRepairGraph()) { this.channelRepair = false; return; }
             }
             // 'explicit' + one channel is what forces the downmix; 'max' hands
             // whatever the file has straight through again.
@@ -1295,6 +1381,11 @@ export default {
             // the product is exactly L.
             this._mixNode.gain.value = needed ? 2 : 1;
             this.channelRepair = needed;
+            this._applyLevelGain();
+        },
+
+        _levelStageNeeded() {
+            return this.volume !== 1 || this.normalize;
         },
 
         _buildRepairGraph() {
@@ -1311,9 +1402,44 @@ export default {
                 const source = ctx.createMediaElementSource(audio);
                 const mix = ctx.createGain();
                 source.connect(mix);
-                mix.connect(ctx.destination);
+                // source → correction → [meter] → volume/normalize → limiter →
+                // speakers. The meter sits AFTER the correction, so a
+                // one-sided recording is measured as it will be heard rather
+                // than at the half level its downmix starts from, and BEFORE
+                // the level stage, so the gain it sets cannot feed back into
+                // what it measures.
+                let tail = mix;
+                const analyser = ctx.createAnalyser ? ctx.createAnalyser() : null;
+                if (analyser) {
+                    analyser.fftSize = 2048;
+                    tail.connect(analyser);
+                    tail = analyser;
+                }
+                const level = ctx.createGain();
+                tail.connect(level);
+                tail = level;
+                // Up to +6 dB of volume on top of up to +18 dB of normalizing
+                // will clip anything already loud. A fast compressor just under
+                // full scale is transparent below it and turns clipping into a
+                // brief duck. Optional: without one it is plain gain.
+                const limiter = ctx.createDynamicsCompressor ? ctx.createDynamicsCompressor() : null;
+                if (limiter) {
+                    const set = (param, v) => { if (param) param.value = v; };
+                    set(limiter.threshold, -1);
+                    set(limiter.knee, 0);
+                    set(limiter.ratio, 20);
+                    set(limiter.attack, 0.003);
+                    set(limiter.release, 0.1);
+                    tail.connect(limiter);
+                    tail = limiter;
+                }
+                tail.connect(ctx.destination);
                 this._sourceNode = source;
                 this._mixNode = mix;
+                this._analyserNode = analyser;
+                this._levelNode = level;
+                this._limiterNode = limiter;
+                this.audioGraphBuilt = true;
                 // Resuming is _resumeGraph()'s job, on EVERY play rather than
                 // only at construction: a context can be suspended long after
                 // it was built — the browser suspends one whose page is
@@ -1458,6 +1584,9 @@ export default {
                 ctx
                     ? `audio graph: ${ctx.state}, correction ${this.channelRepair ? 'on' : 'off'}${this._mixNode ? `, gain ${n(this._mixNode.gain.value)}, ${this._mixNode.channelCountMode}/${this._mixNode.channelCount}` : ''}`
                     : 'audio graph: none (plays straight from the element)',
+                `level: volume ${this.volumePercent}%, normalize ${this.normalize ? 'on' : 'off'}` +
+                    `${this._levelNode ? `, level gain ×${(this._levelTarget || 1).toFixed(2)}` : ''}` +
+                    `${this._levelFor(this.currentTrackIndex) != null ? `, measured ${(20 * Math.log10(this._levelFor(this.currentTrackIndex))).toFixed(1)} dBFS` : ''}`,
             ];
         },
 
@@ -1476,17 +1605,133 @@ export default {
                 if (wasPlaying) this._prepareAudioGraph();
                 return;
             }
+            await this._replaceElement(at, wasPlaying);
+        },
+
+        // The same escape for the volume and normalize stages: back to 100%
+        // with normalizing off, and a new element so nothing is left routed
+        // through a graph that may be what went silent.
+        async playWithoutProcessing() {
+            const at = this.currentSeconds;
+            const wasPlaying = this.playing;
+            this.volume = 1;
+            this.normalize = false;
+            writeNormalize(false);
+            await this._replaceElement(at, wasPlaying);
+        },
+
+        // An element given a MediaElementAudioSourceNode plays through the
+        // graph for good, so the only way out of the graph is a new element.
+        async _replaceElement(at, wasPlaying) {
             this.teardown();
+            this._stopLevelMeter();
             const ctx = this._audioCtx;
-            this._audioCtx = null;
-            this._mixNode = null;
-            this._sourceNode = null;
+            this._forgetGraph();
             this.channelRepair = false;
             this.channelRepairStalled = false;
             if (ctx && ctx.close) ctx.close().catch(() => {});
             this.audioKey++;
             if (this.$nextTick) await this.$nextTick();
             if (this.covers(at)) this.playFrom(at, { autoplay: wasPlaying });
+        },
+
+        _forgetGraph() {
+            this._audioCtx = null;
+            this._mixNode = null;
+            this._sourceNode = null;
+            this._analyserNode = null;
+            this._levelNode = null;
+            this._limiterNode = null;
+            this.audioGraphBuilt = false;
+        },
+
+        // The volume slider. Its input event is a user gesture, which is the
+        // right moment to build the graph if this is the first time it is
+        // needed, so the next play has nothing left to set up.
+        setVolume(value) {
+            const volume = clampVolume(value);
+            if (volume === null) return;
+            this.volume = volume;
+            this._prepareAudioGraph();
+        },
+
+        setNormalize(on) {
+            this.normalize = !!on;
+            writeNormalize(this.normalize);
+            this._prepareAudioGraph();
+            this._syncLevelMeter();
+        },
+
+        // Puts volume × normalizing on the level stage. Smoothed, because a
+        // gain that jumps is heard as a click, and a slider drag is a stream
+        // of jumps.
+        _applyLevelGain() {
+            const node = this._levelNode;
+            if (!node) return;
+            const target = levelStageGain({
+                volume: this.volume,
+                normalize: this.normalize,
+                level: this._levelFor(this.currentTrackIndex),
+            });
+            const ctx = this._audioCtx;
+            const param = node.gain;
+            if (ctx && param.setTargetAtTime && Number.isFinite(ctx.currentTime)) {
+                if (param.cancelScheduledValues) param.cancelScheduledValues(ctx.currentTime);
+                param.setTargetAtTime(target, ctx.currentTime, 0.05);
+            } else {
+                param.value = target;
+            }
+            this._levelTarget = target;
+        },
+
+        // Per TRACK: a track is one continuous MediaRecorder run, and after a
+        // Pause the phone may be somewhere else on the table.
+        _levelFor(trackIndex) {
+            const levels = this._levels || {};
+            return levels[trackIndex] == null ? null : levels[trackIndex];
+        },
+
+        // Reads what is on its way to the speakers and moves the level
+        // estimate. Only while playing: a paused element reads as silence,
+        // which the gate would ignore anyway, but there is no point waking up
+        // ten times a second to find that out.
+        _sampleLevel(dtSeconds = LEVEL_SAMPLE_MS / 1000) {
+            const analyser = this._analyserNode;
+            if (!analyser || !this.normalize) return;
+            let rms;
+            if (analyser.getFloatTimeDomainData) {
+                const buf = this._levelBuffer && this._levelBuffer.length === analyser.fftSize
+                    ? this._levelBuffer : (this._levelBuffer = new Float32Array(analyser.fftSize));
+                analyser.getFloatTimeDomainData(buf);
+                rms = rmsOf(buf);
+            } else if (analyser.getByteTimeDomainData) {
+                const bytes = new Uint8Array(analyser.fftSize);
+                analyser.getByteTimeDomainData(bytes);
+                rms = rmsOf(Array.from(bytes, b => (b - 128) / 128));
+            } else {
+                return;
+            }
+            if (!this._levels) this._levels = {};
+            const track = this.currentTrackIndex;
+            const next = nextLevel(this._levelFor(track), rms, dtSeconds);
+            if (next === this._levels[track]) return;
+            this._levels[track] = next;
+            this._applyLevelGain();
+        },
+
+        _syncLevelMeter() {
+            if (this.playing && this.normalize && this._analyserNode) this._startLevelMeter();
+            else this._stopLevelMeter();
+        },
+
+        _startLevelMeter() {
+            if (this._levelTimer || typeof setInterval !== 'function') return;
+            this._levelTimer = setInterval(() => this._sampleLevel(), LEVEL_SAMPLE_MS);
+        },
+
+        _stopLevelMeter() {
+            if (this._levelTimer) clearInterval(this._levelTimer);
+            this._levelTimer = null;
         },
 
         setPlaybackRate(rate) {
@@ -1547,6 +1792,7 @@ export default {
         _prepareAudioGraph() {
             this._applyChannelRepair();
             this._resumeGraph();
+            this._syncLevelMeter();
         },
 
         // A suspended AudioContext in front of the element produces no sound at
@@ -2004,14 +2250,26 @@ export default {
     font-variant-numeric: tabular-nums;
 }
 
-.playerSpeed {
-    max-width: 420px;
+/* Speed and volume side by side where there is room, stacked on a phone. */
+.playerAdjust {
+    column-gap: 24px;
+}
+
+.playerSpeed,
+.playerVolume {
+    flex: 1 1 280px;
+    max-width: 480px;
 }
 
 /* Fixed width so the slider does not shift as the percentage changes digits. */
-.playerSpeedLabel {
-    min-width: 96px !important;
+.playerSpeedLabel,
+.playerVolumeLabel {
+    min-width: 108px !important;
     font-variant-numeric: tabular-nums;
+    text-transform: none;
+}
+
+.playerNormalize {
     text-transform: none;
 }
 
