@@ -1117,6 +1117,39 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Session player: volume and Normalize (September 2026)
+
+Beside the speed slider: **Volume 0–200 %** and a **Normalize** toggle, for
+recordings made with the phone at the far end of the table.
+`app/src/js/playbackLevel.mjs` is the pure rule set (tested by
+`test/playbackLevel.test.mjs`); the player measures and applies it.
+
+- **Volume is a GainNode, never `audio.volume`.** The element's volume stops at
+  1 and is read-only on iOS, so anything but 100 % means routing the element
+  through Web Audio — permanently, as for the channel correction. The graph is
+  still built only when something needs it (correction, volume ≠ 100 %, or
+  Normalize on), so a default player plays straight from the element as before.
+- **The chain is source → correction → analyser → level → limiter → speakers.**
+  The meter sits after the correction (a one-sided file is measured as heard,
+  not at its half-level downmix) and before the level stage (no feedback). The
+  limiter (−1 dBFS, 20:1) is what makes +6 dB volume on +18 dB normalizing safe.
+- **Normalize is measured while playing, not computed up front.** A static
+  gain needs the whole recording decoded (~2 GB PCM for three hours) and, for a
+  Dropbox copy, downloaded first. It tracks the loud-passage RMS — fast attack
+  (0.3 s), slow release (30 s), gated below −60 dBFS so silence never winds the
+  gain up — toward −20 dBFS, bounded ×0.5–×8, **per track**, forgotten on a new
+  recording. Starts at ×1 until something is heard.
+- Normalize is remembered per device (`localStorage.sessionAudioNormalize`);
+  volume is not, for the same reason the speed is not.
+- "No sound? Play without volume processing." is the same element-swap escape
+  as the correction's (`_replaceElement`), since a silent graph cannot be undone
+  any other way. The iOS silent-switch rule applies: the graph declares a
+  `playback` audio session.
+
+⚠️ Verified in headless Chrome (`e2e/playback-speed.mjs` builds the real
+nodes), **not yet on an iPhone** — the silent switch and a suspended context
+are the things to watch for there.
+
 ### Session Tools: importing a recording as a Past Session (September 2026)
 
 The Session Analysis page is now called **Session Tools** (label only — the

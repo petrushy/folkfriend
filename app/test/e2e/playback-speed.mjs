@@ -34,6 +34,7 @@ let player = sfc.split('<script>')[1].split('</script>')[0]
     .replace("from '@/services/sessionAudioStore.js'", "from '/store.js'")
     .replace("from '@/js/recordingCheck.mjs'", "from '/recordingCheck.js'")
     .replace("from '@/js/mediaSession.mjs'", "from '/mediaSession.js'")
+    .replace("from '@/js/playbackLevel.mjs'", "from '/playbackLevel.js'")
     .replace("import ffConfig from '@/ffConfig.js';", "const ffConfig = { FRONTEND_VERSION: 'e2e' };")
     .replace('export default {', 'const component = {');
 player += `\ncomponent.template = ${JSON.stringify(template)}; export default component;`;
@@ -55,6 +56,7 @@ const routes = new Map([
     ['/store.js', store], ['/player.js', player],
     ['/recordingCheck.js', read('src/js/recordingCheck.mjs')],
     ['/mediaSession.js', read('src/js/mediaSession.mjs')],
+    ['/playbackLevel.js', read('src/js/playbackLevel.mjs')],
     ['/vue.js', read('node_modules/vue/dist/vue.js')],
     ['/vuetify.js', read('node_modules/vuetify/dist/vuetify.js')],
 ]);
@@ -184,7 +186,47 @@ try {
     assert.equal(recovered.error, '');
     assert.doesNotMatch(recovered.errorShown, /cannot play/);
 
-    console.log('Playback speed control passed:', JSON.stringify({ initial, refused, recovered }));
+    // 3. Volume sits beside the speed and goes to 200% — which only a real
+    //    Web Audio gain stage can do, so check a real one was built.
+    assert.ok(await evaluate(`(() => {
+        const thumb = document.querySelector('.playerVolume [role="slider"]');
+        thumb.focus(); return document.activeElement === thumb;
+    })()`), 'the volume thumb can take focus');
+    await press('End', 35);
+    await until(() => evaluate('window.player.volume === 2'), 'the volume to reach 200%');
+    const volume = await evaluate(`(() => {
+        const vm = window.player;
+        return {
+            thumb: document.querySelector('.playerVolume [role="slider"]').getAttribute('aria-valuenow'),
+            label: document.querySelector('.playerVolumeLabel').textContent.trim(),
+            context: vm._audioCtx instanceof AudioContext,
+            level: vm._levelNode instanceof GainNode,
+            analyser: vm._analyserNode instanceof AnalyserNode,
+            limiter: vm._limiterNode instanceof DynamicsCompressorNode,
+            target: vm._levelTarget,
+            elementVolume: vm.$refs.audio.volume,
+        };
+    })()`);
+    assert.deepEqual(volume, {
+        thumb: '200', label: 'Volume 200%', context: true, level: true, analyser: true, limiter: true,
+        target: 2, elementVolume: 1,
+    });
+
+    // 4. Normalize toggles, and reading a real analyser does not throw.
+    await evaluate(`document.querySelector('.playerNormalize').click()`);
+    await until(() => evaluate('window.player.normalize === true'), 'normalize to turn on');
+    const normalize = await evaluate(`(() => {
+        window.player._sampleLevel(0.1);
+        return {
+            pressed: document.querySelector('.playerNormalize').getAttribute('aria-pressed'),
+            target: window.player._levelTarget,
+            stored: localStorage.getItem('sessionAudioNormalize'),
+        };
+    })()`);
+    assert.deepEqual(normalize, { pressed: 'true', target: 2, stored: '1' },
+        'nothing heard yet, so the gain is the volume alone');
+
+    console.log('Playback speed control passed:', JSON.stringify({ initial, refused, recovered, volume, normalize }));
 } finally {
     if (ws) ws.close();
     chrome.kill(); server.close();

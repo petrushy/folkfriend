@@ -86,6 +86,8 @@ async function loadPlayer() {
         await readFile(path.join(srcDir, 'js', 'recordingCheck.mjs'), 'utf8'));
     await writeFile(path.join(tmpDir, 'mediaSession.mjs'),
         await readFile(path.join(srcDir, 'js', 'mediaSession.mjs'), 'utf8'));
+    await writeFile(path.join(tmpDir, 'playbackLevel.mjs'),
+        await readFile(path.join(srcDir, 'js', 'playbackLevel.mjs'), 'utf8'));
 
     const sfc = await readFile(path.join(srcDir, 'components', 'SessionAudioPlayer.vue'), 'utf8');
     const open = sfc.indexOf('<script>');
@@ -101,6 +103,7 @@ async function loadPlayer() {
         ["from '@/js/recordingCheck.mjs'", "from './recordingCheck.mjs'"],
         ["from '@/ffConfig.js'", "from './fake-ffconfig.mjs'"],
         ["from '@/js/mediaSession.mjs'", "from './mediaSession.mjs'"],
+        ["from '@/js/playbackLevel.mjs'", "from './playbackLevel.mjs'"],
     ]) {
         assert.ok(source.includes(from), `expected ${JSON.stringify(from)} in the SFC`);
         source = source.split(from).join(to);
@@ -201,6 +204,31 @@ class FakeGain {
     connect(node) { this.connectedTo = node; }
 }
 
+// Follows single connections from a node to the context's destination, so a
+// test can say "this reaches the speakers" without pinning every stage between.
+function reachesDestination(node, ctx) {
+    for (let i = 0; node && i < 10; i++) {
+        if (node === ctx.destination) return true;
+        node = node.connectedTo;
+    }
+    return false;
+}
+
+class FakeAnalyser {
+    constructor() { this.fftSize = 2048; this.connectedTo = null; this.rms = 0; }
+    connect(node) { this.connectedTo = node; }
+    // A constant signal at the scripted RMS — which is exactly its RMS.
+    getFloatTimeDomainData(buf) { buf.fill(this.rms); }
+}
+
+class FakeCompressor {
+    constructor() {
+        this.connectedTo = null;
+        for (const k of ['threshold', 'knee', 'ratio', 'attack', 'release']) this[k] = { value: 0 };
+    }
+    connect(node) { this.connectedTo = node; }
+}
+
 class FakeAudioContext {
     constructor() {
         this.state = audioEnv.contextState;
@@ -214,6 +242,16 @@ class FakeAudioContext {
         return { connect: (node) => { this.sourceTarget = node; } };
     }
     createGain() { const g = new FakeGain(); this.gains.push(g); return g; }
+    createAnalyser() {
+        if (!audioEnv.withMeter) return undefined;
+        this.analyser = new FakeAnalyser();
+        return this.analyser;
+    }
+    createDynamicsCompressor() {
+        if (!audioEnv.withMeter) return undefined;
+        this.limiter = new FakeCompressor();
+        return this.limiter;
+    }
     resume() {
         this.resumeCalls++;
         // A browser that refuses to resume outside a gesture leaves the state
@@ -238,6 +276,7 @@ function resetAudioEnv() {
     audioEnv.remixToContext = false;
     audioEnv.contextState = 'running';
     audioEnv.resumeFails = false;
+    audioEnv.withMeter = false;
 }
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 0));
@@ -591,7 +630,7 @@ await test('playback of a one-sided recording is downmixed to both speakers', as
     assert.equal(mix.channelCountMode, 'explicit', 'this is what forces the downmix');
     // (L + R) / 2 with R silent would cost 6 dB; with R at zero this is exactly L.
     assert.equal(mix.gain.value, 2);
-    assert.equal(mix.connectedTo, audioEnv.contexts[0].destination);
+    assert.ok(reachesDestination(mix, audioEnv.contexts[0]), 'and on to the speakers');
     assert.equal(vm.channelRepair, true);
 });
 
@@ -1815,6 +1854,151 @@ await test('a loop never runs into a hole, and goes round at the end of what was
     vm._clipEndSeconds = 180;
     await vm.onEnded();
     assert.deepEqual(vm.playRequests, [95], 'back to the start, not on into the next stretch');
+});
+
+console.log('\nSessionAudioPlayer — volume and normalize');
+
+// A player with a clip loaded and nothing wrong with its channels.
+async function mountLevel({ withMeter = true } = {}) {
+    const vm = await mountProbed([LOUD, LOUD], { manifestChannels: 2 });
+    // AFTER mountProbed, which resets the environment — the same trap as
+    // remixToContext above.
+    audioEnv.withMeter = withMeter;
+    return vm;
+}
+
+await test('at 100% with normalize off nothing is routed through Web Audio', async () => {
+    const vm = await mountLevel();
+    vm._play();
+    assert.equal(audioEnv.contexts.length, 0, 'the element plays straight, as before');
+    assert.equal(vm.audioGraphBuilt, false);
+});
+
+await test('a volume above 100% is a gain stage behind the correction, reaching the speakers through a limiter', async () => {
+    const vm = await mountLevel();
+    vm.setVolume(1.8);
+    const ctx = audioEnv.contexts[0];
+    assert.ok(ctx, 'the slider is a gesture, so it builds the graph');
+    const [mix, level] = ctx.gains;
+    assert.equal(mix.gain.value, 1, 'no correction on a healthy recording');
+    assert.equal(level.gain.value, 1.8);
+    assert.equal(mix.connectedTo, ctx.analyser, 'measured after the correction');
+    assert.equal(ctx.analyser.connectedTo, level, 'and before the level stage');
+    assert.equal(level.connectedTo, ctx.limiter);
+    assert.equal(ctx.limiter.connectedTo, ctx.destination);
+    assert.equal(vm.audioGraphBuilt, true);
+});
+
+await test('volume is not audio.volume, which iOS ignores and which stops at 1', async () => {
+    const vm = await mountLevel();
+    vm.$refs.audio.volume = 1;
+    vm.setVolume(0.3);
+    assert.equal(vm.$refs.audio.volume, 1);
+    assert.equal(audioEnv.contexts[0].gains[1].gain.value, 0.3);
+});
+
+await test('volume is clamped to 0–200% and snapped to its steps', async () => {
+    const vm = await mountLevel();
+    vm.setVolume(5);
+    assert.equal(vm.volume, 2);
+    vm.setVolume(-1);
+    assert.equal(vm.volume, 0);
+    vm.setVolume(1.23);
+    assert.equal(vm.volume, 1.25);
+    vm.setVolume('loud');
+    assert.equal(vm.volume, 1.25, 'garbage leaves it alone');
+    assert.equal(vm.volumePercent, 125);
+});
+
+await test('the volume and the one-channel correction do not overwrite each other', async () => {
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    audioEnv.withMeter = true;
+    vm.setVolume(1.5);
+    const [mix, level] = audioEnv.contexts[0].gains;
+    assert.equal(mix.gain.value, 2, 'the downmix keeps its own gain');
+    assert.equal(level.gain.value, 1.5);
+    vm.setVolume(1);
+    assert.equal(mix.gain.value, 2);
+    assert.equal(level.gain.value, 1);
+});
+
+await test('normalize lifts a quiet recording toward the target, and volume multiplies it', async () => {
+    const vm = await mountLevel();
+    vm.setNormalize(true);
+    const ctx = audioEnv.contexts[0];
+    const level = ctx.gains[1];
+    assert.equal(level.gain.value, 1, 'nothing measured yet, so no guess');
+    ctx.analyser.rms = 0.025;          // −32 dBFS: a phone at the far end of the table
+    vm._sampleLevel(0.1);
+    assert.ok(Math.abs(level.gain.value - 4) < 1e-6, `×4 to reach −20 dBFS, got ${level.gain.value}`);
+    vm.setVolume(1.5);
+    assert.ok(Math.abs(level.gain.value - 6) < 1e-6);
+    vm.setNormalize(false);
+    assert.equal(level.gain.value, 1.5, 'off leaves only the volume');
+});
+
+await test('silence never winds the normalize gain up', async () => {
+    const vm = await mountLevel();
+    vm.setNormalize(true);
+    const ctx = audioEnv.contexts[0];
+    ctx.analyser.rms = 0.05;
+    vm._sampleLevel(0.1);
+    const before = ctx.gains[1].gain.value;
+    ctx.analyser.rms = 0;              // a muted stretch
+    for (let i = 0; i < 600; i++) vm._sampleLevel(0.1);
+    assert.equal(ctx.gains[1].gain.value, before);
+});
+
+await test('the measured level is kept per track and forgotten with the recording', async () => {
+    const vm = await mountLevel();
+    vm.setNormalize(true);
+    const ctx = audioEnv.contexts[0];
+    ctx.analyser.rms = 0.02;
+    vm._sampleLevel(0.1);
+    assert.ok(Math.abs(vm._levelFor(0) - 0.02) < 1e-6);
+    vm.currentTrackIndex = 1;
+    assert.equal(vm._levelFor(1), null, 'a later part is measured afresh');
+    vm.currentTrackIndex = 0;
+    vm.$refs.audio.removeAttribute = () => {};
+    await vm.reload();
+    assert.equal(vm._levelFor(0), null);
+});
+
+await test('normalize still works where the browser has no analyser: it is simply plain gain', async () => {
+    const vm = await mountLevel({ withMeter: false });
+    vm.setNormalize(true);
+    vm.setVolume(1.2);
+    const ctx = audioEnv.contexts[0];
+    assert.ok(reachesDestination(ctx.gains[0], ctx));
+    assert.equal(ctx.gains[1].gain.value, 1.2);
+    vm._sampleLevel(0.1);               // nothing to read — must not throw
+});
+
+await test('"No sound?" resets volume and normalize and swaps the element out of the graph', async () => {
+    const vm = await mountLevel();
+    vm.$refs.audio.removeAttribute = () => {};
+    vm.setVolume(1.5);
+    vm.setNormalize(true);
+    const ctx = audioEnv.contexts[0];
+    const key = vm.audioKey;
+    await vm.playWithoutProcessing();
+    assert.equal(vm.volume, 1);
+    assert.equal(vm.normalize, false);
+    assert.equal(vm.audioKey, key + 1, 'a new element');
+    assert.equal(vm.audioGraphBuilt, false);
+    assert.equal(ctx.state, 'closed');
+    vm._play();
+    assert.equal(audioEnv.contexts.length, 1, 'and nothing rebuilds a graph for it');
+});
+
+await test('the check report says what the level stage is doing', async () => {
+    const vm = await mountLevel();
+    vm.setNormalize(true);
+    audioEnv.contexts[0].analyser.rms = 0.01;
+    vm._sampleLevel(0.1);
+    vm.segmentIndex = 0;
+    const text = vm.playbackDiagnostics().join('\n');
+    assert.match(text, /level: volume 100%, normalize on, level gain ×8\.00, measured -40\.0 dBFS/);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
