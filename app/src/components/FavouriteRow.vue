@@ -40,6 +40,17 @@
         <!-- eslint-disable-next-line vue/no-v-html -->
         <div v-if="showAbcPreview" class="abc-preview" :style="{ width: abcPreviewDisplayWidth + 'px' }" @click.stop="favouriteItemClicked" v-html="abcSvg" />
 
+        <!-- Session recording ▶ — only when a saved session recorded this tune -->
+        <v-btn
+            v-if="recordingCount > 0"
+            icon
+            class="mr-0"
+            :aria-label="recordingCount > 1 ? `Play ${name} from a session recording (${recordingCount} sessions)` : `Play ${name} from the session recording, looped`"
+            @click.stop="$emit('playRecording', tuneID)"
+        >
+            <v-icon color="primary">{{ icons.play }}</v-icon>
+        </v-btn>
+
         <!-- Tune background (i) — outside the clickable container so it does not navigate -->
         <TuneBackgroundButton :tuneID="tuneID" :displayName="name" :sourceUrl="sourceUrl" :small="false" />
 
@@ -76,7 +87,7 @@
 </template>
 
 <script>
-import { mdiStar, mdiTagPlusOutline } from '@mdi/js';
+import { mdiStar, mdiTagPlusOutline, mdiPlayCircleOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
 import utils from '@/js/utils';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
@@ -113,6 +124,9 @@ export default {
         tags: { type: Array, default: () => [] },
         allTags: { type: Array, default: () => [] },
         setting: { type: Object, default: null },
+        // How many saved sessions hold a playable recording of this TUNE (any
+        // setting of it). Zero hides the ▶.
+        recordingCount: { type: Number, default: 0 },
     },
     data() {
         return {
@@ -125,6 +139,7 @@ export default {
             icons: {
                 star: mdiStar,
                 plus: mdiTagPlusOutline,
+                play: mdiPlayCircleOutline,
             },
         };
     },
@@ -137,7 +152,8 @@ export default {
         },
         abcPreviewDisplayWidth() {
             // buttons (add-tag ~40 + star ~52) + checkbox (~44) + min tune-info (~180)
-            const reserved = 44 + 180 + 92;
+            // plus the recording ▶ (~36) when there is one.
+            const reserved = 44 + 180 + 92 + (this.recordingCount > 0 ? 36 : 0);
             const available = this.rowWidth - reserved;
             return Math.min(480, Math.max(220, Math.floor(available * 0.7)));
         },

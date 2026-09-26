@@ -1082,7 +1082,11 @@ export default {
         if (store.state.sessionWorkspace) {
             const saved = store.state.sessionWorkspace;
             this.selectedSession = saved.session;
-            this.savedDetections = saved.detections;
+            // No rows means a session handed over from elsewhere (a
+            // favourite's ▶), to be built exactly as selectSession() does.
+            this.savedDetections = saved.detections
+                || (saved.session.tunes || []).map((tune, index) =>
+                    this._buildDetectionRow({ ...tune, id: `saved-${index}` }));
             this.pendingSessionPatch = saved.pending;
         }
         this.refreshPastSessions();

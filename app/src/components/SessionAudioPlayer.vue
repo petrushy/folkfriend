@@ -906,15 +906,21 @@ export default {
             // A different recording has a different level.
             this._levels = {};
             this._applyChannelRepair();
-            if (!this.sessionId) return;
+            if (!this.sessionId) { this._reloading = null; return; }
             const id = this.sessionId;
-            try {
-                const manifest = await readManifest(id);
-                if (id !== this.sessionId) return;
-                this.manifest = manifest && manifest.segments.length ? manifest : null;
-                this.error = '';
-                if (this.manifest) this._probeChannels();
-            } catch (e) { if (id === this.sessionId) this.error = e.message; }
+            // Kept so playTuneLooped() can wait for the manifest of a session
+            // it has just switched to.
+            const loading = (async () => {
+                try {
+                    const manifest = await readManifest(id);
+                    if (id !== this.sessionId) return;
+                    this.manifest = manifest && manifest.segments.length ? manifest : null;
+                    this.error = '';
+                    if (this.manifest) this._probeChannels();
+                } catch (e) { if (id === this.sessionId) this.error = e.message; }
+            })();
+            this._reloading = loading;
+            return loading;
         },
 
         // Picks up segments written since the manifest was last read, without
@@ -1099,6 +1105,34 @@ export default {
             // than guessing which of two overlapping spans was meant.
             if (this.loop) this.loop = this._loopFor(detection) || this.loop;
             return this.playFrom(Math.max(this._anchorFor(detection), range.from));
+        },
+
+        // Public: a favourite's ▶. Plays one tune of the current session with
+        // the loop already on, from a page where the player is not on screen.
+        //
+        // Called after the host has switched sessionId, so it waits for that
+        // session's manifest first. The graph is prepared BEFORE that wait,
+        // while the tap is still a user gesture — the same rule as playFrom().
+        // Resolves true when playback was started; otherwise `error` says why,
+        // since nothing of this player is visible to say it.
+        async playTuneLooped(detectionId) {
+            this._prepareAudioGraph();
+            if (this._reloading) await this._reloading;
+            const detection = this.detections.find(d => d.id === detectionId);
+            if (!detection || typeof detection.audioStartSeconds !== 'number') {
+                this.error = 'That tune is not in this recording.';
+                return false;
+            }
+            if (!this.manifest) {
+                if (!this.error) this.error = 'This recording is not available on this device.';
+                return false;
+            }
+            this.error = '';
+            // Set before the seek, so playFrom() finds its target inside the
+            // loop. A hearing too short to loop still plays, unlooped.
+            this.loop = this._loopFor(detection);
+            await this.playTune(detection);
+            return !this.error;
         },
 
         // The loop for a detection: the stretch it was heard in, clamped to
