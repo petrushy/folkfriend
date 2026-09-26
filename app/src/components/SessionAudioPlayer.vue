@@ -17,6 +17,19 @@
             <v-btn icon :disabled="!totalSeconds" aria-label="Forward 15 seconds" @click="seekBy(SKIP_SECONDS)">
                 <v-icon>{{ icons.forward }}</v-icon>
             </v-btn>
+            <!-- Loops the tune under the playhead, over the stretch the
+                 detector heard it in — for learning a tune by ear, alongside
+                 the speed control below. -->
+            <v-btn
+                icon
+                :disabled="!totalSeconds || !playableDetections.length"
+                :color="loop ? 'primary' : undefined"
+                :aria-pressed="loop ? 'true' : 'false'"
+                :aria-label="loop ? `Stop looping ${loop.title}` : 'Loop the current tune'"
+                @click="toggleLoop"
+            >
+                <v-icon>{{ loop ? icons.loop : icons.loopOff }}</v-icon>
+            </v-btn>
             <div class="playerClock">
                 {{ formatSecondsAsDuration(currentSeconds) }} / {{ formatSecondsAsDuration(totalSeconds) }}
             </div>
@@ -124,6 +137,8 @@
         </div>
         <div class="d-flex justify-space-between caption text--secondary">
             <span>{{ nowPlayingLabel }}</span>
+            <span v-if="loop">Looping {{ loop.title }}
+                ({{ formatSecondsAsDuration(loop.from) }}–{{ formatSecondsAsDuration(loop.to) }})</span>
             <span v-if="mutedSeconds > 0">{{ formatSecondsAsDuration(mutedSeconds) }} muted</span>
             <span v-if="gapBlocks.length">Some audio was not saved</span>
             <span v-if="manifest.stopped">Recording stopped early</span>
@@ -277,7 +292,7 @@
 </template>
 
 <script>
-import { mdiPlay, mdiPause, mdiRewind15, mdiFastForward15 } from '@mdi/js';
+import { mdiPlay, mdiPause, mdiRewind15, mdiFastForward15, mdiRepeat, mdiRepeatOff } from '@mdi/js';
 import eventBus from '@/eventBus.js';
 import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';
 import {
@@ -323,6 +338,9 @@ const COARSE_SKIP_SECONDS = 60;
 const PLAYBACK_RATE_MIN = 0.4;
 const PLAYBACK_RATE_MAX = 1.3;
 const PLAYBACK_RATE_STEP = 0.05;
+// A loop shorter than this is not a tune, it is a stutter — and one that ends
+// before the next timeupdate (~250 ms) would re-seek on every event.
+const MIN_LOOP_SECONDS = 2;
 // How many labelled marks go under the strip. Five (four intervals) is what
 // fits at phone width without the labels colliding.
 const TICK_COUNT = 5;
@@ -543,7 +561,17 @@ export default {
             // The message a refused speed put up, so a later speed that works
             // can take down THAT message and nothing else.
             speedError: '',
-            icons: { play: mdiPlay, pause: mdiPause, rewind: mdiRewind15, forward: mdiFastForward15 },
+            // The tune being looped, `{ detectionId, title, from, to }` in
+            // session-audio seconds, or null. Held as a span rather than read
+            // from currentDetection: once the playhead jumps back, the tune
+            // under it is the same one, but between two overlapping spans
+            // "the tune under the playhead" can change without the user
+            // asking for a different loop.
+            loop: null,
+            icons: {
+                play: mdiPlay, pause: mdiPause, rewind: mdiRewind15, forward: mdiFastForward15,
+                loop: mdiRepeat, loopOff: mdiRepeatOff,
+            },
             SKIP_SECONDS,
             PLAYBACK_RATE_MIN,
             PLAYBACK_RATE_MAX,
@@ -782,6 +810,8 @@ export default {
             this.manifest = null;
             this.error = '';
             this.currentSeconds = 0;
+            this.loop = null;
+            this._loopJumping = false;
             // A different recording is a different question, and the repair
             // graph (if one was built) is reconfigured rather than torn down —
             // an element can only ever have one MediaElementAudioSourceNode.
@@ -879,6 +909,13 @@ export default {
             // instead of several awaits later from a loadedmetadata callback.
             this._prepareAudioGraph();
             const target = Math.max(0, seconds);
+            // A seek out of the looped tune is a request for somewhere else,
+            // so the loop follows it to the tune there — or stops, between
+            // tunes — rather than dragging the playhead back.
+            if (this.loop && !this._inLoop(target)) {
+                const there = this._detectionAt(target);
+                this.loop = there ? this._loopFor(there) : null;
+            }
             const segment = this._segmentFor(target);
             if (!segment) {
                 this.error = target >= this.totalSeconds
@@ -972,7 +1009,75 @@ export default {
                 this.error = 'That part of the session was not recorded.';
                 return;
             }
+            // Looping, a ▶ on another row moves the loop to that tune. Set
+            // before the seek, so playFrom() finds the target inside it rather
+            // than guessing which of two overlapping spans was meant.
+            if (this.loop) this.loop = this._loopFor(detection) || this.loop;
             return this.playFrom(Math.max(this._anchorFor(detection), range.from));
+        },
+
+        // The loop for a detection: the stretch it was heard in, clamped to
+        // the recorded stretch it sits in so a jump back never lands in a hole.
+        // Null when that leaves too little to loop.
+        _loopFor(detection) {
+            if (!detection || typeof detection.audioStartSeconds !== 'number') return null;
+            const span = this.audioSpan(detection);
+            const range = this._rangeContaining(detection.audioStartSeconds);
+            const from = range ? Math.max(span.from, range.from) : span.from;
+            const to = range ? Math.min(span.to, range.to) : span.to;
+            if (!(to - from >= MIN_LOOP_SECONDS)) return null;
+            return {
+                detectionId: detection.id || null,
+                title: detection.title || 'Unknown tune',
+                from,
+                to,
+            };
+        },
+
+        _inLoop(seconds) {
+            return !!this.loop && seconds >= this.loop.from - 0.5 && seconds <= this.loop.to;
+        },
+
+        // The tune whose span contains a moment; the later one where two touch,
+        // as for currentDetection.
+        _detectionAt(seconds) {
+            const hits = this.playableDetections.filter(d => {
+                const span = this.audioSpan(d);
+                return span.from <= seconds && span.to >= seconds;
+            });
+            return hits.length ? hits[hits.length - 1] : null;
+        },
+
+        // Public: the loop button. Loops the tune under the playhead; between
+        // tunes, the one that last started (transportDetection), which is the
+        // tune the user has just been listening to.
+        toggleLoop() {
+            if (this.loop) { this.loop = null; return; }
+            const loop = this._loopFor(this.transportDetection);
+            if (!loop) {
+                this.error = 'That tune is too short in the recording to loop.';
+                return;
+            }
+            this.loop = loop;
+            // Already past it (between tunes): go back to its start now rather
+            // than at the next timeupdate, which only fires while playing.
+            if (this.currentSeconds > loop.to) {
+                this._prepareAudioGraph();
+                this._jumpToLoopStart();
+            }
+        },
+
+        // `autoplay` defaults to carrying on as things were; onEnded passes
+        // true, since by then the element has paused itself.
+        _jumpToLoopStart(autoplay = this.playing) {
+            if (!this.loop || this._loopJumping) return;
+            // One jump at a time. Over Dropbox a jump into another segment is
+            // a download, and the old clip keeps playing — and firing
+            // timeupdate past the loop's end — until it lands.
+            this._loopJumping = true;
+            const done = () => { this._loopJumping = false; };
+            Promise.resolve(this.playFrom(this.loop.from, { autoplay }))
+                .then(done, done);
         },
 
         // `fromTrackStart` is the fallback for a clip a browser refuses: see
@@ -1631,6 +1736,9 @@ export default {
             // position the ▶ buttons jump to stay the same scale.
             this.currentSeconds = this.clipOriginSeconds +
                 audio.currentTime / this.driftRatio;
+            if (this.loop && this.playing && this.currentSeconds >= this.loop.to) {
+                this._jumpToLoopStart();
+            }
             // The card's scrubber extrapolates on its own between updates, so
             // once a second is plenty; a seek resets it through the same path.
             const now = Date.now();
@@ -1699,6 +1807,13 @@ export default {
                 .sort((a, b) => a.index - b.index)
                 .find(s => s.index > this.segmentIndex &&
                     s.startSeconds >= (this._clipEndSeconds || 0) - 0.5);
+            // A loop that reaches the end of what is recorded — or of the
+            // clip, with the next piece already past the loop — goes round
+            // rather than stopping or loading audio it will not play.
+            if (this.loop && (!next || next.startSeconds >= this.loop.to)) {
+                this._jumpToLoopStart(true);
+                return;
+            }
             if (!next) { this.playing = false; return; }
             await this._loadSegment(next, next.startSeconds, true);
         },

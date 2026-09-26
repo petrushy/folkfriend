@@ -39,7 +39,8 @@ async function test(name, fn) {
 
 const FAKE_EVENTBUS = `export default { $emit() {}, $on() {}, $off() {} };`;
 const FAKE_MDI = `export const mdiPlay = 'play'; export const mdiPause = 'pause';
-export const mdiRewind15 = 'rewind'; export const mdiFastForward15 = 'forward';`;
+export const mdiRewind15 = 'rewind'; export const mdiFastForward15 = 'forward';
+export const mdiRepeat = 'repeat'; export const mdiRepeatOff = 'repeat-off';`;
 const FAKE_SESSION_ANALYSIS = `
 export function formatSecondsAsDuration(s) { return String(Math.round(s)); }`;
 let store;
@@ -1716,6 +1717,104 @@ await test('an imported file is never decoded whole for the channel probe', asyn
     store.__clipCalls.length = 0;
     await vm._probeChannels(0);
     assert.equal(store.__clipCalls.length, 0);
+});
+
+console.log('\nlooping a tune');
+
+// A playing element at a given session second, as onTimeUpdate reads it.
+function atSecond(vm, seconds) {
+    vm.$refs.audio = { currentTime: seconds };
+    vm.segmentIndex = 0;
+    vm.clipOriginSeconds = 0;
+    vm.driftRatio = 1;
+    vm.onTimeUpdate();
+}
+
+await test('loop goes back to the tune\'s start when playback reaches its end', async () => {
+    const vm = await mountPlayer(CONTINUOUS);
+    vm.detections = SET;
+    vm.playing = true;
+    vm.currentSeconds = 150;   // in Morning Dew
+    vm.toggleLoop();
+    assert.equal(vm.loop.detectionId, 'b');
+    assert.deepEqual([vm.loop.from, vm.loop.to], [140, 260], 'anchor to last window, as the strip draws it');
+    assert.deepEqual(vm.playRequests, [], 'switching it on inside the tune does not move the playhead');
+    atSecond(vm, 200);
+    assert.deepEqual(vm.playRequests, []);
+    atSecond(vm, 260.2);
+    atSecond(vm, 260.4);   // the old clip is still playing while the jump lands
+    assert.deepEqual(vm.playRequests, [140], 'one jump, not one per timeupdate');
+    await Promise.resolve(); await Promise.resolve();
+    atSecond(vm, 261);
+    assert.deepEqual(vm.playRequests, [140, 140], 'and round again next time');
+});
+
+await test('a paused player is never pulled back by the loop', async () => {
+    const vm = await mountPlayer(CONTINUOUS);
+    vm.detections = SET;
+    vm.currentSeconds = 150;
+    vm.toggleLoop();
+    vm.playing = false;
+    atSecond(vm, 265);
+    assert.deepEqual(vm.playRequests, []);
+});
+
+await test('between tunes the loop is the one that last started, and starts from it', async () => {
+    const vm = await mountPlayer(CONTINUOUS);
+    vm.detections = SET;
+    vm.currentSeconds = 130;   // after The Kesh, before Morning Dew
+    vm.toggleLoop();
+    assert.equal(vm.loop.detectionId, 'a');
+    assert.deepEqual(vm.playRequests, [20]);
+});
+
+await test('switching the loop off stops it', async () => {
+    const vm = await mountPlayer(CONTINUOUS);
+    vm.detections = SET;
+    vm.playing = true;
+    vm.currentSeconds = 150;
+    vm.toggleLoop();
+    vm.toggleLoop();
+    assert.equal(vm.loop, null);
+    atSecond(vm, 265);
+    assert.deepEqual(vm.playRequests, []);
+});
+
+await test('a ▶ on another tune moves the loop to it', async () => {
+    const vm = await mountPlayer(CONTINUOUS);
+    vm.detections = SET;
+    vm.currentSeconds = 150;
+    vm.toggleLoop();
+    await vm.playTune(SET[2]);
+    assert.equal(vm.loop.detectionId, 'c');
+    assert.deepEqual(vm.playRequests, [300]);
+});
+
+await test('a seek out of the loop follows to the tune there, or ends the loop between tunes', async () => {
+    const vm = await mountPlayer(CONTINUOUS);
+    vm.detections = SET;
+    vm.currentSeconds = 150;
+    vm.toggleLoop();
+    await vm.__realPlayFrom(200, { autoplay: false });
+    assert.equal(vm.loop.detectionId, 'b', 'a seek inside the tune keeps its loop');
+    await vm.__realPlayFrom(350, { autoplay: false });
+    assert.equal(vm.loop.detectionId, 'c');
+    await vm.__realPlayFrom(450, { autoplay: false });
+    assert.equal(vm.loop, null, 'no tune there, nothing to loop');
+});
+
+await test('a loop never runs into a hole, and goes round at the end of what was recorded', async () => {
+    const vm = await mountPlayer(GAPPY);
+    // Heard up to 200 s, but everything after 180 s was lost.
+    vm.detections = [{ id: 'x', title: 'X', audioStartSeconds: 100, audioAnchorSeconds: 95, audioEndSeconds: 200 }];
+    vm.currentSeconds = 120;
+    vm.toggleLoop();
+    assert.deepEqual([vm.loop.from, vm.loop.to], [95, 180]);
+    // The segment ends before any timeupdate reaches 180 s.
+    vm.segmentIndex = 0;
+    vm._clipEndSeconds = 180;
+    await vm.onEnded();
+    assert.deepEqual(vm.playRequests, [95], 'back to the start, not on into the next stretch');
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);
