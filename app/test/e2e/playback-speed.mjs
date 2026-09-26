@@ -25,7 +25,10 @@ const read = name => readFileSync(path.join(app, name), 'utf8');
 const sfc = read('src/components/SessionAudioPlayer.vue');
 const template = sfc.slice(sfc.indexOf('<template>') + 10, sfc.lastIndexOf('</template>'));
 let player = sfc.split('<script>')[1].split('</script>')[0]
-    .replace(/import \{[^}]+\} from '@mdi\/js';/, "const mdiPlay='',mdiPause='',mdiRewind15='',mdiFastForward15='';")
+    // Every icon the player imports, whatever they are: a fixed list here broke
+    // this test each time the player gained a button.
+    .replace(/import \{([^}]+)\} from '@mdi\/js';/, (_, names) =>
+        `const ${names.split(',').map(n => n.trim()).filter(Boolean).map(n => `${n}=''`).join(',')};`)
     .replace("import eventBus from '@/eventBus.js';", 'const eventBus = window.testBus;')
     .replace("import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';", 'const formatSecondsAsDuration = s => String(Math.round(s));')
     .replace("from '@/services/sessionAudioStore.js'", "from '/store.js'")
