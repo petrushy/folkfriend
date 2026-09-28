@@ -141,6 +141,13 @@
                 same setting. Either way this changes the next recording, not one already
                 made, and what the device really did is shown under Audio above.
             </p>
+            <p class="caption text--secondary mt-2 mb-0 pl-2">
+                On iPhone and iPad this has no effect: every iOS browser, and an app added
+                to the Home Screen, gets one microphone channel only, whatever is asked for.
+                A recording made there with stereo on can play from the left speaker only,
+                so leave it off. Real stereo needs Chrome or Firefox on a computer or
+                Android, with a microphone that actually captures two channels.
+            </p>
             <v-row
                 align="center"
                 class="pl-2 pr-4 mt-2"
