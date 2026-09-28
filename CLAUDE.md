@@ -1869,11 +1869,39 @@ the comment beside it explains why one would be wrong ("a busy main thread can
 delay a blob containing arbitrarily many seconds"). The code is right and this
 description was stale.
 
-> ⚠️ **Segment boundaries are audible, and over Dropbox they are long.**
-> `onEnded` loads the next segment on demand, which for a cloud recording means
-> a download and a hash verification before any sound — every 180 s, on whatever
-> network the phone has. Prefetching the next segment during playback is the
-> fix and is not built.
+#### Segment boundaries: fewer, prefetched, and not shown as a pause (September 2026)
+
+Reported from a session: short skips in playback, and the ⏸ button flicking to
+▶ for a moment. The export of the same recording, one continuous file, had no
+skips — so it was playback, not capture. Every clip was ONE 180 s segment, and
+moving to the next is a reload of the element (new source, metadata, seek,
+`play()`), which is not gapless on any browser. The element also pauses itself
+at the end of a clip, just before `ended`, and `@pause` passed that straight to
+the button (and to the lock-screen card through the `playing` watcher).
+
+- **A clip after the first spans several segments** (`js/clipWindow.mjs`):
+  same track, no hole, up to `CLIP_WINDOW_BYTES` (24 MB, ~28 min at 114 kbps,
+  ~50 min at 64) and at most 20 segments when sizes are unknown. The FIRST clip
+  of a tap stays one segment, because over Dropbox each segment is a download
+  before any sound.
+- **The next window is built while this one plays**, from
+  `PREFETCH_LEAD_SECONDS` (90) before its end, so the handover awaits no
+  storage and no download. With nothing prefetched it falls back to ONE
+  segment, not a whole window — building a window at the boundary would be a
+  long silence over Dropbox. A tap while a prefetch is finishing wins
+  (generation check), and any other load discards the prefetch.
+- **`onPause` holds ⏸ through a handover** (`audio.ended` with more recording or
+  a loop to follow); a failed handover, a refused `play()` and an element error
+  set it back.
+- A seek anywhere inside the loaded clip seeks in place rather than reloading.
+
+⚠️ **The remaining boundaries are still reloads**, now every window rather than
+every segment, and each is only a switch to a blob already in memory. Truly
+gapless needs Media Source Extensions (`ManagedMediaSource` on iOS 17.1+) and
+has not been attempted. Verified in headless Chrome by
+`e2e/session-audio-chain.mjs` (real MediaRecorder, 3 s segments: a mid-track
+window decodes as one file, and the player crosses a boundary with no pause
+flip — the old player fails it), **not yet on an iPhone.**
 
 **A manual mute silences the RECORDING without stopping detection.** The
 mechanism is `MediaStreamTrack.clone()`: a cloned track shares the microphone

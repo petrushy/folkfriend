@@ -24,6 +24,7 @@ let player = sfc.split('<script>')[1].split('</script>')[0]
     .replace("from '@/js/recordingCheck.mjs'", "from '/recordingCheck.js'")
     .replace("from '@/js/mediaSession.mjs'", "from '/mediaSession.js'")
     .replace("from '@/js/playbackLevel.mjs'", "from '/playbackLevel.js'")
+    .replace("from '@/js/clipWindow.mjs'", "from '/clipWindow.js'")
     .replace("import ffConfig from '@/ffConfig.js';", "const ffConfig = { FRONTEND_VERSION: 'e2e' };")
     .replace('export default {', 'const component = {');
 player += `\ncomponent.template = ${JSON.stringify(template)}; export default component;`;
@@ -43,6 +44,7 @@ const routes = new Map([
     ['/recordingCheck.js', read('src/js/recordingCheck.mjs')],
     ['/mediaSession.js', read('src/js/mediaSession.mjs')],
     ['/playbackLevel.js', read('src/js/playbackLevel.mjs')],
+    ['/clipWindow.js', read('src/js/clipWindow.mjs')],
     ['/vue.js', read('node_modules/vue/dist/vue.js')],
     ['/idb.js', read('node_modules/idb-keyval/dist/index.js')],
 ]);
@@ -130,7 +132,15 @@ try {
             const sourceBytes = new Uint8Array(await new Blob(original).arrayBuffer());
             const exportBytes = new Uint8Array(await full.blob.arrayBuffer());
             const identical = sourceBytes.length === exportBytes.length && sourceBytes.every((b,i) => b === exportBytes[i]);
-            reports.push({ id, segments: manifest.segments.length, finalized: !!manifest.finalizedAt, identical, clipReports });
+            // What the player now loads after the first clip: several
+            // segments from mid-track as ONE file (header + their chunks).
+            const later = manifest.segments.slice(1);
+            const windowClip = await store.buildClip(id, later[0].startSeconds,
+                later[later.length - 1].startSeconds + later[later.length - 1].durationSeconds, manifest);
+            const windowPcm = await decoder.decodeAudioData(await windowClip.blob.arrayBuffer());
+            const windowReport = { segments: later.length, seconds: windowPcm.duration,
+                span: windowClip.endSeconds - windowClip.startSeconds };
+            reports.push({ id, segments: manifest.segments.length, finalized: !!manifest.finalizedAt, identical, clipReports, windowReport });
         }
         const component = (await import('/player.js')).default;
         const root = new Vue({ data: { id: reports[0].id }, render(h) {
@@ -138,6 +148,30 @@ try {
         } }).$mount(); document.body.append(root.$el);
         const vm = root.$refs.player;
         await waitFor(() => vm.channelProbe?.oneSided);
+        // A real handover: play from the start and let the element run off
+        // the end of its first clip. The button must never read "paused" on
+        // the way, and what loads next is the prefetched multi-segment window.
+        const handover = await (async () => {
+            const segs = vm.manifest.segments.slice().sort((a, b) => a.index - b.index);
+            const boundary = segs[0].startSeconds + segs[0].durationSeconds;
+            const flips = [];
+            const unwatch = vm.$watch('playing', p => { if (!p) flips.push(vm.currentSeconds); });
+            await vm.playFrom(0);
+            await waitFor(() => vm.playing);
+            const firstClipEnd = vm._clipEndSeconds;
+            const deadline = Date.now() + 15000;
+            while (!(vm.segmentIndex !== segs[0].index && vm.currentSeconds > boundary + 0.5 && vm.playing)) {
+                if (Date.now() > deadline) break;
+                await delay(50);
+            }
+            const result = { boundary, firstClipEnd, flips, segmentIndex: vm.segmentIndex,
+                seconds: vm.currentSeconds, clipEnd: vm._clipEndSeconds,
+                recordingEnd: segs[segs.length - 1].startSeconds + segs[segs.length - 1].durationSeconds,
+                error: vm.error };
+            unwatch();
+            vm.$refs.audio.pause();
+            return result;
+        })();
         vm._prepareAudioGraph(); const element = vm.$refs.audio;
         const oldId = root.id, newId = oldId + '-copy';
         const first = await store.readManifest(oldId);
@@ -150,7 +184,7 @@ try {
         vm._prepareAudioGraph();
         const graph = { sameElement: element === vm.$refs.audio,
             attached: vm._sourceNode.mediaElement === vm.$refs.audio, corrected: vm.channelRepair };
-        root.$destroy(); return { reports, graph };
+        root.$destroy(); return { reports, graph, handover };
     })()`);
     assert.ok(results.reports.length, 'at least one native container supported');
     for (const report of results.reports) {
@@ -159,6 +193,17 @@ try {
         assert.ok(report.clipReports.every(c => c.seconds > 0), JSON.stringify(report));
     }
     assert.deepEqual(results.graph, { sameElement: true, attached: true, corrected: true });
+    for (const report of results.reports) {
+        const w = report.windowReport;
+        // Decodes as one file, carrying more than any single segment does.
+        assert.ok(w.seconds > Math.max(...report.clipReports.map(c => c.seconds)) - 0.25 &&
+            w.seconds >= w.span - 0.5, JSON.stringify(report));
+    }
+    const h = results.handover;
+    assert.ok(!h.error, JSON.stringify(h));
+    assert.ok(h.seconds > h.boundary + 0.5, `playback crossed the first boundary: ${JSON.stringify(h)}`);
+    assert.deepEqual(h.flips, [], `the button never read paused at the handover: ${JSON.stringify(h)}`);
+    assert.ok(Math.abs(h.clipEnd - h.recordingEnd) < 0.5, `the next clip is the whole remaining window: ${JSON.stringify(h)}`);
     console.log('Native recording/storage/export and Vue graph lifecycle passed:', JSON.stringify(results));
 } finally {
     if (ws) ws.close();

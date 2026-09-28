@@ -333,7 +333,7 @@
             @timeupdate="onTimeUpdate"
             @ended="onEnded"
             @play="playing = true"
-            @pause="playing = false"
+            @pause="onPause"
             @error="onAudioError"
         />
     </div>
@@ -346,6 +346,7 @@ import { formatSecondsAsDuration } from '@/js/sessionAnalysis.js';
 import {
     VOLUME_MIN, VOLUME_MAX, VOLUME_STEP, clampVolume, rmsOf, nextLevel, levelStageGain,
 } from '@/js/playbackLevel.mjs';
+import { clipWindow, segmentAfter, PREFETCH_LEAD_SECONDS } from '@/js/clipWindow.mjs';
 import {
     playbackReadManifest as readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor, playsWhole,
     inspectRecording,
@@ -951,6 +952,7 @@ export default {
         teardown() {
             this._loadGeneration = (this._loadGeneration || 0) + 1;
             this._pendingCloudPlay = null;
+            this._prefetch = null;
             const audio = this.$refs.audio;
             if (audio) {
                 try { audio.pause(); } catch (e) { /* not loaded */ }
@@ -1021,7 +1023,12 @@ export default {
             // it would re-read the entire file for every seek.
             const inLoadedWholeFile = this.segmentIndex !== null && this._loadedWholeFile &&
                 segment.trackIndex === this.currentTrackIndex;
-            if (this.segmentIndex === segment.index || inLoadedWholeFile) {
+            // Likewise anywhere inside a clip that spans several segments (see
+            // clipWindow.mjs): the moment is already in the element.
+            const inLoadedClip = this.segmentIndex !== null &&
+                segment.trackIndex === this.currentTrackIndex &&
+                target >= this._clipStartSeconds && target < this._clipEndSeconds;
+            if (this.segmentIndex === segment.index || inLoadedWholeFile || inLoadedClip) {
                 // CANCELS an older load that has not landed yet.
                 //
                 // segmentIndex names the segment currently IN the element, and
@@ -1203,23 +1210,27 @@ export default {
         // _retryFromTrackStart(). It changes only how much of the track is in
         // the blob — the timeline is the track's either way, so nothing about
         // seeking changes with it.
-        async _loadSegment(segment, seekSeconds, autoplay, { fromTrackStart = false } = {}) {
+        //
+        // `toSeconds` is where the clip ends — the segment's own end unless a
+        // window of several was asked for — and `prebuilt` a clip already
+        // assembled by _prefetchNext(), so the handover waits on nothing.
+        async _loadSegment(segment, seekSeconds, autoplay,
+            { fromTrackStart = false, toSeconds = null, prebuilt = null } = {}) {
             const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
             const audio = this.$refs.audio;
             if (!audio) return;
             this.error = '';
+            // A prefetch is for whatever follows the clip it was started from;
+            // any other load makes it the wrong clip.
+            if (!prebuilt) this._prefetch = null;
             const track = (this.manifest.tracks || [])
                 .find(t => t.index === segment.trackIndex);
             const from = fromTrackStart && track
                 ? track.startSeconds
                 : segment.startSeconds;
+            const to = toSeconds !== null ? toSeconds : segment.startSeconds + segment.durationSeconds;
             try {
-                const clip = await buildClip(
-                    this.sessionId,
-                    from,
-                    segment.startSeconds + segment.durationSeconds,
-                    this.manifest,
-                );
+                const clip = prebuilt || await buildClip(this.sessionId, from, to, this.manifest);
                 if (generation !== this._loadGeneration) return;
                 if (!clip) {
                     this.error = 'That part of the recording is missing.';
@@ -1255,6 +1266,7 @@ export default {
                 this._loadedSegment = segment;
                 this._loadedWholeFile = playsWhole(track);
                 this._loadedSeekSeconds = seekSeconds;
+                this._loadedToSeconds = to;
                 this._clipFromTrackStart = fromTrackStart;
                 audio.src = this.objectUrl;
                 audio.load();
@@ -1871,6 +1883,9 @@ export default {
                 started.catch(e => {
                     if (audio.error && audio.error.code === 4 &&
                         this._retryFromTrackStart(true)) return;
+                    // No 'pause' follows a play() that never started, and a
+                    // handover holds the button on ⏸ (see onPause).
+                    this.playing = false;
                     this.error =
                         `Could not play: ${this._playFailureDetail(audio, e)}${this._exportHint()}`;
                 });
@@ -2019,6 +2034,9 @@ export default {
             if (this.loop && this.playing && this.currentSeconds >= this.loop.to) {
                 this._jumpToLoopStart();
             }
+            if (this.playing && this._clipEndSeconds - this.currentSeconds <= PREFETCH_LEAD_SECONDS) {
+                this._prefetchNext();
+            }
             // The card's scrubber extrapolates on its own between updates, so
             // once a second is plenty; a seek resets it through the same path.
             const now = Date.now();
@@ -2074,19 +2092,16 @@ export default {
             return this.playTune(target.detection);
         },
 
-        // Segments are separate files, so continuous playback has to walk them.
-        // Blob URLs load from local storage, so the join is short — but it is
-        // not gapless, and a segment boundary is audible as a brief break.
+        // Segments are separate files, so continuous playback has to walk them
+        // — and every step is a reload, which is not gapless. Heard in the
+        // field as a short skip every three minutes that the export of the
+        // same recording did not have. So the walk is made as rarely and as
+        // quickly as possible: the next clip spans as many segments as
+        // clipWindow() allows, and _prefetchNext() has built it before this
+        // clip ends, so the handover waits on no storage and no download.
         async onEnded() {
             if (!this.manifest || this.segmentIndex === null) return;
-            // The first piece that begins where the loaded clip ENDS, not the
-            // next index: a clip can span several pieces (a whole imported
-            // file spans all of its own), and the next index would replay them.
-            const next = this.manifest.segments
-                .slice()
-                .sort((a, b) => a.index - b.index)
-                .find(s => s.index > this.segmentIndex &&
-                    s.startSeconds >= (this._clipEndSeconds || 0) - 0.5);
+            const next = segmentAfter(this.manifest.segments, this.segmentIndex, this._clipEndSeconds);
             // A loop that reaches the end of what is recorded — or of the
             // clip, with the next piece already past the loop — goes round
             // rather than stopping or loading audio it will not play.
@@ -2095,7 +2110,63 @@ export default {
                 return;
             }
             if (!next) { this.playing = false; return; }
-            await this._loadSegment(next, next.startSeconds, true);
+            const ready = this._takePrefetch(next);
+            const generation = this._loadGeneration || 0;
+            const clip = ready ? await ready.clip : null;
+            // A tap while the prefetch was finishing is the newer request.
+            if (generation !== (this._loadGeneration || 0)) return;
+            if (clip) {
+                await this._loadSegment(next, next.startSeconds, true,
+                    { toSeconds: ready.toSeconds, prebuilt: clip });
+            } else {
+                // Nothing built in time (a clip shorter than the lead, or a
+                // failed prefetch): the one segment is the quickest start, and
+                // the window after it is prefetched as usual.
+                await this._loadSegment(next, next.startSeconds, true);
+            }
+            // The button was held on ⏸ through the handover (onPause); a
+            // handover that failed has stopped, and must say so.
+            if (this.error && generation + 1 === this._loadGeneration) this.playing = false;
+        },
+
+        // The element pauses itself at the end of every clip, immediately
+        // before 'ended'. When the recording carries on, that is a handover
+        // rather than a pause, and showing ▶ for the moment it takes — and
+        // flipping the lock-screen card with it — was the other half of what
+        // the user saw at every segment boundary.
+        onPause() {
+            const audio = this.$refs.audio;
+            if (audio && audio.ended && this.manifest && this.segmentIndex !== null &&
+                (this.loop || segmentAfter(this.manifest.segments, this.segmentIndex, this._clipEndSeconds))) {
+                return;
+            }
+            this.playing = false;
+        },
+
+        // Builds the clip that follows the playing one, once, while this one
+        // still has PREFETCH_LEAD_SECONDS to run. Never throws: a prefetch
+        // that fails leaves onEnded() to load the next segment itself.
+        _prefetchNext() {
+            if (this._prefetch || !this.manifest || this.segmentIndex === null) return;
+            const next = segmentAfter(this.manifest.segments, this.segmentIndex, this._clipEndSeconds);
+            if (!next) return;
+            const { toSeconds } = clipWindow(this.manifest.segments, next);
+            const sessionId = this.sessionId;
+            this._prefetch = {
+                sessionId,
+                segmentIndex: next.index,
+                toSeconds,
+                clip: Promise.resolve()
+                    .then(() => buildClip(sessionId, next.startSeconds, toSeconds, this.manifest))
+                    .catch(() => null),
+            };
+        },
+
+        _takePrefetch(next) {
+            const prefetch = this._prefetch;
+            this._prefetch = null;
+            return prefetch && prefetch.sessionId === this.sessionId &&
+                prefetch.segmentIndex === next.index ? prefetch : null;
         },
 
         // A clip a browser will not decode, rebuilt from the track's start.
@@ -2129,7 +2200,7 @@ export default {
             this._retryingFromTrackStart = true;
             const done = () => { this._retryingFromTrackStart = false; };
             this._loadSegment(segment, this._loadedSeekSeconds, autoplay,
-                { fromTrackStart: true }).then(done, done);
+                { fromTrackStart: true, toSeconds: this._loadedToSeconds || null }).then(done, done);
             return true;
         },
 
@@ -2140,6 +2211,7 @@ export default {
             const code = audio.error && audio.error.code;
             // 4 is SRC_NOT_SUPPORTED: these BYTES, not this situation.
             if (code === 4 && this._retryFromTrackStart(this._autoplayAfterLoad)) return;
+            this.playing = false;
             this.error = `This browser could not play the recorded audio` +
                 ` (${this._clipDetail(audio)}).${this._exportHint()}`;
         },
