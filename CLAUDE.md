@@ -1474,6 +1474,21 @@ speakers by every player there is. Stereo is opt-in
 (`userSettings.sessionAudioStereo`), since it splits the same bitrate across two
 channels.
 
+⚠️ **On iOS none of this does anything: WebKit's getUserMedia is mono only**
+and has no `channelCount` constraint at all (WebKit bug 210231, open since 2020;
+a stereo source is reduced to its LEFT channel, not mixed). That covers Safari,
+the installed PWA and every other iOS browser. Measured September 2026 on a
+2 h 42 min export recorded with stereo ON: an AAC file labelled 2-channel,
+left at −26 dB RMS, right at −123 dB — i.e. dead. So the one-sided file
+on iPhone is most likely made by WebKit's `MediaRecorder` writing a mono track
+into two-channel AAC, which asking for one channel cannot prevent. Unverified:
+whether stereo OFF gives the same dead right channel (record 30 s, export,
+check). If it does, the fix is recording through a Web Audio upmix
+(source → 2-channel `MediaStreamAudioDestinationNode`), not a constraint. The
+Settings text now tells iOS users the switch has no effect there. Real stereo
+from the iPhone's built-in mics exists natively since iOS 14 (AVAudioSession
+stereo polar pattern) and would need a native wrapper.
+
 The manifest records what the **track** reported rather than what was asked for,
 per track (the setting can change between two stretches of one session, exactly
 as the container can), and a recording made before this has no channel count and
