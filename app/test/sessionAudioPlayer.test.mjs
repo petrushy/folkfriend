@@ -88,6 +88,8 @@ async function loadPlayer() {
         await readFile(path.join(srcDir, 'js', 'mediaSession.mjs'), 'utf8'));
     await writeFile(path.join(tmpDir, 'playbackLevel.mjs'),
         await readFile(path.join(srcDir, 'js', 'playbackLevel.mjs'), 'utf8'));
+    await writeFile(path.join(tmpDir, 'clipWindow.mjs'),
+        await readFile(path.join(srcDir, 'js', 'clipWindow.mjs'), 'utf8'));
 
     const sfc = await readFile(path.join(srcDir, 'components', 'SessionAudioPlayer.vue'), 'utf8');
     const open = sfc.indexOf('<script>');
@@ -104,6 +106,7 @@ async function loadPlayer() {
         ["from '@/ffConfig.js'", "from './fake-ffconfig.mjs'"],
         ["from '@/js/mediaSession.mjs'", "from './mediaSession.mjs'"],
         ["from '@/js/playbackLevel.mjs'", "from './playbackLevel.mjs'"],
+        ["from '@/js/clipWindow.mjs'", "from './clipWindow.mjs'"],
     ]) {
         assert.ok(source.includes(from), `expected ${JSON.stringify(from)} in the SFC`);
         source = source.split(from).join(to);
@@ -1999,6 +2002,155 @@ await test('the check report says what the level stage is doing', async () => {
     vm.segmentIndex = 0;
     const text = vm.playbackDiagnostics().join('\n');
     assert.match(text, /level: volume 100%, normalize on, level gain ×8\.00, measured -40\.0 dBFS/);
+});
+
+console.log('\nSessionAudioPlayer — crossing segment boundaries');
+
+// Three segments of one track, with the sizes clipWindow() budgets by.
+const BOUNDARIES = {
+    ...CONTINUOUS,
+    segments: CONTINUOUS.segments.map(s => ({ ...s, bytes: 2 * 1024 * 1024 })),
+};
+
+// An element that records what it is given and never fires anything itself.
+function handoverElement() {
+    const element = {
+        src: '', ended: false, loads: 0, _t: 0,
+        seekable: { length: 0 }, duration: NaN,
+        load() { element.loads++; },
+        play: () => Promise.resolve(),
+        pause() {},
+        getAttribute: () => element.src,
+        set currentTime(v) { element._t = v; },
+        get currentTime() { return element._t; },
+    };
+    return element;
+}
+
+// A clip covering exactly what was asked for, on the track's timeline.
+function exactClips(sessionId, from, to) {
+    return { blob: new Blob(['x']), mimeType: 'audio/mp4', startSeconds: from, endSeconds: to,
+        trackIndex: 0, trackStartSeconds: 0 };
+}
+
+// Playing, some way into the first segment's clip.
+async function playingFirstClip() {
+    const vm = await mountPlayer(BOUNDARIES);
+    vm.playFrom = vm.__realPlayFrom;
+    vm.$refs.audio = handoverElement();
+    store.__setClipFactory(exactClips);
+    store.__clipCalls.length = 0;
+    await vm.playFrom(10, { autoplay: false });
+    vm.playing = true;
+    return vm;
+}
+
+await test('the button stays on pause through a handover, and only there', async () => {
+    // The element pauses itself at the end of every clip, just before
+    // 'ended'. Letting that through showed ▶ at every segment boundary.
+    const vm = await playingFirstClip();
+    vm.$refs.audio.ended = true;
+    vm.onPause();
+    assert.equal(vm.playing, true, 'more recording follows: a handover');
+
+    vm._clipEndSeconds = 540;          // the clip reaches the end of the recording
+    vm.onPause();
+    assert.equal(vm.playing, false, 'nothing follows: really stopped');
+
+    vm.playing = true;
+    vm._clipEndSeconds = 180;
+    vm.$refs.audio.ended = false;      // the user's own pause, mid-clip
+    vm.onPause();
+    assert.equal(vm.playing, false);
+});
+
+// Playback clips only; the channel probe reads a few seconds on its own.
+const clipLoads = () => store.__clipCalls.filter(([, from, to]) => to - from > 10);
+
+await test('the first tap loads one segment; what follows is prefetched as a window', async () => {
+    const vm = await playingFirstClip();
+    assert.deepEqual(clipLoads(), [['s1', 0, 180]], 'one segment: the quickest start');
+
+    vm.$refs.audio.currentTime = 60;   // 120 s left: not yet
+    vm.onTimeUpdate();
+    await settle();
+    assert.equal(clipLoads().length, 1);
+
+    vm.$refs.audio.currentTime = 120;  // inside the lead
+    vm.onTimeUpdate();
+    vm.onTimeUpdate();
+    await settle();
+    assert.deepEqual(clipLoads().slice(1), [['s1', 180, 540]],
+        'built once, and spanning every segment the budget allows');
+});
+
+await test('the handover uses the prefetched clip and builds nothing more', async () => {
+    const vm = await playingFirstClip();
+    vm.$refs.audio.currentTime = 150;
+    vm.onTimeUpdate();
+    await settle();
+    const calls = clipLoads().length;
+    const loads = vm.$refs.audio.loads;
+
+    await vm.onEnded();
+    assert.equal(clipLoads().length, calls, 'nothing assembled at the boundary');
+    assert.equal(vm.$refs.audio.loads, loads + 1);
+    assert.equal(vm.segmentIndex, 1);
+    assert.deepEqual([vm._clipStartSeconds, vm._clipEndSeconds], [180, 540]);
+    assert.equal(vm._autoplayAfterLoad, true, 'and it carries on playing');
+});
+
+await test('a seek anywhere inside a multi-segment clip does not reload it', async () => {
+    const vm = await playingFirstClip();
+    vm.$refs.audio.currentTime = 150;
+    vm.onTimeUpdate();
+    await settle();
+    await vm.onEnded();
+    const calls = clipLoads().length;
+    const loads = vm.$refs.audio.loads;
+
+    await vm.playFrom(470, { autoplay: false });    // in segment 2, inside the clip
+    assert.equal(clipLoads().length, calls);
+    assert.equal(vm.$refs.audio.loads, loads);
+    assert.equal(vm.$refs.audio.currentTime, 470, 'sought on the track\'s timeline');
+});
+
+await test('a tap while the prefetch is still finishing is not overridden by it', async () => {
+    const vm = await playingFirstClip();
+    let release;
+    store.__setClipFactory((sid, from, to) => from === 180
+        ? new Promise(resolve => { release = () => resolve(exactClips(sid, from, to)); })
+        : exactClips(sid, from, to));
+    vm.$refs.audio.currentTime = 150;
+    vm.onTimeUpdate();
+    await settle();
+
+    const ending = vm.onEnded();
+    await vm.playFrom(20, { autoplay: false });     // the user's newer choice
+    release();
+    await ending;
+    assert.equal(vm.segmentIndex, 0, 'still where the user asked to be');
+    assert.equal(vm.$refs.audio.currentTime, 20);
+});
+
+await test('with nothing prefetched, the handover loads just the next segment', async () => {
+    // A clip shorter than the lead never triggers a prefetch; building a whole
+    // window at the boundary would be a long silence over Dropbox.
+    const vm = await playingFirstClip();
+    store.__clipCalls.length = 0;
+    await vm.onEnded();
+    assert.deepEqual(clipLoads(), [['s1', 180, 360]]);
+});
+
+await test('a handover that fails shows the player stopped', async () => {
+    const vm = await playingFirstClip();
+    store.__setClipFactory(() => null);
+    vm.$refs.audio.ended = true;
+    vm.onPause();
+    assert.equal(vm.playing, true);
+    await vm.onEnded();
+    assert.match(vm.error, /missing/);
+    assert.equal(vm.playing, false);
 });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

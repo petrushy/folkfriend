@@ -35,6 +35,7 @@ let player = sfc.split('<script>')[1].split('</script>')[0]
     .replace("from '@/js/recordingCheck.mjs'", "from '/recordingCheck.js'")
     .replace("from '@/js/mediaSession.mjs'", "from '/mediaSession.js'")
     .replace("from '@/js/playbackLevel.mjs'", "from '/playbackLevel.js'")
+    .replace("from '@/js/clipWindow.mjs'", "from '/clipWindow.js'")
     .replace("import ffConfig from '@/ffConfig.js';", "const ffConfig = { FRONTEND_VERSION: 'e2e' };")
     .replace('export default {', 'const component = {');
 player += `\ncomponent.template = ${JSON.stringify(template)}; export default component;`;
@@ -57,6 +58,7 @@ const routes = new Map([
     ['/recordingCheck.js', read('src/js/recordingCheck.mjs')],
     ['/mediaSession.js', read('src/js/mediaSession.mjs')],
     ['/playbackLevel.js', read('src/js/playbackLevel.mjs')],
+    ['/clipWindow.js', read('src/js/clipWindow.mjs')],
     ['/vue.js', read('node_modules/vue/dist/vue.js')],
     ['/vuetify.js', read('node_modules/vuetify/dist/vuetify.js')],
 ]);
