@@ -78,6 +78,14 @@ export function deleteRecords(uid, name, ids) {
 export function __reset() { __pushes.length = 0; __onChange = null; __records.length = 0; }
 `,
     'fake-ai.mjs': `
+export const __noteCalls = [];
+export let __noteStatus = 'ok';
+export function __setNoteStatus(v) { __noteStatus = v; __noteCalls.length = 0; }
+export async function generateNoteForTune(args) {
+    __noteCalls.push(args);
+    if (__noteStatus !== 'ok') return { status: __noteStatus };
+    return { status: 'ok', record: { text: 'auto note', model: args.model, generatedAt: 5, sourceUrl: args.sourceUrl, usage: { input_tokens: 1, output_tokens: 1 } } };
+}
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
 // The real mapping is pinned in aiSummary.test.mjs; this only has to show the
 // store applies it on both load paths.
@@ -755,6 +763,64 @@ await test('a malformed usage record does not produce NaN', async () => {
     assert.equal(usage.calls, 1);
     assert.equal(usage.inputTokens, 0);
     assert.ok(Number.isFinite(usage.costUsd));
+});
+
+console.log('\nstarring writes the note');
+
+const STAR = { settingID: 11, displayName: 'The Kesh', setting: { tune_id: '5', source_url: 'https://thesession.org/tunes/5' } };
+const settle = () => new Promise(r => setTimeout(r, 20));
+
+await test('starring a tune generates and saves its note when AI notes are on and a key is set', async () => {
+    const { store } = await loadStore();
+    const ai = await import(path.join(tmpDir, 'fake-ai.mjs'));
+    ai.__setNoteStatus('ok');
+    store.userSettings.aiSummariesEnabled = true;
+    store.setApiKey('sk-ant-test');
+    await store.addFavourite(STAR);
+    await settle();
+    assert.equal(ai.__noteCalls.length, 1);
+    assert.equal(ai.__noteCalls[0].tuneID, '5');
+    assert.equal((await store.getAiSummary('5')).text, 'auto note');
+    assert.equal(store.getAiUsage().calls, 1);
+});
+
+await test('nothing is generated when AI notes are off, there is no key, or a note exists', async () => {
+    const ai = await import(path.join(tmpDir, 'fake-ai.mjs'));
+    {
+        const { store } = await loadStore();
+        ai.__setNoteStatus('ok');
+        store.userSettings.aiSummariesEnabled = false;
+        store.setApiKey('sk-ant-test');
+        await store.addFavourite(STAR); await settle();
+        assert.equal(ai.__noteCalls.length, 0, 'setting off');
+    }
+    {
+        const { store } = await loadStore();
+        ai.__setNoteStatus('ok');
+        store.userSettings.aiSummariesEnabled = true;
+        await store.addFavourite(STAR); await settle();
+        assert.equal(ai.__noteCalls.length, 0, 'no key');
+    }
+    {
+        const { store } = await loadStore();
+        ai.__setNoteStatus('ok');
+        store.userSettings.aiSummariesEnabled = true;
+        store.setApiKey('sk-ant-test');
+        await store.setAiSummary('5', { text: 'existing', generatedAt: 1 });
+        await store.addFavourite(STAR); await settle();
+        assert.equal(ai.__noteCalls.length, 0, 'already has a note');
+    }
+});
+
+await test('a tune with no discussion is starred without a note or an error', async () => {
+    const { store } = await loadStore();
+    const ai = await import(path.join(tmpDir, 'fake-ai.mjs'));
+    ai.__setNoteStatus('no-discussion');
+    store.userSettings.aiSummariesEnabled = true;
+    store.setApiKey('sk-ant-test');
+    await store.addFavourite(STAR); await settle();
+    assert.equal(await store.getAiSummary('5'), null);
+    assert.equal(await store.isFavourite(11), true);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

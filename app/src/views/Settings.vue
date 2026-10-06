@@ -356,7 +356,7 @@
                     v-model="userSettings.aiSummariesEnabled"
                     inset
                     label="Show tune background notes"
-                    hint="Nothing is ever generated automatically — you tap to generate."
+                    hint="Starring a tune writes its note automatically when a discussion exists; otherwise you tap to generate."
                     persistent-hint
                     class="my-0 pl-2"
                     @change="settingsChanged"

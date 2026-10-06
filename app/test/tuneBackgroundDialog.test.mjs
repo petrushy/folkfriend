@@ -54,26 +54,28 @@ export function __holdNextComments() {
 }
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
 export function describeAiSummaryError(e) { return \`described:\${e && e.kind}\`; }
-export async function fetchSessionTuneFacts(tuneID) {
-    __calls.push({ fn: 'facts', tuneID });
-    return { name: \`Tune \${tuneID}\` };
-}
-export async function fetchSessionComments(tuneID) {
-    __calls.push({ fn: 'comments', tuneID });
+export let __norbeckMatch = 1316;
+export function __setNorbeckMatch(v) { __norbeckMatch = v; }
+export async function generateNoteForTune(args) {
+    const { tuneID, displayName } = args;
+    __calls.push({ fn: 'resolve', tuneID, displayName });
+    let sessionID = tuneID;
+    if (Number(tuneID) >= 3000000000) sessionID = __norbeckMatch;
+    else if (Number(tuneID) >= 1000000) return { status: 'unsupported' };
+    if (!sessionID) return { status: 'no-discussion' };
+    __calls.push({ fn: 'facts', tuneID: sessionID });
+    __calls.push({ fn: 'comments', tuneID: sessionID });
     if (__holdComments) await __holdComments;
-    return { text: \`comments for \${tuneID}\`, count: 3, source: 'json' };
-}
-export async function generateTuneSummary(args) {
     __calls.push({ fn: 'generate', ...args });
-    return {
-        text: \`note for \${args.tuneID}\`,
+    return { status: 'ok', record: {
+        text: \`note for \${tuneID}\`,
         model: args.model,
         generatedAt: 1000,
-        sourceUrl: args.sourceUrl,
+        sourceUrl: String(sessionID) !== String(tuneID) ? 'https://thesession.org/tunes/' + sessionID : args.sourceUrl,
         grounding: 'comments',
         commentCount: 3,
         usage: { input_tokens: 10, output_tokens: 20 },
-    };
+    } };
 }
 `;
 
@@ -121,6 +123,7 @@ async function loadDialog() {
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from '@/services/store.js'", "from './fake-store.mjs'"],
         ["from '@/services/aiSummary.js'", "from './fake-ai.mjs'"],
+        ["from '@/js/source.mjs'", `from '${path.join(srcDir, 'js', 'source.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in the SFC`);
@@ -151,6 +154,36 @@ async function loadDialog() {
 await mkdir(tmpDir, { recursive: true });
 
 console.log('\nopening the shared dialog');
+
+await test('a Norbeck tune reads the matching thesession discussion', async () => {
+    const { vm, ai, store } = await loadDialog();
+    await vm.show({ tuneID: '4280328944', displayName: 'Two Turtles, The', sourceUrl: 'https://www.norbeck.nu/abc/' });
+    await vm.generateSummary();
+    const calls = ai.__calls.filter(c => c.fn === 'comments' || c.fn === 'facts');
+    assert.deepEqual(calls.map(c => c.tuneID), [1316, 1316]);
+    const gen = ai.__calls.find(c => c.fn === 'generate');
+    assert.equal(gen.tuneID, '4280328944', 'saved under the Norbeck tune');
+    assert.equal(store.__saved['4280328944'].sourceUrl, 'https://thesession.org/tunes/1316');
+});
+
+await test('no discussion available: nothing is generated and no call is paid for', async () => {
+    const { vm, ai } = await loadDialog();
+    ai.__setNorbeckMatch(null);
+    await vm.show({ tuneID: '4280328944', displayName: 'Obscure Polska', sourceUrl: 'https://www.norbeck.nu/abc/' });
+    await vm.generateSummary();
+    assert.equal(ai.__calls.filter(c => c.fn === 'generate').length, 0);
+    assert.match(vm.summaryError, /no-discussion/);
+    assert.equal(vm.summary, null);
+});
+
+await test('a Folkwiki tune says it is not implemented and makes no calls', async () => {
+    const { vm, ai } = await loadDialog();
+    await vm.show({ tuneID: '974588901', displayName: 'Gumboda schottis' });
+    assert.equal(vm.unsupported, true);
+    await vm.generateSummary();
+    assert.equal(ai.__calls.filter(c => c.fn === 'generate').length, 0);
+    assert.match(vm.summaryError, /unsupported/);
+});
 
 await test('opening for a different tune clears the previous note', async () => {
     const { vm, store } = await loadDialog();

@@ -22,6 +22,9 @@
                         source.
                     </p>
                 </template>
+                <p v-else-if="unsupported" class="mb-0">
+                    Background notes are not implemented for Folkwiki tunes yet.
+                </p>
                 <p v-else-if="!summaryError" class="mb-0">
                     No background note saved for this tune yet. Generating one makes a
                     single call to the Claude API with your own key, and the result is
@@ -33,7 +36,7 @@
                 <v-btn text :disabled="summaryLoading" @click="open = false">
                     Close
                 </v-btn>
-                <v-btn text color="primary" :loading="summaryLoading" @click="generateSummary">
+                <v-btn v-if="!unsupported" text color="primary" :loading="summaryLoading" @click="generateSummary">
                     {{ summary ? 'Regenerate' : 'Generate' }}
                 </v-btn>
             </v-card-actions>
@@ -52,13 +55,12 @@
 // cache-first, never generate without a tap, single in-flight request — in a
 // single place rather than copied four times.
 import eventBus from '@/eventBus.js';
+import { DATASET_FOLKWIKI, datasetForTuneID } from '@/js/source.mjs';
 import store from '@/services/store.js';
 import {
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
     describeAiSummaryError,
-    fetchSessionComments,
-    fetchSessionTuneFacts,
-    generateTuneSummary,
+    generateNoteForTune,
 } from '@/services/aiSummary.js';
 
 export default {
@@ -79,6 +81,12 @@ export default {
         summaryCommentCount: 0,
     }),
     computed: {
+        // Folkwiki has no discussion to build a note from. A note already saved
+        // for one is still shown.
+        unsupported() {
+            return !this.summary && !this.summaryLoading && Boolean(this.tuneID)
+                && datasetForTuneID(this.tuneID) === DATASET_FOLKWIKI;
+        },
         // Names what the note was built from, so a user reporting a thin note
         // carries its own diagnosis. Only shown right after generating — a note
         // read back from the cache does not persist this.
@@ -170,24 +178,20 @@ export default {
             this.summaryCommentCount = 0;
 
             try {
-                // Both non-fatal: each resolves to null if thesession is
-                // unreachable or this is a folkwiki tune, and the note is written
-                // anyway — from the model's own knowledge, labelled as such.
-                // The comments are the material the note is actually built from.
-                const [facts, comments] = await Promise.all([
-                    fetchSessionTuneFacts(tuneID),
-                    fetchSessionComments(tuneID),
-                ]);
-
-                const record = await generateTuneSummary({
+                const { status, record } = await generateNoteForTune({
                     tuneID,
                     displayName: request.displayName,
                     sourceUrl: request.sourceUrl,
-                    facts,
-                    comments,
                     model: request.model,
                     apiKey,
                 });
+                if (status !== 'ok') {
+                    // Nothing was generated or paid for.
+                    if (String(this.tuneID) === String(tuneID)) {
+                        this.summaryError = describeAiSummaryError({ kind: status });
+                    }
+                    return;
+                }
 
                 store.recordAiUsage(record.usage, record.model);
                 await store.setAiSummary(tuneID, record);
