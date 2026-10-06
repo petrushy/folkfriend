@@ -83,6 +83,7 @@ export function deleteRecords(uid, name, ids) {
 export function __reset() { __pushes.length = 0; __records.length = 0; __subs.length = 0; }
 `,
     'fake-ai.mjs': `
+export async function generateNoteForTune() { return { status: 'no-discussion' }; }
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
 export function resolveModel(model) { return model || DEFAULT_MODEL; }
 export function estimateCostUsd() { return 0; }

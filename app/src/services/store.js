@@ -4,7 +4,7 @@
 import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
-import {estimateCostUsd, resolveModel as resolveAiModel, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
+import {estimateCostUsd, generateNoteForTune, resolveModel as resolveAiModel, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
 import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '@/js/places.mjs';
 import {deleteSessionAudio, reclaimAudioForMissingSessions} from './sessionAudioStore.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
@@ -548,7 +548,41 @@ class Store {
                 this._favouriteTuneIDs.add(String(result.setting.tune_id));
             }
             if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+            this._autoGenerateNote(result);
         }
+    }
+
+    // Starring a tune writes its background note, when AI notes are on and a key
+    // is set. Fire-and-forget and silent on failure: the star has already
+    // succeeded, and the (i) button remains for a manual attempt. Only reached
+    // from addFavourite, not from a synced snapshot, so a second device receiving
+    // the favourite does not spend again; the note itself arrives with it.
+    _autoGenerateNote(result) {
+        const tuneID = result && result.setting && result.setting.tune_id;
+        if (!tuneID || !this.userSettings.aiSummariesEnabled || !this.hasApiKey()) return;
+        const key = String(tuneID);
+        this._autoNotesInFlight = this._autoNotesInFlight || new Set();
+        if (this._autoNotesInFlight.has(key)) return;
+        this._autoNotesInFlight.add(key);
+        (async () => {
+            try {
+                if (await this.getAiSummary(key)) return;
+                const { status, record } = await generateNoteForTune({
+                    tuneID: key,
+                    displayName: result.displayName || '',
+                    sourceUrl: result.setting.source_url || '',
+                    model: resolveAiModel(this.userSettings.aiSummaryModel || DEFAULT_AI_MODEL),
+                    apiKey: this.getApiKey(),
+                });
+                if (status !== 'ok') return;
+                this.recordAiUsage(record.usage, record.model);
+                await this.setAiSummary(key, record);
+            } catch (e) {
+                console.warn('automatic tune note failed', e && e.message);
+            } finally {
+                this._autoNotesInFlight.delete(key);
+            }
+        })();
     }
 
     async removeFavourite(settingID) {

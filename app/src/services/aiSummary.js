@@ -31,7 +31,13 @@ import { isDefinitelyOffline } from './tuneIndexNetwork.js';
 // above the folkwiki base is not a thesession tune, whatever else it is. The
 // label would be wrong for norbeck; the boolean is not, and the boolean is all
 // that is used.
-import { isThesessionTuneID, tuneSourceUrl } from '../js/source.mjs';
+import {
+    DATASET_FOLKWIKI,
+    DATASET_NORBECK,
+    datasetForTuneID,
+    isThesessionTuneID,
+    tuneSourceUrl,
+} from '../js/source.mjs';
 
 const MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
 const ANTHROPIC_VERSION = '2023-06-01';
@@ -131,6 +137,8 @@ export class AiSummaryError extends Error {
 }
 
 const ERROR_MESSAGES = {
+    'no-discussion': 'No discussion could be found for this tune, so there is nothing to base a note on. Nothing was generated.',
+    unsupported: 'Background notes are not implemented for Folkwiki tunes yet.',
     'no-key': 'Add your Anthropic API key in Settings to generate background notes.',
     offline: 'No connection. Background notes need the internet, but any note you have already generated stays available offline.',
     timeout: 'The request took too long and was cancelled. Try again when the connection is better.',
@@ -249,6 +257,63 @@ export async function fetchSessionTuneFacts(tuneID) {
         console.warn('thesession facts unavailable', e && e.message);
         return null;
     }
+}
+
+// ---- tunes that are not from thesession ------------------------------------
+//
+// Notes are built from the discussion on a tune's thesession.org page, so a tune
+// from another source needs a thesession page to read.
+//   thesession  its own id.
+//   norbeck     Norbeck's collection is largely Irish session tunes that thesession
+//               also has, but the data carries no thesession id, so the tune is
+//               looked up by title. Only an exact title match counts: a near miss
+//               would put another tune's discussion under this one's name.
+//   folkwiki    nothing to read (not implemented).
+
+// "Two Turtles, The" and "The Two Turtles" are the same title.
+export function normaliseTuneTitle(title) {
+    let t = String(title || '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+    t = t.replace(/[^a-z0-9, ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    t = t.replace(/,\s*(the|a|an)$/, '');
+    t = t.replace(/^(the|a|an)\s+/, '');
+    return t.replace(/[, ]+/g, ' ').trim();
+}
+
+export function sessionSearchUrl(title) {
+    return `https://thesession.org/tunes/search?q=${encodeURIComponent(String(title))}&format=json`;
+}
+
+// The thesession tune with exactly this title, as { id, name }, or null. Never
+// throws: no match just means the note is written without a discussion.
+export async function findThesessionTune(title) {
+    const wanted = normaliseTuneTitle(title);
+    if (!wanted || isDefinitelyOffline()) return null;
+    try {
+        const response = await fetchWithDeadline(sessionSearchUrl(title), TIMEOUTS.SESSION_JSON_MS);
+        if (!response.ok) return null;
+        const data = await response.json();
+        const tunes = data && Array.isArray(data.tunes) ? data.tunes : [];
+        const hit = tunes.find(t => t && typeof t.name === 'string' && normaliseTuneTitle(t.name) === wanted);
+        const id = hit ? parseInt(hit.id, 10) : NaN;
+        return Number.isNaN(id) ? null : { id, name: hit.name };
+    } catch (e) {
+        console.warn('thesession search unavailable', e && e.message);
+        return null;
+    }
+}
+
+// Which thesession tune to read for this one:
+//   { supported: false }                 nothing can be written (folkwiki)
+//   { supported: true, sessionID: null } write from knowledge (no match found)
+//   { supported: true, sessionID: 1316 } read that tune's page
+export async function resolveSessionTune({ tuneID, displayName = '', dataset = '' }) {
+    const source = datasetForTuneID(tuneID, dataset);
+    if (source === DATASET_FOLKWIKI) return { supported: false, sessionID: null };
+    if (source === DATASET_NORBECK) {
+        const match = await findThesessionTune(displayName);
+        return { supported: true, sessionID: match ? match.id : null, matchedName: match ? match.name : '' };
+    }
+    return { supported: true, sessionID: tuneID };
 }
 
 // ---- the discussion thread ------------------------------------------------
@@ -681,6 +746,37 @@ async function requestWithLadder(makeBody, apiKey) {
             return { response: await postMessages(withoutTool, apiKey), body: withoutTool, degraded: true };
         }
     }
+}
+
+// The whole pipeline for one tune, shared by the dialog (on a tap) and by
+// starring (automatically): find the discussion, and write a note from it only if
+// there is one. Resolves to { status, record? } where status is 'ok',
+// 'unsupported' (Folkwiki) or 'no-discussion'. Errors from the API throw.
+export async function generateNoteForTune({ tuneID, displayName = '', sourceUrl = '', model = DEFAULT_MODEL, apiKey = '' }) {
+    const resolved = await resolveSessionTune({ tuneID, displayName });
+    if (!resolved.supported) return { status: 'unsupported' };
+
+    const sessionID = resolved.sessionID;
+    const [facts, comments] = sessionID ? await Promise.all([
+        fetchSessionTuneFacts(sessionID),
+        fetchSessionComments(sessionID),
+    ]) : [null, null];
+
+    // A note with no discussion behind it is only the model's recollection.
+    if (!comments || !comments.text) return { status: 'no-discussion' };
+
+    const record = await generateTuneSummary({
+        tuneID,
+        displayName,
+        // For a tune read from another tune's page (Norbeck), the note's source is
+        // that page.
+        sourceUrl: String(sessionID) !== String(tuneID) ? sessionTunePageUrl(sessionID) : sourceUrl,
+        facts,
+        comments,
+        model,
+        apiKey,
+    });
+    return { status: 'ok', record };
 }
 
 // Generate one background note. Throws AiSummaryError on every failure path.
