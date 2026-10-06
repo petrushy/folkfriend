@@ -136,7 +136,7 @@ await test('web_fetch variant is gated on the model (the wrong one 400s)', async
     // Haiku 4.5 is not in the _20260209 support list, so it must get the basic
     // variant. Getting this backwards is a 400 the user would see as "HTTP 400".
     assert.equal(ai.webFetchToolFor('claude-haiku-4-5', url).type, 'web_fetch_20250910');
-    assert.equal(ai.webFetchToolFor('claude-sonnet-5', url).type, 'web_fetch_20260209');
+    assert.equal(ai.webFetchToolFor('claude-sonnet-5-5', url).type, 'web_fetch_20260209');
     // Unknown models fall back to the default's variant rather than undefined.
     assert.equal(ai.webFetchToolFor('something-new', url).type, 'web_fetch_20250910');
 });
@@ -834,6 +834,33 @@ await test('a genuinely full page read is reported as grounded', async () => {
     assert.equal(result.grounding, 'page');
 });
 
+console.log('\naiSummary — model choice');
+
+await test('a retired model resolves to its replacement, an unknown one to the default', async () => {
+    const ai = await loadAiSummary();
+    assert.equal(ai.resolveModel('claude-sonnet-5'), 'claude-sonnet-5-5');
+    assert.equal(ai.resolveModel('claude-sonnet-5-5'), 'claude-sonnet-5-5');
+    assert.equal(ai.resolveModel('claude-haiku-4-5'), 'claude-haiku-4-5');
+    assert.equal(ai.resolveModel('nonexistent'), ai.DEFAULT_MODEL);
+    assert.equal(ai.resolveModel(undefined), ai.DEFAULT_MODEL);
+    // Every replacement must itself be offered, or the mapping lands on nothing.
+    for (const id of Object.keys(ai.MODELS)) assert.equal(ai.resolveModel(id), id);
+});
+
+await test('a stored retired model is sent to the API as its replacement', async () => {
+    // An ID never floats to a newer minor version on the API side, so sending
+    // the stored string as-is would keep the user on the old model for ever.
+    const ai = await loadAiSummary();
+    const { impl, calls } = recordingFetch(jsonResponse(OK_MESSAGE));
+    stubEnv({ fetchImpl: impl });
+
+    const result = await ai.generateTuneSummary({ ...ARGS, model: 'claude-sonnet-5' });
+    const apiCalls = calls.filter(c => String(c.url).includes('api.anthropic.com'));
+    assert.ok(apiCalls.length > 0);
+    for (const call of apiCalls) assert.equal(call.body.model, 'claude-sonnet-5-5');
+    assert.equal(result.model, 'claude-sonnet-5-5', 'the note must record the model that wrote it');
+});
+
 console.log('\naiSummary — cost estimate');
 
 await test('cost is priced per model and counts cached input tokens', async () => {
@@ -841,7 +868,9 @@ await test('cost is priced per model and counts cached input tokens', async () =
     const usage = { input_tokens: 1e6, output_tokens: 1e6 };
 
     assert.equal(ai.estimateCostUsd(usage, 'claude-haiku-4-5'), 1 + 5);
-    assert.equal(ai.estimateCostUsd(usage, 'claude-sonnet-5'), 3 + 15);
+    assert.equal(ai.estimateCostUsd(usage, 'claude-sonnet-5-5'), 2 + 10);
+    // A retired ID prices as its replacement, not as the default.
+    assert.equal(ai.estimateCostUsd(usage, 'claude-sonnet-5'), 2 + 10);
     // Unknown model must not silently price at zero.
     assert.ok(ai.estimateCostUsd(usage, 'nonexistent') > 0);
     // Cache fields are input tokens too, and missing fields are not NaN.
@@ -857,9 +886,9 @@ await test('the per-note estimate tracks the comment cap', async () => {
     // rather than a whole page of notation, which is why it is cents not tens of
     // cents.
     const haiku = ai.estimateCostPerNoteUsd('claude-haiku-4-5');
-    const sonnet = ai.estimateCostPerNoteUsd('claude-sonnet-5');
+    const sonnet = ai.estimateCostPerNoteUsd('claude-sonnet-5-5');
     assert.ok(haiku > 0.001 && haiku < 0.02, `haiku estimate ${haiku} looks wrong`);
-    assert.ok(sonnet > haiku * 2.5, 'sonnet must be priced well above haiku');
+    assert.ok(sonnet > haiku * 1.5, 'sonnet must be priced well above haiku');
     assert.ok(ai.estimateCostPerNoteUsd('unknown-model') > 0);
 });
 

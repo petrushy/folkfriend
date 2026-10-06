@@ -79,6 +79,11 @@ export function __reset() { __pushes.length = 0; __onChange = null; __records.le
 `,
     'fake-ai.mjs': `
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
+// The real mapping is pinned in aiSummary.test.mjs; this only has to show the
+// store applies it on both load paths.
+export function resolveModel(model) {
+    return model === 'claude-sonnet-5' ? 'claude-sonnet-5-5' : (model || DEFAULT_MODEL);
+}
 export function estimateCostUsd(usage, model) {
     const input = (usage && usage.input_tokens) || 0;
     const output = (usage && usage.output_tokens) || 0;
@@ -209,6 +214,24 @@ await test('a restored backup written before a setting existed still gets it', a
     assert.equal(store.userSettings.advancedMode, true);
     assert.equal(store.userSettings.aiSummaryModel, 'claude-haiku-4-5',
         'an old backup must not leave new settings undefined');
+});
+
+await test('a retired model choice becomes its replacement, not the default', async () => {
+    // Someone who chose Sonnet 5 asked for the better model. Falling back to
+    // Haiku because the ID is no longer offered would quietly undo that.
+    const { store } = await loadStore({ storedSettings: { aiSummaryModel: 'claude-sonnet-5' } });
+    assert.equal(store.userSettings.aiSummaryModel, 'claude-sonnet-5-5');
+});
+
+await test('a restored backup naming a retired model gets its replacement', async () => {
+    const { store } = await loadStore();
+    await store.importUserData(JSON.stringify({
+        version: 1,
+        userSettings: { aiSummaryModel: 'claude-sonnet-5' },
+        favouriteItems: [],
+        historyItems: [],
+    }));
+    assert.equal(store.userSettings.aiSummaryModel, 'claude-sonnet-5-5');
 });
 
 console.log('\nwhich tune databases are selected');

@@ -89,18 +89,34 @@ export const MODELS = {
         outputPerMTok: 5,
         webFetch: 'web_fetch_20250910',
     },
-    'claude-sonnet-5': {
-        label: 'Sonnet 5 — better prose',
-        inputPerMTok: 3,
-        outputPerMTok: 15,
+    'claude-sonnet-5-5': {
+        label: 'Sonnet 5.5 — better prose',
+        inputPerMTok: 2,
+        outputPerMTok: 10,
         webFetch: 'web_fetch_20260209',
     },
 };
 
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
 
+// Models this app used to offer, mapped to their replacement. A model ID never
+// floats to a newer minor version on the API side, and the choice is stored in
+// each user's settings, so without this a user who picked the old Sonnet would
+// silently drop to the default (unknown IDs fall back to Haiku) — the opposite
+// of what they asked for.
+const REPLACED_MODELS = {
+    'claude-sonnet-5': 'claude-sonnet-5-5',
+};
+
+// The model to actually use for a stored or requested ID: itself if offered,
+// its replacement if retired, otherwise the default.
+export function resolveModel(model) {
+    const id = REPLACED_MODELS[model] || model;
+    return MODELS[id] ? id : DEFAULT_MODEL;
+}
+
 export function modelSpec(model) {
-    return MODELS[model] || MODELS[DEFAULT_MODEL];
+    return MODELS[resolveModel(model)];
 }
 
 // kind is what the UI switches on to produce one plain sentence:
@@ -684,6 +700,7 @@ export async function generateTuneSummary({
         throw new AiSummaryError('offline', 'Device is offline');
     }
 
+    model = resolveModel(model);
     const url = sourceUrl || tuneSourceUrl({ tuneID, displayName });
     const commentText = comments && comments.text ? comments.text : '';
 
