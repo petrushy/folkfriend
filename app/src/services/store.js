@@ -4,7 +4,7 @@
 import eventBus from '@/eventBus.js';
 import {get, set} from 'idb-keyval';
 import {FavouriteItem} from '@/js/schema';
-import {estimateCostUsd, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
+import {estimateCostUsd, resolveModel as resolveAiModel, DEFAULT_MODEL as DEFAULT_AI_MODEL} from './aiSummary.js';
 import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '@/js/places.mjs';
 import {deleteSessionAudio, reclaimAudioForMissingSessions} from './sessionAudioStore.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
@@ -279,6 +279,9 @@ class Store {
             !!storedSettings && storedSettings.tuneDatasets !== undefined;
         this.userSettings.tuneDatasets = sanitiseDatasets(
             _datasetsFor(storedSettings, this.userSettings.tuneDatasets));
+        // A retired model ID becomes its replacement, so Settings shows what is
+        // actually used rather than an option that no longer exists.
+        this.userSettings.aiSummaryModel = resolveAiModel(this.userSettings.aiSummaryModel);
         this.searchState = this.searchStates.READY;
 
         this._favouriteIDs = null;
@@ -373,6 +376,7 @@ class Store {
         }
         userSettings.tuneDatasets = sanitiseDatasets(
             incomingDatasets === undefined ? userSettings.tuneDatasets : incomingDatasets);
+        userSettings.aiSummaryModel = resolveAiModel(userSettings.aiSummaryModel);
         // Saving settings answers the question, whether or not the user was
         // thinking about datasets at the time.
         this._datasetSelectionIsExplicit = true;

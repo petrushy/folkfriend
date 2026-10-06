@@ -646,6 +646,7 @@ export async function del(key) { await tick(); __db.delete(key); }
     'fake-sync.mjs': FAKE_SYNC,
     'fake-ai.mjs': `
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
+export function resolveModel(model) { return model || DEFAULT_MODEL; }
 export function estimateCostUsd() { return 0; }
 `,
     'fake-firebase-auth.mjs': `

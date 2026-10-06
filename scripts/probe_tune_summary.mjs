@@ -4,7 +4,7 @@
 //   ANTHROPIC_API_KEY=sk-ant-... node scripts/probe_tune_summary.mjs [tuneID] [model]
 //
 // Example:
-//   ANTHROPIC_API_KEY=... node scripts/probe_tune_summary.mjs 14109 claude-sonnet-5
+//   ANTHROPIC_API_KEY=... node scripts/probe_tune_summary.mjs 14109 claude-sonnet-5-5
 //
 // What it answers that the unit tests cannot, because the unit tests fake the
 // network:

@@ -3573,10 +3573,25 @@ import. There is a test asserting the exported JSON does not contain it.
    "HTTP 400", and the open question of whether Haiku 4.5 serves `web_fetch` at
    all resolves itself at runtime.
 3. **Thinking is left at each model's default.** Haiku 4.5 has no adaptive
-   thinking; Sonnet 5 runs adaptive when `thinking` is omitted, which is *wanted*
-   here because a thinking-disabled Sonnet 5 reaches for tools noticeably less
+   thinking; Sonnet 5.5 runs adaptive when `thinking` is omitted, which is *wanted*
+   here because a thinking-disabled Sonnet reaches for tools noticeably less
    often and `web_fetch` firing is the point. Hence `max_tokens: 1500` — that cap
-   covers thinking *and* visible text together.
+   covers thinking *and* visible text together. Do **not** add
+   `thinking: {type: "disabled"}` for Sonnet 5.5: it returns a 400 there (the
+   off switch on that model is `{type: "between_tools"}`). Nor a forced
+   `tool_choice` — also a 400 on 5.5.
+
+**Model IDs never move up a minor version on their own** (October 2026).
+Sonnet was offered as `claude-sonnet-5`, which stayed Sonnet 5.0 after 5.5
+shipped. It is `claude-sonnet-5-5` now. Since the choice is stored in each
+user's settings, and an unknown ID falls back to the *default* (Haiku),
+dropping the old key alone would have quietly moved everyone who chose
+Sonnet onto the cheaper model. `REPLACED_MODELS` / `resolveModel()` in
+`aiSummary.js` map a retired ID to its replacement. The store applies it on
+load and on backup import, so Settings shows the model actually in use, and
+`generateTuneSummary` applies it to whatever it is handed. **When retiring a
+model from `MODELS`, add it to `REPLACED_MODELS`**; a test asserts that every
+replacement is itself offered.
 
 #### What the first on-device test actually broke (August 2026)
 
@@ -3696,7 +3711,7 @@ expensive one guessing.
 
 `estimateCostPerNoteUsd()` derives the Settings figure from `MAX_COMMENTS_CHARS`,
 so changing the cap cannot leave a stale (flatteringly cheap) number on screen:
-~$0.009 per note on Haiku 4.5 and ~$0.027 on Sonnet 5, once per tune, cached
+~$0.009 per note on Haiku 4.5 and ~$0.018 on Sonnet 5.5, once per tune, cached
 forever.
 
 **`pageFetchStats()` is how to tell whether any of this worked**, since "the
@@ -3730,7 +3745,7 @@ is false, the budget is still too small — that is the number to raise.
 Nothing is ever generated automatically: opening the dialog reads the cache and
 stops, so a cache miss shows a Generate button and waits for a tap. Results are
 cached permanently, so a tune costs at most one call per account. Default model
-is Haiku 4.5 (~$0.009/note; Sonnet 5 ~$0.03). `max_content_tokens: 6000` bounds
+is Haiku 4.5 (~$0.009/note; Sonnet 5.5 ~$0.018). `max_content_tokens: 6000` bounds
 the page read, `max_uses: 1` bounds the fetching, and `allowed_domains` is
 derived from the tune's own URL so the model cannot be talked into fetching
 anything else. Settings shows call count and approximate spend.
@@ -3859,11 +3874,11 @@ identity). This is what makes the two new settings reach existing installs.
 
 #### Tests
 
-- `app/test/aiSummary.test.mjs` (21 cases) — the network layer with a faked
+- `app/test/aiSummary.test.mjs` (39 cases) — the network layer with a faked
   `fetch`: block-type extraction, refusal, `pause_turn` resume and cap, the
   web_fetch error path, the three-rung ladder, status→kind mapping, the bounded
   deadline, and offline/no-key short-circuits that must not spend a request.
-- `app/test/aiSummaryStore.test.mjs` (23 cases) — both storage invariants above.
+- `app/test/aiSummaryStore.test.mjs` (37 cases) — both storage invariants above.
   The deletion half is covered from seven angles, because each one fails a
   different plausible implementation: a tombstoned deletion must not be
   resurrected; a *stale device's* push must not resurrect it either; nor must one
