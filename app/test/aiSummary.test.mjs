@@ -855,7 +855,7 @@ await test('a stored retired model is sent to the API as its replacement', async
     stubEnv({ fetchImpl: impl });
 
     const result = await ai.generateTuneSummary({ ...ARGS, model: 'claude-sonnet-5' });
-    const apiCalls = calls.filter(c => String(c.url).includes('api.anthropic.com'));
+    const apiCalls = calls.filter(c => new URL(String(c.url)).hostname === 'api.anthropic.com');
     assert.ok(apiCalls.length > 0);
     for (const call of apiCalls) assert.equal(call.body.model, 'claude-sonnet-5-5');
     assert.equal(result.model, 'claude-sonnet-5-5', 'the note must record the model that wrote it');
