@@ -648,6 +648,7 @@ export async function del(key) { await tick(); __db.delete(key); }
 export const DEFAULT_MODEL = 'claude-haiku-4-5';
 export function resolveModel(model) { return model || DEFAULT_MODEL; }
 export function estimateCostUsd() { return 0; }
+export async function generateNoteForTune() { return { status: 'no-discussion' }; }
 `,
     'fake-firebase-auth.mjs': `
 export class GoogleAuthProvider {}
