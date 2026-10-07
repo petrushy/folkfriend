@@ -153,10 +153,44 @@
                     <AbcDisplay :abc="settingData.abc" :mode="settingData.mode" :meter="settingData.meter"
                         :title="name" :settingID="settingData.setting_id"
                         @abcGoFullScreen="abcGoFullScreen" @abcExitFullScreen="abcExitFullScreen"
-                        @abcRendered="scrollIntoView" />
+                        @abcRendered="scrollIntoView">
+                        <!-- Session recording ▶ — only when a saved session recorded this tune -->
+                        <template #controls>
+                            <v-btn
+                                v-if="recordingEntries.length"
+                                small
+                                class="mx-1 px-2 abcControls"
+                                :aria-label="recordingPlaying ? `Pause ${name}` : `Play ${name} from a session recording`"
+                                :title="recordingEntries.length > 1 ? `Play from a session recording (${recordingEntries.length} sessions)` : 'Play from the session recording, looped'"
+                                @click.stop="playRecording"
+                            >
+                                <v-icon small color="primary">{{ recordingPlaying ? icons.pause : icons.play }}</v-icon>
+                            </v-btn>
+                        </template>
+                    </AbcDisplay>
                 </v-expansion-panel-content>
             </v-expansion-panel>
         </v-expansion-panels>
+
+        <v-dialog v-model="recordingPicker" max-width="400">
+            <v-card>
+                <v-card-title class="text-subtitle-1">Play {{ name }} from…</v-card-title>
+                <v-list dense>
+                    <v-list-item v-for="entry in recordingEntries" :key="entry.sessionId"
+                        @click="playRecordingEntry(entry)">
+                        <v-list-item-content>
+                            <v-list-item-title>{{ entry.sessionName }}</v-list-item-title>
+                            <v-list-item-subtitle>{{ formatSessionDate(entry.startedAt) }}</v-list-item-subtitle>
+                        </v-list-item-content>
+                    </v-list-item>
+                </v-list>
+                <v-card-actions>
+                    <v-spacer />
+                    <v-btn text @click="recordingPicker = false">Cancel</v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
+        <v-snackbar v-model="recordingSnackbar" :timeout="3000">{{ recordingSnackbarText }}</v-snackbar>
 
     </v-container>
     <v-container v-else-if="loadError" class="px-10">
@@ -187,8 +221,15 @@ import {
     mdiMapMarker,
     mdiPlus,
     mdiTagPlusOutline,
+    mdiPlay,
+    mdiPause,
 } from '@mdi/js';
 import store from '@/services/store.js';
+import { indexRecordingsByTune, sessionDetections, formatSessionDate } from '@/js/tuneRecordings.mjs';
+import { listManifests } from '@/services/sessionAudioStore.js';
+import { dropboxState } from '@/services/dropbox.js';
+import { playSessionTuneLooped, playerHost, sessionPlayer } from '@/services/sessionPlayerHost.js';
+import liveAnalysisService from '@/services/liveAnalysis.js';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
@@ -242,6 +283,12 @@ export default {
             // recreated after the fact, so a mis-tap must not be final.
             removedSightings: [],
 
+            // Saved sessions with a playable recording of this tune.
+            recordingEntries: [],
+            recordingPicker: false,
+            recordingSnackbar: false,
+            recordingSnackbarText: '',
+
             expandedIndex: [],
             favouritedSettings: {},
             settingTags: {},
@@ -257,10 +304,19 @@ export default {
                 mapMarker: mdiMapMarker,
                 close: mdiCloseCircle,
                 plus: mdiPlus,
+                play: mdiPlay,
+                pause: mdiPause,
             },
         };
     },
     computed: {
+        // True while the shared session player is sounding THIS tune.
+        recordingPlaying() {
+            const playback = playerHost.playback;
+            if (!playback || !playback.playing || !playback.detectionId) return false;
+            const detection = (playerHost.detections || []).find(d => d.id === playback.detectionId);
+            return !!detection && String(detection.tuneId) === String(this.tuneID);
+        },
         // Which dataset this tune came from, as labelled by the worker. Falls
         // back to the ID range only for tunes loaded from a legacy merged blob.
         dataset() {
@@ -312,6 +368,8 @@ export default {
         this._loadHeardAt();
         this._onSightingsChanged = () => this._loadHeardAt();
         eventBus.$on('sightingsChanged', this._onSightingsChanged);
+        this._loadRecordings();
+        eventBus.$on('liveSessionsChanged', this._loadRecordings);
 
         try {
             const loaded = await this._loadSettingsAndAliases();
@@ -404,12 +462,72 @@ export default {
     beforeDestroy: function () {
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
         if (this._onSightingsChanged) eventBus.$off('sightingsChanged', this._onSightingsChanged);
+        eventBus.$off('liveSessionsChanged', this._loadRecordings);
     },
     beforeRouteLeave: function (_to, _from, next) {
         eventBus.$emit('stopSynthPlayback');
         next();
     },
     methods: {
+        formatSessionDate,
+        // Saved sessions that recorded this tune and whose audio this device
+        // holds (or Dropbox may). Same rule as the ▶ on a favourite.
+        async _loadRecordings() {
+            try {
+                const [sessions, manifests] = await Promise.all([
+                    store.getLiveSessions(),
+                    listManifests(),
+                ]);
+                const local = new Set(manifests
+                    .filter(m => m.segments && m.segments.length)
+                    .map(m => m.sessionId));
+                const cloud = dropboxState.enabled && dropboxState.connected;
+                this._sessionsById = new Map(sessions.map(s => [s.id, s]));
+                const index = indexRecordingsByTune(sessions, id => local.has(id) || cloud);
+                this.recordingEntries = index.get(String(this.tuneID)) || [];
+            } catch (e) {
+                this.recordingEntries = [];
+            }
+        },
+        playRecording() {
+            // The same button pauses it; the mini player can resume.
+            if (this.recordingPlaying) {
+                const player = sessionPlayer();
+                if (player && player.playing) player.togglePlay();
+                return;
+            }
+            if (this.recordingEntries.length === 1) this.playRecordingEntry(this.recordingEntries[0]);
+            else if (this.recordingEntries.length > 1) this.recordingPicker = true;
+        },
+        async playRecordingEntry(entry) {
+            this.recordingPicker = false;
+            const session = this._sessionsById && this._sessionsById.get(entry.sessionId);
+            if (!session) return this._recordingMessage('That session is no longer saved.');
+
+            // Same guards as the favourites list: never replace a workspace
+            // holding an unsaved edit to another session.
+            const workspace = store.state.sessionWorkspace;
+            const sameSession = workspace && workspace.session && workspace.session.id === session.id;
+            const blocked = workspace && workspace.pending && !sameSession;
+
+            const playing = playSessionTuneLooped({
+                sessionId: session.id,
+                sessionName: entry.sessionName,
+                detections: sessionDetections(session),
+                detectionId: entry.detectionId,
+            }, { onError: message => this._recordingMessage(message) });
+
+            if (!blocked) {
+                if (session.id === liveAnalysisService.sessionId) store.state.sessionWorkspace = null;
+                else if (!sameSession) store.state.sessionWorkspace = { session: { ...session }, detections: null, pending: null };
+            }
+            const result = await playing;
+            if (!result.ok) this._recordingMessage(result.error);
+        },
+        _recordingMessage(text) {
+            this.recordingSnackbarText = text;
+            this.recordingSnackbar = true;
+        },
         async _loadHeardAt() {
             this.geoTaggingOn = !!store.userSettings.geoTagDetections;
             if (!this.geoTaggingOn) {

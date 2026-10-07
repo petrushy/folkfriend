@@ -40,6 +40,7 @@
             <v-btn small class="mx-1 px-2 abcControls" @click="fullscreen ? exitFullScreen() : goFullScreen()">
                 <v-icon small>{{ fullscreen ? icons.fullscreenExit : icons.fullscreen }}</v-icon>
             </v-btn>
+            <slot name="controls" />
             <div class="ml-auto d-flex align-center tempoControl">
                 <v-icon small class="mr-1">{{ icons.metronome }}</v-icon>
                 <v-slider
