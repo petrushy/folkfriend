@@ -177,7 +177,13 @@
             </span>
         </div>
         <div class="d-flex justify-space-between caption text--secondary">
-            <span>{{ nowPlayingLabel }}</span>
+            <span>
+                <router-link v-if="currentTuneLink" :to="currentTuneLink" class="nowPlayingLink"
+                    title="Open the tune and its score">{{ nowPlayingLabel }}</router-link>
+                <template v-else>{{ nowPlayingLabel }}</template>
+                <router-link v-if="currentTuneLink" :to="currentTuneLink" class="nowPlayingScore"
+                    aria-label="Open the score">score &rarr;</router-link>
+            </span>
             <span v-if="loop">Looping {{ loop.title }}
                 ({{ formatSecondsAsDuration(loop.from) }}–{{ formatSecondsAsDuration(loop.to) }})</span>
             <span v-if="mutedSeconds > 0">{{ formatSecondsAsDuration(mutedSeconds) }} muted</span>
@@ -795,6 +801,22 @@ export default {
                 return span.from <= this.currentSeconds && span.to >= this.currentSeconds;
             });
             return current.length ? current[current.length - 1] : null;
+        },
+        // Where the tune under the playhead opens, or null between tunes.
+        // The tune the user picked in the list wins over the detected one.
+        currentTuneLink() {
+            const d = this.currentDetection;
+            if (!d) return null;
+            const tuneID = d.selectedTuneId || d.tuneId;
+            if (!tuneID) return null;
+            return {
+                name: 'tune',
+                query: {
+                    tuneID: String(tuneID),
+                    settingID: String(d.selectedSettingId || d.settingId || ''),
+                    displayName: d.selectedTitle || d.title || '',
+                },
+            };
         },
         nowPlayingLabel() {
             if (this.currentDetection) return this.currentDetection.title || 'Unknown tune';
@@ -2352,6 +2374,16 @@ export default {
 </script>
 
 <style scoped>
+.nowPlayingLink {
+    color: inherit;
+    text-decoration: none;
+}
+.nowPlayingLink:hover {
+    text-decoration: underline;
+}
+.nowPlayingScore {
+    margin-left: 8px;
+}
 .playerClock {
     font-variant-numeric: tabular-nums;
 }
