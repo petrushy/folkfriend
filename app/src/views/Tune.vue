@@ -164,7 +164,7 @@
                                 :title="recordingEntries.length > 1 ? `Play from a session recording (${recordingEntries.length} sessions)` : 'Play from the session recording, looped'"
                                 @click.stop="playRecording"
                             >
-                                <v-icon small color="primary" class="mr-1">{{ recordingPlaying ? icons.pause : icons.microphone }}</v-icon>
+                                <v-icon small color="primary" class="mr-1">{{ recordingPlaying ? icons.pause : icons.play }}</v-icon>
                                 <span class="recordingBtnLabel">{{ recordingPlaying ? 'Pause' : 'Recording' }}</span>
                             </v-btn>
                         </template>
@@ -222,7 +222,7 @@ import {
     mdiMapMarker,
     mdiPlus,
     mdiTagPlusOutline,
-    mdiMicrophone,
+    mdiPlay,
     mdiPause,
 } from '@mdi/js';
 import store from '@/services/store.js';
@@ -305,7 +305,7 @@ export default {
                 mapMarker: mdiMapMarker,
                 close: mdiCloseCircle,
                 plus: mdiPlus,
-                microphone: mdiMicrophone,
+                play: mdiPlay,
                 pause: mdiPause,
             },
         };
