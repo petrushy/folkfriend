@@ -97,6 +97,12 @@ export default {
             required: false,
             default: null,
         },
+        // Semitones to show AND play the score transposed (-12..12).
+        transpose: {
+            type: Number,
+            required: false,
+            default: 0,
+        },
         // Render notation only. Used by the live-follow overlay, where synth
         // playback would feed straight back into the listening microphone.
         hideControls: {
@@ -180,7 +186,7 @@ export default {
 
         const svgDiv = this.$refs.abcTarget;
 
-        this.abcVisual = ABCJS.renderAbc(svgDiv, this.abcText, { responsive: 'resize' })[0];
+        this._render();
         this.$emit('abcRendered');
 
         this._onStopSynthPlayback = () => {
@@ -199,7 +205,37 @@ export default {
             this.audioContext = null;
         }
     },
+    watch: {
+        transpose() {
+            // The synth holds the old notes, so stop rather than keep playing
+            // the previous key under a score that has already changed.
+            this.stopPlaying();
+            this._render();
+        },
+    },
     methods: {
+        _render() {
+            const target = this.$refs.abcTarget;
+            if (!target) return;
+            this._clearHighlightedNotes();
+            // visualTranspose changes what is drawn; the synth is told
+            // separately (see _synthOptions) because abcjs deliberately
+            // subtracts the visual transpose out of the sound.
+            this.abcVisual = ABCJS.renderAbc(target, this.abcText, {
+                responsive: 'resize',
+                visualTranspose: this.transpose || 0,
+            })[0];
+        },
+        _synthOptions(onEnded) {
+            return {
+                onEnded,
+                soundFontUrl: '/soundfont/',
+                soundFontVolumeMultiplier: 3.0,
+                // Net sounding pitch = written pitch + midiTranspose, so
+                // passing the same value as visualTranspose plays what is shown.
+                midiTranspose: this.transpose || 0,
+            };
+        },
         // PIN THE PULSE TO THE QUARTER NOTE.
         //
         // ABCJS's default tempo is counted in the METER'S OWN beat unit, so
@@ -404,11 +440,7 @@ export default {
                     // soundFontUrl points to the locally bundled FluidR3_GM subset;
                     // soundFontVolumeMultiplier must be set explicitly because ABCJS
                     // only auto-applies 3.0 for the known remote CDN URL.
-                    options: {
-                        onEnded: () => this._handlePlaybackEnded(),
-                        soundFontUrl: '/soundfont/',
-                        soundFontVolumeMultiplier: 3.0,
-                    },
+                    options: this._synthOptions(() => this._handlePlaybackEnded()),
                 }).then(() => {
                     return this.midiBuffer.prime();
                 }).then(() => {
@@ -438,7 +470,7 @@ export default {
                 visualObj: this.abcVisual,
                 audioContext: this.audioContext,
                 millisecondsPerMeasure: msPerMeasure,
-                options: { onEnded, soundFontUrl: '/soundfont/', soundFontVolumeMultiplier: 3.0 },
+                options: this._synthOptions(onEnded),
             }).then(() => {
                 return newBuffer.prime();
             }).then(() => {

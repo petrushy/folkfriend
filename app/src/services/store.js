@@ -224,6 +224,15 @@ const KEY_OPEN_LIVE_SESSION = 'openLiveSession';
 // derived from, and that device could then never replace it.
 const nextUpdatedAt = previous => Math.max(Date.now(), (Number(previous) || 0) + 1);
 
+// A synced value is untrusted: another device, an older build or a hand-edited
+// backup may have written anything. Anything not an integer in range is 0.
+export const MAX_TRANSPOSE = 12;
+export function clampTranspose(value) {
+    const n = Math.round(Number(value));
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(-MAX_TRANSPOSE, Math.min(MAX_TRANSPOSE, n));
+}
+
 class Store {
     constructor() {
         this.state = {
@@ -289,6 +298,7 @@ class Store {
         this._settingTagsCache = null;  // Map<settingID string, string[]>
         this._tuneTagsCache = null;     // Map<tuneID string, string[]> — union across all settings
         this._favouriteTempoCache = null; // Map<settingID string, number|null>
+        this._favouriteTransposeCache = null; // Map<settingID string, semitones>
         this._aiSummariesCache = null;    // object, tuneID string -> summary record
         this.analytics = null;
         this.analyticsLoaded = new Promise(resolve => {
@@ -506,6 +516,7 @@ class Store {
             );
             this._settingTagsCache = new Map(items.map(f => [String(f.result.settingID), f.tags || []]));
             this._favouriteTempoCache = new Map(items.map(f => [String(f.result.settingID), f.tempo ?? null]));
+            this._favouriteTransposeCache = new Map(items.map(f => [String(f.result.settingID), clampTranspose(f.transpose)]));
             this._tuneTagsCache = new Map();
             items.forEach(f => {
                 if (f.result.setting && f.result.setting.tune_id) {
@@ -530,6 +541,7 @@ class Store {
         this._settingTagsCache = null;
         this._tuneTagsCache = null;
         this._favouriteTempoCache = null;
+        this._favouriteTransposeCache = null;
     }
 
     async addFavourite(result) {
@@ -631,6 +643,27 @@ class Store {
         if (!item) return; // not a favourite — nothing to save
         item.tempo = tempoPercent;
         if (this._favouriteTempoCache) this._favouriteTempoCache.set(settingID, tempoPercent);
+        await this._dbSet('favouriteItems', items);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+    }
+
+    // Semitones the score is shown and played transposed, -12..12. Stored on
+    // the favourite exactly like `tempo`, so it rides the favourites document
+    // to the user's other devices with no sync changes. Absent means 0.
+    async getFavouriteTranspose(settingID) {
+        if (!this._isValidSettingID(settingID)) return 0;
+        if (this._favouriteTransposeCache === null) await this._loadFavouriteIDs();
+        return clampTranspose(this._favouriteTransposeCache.get(String(settingID)));
+    }
+
+    async setFavouriteTranspose(settingID, semitones) {
+        settingID = String(settingID);
+        const value = clampTranspose(semitones);
+        const items = await this.getFavourites();
+        const item = items.find(f => String(f.result.settingID) === settingID);
+        if (!item) return; // not a favourite — nothing to save
+        item.transpose = value;
+        if (this._favouriteTransposeCache) this._favouriteTransposeCache.set(settingID, value);
         await this._dbSet('favouriteItems', items);
         if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
