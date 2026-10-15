@@ -150,7 +150,23 @@
                             <span class="settingMetaLabel">Origin</span> {{ settingData.origin }}
                         </span>
                     </div>
-                    <AbcDisplay :abc="settingData.abc" :mode="settingData.mode" :meter="settingData.meter"
+                    <div class="transposeRow">
+                        <span class="settingMetaLabel">Transpose</span>
+                        <v-btn icon x-small :disabled="transposeFor(settingData) <= -12"
+                            aria-label="Transpose down one semitone" title="Down a semitone"
+                            @click.stop="changeTranspose(settingData, -1)">
+                            <v-icon small>{{ icons.minus }}</v-icon>
+                        </v-btn>
+                        <span class="transposeValue" aria-live="polite">{{ transposeLabel(settingData) }}</span>
+                        <v-btn icon x-small :disabled="transposeFor(settingData) >= 12"
+                            aria-label="Transpose up one semitone" title="Up a semitone"
+                            @click.stop="changeTranspose(settingData, 1)">
+                            <v-icon small>{{ icons.plus }}</v-icon>
+                        </v-btn>
+                        <v-btn v-if="transposeFor(settingData) !== 0" text x-small class="px-1"
+                            @click.stop="setTranspose(settingData, 0)">Reset</v-btn>
+                    </div>
+                    <AbcDisplay :abc="settingData.abc" :transpose="transposeFor(settingData)" :mode="settingData.mode" :meter="settingData.meter"
                         :title="name" :settingID="settingData.setting_id"
                         @abcGoFullScreen="abcGoFullScreen" @abcExitFullScreen="abcExitFullScreen"
                         @abcRendered="scrollIntoView">
@@ -221,11 +237,12 @@ import {
     mdiCloseCircle,
     mdiMapMarker,
     mdiPlus,
+    mdiMinus,
     mdiTagPlusOutline,
     mdiPlay,
     mdiPause,
 } from '@mdi/js';
-import store from '@/services/store.js';
+import store, { clampTranspose } from '@/services/store.js';
 import { indexRecordingsByTune, sessionDetections, formatSessionDate } from '@/js/tuneRecordings.mjs';
 import { listManifests } from '@/services/sessionAudioStore.js';
 import { dropboxState } from '@/services/dropbox.js';
@@ -292,6 +309,9 @@ export default {
 
             expandedIndex: [],
             favouritedSettings: {},
+            // setting_id -> semitones. Saved with the favourite (and so synced);
+            // for a tune that is not starred it is simply this visit's choice.
+            transposeBySetting: {},
             settingTags: {},
             allTags: [],
             addTagMenus: {},
@@ -305,6 +325,7 @@ export default {
                 mapMarker: mdiMapMarker,
                 close: mdiCloseCircle,
                 plus: mdiPlus,
+                minus: mdiMinus,
                 play: mdiPlay,
                 pause: mdiPause,
             },
@@ -424,6 +445,10 @@ export default {
                     ]);
                     this.$set(this.favouritedSettings, s.setting_id, v);
                     this.$set(this.settingTags, s.setting_id, tags);
+                    if (v) {
+                        this.$set(this.transposeBySetting, s.setting_id,
+                            await store.getFavouriteTranspose(s.setting_id));
+                    }
                 }),
             ]);
 
@@ -702,14 +727,34 @@ export default {
                 this.$set(this.favouritedSettings, sid, false);
                 this.$set(this.settingTags, sid, []);
             } else {
+                const pending = this.transposeFor(settingData);
                 store.addFavourite({
                     settingID: sid,
                     setting: settingData,
                     displayName: this.displayName,
+                }).then(() => {
+                    // Keep a transposition chosen before starring.
+                    if (pending) store.setFavouriteTranspose(sid, pending);
                 });
                 this.$set(this.favouritedSettings, sid, true);
                 store.getTagsForSetting(sid).then(tags => this.$set(this.settingTags, sid, tags));
             }
+        },
+        transposeFor(settingData) {
+            return clampTranspose(this.transposeBySetting[settingData.setting_id]);
+        },
+        transposeLabel(settingData) {
+            const n = this.transposeFor(settingData);
+            return n > 0 ? `+${n}` : String(n);
+        },
+        changeTranspose(settingData, delta) {
+            this.setTranspose(settingData, this.transposeFor(settingData) + delta);
+        },
+        setTranspose(settingData, semitones) {
+            const sid = settingData.setting_id;
+            const value = clampTranspose(semitones);
+            this.$set(this.transposeBySetting, sid, value);
+            if (this.favouritedSettings[sid]) store.setFavouriteTranspose(sid, value);
         },
         addableTagsFor(settingID) {
             const current = this.settingTags[settingID] || [];
@@ -834,6 +879,20 @@ h1 {
     padding: 8px 0 4px;
     font-size: 0.85em;
     color: rgba(0, 0, 0, 0.6);
+}
+
+.transposeRow {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 0;
+    font-size: 0.85em;
+}
+
+.transposeValue {
+    min-width: 2.2em;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
 }
 
 .settingMetaLabel {
