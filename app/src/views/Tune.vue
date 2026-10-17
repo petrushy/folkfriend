@@ -277,7 +277,7 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 // a whistle in C reads a tone higher than it sounds and one in G or A reads
 // lower. B-flat clarinet/trumpet reads a tone higher too, hence "C or B♭".
 const INSTRUMENT_PRESETS = [
-    ['Concert pitch (D)', 0],
+    ['Default (as written)', 0],
     ['C or B♭', 2],
     ['E♭', 9],
     ['F', 7],
