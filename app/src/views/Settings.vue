@@ -40,7 +40,7 @@
                     v-model.number="userSettings.instrumentShift"
                     :items="instrumentItems"
                     label="My instrument"
-                    hint="Changes the written score only, on every tune. Playback stays as is."
+                    hint="The key of your instrument, named as whistles are (a D needs no change). Changes the written score only, on every tune; playback stays as is."
                     persistent-hint
                     dense
                     @change="settingsChanged"

@@ -183,7 +183,7 @@
                                             @click="setTranspose(settingData, 0)">Reset</v-btn>
                                     </div>
                                     <div class="settingMetaLabel mt-3">My instrument</div>
-                                    <div class="text-caption">Changes the written score only, for all tunes.</div>
+                                    <div class="text-caption">Your instrument's key. Changes the written score only, for all tunes.</div>
                                     <v-select :value="instrumentShift" :items="instrumentItems" dense hide-details
                                         class="mt-1" @change="setInstrumentShift" />
                                 </v-card>
