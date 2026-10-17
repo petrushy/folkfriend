@@ -35,6 +35,17 @@
                     @change="settingsChanged"
                 />
             </v-row>
+            <v-row class="pl-2 pr-4">
+                <v-select
+                    v-model.number="userSettings.instrumentShift"
+                    :items="instrumentItems"
+                    label="My instrument"
+                    hint="Changes the written score only, on every tune. Playback stays as is."
+                    persistent-hint
+                    dense
+                    @change="settingsChanged"
+                />
+            </v-row>
             <v-row>
                 <v-switch
                     v-model="userSettings.useMlTranscriber"
@@ -919,6 +930,7 @@ import {
     reclaimOrphans,
 } from '@/services/sessionAudioStore.js';
 import eventBus from '@/eventBus.js';
+import { instrumentItems } from '@/js/instruments.mjs';
 import utils from '@/js/utils.js';
 import { fetchDatasetsManifest } from '@/services/tuneIndexNetwork.js';
 import {
@@ -1055,6 +1067,9 @@ export default {
         clearAiDialog: false,
     }),
     computed: {
+        instrumentItems() {
+            return instrumentItems(this.userSettings.instrumentShift);
+        },
         // The size figure is on the item itself, not in the hint, because the
         // choice is really a storage decision and the number is the whole
         // basis for making it.
