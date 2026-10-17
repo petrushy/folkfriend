@@ -272,14 +272,17 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 // settles, and the worker's network calls are themselves bounded. It exists
 // only so that a bug in that chain degrades to the offline copy rather than a
 // blank screen.
-// Written pitch relative to sounding pitch, in semitones: a B-flat player
-// reads a major second above what sounds.
+// Written pitch relative to sounding pitch, in semitones, by the instrument's
+// key. Tunes are shown in concert pitch (a D whistle plays them as written), so
+// a whistle in C reads a tone higher than it sounds and one in G or A reads
+// lower. B-flat clarinet/trumpet reads a tone higher too, hence "C or B♭".
 const INSTRUMENT_PRESETS = [
-    ['Concert pitch (C)', 0],
-    ['B♭ (clarinet, trumpet)', 2],
-    ['E♭ (alto sax)', 9],
-    ['F (horn)', 7],
-    ['A (clarinet in A)', 3],
+    ['Concert pitch (D)', 0],
+    ['C or B♭', 2],
+    ['E♭', 9],
+    ['F', 7],
+    ['G', -5],
+    ['A', -7],
 ];
 
 const TUNE_INDEX_WAIT_MS = 20000;
