@@ -241,6 +241,7 @@
 import utils from '@/js/utils.js';
 import { sourceNameForTuneID, settingSourceUrl, tuneSourceUrl } from '@/js/source.mjs';
 import { placesForTune } from '@/js/places.mjs';
+import { instrumentItems } from '@/js/instruments.mjs';
 import TunePlaceDialog from '@/components/TunePlaceDialog.vue';
 import AbcDisplay from '@/components/AbcDisplay';
 import ffBackend from '@/services/backend.js';
@@ -272,19 +273,6 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 // settles, and the worker's network calls are themselves bounded. It exists
 // only so that a bug in that chain degrades to the offline copy rather than a
 // blank screen.
-// Written pitch relative to sounding pitch, in semitones, by the instrument's
-// key. Tunes are shown in concert pitch (a D whistle plays them as written), so
-// a whistle in C reads a tone higher than it sounds and one in G or A reads
-// lower. B-flat clarinet/trumpet reads a tone higher too, hence "C or B♭".
-const INSTRUMENT_PRESETS = [
-    ['Default (as written)', 0],
-    ['C or B♭', 2],
-    ['E♭', 9],
-    ['F', 7],
-    ['G', -5],
-    ['A', -7],
-];
-
 const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
@@ -368,11 +356,7 @@ export default {
     },
     computed: {
         instrumentItems() {
-            const items = INSTRUMENT_PRESETS.map(([text, value]) => ({ text, value }));
-            if (!items.some(i => i.value === this.instrumentShift)) {
-                items.push({ text: `Custom (${this.instrumentShift > 0 ? '+' : ''}${this.instrumentShift} semitones)`, value: this.instrumentShift });
-            }
-            return items;
+            return instrumentItems(this.instrumentShift);
         },
         // True while the shared session player is sounding THIS tune.
         recordingPlaying() {
