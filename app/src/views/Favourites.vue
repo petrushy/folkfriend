@@ -13,6 +13,17 @@
                 :prepend-icon="icons.sort"
             />
             <v-btn
+                v-if="sortBy === 'random'"
+                icon
+                small
+                title="Shuffle again"
+                @click="reshuffle"
+            >
+                <v-icon small>
+                    {{ icons.shuffle }}
+                </v-icon>
+            </v-btn>
+            <v-btn
                 icon
                 small
                 :color="groupBy ? 'primary' : ''"
@@ -715,14 +726,14 @@
 </template>
 
 <script>
-import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline } from '@mdi/js';
+import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline, mdiShuffleVariant } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
 import FavouriteRow from '@/components/FavouriteRow';
 import utils from '@/js/utils';
 import { settingSourceUrl } from '@/js/source.mjs';
-import { typeOptions, keyOptions, keyLabel, typeLabel, matchesFacets } from '@/js/favouriteFacets.mjs';
+import { typeOptions, keyOptions, keyLabel, typeLabel, matchesFacets, scopedOptions, shuffleKey } from '@/js/favouriteFacets.mjs';
 import { windowRows, windowGroups, INITIAL_ROW_BUDGET, ROW_BUDGET_STEP } from '@/js/rowWindow.mjs';
 import router from '@/router/index.js';
 import { indexRecordingsByTune, sessionDetections, formatSessionDate } from '@/js/tuneRecordings.mjs';
@@ -795,7 +806,9 @@ export default {
                 { text: 'Tune type', value: 'type' },
                 { text: 'Key', value: 'key' },
                 { text: 'Tags', value: 'tags' },
+                { text: 'Random', value: 'random' },
             ],
+            shuffleSeed: Math.floor(Math.random() * 2 ** 31),
             icons: {
                 export: mdiExport,
                 pencil: mdiPencil,
@@ -806,6 +819,7 @@ export default {
                 tagPlus: mdiTagPlusOutline,
                 groupDate: mdiCalendarMonth,
                 sort: mdiSort,
+                shuffle: mdiShuffleVariant,
                 mapMarker: mdiMapMarker,
                 groupPlace: mdiMapMarkerMultipleOutline,
                 close: mdiClose,
@@ -837,26 +851,13 @@ export default {
             return this.icons.groupTag;
         },
         filteredItems() {
-            const needle = (this.nameFilter || '').trim().toLowerCase();
-            const filtered = this.favouriteItems.filter(item => {
-                if (this.activeTags.length > 0 && !this.activeTags.every(t => (item.tags || []).includes(t))) return false;
-                // OR within type and within key (a setting has only one of
-                // each), AND between them — see favouriteFacets.mjs.
-                if (!matchesFacets(item, this.activeTypes, this.activeKeys)) return false;
-                // OR across places, unlike tags which are AND. Selecting two
-                // places means "heard at either" — the useful reading, since a
-                // tune heard at *both* of two named pubs is a rare thing to ask
-                // for and would usually filter to nothing.
-                if (this.activePlaceIDs.length > 0) {
-                    const tuneID = item.result.setting && item.result.setting.tune_id;
-                    const placeIDs = tuneID ? this.placeIDsByTune.get(String(tuneID)) : null;
-                    if (!placeIDs || !this.activePlaceIDs.some(id => placeIDs.has(id))) return false;
-                }
-                if (needle && !utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle)) return false;
-                return true;
-            });
+            const filtered = this._filterItems(this.activeTypes, this.activeKeys);
             const sorted = [...filtered];
             switch (this.sortBy) {
+            case 'random':
+                sorted.sort((a, b) =>
+                    shuffleKey(a.result.settingID, this.shuffleSeed) - shuffleKey(b.result.settingID, this.shuffleSeed));
+                break;
             case 'name':
                 sorted.sort((a, b) =>
                     utils.parseDisplayableName(a.result.displayName)
@@ -921,13 +922,12 @@ export default {
                 .map(place => ({ ...place, matchCount: counts.get(place.id) }))
                 .sort((a, b) => b.matchCount - a.matchCount || a.name.localeCompare(b.name));
         },
-        // Over ALL favourites, like the place chips, so the options do not
-        // vanish from under the user as other filters narrow the list.
+        // Counted over the current view (all filters but the facet's own).
         typeFilterOptions() {
-            return typeOptions(this.favouriteItems);
+            return scopedOptions(this._filterItems([], this.activeKeys), typeOptions, this.activeTypes, this.favouriteItems);
         },
         keyFilterOptions() {
-            return keyOptions(this.favouriteItems);
+            return scopedOptions(this._filterItems(this.activeTypes, []), keyOptions, this.activeKeys, this.favouriteItems);
         },
         allTags() {
             const tags = new Set();
@@ -1061,7 +1061,11 @@ export default {
         activeKeys: { handler() { this._persistFilterState(); this._resetRowBudget(); }, deep: true },
         nameFilter() { this._persistFilterState(); this._resetRowBudget(); },
         groupBy() { this._persistFilterState(); this._resetRowBudget(); },
-        sortBy() { this._persistFilterState(); this._resetRowBudget(); },
+        sortBy(value) {
+            if (value === 'random') this.shuffleSeed = Math.floor(Math.random() * 2 ** 31);
+            this._persistFilterState();
+            this._resetRowBudget();
+        },
         collapsedTagGroups() { this._persistFilterState(); },
         collapsedDateGroups() { this._persistFilterState(); },
         collapsedPlaceGroups() { this._persistFilterState(); },
@@ -1335,6 +1339,32 @@ export default {
             const i = this.activePlaceIDs.indexOf(placeID);
             if (i >= 0) this.activePlaceIDs.splice(i, 1);
             else this.activePlaceIDs.push(placeID);
+        },
+        // Every filter except the type/key selections, which the caller
+        // supplies: the facet menus count with their OWN facet left out.
+        _filterItems(activeTypes, activeKeys) {
+            const needle = (this.nameFilter || '').trim().toLowerCase();
+            return this.favouriteItems.filter(item => {
+                if (this.activeTags.length > 0 && !this.activeTags.every(t => (item.tags || []).includes(t))) return false;
+                // OR within type and within key (a setting has only one of
+                // each), AND between them — see favouriteFacets.mjs.
+                if (!matchesFacets(item, activeTypes, activeKeys)) return false;
+                // OR across places, unlike tags which are AND. Selecting two
+                // places means "heard at either" — the useful reading, since a
+                // tune heard at *both* of two named pubs is a rare thing to ask
+                // for and would usually filter to nothing.
+                if (this.activePlaceIDs.length > 0) {
+                    const tuneID = item.result.setting && item.result.setting.tune_id;
+                    const placeIDs = tuneID ? this.placeIDsByTune.get(String(tuneID)) : null;
+                    if (!placeIDs || !this.activePlaceIDs.some(id => placeIDs.has(id))) return false;
+                }
+                if (needle && !utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle)) return false;
+                return true;
+            });
+        },
+        reshuffle() {
+            this.shuffleSeed = Math.floor(Math.random() * 2 ** 31);
+            this._resetRowBudget();
         },
         toggleActiveType(type) {
             const i = this.activeTypes.indexOf(type);
