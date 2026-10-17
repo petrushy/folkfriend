@@ -16,6 +16,8 @@ import {
     typeOptions,
     keyOptions,
     matchesFacets,
+    scopedOptions,
+    shuffleKey,
 } from '../src/js/favouriteFacets.mjs';
 
 const fav = (dance, mode) => ({ result: { settingID: Math.random(), setting: { dance, mode } } });
@@ -90,4 +92,22 @@ test('an item with no type is excluded once a type is chosen', () => {
     assert.equal(matchesFacets(fav('', 'Dmajor'), ['reel'], []), false);
 });
 
+
+test('scopedOptions counts the given view and keeps a selected zero-count value', () => {
+    const all = [fav('jig', 'Gmajor'), fav('jig', 'Dmajor'), fav('reel', 'Gmajor')];
+    const view = [all[0], all[2]];
+    const opts = scopedOptions(view, typeOptions, ['jig'], all);
+    assert.equal(opts.find(o => o.value === 'jig').count, 1);
+    const none = scopedOptions([all[2]], typeOptions, ['jig'], all);
+    assert.equal(none.find(o => o.value === 'jig').count, 0);
+    assert.equal(scopedOptions([all[2]], typeOptions, [], all).some(o => o.value === 'jig'), false);
+});
+
+test('shuffleKey is stable per seed, varies across seeds, stays in [0,1)', () => {
+    assert.equal(shuffleKey(42, 7), shuffleKey(42, 7));
+    assert.notEqual(shuffleKey(42, 7), shuffleKey(42, 8));
+    for (let i = 0; i < 200; i++) { const k = shuffleKey(i, 3); assert.ok(k >= 0 && k < 1); }
+    const order = seed => [...Array(20).keys()].sort((a, b) => shuffleKey(a, seed) - shuffleKey(b, seed)).join();
+    assert.notEqual(order(1), order(2));
+});
 console.log(`favouriteFacets: ${passed} passed`);

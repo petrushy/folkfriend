@@ -93,3 +93,27 @@ export function matchesFacets(item, activeTypes, activeKeys) {
     if (activeKeys && activeKeys.length > 0 && !activeKeys.includes(tuneKeyOf(item))) return false;
     return true;
 }
+
+// Options for a facet counted over the CURRENT view: `items` is what the other
+// filters leave (everything but this facet's own selection, so ticking Jigs
+// does not zero out Reels and make OR-ing impossible). Values with no match
+// are dropped, except a selected one, which stays so it can be unticked.
+export function scopedOptions(items, optionsFor, active, allItems) {
+    const options = optionsFor(items);
+    const have = new Set(options.map(o => o.value));
+    for (const o of optionsFor(allItems)) {
+        if ((active || []).includes(o.value) && !have.has(o.value)) options.push({ ...o, count: 0 });
+    }
+    return options;
+}
+
+// Stable pseudo-random key for an item under a seed, so a shuffle holds still
+// while the list re-renders (typing in the name filter) and changes only when
+// the seed does. mulberry32 over a string hash of id + seed.
+export function shuffleKey(id, seed) {
+    let h = 2166136261 ^ seed;
+    for (const c of String(id)) h = Math.imul(h ^ c.charCodeAt(0), 16777619);
+    h = Math.imul(h ^ (h >>> 15), h | 1);
+    h ^= h + Math.imul(h ^ (h >>> 7), h | 61);
+    return ((h ^ (h >>> 14)) >>> 0) / 4294967296;
+}
