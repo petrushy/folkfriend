@@ -28,6 +28,9 @@ const USER_SETTING_DEFAULTS = {
     autoUpdateTuneData: true, // check for a newer tune index on startup
     aiSummariesEnabled: false, // show the (i) tune-background button; needs an API key
     aiSummaryModel: DEFAULT_AI_MODEL, // which Claude model writes the background note
+    // Semitones the WRITTEN score is shifted for a transposing instrument. Score
+    // only; global because it describes the player, not the tune.
+    instrumentShift: 0,
     geoTagDetections: false, // record where each tune was heard; needs location permission
     // Keep the audio of a live session so it can be listened back to and
     // exported. Off by default and deliberately so: three hours of a pub
