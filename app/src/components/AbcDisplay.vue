@@ -186,7 +186,7 @@ export default {
 
         const svgDiv = this.$refs.abcTarget;
 
-        this._render();
+        this.drawScore();
         this.$emit('abcRendered');
 
         this._onStopSynthPlayback = () => {
@@ -210,11 +210,11 @@ export default {
             // The synth holds the old notes, so stop rather than keep playing
             // the previous key under a score that has already changed.
             this.stopPlaying();
-            this._render();
+            this.drawScore();
         },
     },
     methods: {
-        _render() {
+        drawScore() {
             const target = this.$refs.abcTarget;
             if (!target) return;
             this._clearHighlightedNotes();
