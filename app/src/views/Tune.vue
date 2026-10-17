@@ -150,28 +150,44 @@
                             <span class="settingMetaLabel">Origin</span> {{ settingData.origin }}
                         </span>
                     </div>
-                    <div class="transposeRow">
-                        <span class="settingMetaLabel">Transpose</span>
-                        <v-btn icon x-small :disabled="transposeFor(settingData) <= -12"
-                            aria-label="Transpose down one semitone" title="Down a semitone"
-                            @click.stop="changeTranspose(settingData, -1)">
-                            <v-icon small>{{ icons.minus }}</v-icon>
-                        </v-btn>
-                        <span class="transposeValue" aria-live="polite">{{ transposeLabel(settingData) }}</span>
-                        <v-btn icon x-small :disabled="transposeFor(settingData) >= 12"
-                            aria-label="Transpose up one semitone" title="Up a semitone"
-                            @click.stop="changeTranspose(settingData, 1)">
-                            <v-icon small>{{ icons.plus }}</v-icon>
-                        </v-btn>
-                        <v-btn v-if="transposeFor(settingData) !== 0" text x-small class="px-1"
-                            @click.stop="setTranspose(settingData, 0)">Reset</v-btn>
-                    </div>
-                    <AbcDisplay :abc="settingData.abc" :transpose="transposeFor(settingData)" :mode="settingData.mode" :meter="settingData.meter"
+                    <AbcDisplay :abc="settingData.abc" :transpose="transposeFor(settingData)" :instrumentShift="instrumentShift" :mode="settingData.mode" :meter="settingData.meter"
                         :title="name" :settingID="settingData.setting_id"
                         @abcGoFullScreen="abcGoFullScreen" @abcExitFullScreen="abcExitFullScreen"
                         @abcRendered="scrollIntoView">
                         <!-- Session recording ▶ — only when a saved session recorded this tune -->
                         <template #controls>
+                            <v-menu v-model="settingsMenus[settingData.setting_id]" :close-on-content-click="false"
+                                offset-y top>
+                                <template #activator="{ on, attrs }">
+                                    <v-btn small class="mx-1 px-2 abcControls" aria-label="Score settings"
+                                        title="Transpose and instrument" v-bind="attrs" :color="scoreAdjusted(settingData) ? 'primary' : ''" v-on="on">
+                                        <v-icon small>{{ icons.cog }}</v-icon>
+                                    </v-btn>
+                                </template>
+                                <v-card class="scoreSettings pa-3" width="280">
+                                    <div class="settingMetaLabel">Transpose key</div>
+                                    <div class="text-caption">Changes the score and the sound.</div>
+                                    <div class="transposeRow">
+                                        <v-btn icon small :disabled="transposeFor(settingData) <= -12"
+                                            aria-label="Transpose down one semitone"
+                                            @click="changeTranspose(settingData, -1)">
+                                            <v-icon small>{{ icons.minus }}</v-icon>
+                                        </v-btn>
+                                        <span class="transposeValue" aria-live="polite">{{ transposeLabel(settingData) }}</span>
+                                        <v-btn icon small :disabled="transposeFor(settingData) >= 12"
+                                            aria-label="Transpose up one semitone"
+                                            @click="changeTranspose(settingData, 1)">
+                                            <v-icon small>{{ icons.plus }}</v-icon>
+                                        </v-btn>
+                                        <v-btn v-if="transposeFor(settingData) !== 0" text x-small class="px-1"
+                                            @click="setTranspose(settingData, 0)">Reset</v-btn>
+                                    </div>
+                                    <div class="settingMetaLabel mt-3">My instrument</div>
+                                    <div class="text-caption">Changes the written score only, for all tunes.</div>
+                                    <v-select :value="instrumentShift" :items="instrumentItems" dense hide-details
+                                        class="mt-1" @change="setInstrumentShift" />
+                                </v-card>
+                            </v-menu>
                             <v-btn
                                 v-if="recordingEntries.length"
                                 small
@@ -238,6 +254,7 @@ import {
     mdiMapMarker,
     mdiPlus,
     mdiMinus,
+    mdiCog,
     mdiTagPlusOutline,
     mdiPlay,
     mdiPause,
@@ -255,6 +272,16 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 // settles, and the worker's network calls are themselves bounded. It exists
 // only so that a bug in that chain degrades to the offline copy rather than a
 // blank screen.
+// Written pitch relative to sounding pitch, in semitones: a B-flat player
+// reads a major second above what sounds.
+const INSTRUMENT_PRESETS = [
+    ['Concert pitch (C)', 0],
+    ['B♭ (clarinet, trumpet)', 2],
+    ['E♭ (alto sax)', 9],
+    ['F (horn)', 7],
+    ['A (clarinet in A)', 3],
+];
+
 const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
@@ -312,6 +339,10 @@ export default {
             // setting_id -> semitones. Saved with the favourite (and so synced);
             // for a tune that is not starred it is simply this visit's choice.
             transposeBySetting: {},
+            // Global, not per tune: how this player's instrument is written
+            // relative to concert pitch. Score only; never affects the sound.
+            instrumentShift: clampTranspose(store.userSettings.instrumentShift),
+            settingsMenus: {},
             settingTags: {},
             allTags: [],
             addTagMenus: {},
@@ -326,12 +357,20 @@ export default {
                 close: mdiCloseCircle,
                 plus: mdiPlus,
                 minus: mdiMinus,
+                cog: mdiCog,
                 play: mdiPlay,
                 pause: mdiPause,
             },
         };
     },
     computed: {
+        instrumentItems() {
+            const items = INSTRUMENT_PRESETS.map(([text, value]) => ({ text, value }));
+            if (!items.some(i => i.value === this.instrumentShift)) {
+                items.push({ text: `Custom (${this.instrumentShift > 0 ? '+' : ''}${this.instrumentShift} semitones)`, value: this.instrumentShift });
+            }
+            return items;
+        },
         // True while the shared session player is sounding THIS tune.
         recordingPlaying() {
             const playback = playerHost.playback;
@@ -433,6 +472,7 @@ export default {
             // Pre-declare per-setting menu/input keys so Vue 2 reactivity tracks them from the start.
             this.settings.forEach(s => {
                 this.$set(this.addTagMenus, s.setting_id, false);
+                this.$set(this.settingsMenus, s.setting_id, false);
                 this.$set(this.tagInputValues, s.setting_id, null);
             });
 
@@ -739,6 +779,14 @@ export default {
                 this.$set(this.favouritedSettings, sid, true);
                 store.getTagsForSetting(sid).then(tags => this.$set(this.settingTags, sid, tags));
             }
+        },
+        scoreAdjusted(settingData) {
+            return this.transposeFor(settingData) !== 0 || this.instrumentShift !== 0;
+        },
+        setInstrumentShift(value) {
+            this.instrumentShift = clampTranspose(value);
+            store.userSettings.instrumentShift = this.instrumentShift;
+            store.updateUserSettings(store.userSettings);
         },
         transposeFor(settingData) {
             return clampTranspose(this.transposeBySetting[settingData.setting_id]);

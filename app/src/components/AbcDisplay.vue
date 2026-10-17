@@ -103,6 +103,14 @@ export default {
             required: false,
             default: 0,
         },
+        // Semitones added to the WRITTEN score only, for transposing
+        // instruments (a B-flat player reads a note a tone above what sounds).
+        // The sound is unaffected.
+        instrumentShift: {
+            type: Number,
+            required: false,
+            default: 0,
+        },
         // Render notation only. Used by the live-follow overlay, where synth
         // playback would feed straight back into the listening microphone.
         hideControls: {
@@ -206,6 +214,10 @@ export default {
         }
     },
     watch: {
+        instrumentShift() {
+            // Notation only; playback is unchanged so keep it going.
+            this.drawScore();
+        },
         transpose() {
             // The synth holds the old notes, so stop rather than keep playing
             // the previous key under a score that has already changed.
@@ -220,10 +232,11 @@ export default {
             this._clearHighlightedNotes();
             // visualTranspose changes what is drawn; the synth is told
             // separately (see _synthOptions) because abcjs deliberately
-            // subtracts the visual transpose out of the sound.
+            // subtracts the visual transpose out of the sound. The instrument
+            // shift is added here but NOT to the synth: written pitch only.
             this.abcVisual = ABCJS.renderAbc(target, this.abcText, {
                 responsive: 'resize',
-                visualTranspose: this.transpose || 0,
+                visualTranspose: (this.transpose || 0) + (this.instrumentShift || 0),
             })[0];
         },
         _synthOptions(onEnded) {
