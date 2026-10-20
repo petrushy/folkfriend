@@ -326,7 +326,7 @@
             </v-menu>
             <v-text-field
                 v-model="nameFilter"
-                placeholder="Search by name…"
+                placeholder="Search by name or composer…"
                 dense
                 hide-details
                 clearable
@@ -1358,7 +1358,14 @@ export default {
                     const placeIDs = tuneID ? this.placeIDsByTune.get(String(tuneID)) : null;
                     if (!placeIDs || !this.activePlaceIDs.some(id => placeIDs.has(id))) return false;
                 }
-                if (needle && !utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle)) return false;
+                if (needle) {
+                    // Name or composer. The composer lives on the saved setting
+                    // snapshot; favourites saved before it was indexed have none.
+                    const composer = item.result.setting && item.result.setting.composer;
+                    const inName = utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle);
+                    const inComposer = typeof composer === 'string' && composer.toLowerCase().includes(needle);
+                    if (!inName && !inComposer) return false;
+                }
                 return true;
             });
         },
