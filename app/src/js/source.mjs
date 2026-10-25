@@ -19,35 +19,44 @@
 export const DATASET_THESESSION = 'thesession';
 export const DATASET_FOLKWIKI = 'folkwiki';
 export const DATASET_NORBECK = 'norbeck';
+export const DATASET_SPILLEFOLK = 'spillefolk';
 
 const KNOWN_DATASETS = new Set([
     DATASET_THESESSION,
     DATASET_FOLKWIKI,
     DATASET_NORBECK,
+    DATASET_SPILLEFOLK,
 ]);
 
 // Unlabelled-tune fallback. These MUST match the ID bases in the data repo's
-// builders (build_folkwiki_data.py, build_norbeck_data.py). Folkwiki is not the
-// small block its base suggests — its hash term carries it to ~1.68e9 — which
-// is why norbeck starts three billion up rather than at 3,000,000.
+// builders (build_folkwiki_data.py, build_norbeck_data.py,
+// build_spillefolk_data.py). Folkwiki is not the small block its base suggests
+// — its hash term carries it to ~1.68e9 — which is why norbeck starts three
+// billion up rather than at 3,000,000. Norbeck's SETTING ids reach ~4.4e11, so
+// spillefolk starts at 1e12; it must be tested before norbeck, which is
+// open-ended upwards.
 const FOLKWIKI_TUNE_ID_BASE = 1000000;
 const NORBECK_TUNE_ID_BASE = 3000000000;
+const SPILLEFOLK_TUNE_ID_BASE = 1000000000000;
 
 // Human names for the datasets, shared by every view that names one. Kept
 // here rather than in a component so Settings and Search cannot drift apart.
 //
-// Norbeck is here but NOT in store.js's KNOWN_DATASETS: the app does not offer
-// to fetch it, but it must still be named properly once someone imports it.
+// Norbeck and Spillefolk are here but NOT in store.js's KNOWN_DATASETS: the app
+// does not offer to fetch them (both are private, imported by hand), but they
+// must still be named properly once someone imports them.
 export const DATASET_LABELS = {
     [DATASET_THESESSION]: 'The Session',
     [DATASET_FOLKWIKI]: 'Folkwiki',
     [DATASET_NORBECK]: 'Norbeck',
+    [DATASET_SPILLEFOLK]: 'Spillefolk',
 };
 
 export const DATASET_DESCRIPTIONS = {
     [DATASET_THESESSION]: 'Irish and session tunes from thesession.org',
     [DATASET_FOLKWIKI]: 'Swedish folk music from folkwiki.se',
     [DATASET_NORBECK]: 'Henrik Norbeck\u2019s Irish and Swedish collection',
+    [DATASET_SPILLEFOLK]: 'Danish and Nordic tunes from Folkets Hus Spillefolk',
 };
 
 // The lowercase identifiers shown on the source chip, which match how each
@@ -56,6 +65,7 @@ const SOURCE_LABELS = {
     [DATASET_THESESSION]: 'thesession',
     [DATASET_FOLKWIKI]: 'folkwiki',
     [DATASET_NORBECK]: 'norbeck',
+    [DATASET_SPILLEFOLK]: 'spillefolk',
 };
 
 function safeString(value) {
@@ -98,6 +108,7 @@ export function datasetForTuneID(tuneID, dataset = '') {
     const n = parseInt(tuneID, 10);
     if (Number.isNaN(n)) return DATASET_FOLKWIKI;
     if (n < FOLKWIKI_TUNE_ID_BASE) return DATASET_THESESSION;
+    if (n >= SPILLEFOLK_TUNE_ID_BASE) return DATASET_SPILLEFOLK;
     if (n >= NORBECK_TUNE_ID_BASE) return DATASET_NORBECK;
     return DATASET_FOLKWIKI;
 }
@@ -132,6 +143,10 @@ export function tuneSourceUrl({ tuneID, displayName = '', sourceUrl = '', datase
 
     if (id === DATASET_NORBECK) {
         return 'https://www.norbeck.nu/abc/';
+    }
+
+    if (id === DATASET_SPILLEFOLK) {
+        return 'https://spillefolk.dk/nodesamlingen/';
     }
 
     // A dataset this build does not know about has no derivable URL at all.

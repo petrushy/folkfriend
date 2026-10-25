@@ -106,6 +106,20 @@ assert.equal(
 assert.equal(datasetForTuneID('3001472672'), 'norbeck');
 assert.equal(datasetForTuneID('7292804357'), 'norbeck');
 assert.equal(sourceNameForTuneID('3001472672'), 'norbeck');
+// An unlabelled SPILLEFOLK tune (ids from 1e12) must not be called norbeck,
+// whose range is open-ended upwards — and norbeck's own top end (tune ids to
+// ~7.3e9) must stay norbeck.
+assert.equal(datasetForTuneID('1000059435'), 'folkwiki');
+assert.equal(datasetForTuneID('1004294967295'), 'spillefolk');
+assert.equal(datasetForTuneID('1000000000000'), 'spillefolk');
+assert.equal(sourceNameForTuneID('1004294967295'), 'spillefolk');
+assert.equal(datasetForTuneID('7294967295'), 'norbeck');
+assert.equal(
+    tuneSourceUrl({ tuneID: '1004294967295', dataset: 'spillefolk',
+        sourceUrl: 'https://spillefolk.dk/nodesamling/visnode.php?key=po-nr49&lan=dk' }),
+    'https://spillefolk.dk/nodesamling/visnode.php?key=po-nr49&lan=dk');
+assert.equal(tuneSourceUrl({ tuneID: '1004294967295', dataset: 'spillefolk' }),
+    'https://spillefolk.dk/nodesamlingen/');
 // ...without swallowing folkwiki, whose hash term reaches ~1.68e9.
 assert.equal(datasetForTuneID('1678715901'), 'folkwiki');
 assert.equal(datasetForTuneID('1398101'), 'folkwiki');
