@@ -776,6 +776,7 @@ class FolkFriendWASMWrapper {
                         id, url: local.url, v: local.v || 0,
                         date: local.date || null, size: local.bytes || 0,
                         origin: 'user', label: local.label || id,
+                        copyright: local.copyright,
                     });
                 } else {
                     failed[id] = 'added from a file — re-import it to update';
@@ -873,6 +874,9 @@ class FolkFriendWASMWrapper {
                     if (typeof parsed.label === 'string' && parsed.label) {
                         entry.label = parsed.label;
                     }
+                    if (typeof parsed.copyright === 'string') {
+                        entry.copyright = parsed.copyright;
+                    }
                 }
 
                 const part = {
@@ -937,6 +941,9 @@ class FolkFriendWASMWrapper {
                         origin: entry.origin || undefined,
                         label: entry.label,
                         url: entry.url,
+                        // A published dataset's notice comes from its
+                        // datasets.json entry; an imported one's from itself.
+                        copyright: entry.copyright,
                     });
                 } catch (e) {
                     // It works for this session; it just will not survive a
@@ -1465,6 +1472,7 @@ class FolkFriendWASMWrapper {
                     origin: 'user',
                     label,
                     url: url || null,
+                    copyright: parsed.copyright,
                 });
             } catch (e) {
                 persistError = (e && e.message) || String(e);

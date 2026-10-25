@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 
 import {
+    datasetDisplayName,
     datasetForTuneID,
     safeSourceUrl,
     isThesessionTuneID,
@@ -173,3 +174,14 @@ assert.equal(safeSourceUrl('https://ok.example/x'), 'https://ok.example/x');
 assert.equal(safeSourceUrl('http://ok.example/x'), 'http://ok.example/x');
 
 console.log('source-links.test.mjs passed');
+
+// --- Dataset names -------------------------------------------------------
+// The app's own label for the datasets it ships; otherwise the name the
+// dataset's file gave itself (stored in its manifest on import); otherwise the
+// raw id. One rule for every view, so a new dataset needs no app release.
+assert.equal(datasetDisplayName('norbeck', { label: 'Something else' }), 'Norbeck');
+assert.equal(datasetDisplayName('spillefolk', { label: 'Spillefolk' }), 'Spillefolk');
+assert.equal(datasetDisplayName('spillefolk', null), 'spillefolk');
+assert.equal(datasetDisplayName('spillefolk', { label: '' }), 'spillefolk');
+assert.equal(datasetDisplayName('spillefolk', { label: 42 }), 'spillefolk');
+console.log('dataset names passed');

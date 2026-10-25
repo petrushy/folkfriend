@@ -102,6 +102,16 @@ export function datasetForTuneID(tuneID, dataset = '') {
     return DATASET_FOLKWIKI;
 }
 
+// The name to show for a dataset. The app's own label wins for the datasets
+// it ships; anything else — an imported file — names itself, and its stored
+// manifest carries that name (worker.addUserDataset). The raw id is the last
+// resort. One rule for every view, so a new dataset needs no app change.
+export function datasetDisplayName(id, manifest = null) {
+    return DATASET_LABELS[id]
+        || (manifest && typeof manifest.label === 'string' && manifest.label)
+        || id;
+}
+
 export function isKnownDataset(id) {
     return KNOWN_DATASETS.has(id);
 }
