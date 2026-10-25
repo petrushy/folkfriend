@@ -919,7 +919,7 @@
 <script>
 import DropboxBackup from '@/components/DropboxBackup.vue';
 import store, { KNOWN_DATASETS } from '@/services/store.js';
-import { DATASET_LABELS, DATASET_DESCRIPTIONS } from '@/js/source.mjs';
+import { datasetDisplayName, DATASET_DESCRIPTIONS } from '@/js/source.mjs';
 import ffBackend from '@/services/backend.js';
 import geoService from '@/services/geo.js';
 import micService from '@/services/mic.js';
@@ -1139,9 +1139,7 @@ export default {
                 // about it. Falling straight through to the raw id showed the
                 // user an opaque machine name moments after telling them
                 // "Norbeck is ready".
-                const label = DATASET_LABELS[id]
-                    || (manifest && manifest.label)
-                    || id;
+                const label = datasetDisplayName(id, manifest);
                 const description = DATASET_DESCRIPTIONS[id]
                     || ((manifest && manifest.origin === 'user')
                         ? `Added by you from a ${manifest.url ? 'link' : 'file'}`
