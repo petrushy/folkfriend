@@ -64,6 +64,7 @@ import { mdiArrowExpand, mdiArrowCollapse, mdiPause, mdiPlay, mdiStop, mdiMetron
 import store from '@/services/store.js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
+import { layoutOptionsFor } from '@/js/abcLayout.mjs';
 
 // How far ahead of the audio (in ms) the score highlight is shown. A small
 // lead makes the highlight feel like it anticipates the note rather than
@@ -237,6 +238,9 @@ export default {
             this.abcVisual = ABCJS.renderAbc(target, this.abcText, {
                 responsive: 'resize',
                 visualTranspose: (this.transpose || 0) + (this.instrumentShift || 0),
+                // Re-flows a tune written as one long line; keeps the
+                // source's own line breaks otherwise. See abcLayout.mjs.
+                ...layoutOptionsFor(this.abcText),
             })[0];
         },
         _synthOptions(onEnded) {
