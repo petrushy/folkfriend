@@ -1585,7 +1585,13 @@ export default {
         },
         async clearAiSummaries() {
             this.clearAiDialog = false;
-            await store.clearAiSummaries();
+            try {
+                await store.clearAiSummaries();
+            } catch (e) {
+                console.error('Could not clear notes from favourites', e);
+                this.aiMessage = 'Could not remove the notes from your favourites. Try again.';
+                return;
+            }
             await this._refreshAiSummaryCount();
             this.aiMessage = 'Saved background notes deleted.';
         },

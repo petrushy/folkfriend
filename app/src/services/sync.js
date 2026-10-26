@@ -14,7 +14,10 @@ function favDoc(uid) {
 // Subscribe to real-time Firestore updates for favourites.
 //
 // getLocalFavs — async function that returns the current local favourites array.
-//   Called lazily (only when needed) so it's never stale.
+//   Called lazily (only when needed) so it's never stale. It must REJECT when
+//   the local copy cannot be read: what it returns is pushed over the
+//   Firestore document, so answering [] for a failed read would delete every
+//   favourite on every device. A rejection skips the push.
 //
 // Conflict resolution: every Firestore document now carries clientUpdatedAt
 // (a client-side Date.now() millis). The same value is mirrored in
@@ -34,7 +37,15 @@ export function subscribe(uid, getLocalFavs, onChange) {
         if (!snap.exists()) {
             if (!seeded) {
                 seeded = true;
-                const items = await getLocalFavs();
+                let items;
+                try {
+                    items = await getLocalFavs();
+                } catch (e) {
+                    // Try again on the next snapshot rather than seed nothing.
+                    seeded = false;
+                    console.error('[folkfriend sync] could not read local favourites to seed', e);
+                    return;
+                }
                 pushFavourites(uid, items);
             }
             return;
@@ -48,9 +59,14 @@ export function subscribe(uid, getLocalFavs, onChange) {
             // Local was modified more recently — push local to Firestore, don't
             // overwrite local with stale Firestore data.
             pushInFlight = true;
-            const localItems = await getLocalFavs();
-            await pushFavourites(uid, localItems);
-            pushInFlight = false;
+            try {
+                const localItems = await getLocalFavs();
+                await pushFavourites(uid, localItems);
+            } catch (e) {
+                console.error('[folkfriend sync] could not read local favourites to push', e);
+            } finally {
+                pushInFlight = false;
+            }
         } else {
             // Firestore is same or newer (or documents predate this versioning) —
             // apply to local and record the Firestore timestamp so future snapshots
