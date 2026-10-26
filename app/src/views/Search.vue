@@ -164,7 +164,7 @@ import eventBus from '@/eventBus';
 import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiMusicClefTreble } from '@mdi/js';
 import micService from '@/services/mic';
 import liveAnalysisService from '@/services/liveAnalysis.js';
-import { DATASET_LABELS } from '@/js/source.mjs';
+import { datasetDisplayName } from '@/js/source.mjs';
 
 export default {
     name: 'SearchView',
@@ -187,6 +187,9 @@ export default {
             analyzeScale: 1.0,
 
             missingDatasets: [],
+            // Stored manifests of the missing datasets — an imported one is
+            // named by its own file, which this build may know nothing about.
+            datasetManifests: {},
 
             icons: {
                 magnify: mdiMagnify,
@@ -202,7 +205,9 @@ export default {
             if (!this.indexLoaded) return null;
             const missing = this.missingDatasets;
             if (!missing.length) return null;
-            const names = missing.map(id => DATASET_LABELS[id] || id).join(', ');
+            const names = missing
+                .map(id => datasetDisplayName(id, this.datasetManifests[id]))
+                .join(', ');
             return `${names} ${missing.length === 1 ? 'is' : 'are'} not saved on `
                 + 'this device yet, so its tunes will not be found. See Settings.';
         },
@@ -223,6 +228,7 @@ export default {
         this._onIndexStatus = (detail) => {
             this.indexStatus = detail.status;
             this.missingDatasets = detail.datasetsMissing || [];
+            this._loadDatasetManifests(this.missingDatasets);
             this.downloadProgress = detail.status === 'downloading'
                 ? { received: detail.received || 0, total: detail.total || 0 }
                 : null;
@@ -275,6 +281,19 @@ export default {
         eventBus.$off('micRecovered', this._onMicRecovered);
     },
     methods: {
+        async _loadDatasetManifests(ids) {
+            const unknown = ids.filter(id => !(id in this.datasetManifests));
+            if (!unknown.length) return;
+            try {
+                const inventory = await ffBackend.getDatasetInventory(unknown);
+                this.datasetManifests = {
+                    ...this.datasetManifests,
+                    ...((inventory && inventory.datasets) || {}),
+                };
+            } catch (e) {
+                // Names fall back to the raw id; the note still appears.
+            }
+        },
         _startPulse() {
             if (this._pulseRunning) return;
             this._pulseRunning = true;

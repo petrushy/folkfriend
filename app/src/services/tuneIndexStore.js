@@ -433,6 +433,16 @@ export async function readMergedLegacyIndex() {
 // only runs once the whole selection is committed.
 //
 // `metadata` is { v, date } from datasets.json.
+// Plain text, bounded: it comes from a file anyone can import and is shown
+// verbatim (as text, never HTML) on the Help page.
+export const MAX_COPYRIGHT_CHARS = 400;
+export function cleanCopyright(value) {
+    if (typeof value !== 'string') return '';
+    const text = value.replace(/\s+/g, ' ').trim();
+    return text.length > MAX_COPYRIGHT_CHARS
+        ? `${text.slice(0, MAX_COPYRIGHT_CHARS - 1)}\u2026` : text;
+}
+
 export async function writeDataset(id, rawText, metadata) {
     if (typeof rawText !== 'string' || rawText.length === 0) {
         throw new Error(`refusing to write an empty ${id} payload`);
@@ -484,6 +494,10 @@ export async function writeDataset(id, rawText, metadata) {
     // A dataset the user added by hand: it has no datasets.json entry, so the
     // manifest is the only place its name lives, and the update check must not
     // treat "not in the manifest" as an error for it.
+    // A dataset's own attribution notice (e.g. Norbeck's terms require one).
+    // Kept with the copy so the app can show it without knowing the dataset.
+    const copyright = cleanCopyright(metadata && metadata.copyright);
+    if (copyright) manifest.copyright = copyright;
     if (metadata && metadata.origin === 'user') {
         manifest.origin = 'user';
         manifest.label = metadata.label || id;

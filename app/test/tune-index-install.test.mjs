@@ -189,8 +189,9 @@ export class FolkFriendWASM {
 // Shaped exactly like the real thing (rust/src/index/schema.rs): tune_id and
 // contour are deliberately strings on both sides. Each dataset occupies its own
 // ID range, as the real builders guarantee, so a merge is lossless.
-const ID_BASE = { thesession: 1000, folkwiki: 2_000_000, norbeck: 8_000_000 };
-const TUNE_BASE = { thesession: 0, folkwiki: 1_000_000, norbeck: 3_000_000 };
+// `spillefolk` stands for any dataset this build was not written for.
+const ID_BASE = { thesession: 1000, folkwiki: 2_000_000, norbeck: 8_000_000, spillefolk: 12_000_000 };
+const TUNE_BASE = { thesession: 0, folkwiki: 1_000_000, norbeck: 3_000_000, spillefolk: 13_000_000 };
 
 function makeIndex(dataset, tag, n = 150) {
     const settings = {};
@@ -1422,6 +1423,35 @@ async function run() {
             r => wrapper.refreshTuneIndex(['norbeck'], r));
         assert.equal(refresh.ok, true, JSON.stringify(refresh.failed));
         await assertOfflineCopyIs('norbeck', 'v2', 43, 'refreshed from its URL');
+    });
+
+    await test('an imported dataset keeps its own name and notice through a refresh', async () => {
+        // The app names and attributes a dataset it does not know from what
+        // the file says about itself. A refresh that dropped either would turn
+        // it back into a raw id with no notice — Norbeck's terms require one.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const url = 'https://example.invalid/private/spillefolk.json';
+        netMod.__net.bodies[url] = makeSelfDescribing('spillefolk', 'v1', {
+            label: 'Spillefolk', copyright: 'Folkets Hus Spillefolk. Personal use.',
+        });
+        const wrapper = await newWorker({ datasets: [] });
+        const added = await new Promise(r => wrapper.addUserDataset({ url }, r));
+        assert.equal(added.ok, true, added.error);
+        let manifest = idbMod.__db.get('ffIndexManifest:spillefolk');
+        assert.equal(manifest.label, 'Spillefolk');
+        assert.equal(manifest.copyright, 'Folkets Hus Spillefolk. Personal use.');
+
+        netMod.__net.bodies[url] = makeSelfDescribing('spillefolk', 'v2', {
+            v: 43, label: 'Spillefolk', copyright: 'Updated notice.',
+        });
+        const refresh = await new Promise(
+            r => wrapper.refreshTuneIndex(['spillefolk'], r));
+        assert.equal(refresh.ok, true, JSON.stringify(refresh.failed));
+        manifest = idbMod.__db.get('ffIndexManifest:spillefolk');
+        assert.equal(manifest.label, 'Spillefolk', 'the name was lost on refresh');
+        assert.equal(manifest.copyright, 'Updated notice.',
+            'the notice was not refreshed from the file');
     });
 
     await test('an import cannot impersonate a published dataset', async () => {

@@ -73,7 +73,8 @@
 <script>
 import store from '@/services/store.js';
 import ffConfig from '@/ffConfig.js';
-import { DATASET_LABELS } from '@/js/source.mjs';
+import { datasetDisplayName } from '@/js/source.mjs';
+import ffBackend from '@/services/backend';
 import eventBus from '@/eventBus';
 import utils from '@/js/utils.js';
 
@@ -101,7 +102,9 @@ export default {
             dotsVertical: mdiDotsVertical,
         },
         isStableRelease: utils.isStableRelease(),
-        year: new Date().getFullYear()
+        year: new Date().getFullYear(),
+        // Stored manifests of the loaded datasets: their names and notices.
+        datasetManifests: {},
     }),
     computed: {
         backendVersion() {
@@ -116,16 +119,27 @@ export default {
             const loaded = (store.state.indexDatasets || {}).loaded || [];
             const date = this.tuneIndexDate;
             if (!loaded.length) return date;
-            const names = loaded.map(id => DATASET_LABELS[id] || id).join(', ');
+            const names = loaded
+                .map(id => datasetDisplayName(id, this.datasetManifests[id]))
+                .join(', ');
             return `${names} · ${date}`;
         },
-        // Norbeck's collection is his copyright and its terms require the
-        // notice be kept, so it is shown whenever that dataset is loaded.
+        // Each loaded dataset's own notice, from its file (`copyright`, kept in
+        // its stored manifest). Norbeck's terms require his; any dataset can
+        // carry one without the app knowing about it. A Norbeck copy imported
+        // before notices were stored has none in its manifest, so his falls
+        // back to the text this build always showed.
         attribution() {
             const loaded = (store.state.indexDatasets || {}).loaded || [];
-            if (!loaded.includes('norbeck')) return '';
-            return 'Norbeck tunes © Henrik Norbeck (norbeck.nu), used with '
-                + 'attribution. Not for commercial use.';
+            return loaded.map(id => {
+                const manifest = this.datasetManifests[id];
+                if (manifest && manifest.copyright) return manifest.copyright;
+                if (id === 'norbeck') {
+                    return 'Norbeck tunes © Henrik Norbeck (norbeck.nu), used '
+                        + 'with attribution. Not for commercial use.';
+                }
+                return '';
+            }).filter(Boolean).join(' ');
         },
         tuneIndexDate() {
             const date = store.state.tuneIndexDate;
@@ -141,6 +155,7 @@ export default {
     },
     created: function () {
         eventBus.$emit('parentViewActivated');
+        this._loadDatasetManifests();
     },
     mounted: function () {
         if(this.download) {
@@ -148,6 +163,18 @@ export default {
         } else if(this.share) {
             this.$refs['helpShare'].$el.scrollIntoView();
         }
+    },
+    methods: {
+        async _loadDatasetManifests() {
+            const loaded = (store.state.indexDatasets || {}).loaded || [];
+            if (!loaded.length) return;
+            try {
+                const inventory = await ffBackend.getDatasetInventory(loaded);
+                this.datasetManifests = (inventory && inventory.datasets) || {};
+            } catch (e) {
+                // Built-in names and Norbeck's notice still show.
+            }
+        },
     },
 };
 </script>
