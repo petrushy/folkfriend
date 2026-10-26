@@ -695,6 +695,29 @@ async function run() {
         assert.deepEqual(items.find(f => f.result.settingID === '1').tags, ['reel']);
     });
 
+    await test('favourites reach Firestore in the order the writes committed', async () => {
+        // pushFavourites stamps clientUpdatedAt when it is called and Firestore
+        // keeps the newest stamp, so an edit pushed AFTER the write chain
+        // released could land behind a later edit's push and replace the newer
+        // list everywhere. The folder migration's extra write is what widened
+        // that window; here it is held open so the second edit runs inside it.
+        const { store, idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [{ ...fav('1', '10'), folderId: 'f1' }]);
+        idb.__db.set('favouriteFolders', [{ id: 'f1', name: 'Reels' }]);
+        idb.__delaySetsOf('favouriteFolders', 50);
+        try {
+            await Promise.all([
+                store.addTagToFavourite('1', 'jig'),
+                store.addFavourite({ settingID: '2', setting: { tune_id: '20' }, displayName: 'B' }),
+            ]);
+        } finally { idb.__allowAll(); }
+
+        const lastPush = sync.__pushes[sync.__pushes.length - 1];
+        assert.deepEqual(new Set(lastPush.map(f => f.result.settingID)), new Set(['1', '2']),
+            'the last push is the newest list, not an older one stamped later');
+        assert.deepEqual(lastPush.find(f => f.result.settingID === '1').tags, ['Reels', 'jig']);
+    });
+
     await test('the star cache never answers from before a write it raced', async () => {
         // A cache load reading just before a write commits, and assigning just
         // after it is invalidated, would cache the old list until the next edit.
@@ -721,6 +744,44 @@ async function run() {
 
         assert.deepEqual(idb.__db.get('tuneSightings'), [existing]);
         assert.deepEqual(sync.__records.filter(r => r.name === 'sightings'), []);
+    });
+
+    await test('a clear that fails on places has still deleted the sightings remotely', async () => {
+        // The sightings are wiped first. Holding their remote deletes until
+        // the places were wiped too meant a failure there lost the ids for
+        // good: a retry reads an empty log, so the remote copies survive the
+        // clear and come back with the next snapshot.
+        const { store, idb, sync } = await signedInStore();
+        idb.__db.set('tuneSightings', [
+            { id: 's1', tuneID: '42', timestamp: 2, placeID: null },
+            { id: 's2', tuneID: '43', timestamp: 1, placeID: null },
+        ]);
+        idb.__db.set('places', [{ id: 'p1', name: 'Pub', ...COBBLESTONE, radiusM: 150, createdAt: 1 }]);
+
+        idb.__failReadsOf('places');
+        try {
+            await assert.rejects(store.clearSightings());
+        } finally { idb.__allowAll(); }
+
+        assert.deepEqual(idb.__db.get('tuneSightings'), []);
+        const deleted = sync.__records.filter(r => r.op === 'delete' && r.name === 'sightings').map(r => r.id);
+        assert.deepEqual(new Set(deleted), new Set(['s1', 's2']));
+        assert.equal(idb.__db.get('places').length, 1, 'places untouched, ready for a retry');
+    });
+
+    await test('deleting a place whose sightings cannot be read still deletes it remotely', async () => {
+        const { store, idb, sync } = await signedInStore();
+        idb.__db.set('places', [{ id: 'p1', name: 'Pub', ...COBBLESTONE, radiusM: 150, createdAt: 1 }]);
+        idb.__db.set('tuneSightings', [{ id: 's1', tuneID: '42', timestamp: 1, placeID: 'p1' }]);
+
+        idb.__failReadsOf('tuneSightings');
+        try {
+            await assert.rejects(store.deletePlace('p1'));
+        } finally { idb.__allowAll(); }
+
+        assert.deepEqual(idb.__db.get('places'), []);
+        assert.ok(sync.__records.some(r => r.op === 'delete' && r.name === 'places' && r.id === 'p1'),
+            'or the next snapshot brings the deleted place back');
     });
 
     await test('two sightings at the same moment are both kept', async () => {
@@ -805,7 +866,11 @@ export const __db = new Map();
 // above it are exactly what turns one into a destructive empty answer.
 const __failReads = new Set();
 export function __failReadsOf(key) { __failReads.add(key); }
-export function __allowAll() { __failReads.clear(); }
+export function __allowAll() { __failReads.clear(); __slowSets.clear(); }
+// Holds writes to one key open for a while, to widen a window between two
+// steps that a test needs another operation to land in.
+const __slowSets = new Map();
+export function __delaySetsOf(key, ms) { __slowSets.set(key, ms); }
 // Values are CLONED in and out, as IndexedDB's structured clone does. Handing
 // every reader the same array would let two overlapping read-modify-writes
 // both mutate one object, and a lost-write test would pass against
@@ -815,7 +880,11 @@ export async function get(key) {
     if (__failReads.has(key)) throw new Error('read failed');
     return structuredClone(__db.get(key));
 }
-export async function set(key, value) { await tick(); __db.set(key, structuredClone(value)); }
+export async function set(key, value) {
+    await tick();
+    if (__slowSets.has(key)) await new Promise(resolve => setTimeout(resolve, __slowSets.get(key)));
+    __db.set(key, structuredClone(value));
+}
 export async function del(key) { await tick(); __db.delete(key); }
 `,
     'fake-sync.mjs': FAKE_SYNC,

@@ -339,23 +339,39 @@ export default {
             this.pickerDialog = true;
         },
         async savePlace(details) {
-            const place = await store.namePlace(details);
+            let place = null;
+            try {
+                place = await store.namePlace(details);
+            } catch (e) {
+                console.error('Could not save place', e);
+            }
             this.editingPlace = null;
             this.editingStart = null;
             if (!place) {
                 this.notify('That place could not be saved.');
-                return;
             }
+            // Reloaded either way: a failure part-way can still have saved the
+            // place itself, and the list should show what is really stored.
             await this.load();
         },
         async confirmDeletePlace(place) {
             if (!window.confirm(`Forget the name "${place.name}"? The tunes heard there are kept.`)) return;
-            await store.deletePlace(place.id);
+            try {
+                await store.deletePlace(place.id);
+            } catch (e) {
+                console.error('Could not delete place', e);
+                this.notify('That place could not be fully deleted. Try again.');
+            }
             await this.load();
         },
         async confirmClear() {
             if (!window.confirm('Delete every recorded place and hearing? This cannot be undone.')) return;
-            await store.clearSightings();
+            try {
+                await store.clearSightings();
+            } catch (e) {
+                console.error('Could not clear places and hearings', e);
+                this.notify('Not everything could be deleted. Try again.');
+            }
             await this.load();
         },
         // `undoable` guards the Undo button: without it, a later unrelated

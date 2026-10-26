@@ -473,11 +473,9 @@ class Store {
     // a replacement array, or returns a falsy value for "nothing to change".
     // Resolves to whether the mutation changed anything.
     async _updateFavourites(mutate) {
-        let migratedFolders = false;
         let changed = false;
-        const written = await this._withRecords('favouriteItems', async stored => {
+        await this._withRecords('favouriteItems', async stored => {
             const normalised = await this._normaliseFavourites(stored);
-            migratedFolders = normalised.migratedFolders;
             const outcome = await mutate(normalised.items);
             changed = Boolean(outcome);
             if (!changed && !normalised.changed) return null;
@@ -487,11 +485,18 @@ class Store {
             // behind this write cannot run until it has committed and will
             // read the new list.
             this._invalidateFavouriteCache();
-            return { write: true, records, value: records };
+            await this._dbSetStrict('favouriteItems', records);
+            if (normalised.migratedFolders) await this._dbSet('favouriteFolders', []);
+            // PUSHED INSIDE THE CHAIN, so pushes leave in the order the writes
+            // committed. pushFavourites stamps clientUpdatedAt when called, and
+            // Firestore keeps the newest stamp: a push made after the chain
+            // released could land behind a later edit's push and replace the
+            // newer list with this older one on every device. Not awaited —
+            // offline, setDoc does not resolve until the server acknowledges,
+            // and the chain must not wait on the network.
+            if (this.currentUser) pushFavourites(this.currentUser.uid, records);
+            return null;
         });
-        if (!written) return false;
-        if (migratedFolders) await this._dbSet('favouriteFolders', []);
-        if (this.currentUser) pushFavourites(this.currentUser.uid, written);
         return changed;
     }
 
@@ -1244,7 +1249,10 @@ class Store {
         if (!isValidFix(centre)) return null;
 
         // Places first, then sightings, each through its own chain — one after
-        // the other, never one inside the other.
+        // the other, never one inside the other. Each step is synced as soon as
+        // it commits: if the second step fails, what the first one changed
+        // locally has still reached the other devices, rather than being
+        // undone by the next snapshot.
         const place = await this._withRecords(KEY_PLACES, places => {
             let found = id ? places.find(p => p.id === id) : null;
             if (found) {
@@ -1264,7 +1272,8 @@ class Store {
                 places.push(found);
             }
             return { write: true, records: places, value: found };
-        });
+        }, 'sightingsChanged');
+        this._syncPush('places', place);
 
         const adopted = await this._withRecords(KEY_SIGHTINGS, sightings => {
             const adopting = new Set(sightingsToAdopt(place, sightings).map(s => s.id));
@@ -1277,14 +1286,11 @@ class Store {
                 records: sightings,
                 value: sightings.filter(s => adopting.has(s.id)),
             };
-        });
-
-        this._syncPush('places', place);
+        }, 'sightingsChanged');
         // Naming is retroactive, so it rewrites the placeID of every sighting
         // it adopted — those have to go up too, or the other device keeps
         // showing them as unplaced under a name it can already see.
         this._syncPushMany('sightings', adopted);
-        eventBus.$emit('sightingsChanged');
         return place;
     }
 
@@ -1292,11 +1298,16 @@ class Store {
     // are observations, and the name was only ever a label over them. Losing an
     // evening's log because a name was tidied up would be the same class of
     // mistake as deleting the offline index on a failed update.
+    //
+    // The place's remote delete is sent as soon as the local one commits, not
+    // after the sightings step: if that step failed, the place would be gone
+    // here and still in Firestore, and the next snapshot would bring it back.
     async deletePlace(placeID) {
         await this._withRecords(KEY_PLACES, places => ({
             write: true,
             records: places.filter(p => p.id !== placeID),
-        }));
+        }), 'sightingsChanged');
+        this._syncDelete('places', placeID);
 
         const orphaned = await this._withRecords(KEY_SIGHTINGS, sightings => {
             const unplaced = [];
@@ -1307,14 +1318,11 @@ class Store {
                 }
             }
             return { write: unplaced.length > 0, records: sightings, value: unplaced };
-        });
-
-        this._syncDelete('places', placeID);
+        }, 'sightingsChanged');
         // The sightings survive the name being deleted, so they are UPDATED
         // remotely, never removed — the other device has to learn they are
         // unplaced now, not that they never happened.
         this._syncPushMany('sightings', orphaned);
-        eventBus.$emit('sightingsChanged');
     }
 
     async deleteSighting(sightingID) {
@@ -1332,12 +1340,16 @@ class Store {
         // this the local log is cleared and the synced one is not, and the
         // next snapshot puts every record straight back. Strictly, and in the
         // same link as the wipe, so the ids are exactly what was wiped.
+        //
+        // Each collection's remote deletes go out as soon as ITS wipe commits.
+        // Holding them until both were wiped meant a failure on the second
+        // lost the first one's ids for good: a retry reads an empty log, and
+        // the remote copies outlive the clear and come back.
         const wipe = records => ({ write: true, records: [], value: records.map(r => r.id) });
-        const sightingIDs = await this._withRecords(KEY_SIGHTINGS, wipe);
-        const placeIDs = await this._withRecords(KEY_PLACES, wipe);
+        const sightingIDs = await this._withRecords(KEY_SIGHTINGS, wipe, 'sightingsChanged');
         this._syncDeleteMany('sightings', sightingIDs);
+        const placeIDs = await this._withRecords(KEY_PLACES, wipe, 'sightingsChanged');
         this._syncDeleteMany('places', placeIDs);
-        eventBus.$emit('sightingsChanged');
     }
 
     // ---- Live listening sessions (Past Sessions) ---------------------------
@@ -1818,16 +1830,18 @@ class Store {
                 await this._harvestAiSummaries(items);
                 const restored = await this._reapplyAiSummaries(items);
                 // Through the write chain, so a local edit in flight cannot
-                // interleave with this replacement.
+                // interleave with this replacement — and the repair push goes
+                // out from inside it, for the reason given in _updateFavourites.
                 try {
-                    await this._withRecords('favouriteItems', () => {
+                    await this._withRecords('favouriteItems', async () => {
                         this._invalidateFavouriteCache();
-                        return { write: true, records: items };
+                        await this._dbSetStrict('favouriteItems', items);
+                        if (restored && this.currentUser) pushFavourites(this.currentUser.uid, items);
+                        return null;
                     });
                 } catch (e) {
                     console.error('IndexedDB write error (favouriteItems)', e);
                 }
-                if (restored && this.currentUser) pushFavourites(this.currentUser.uid, items);
                 eventBus.$emit('syncComplete');
             }
         });
