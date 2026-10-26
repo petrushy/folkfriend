@@ -411,17 +411,33 @@ class Store {
         }
     }
 
+    // For DISPLAY only. A failed read answers [], which is right for rendering
+    // a list and wrong as the input to a write — anything that changes the
+    // favourites goes through _updateFavourites, which reads strictly.
     async getFavourites() {
-        let items;
         try {
-            items = await get('favouriteItems') || [];
+            const stored = await get('favouriteItems') || [];
+            return (await this._normaliseFavourites(stored)).items;
         } catch (e) {
             console.error('IndexedDB read error (favouriteItems)', e);
             return [];
         }
-        // Migrate items that still use the old folderId model → convert folder name to tag
-        const needsMigration = items.some(item => item.folderId !== undefined);
-        if (needsMigration) {
+    }
+
+    // Rejects on a failed read. For anything that sends the list somewhere —
+    // sync pushes it over the Firestore document, so [] there is a deletion.
+    async getFavouritesStrict() {
+        return (await this._normaliseFavourites(await get('favouriteItems') || [])).items;
+    }
+
+    // Brings a stored favourites array up to the current shape: converts the
+    // old folderId model to tags, and drops items with an invalid settingID
+    // (stored by a previous bug). In memory only; `changed` says whether the
+    // stored copy should be rewritten.
+    async _normaliseFavourites(stored) {
+        let items = stored;
+        let migratedFolders = false;
+        if (items.some(item => item && item.folderId !== undefined)) {
             const folders = await get('favouriteFolders') || [];
             const folderNameById = new Map(folders.map(f => [f.id, f.name]));
             items = items.map(item => {
@@ -433,26 +449,64 @@ class Store {
                 }
                 return item;
             });
-            await this._dbSet('favouriteItems', items);
-            await this._dbSet('favouriteFolders', []);
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+            migratedFolders = true;
         }
-        return items;
+        const valid = items.filter(f => f && f.result && this._isValidSettingID(f.result.settingID));
+        const dropped = valid.length !== items.length;
+        return { items: valid, changed: migratedFolders || dropped, migratedFolders };
+    }
+
+    // Every change to the favourites goes through here.
+    //
+    // Two things the callers used to get wrong, each of which loses favourites:
+    //
+    //  - The read was LENIENT. getFavourites() answers a failed read with [],
+    //    and a caller adding one star to that wrote a one-item list over the
+    //    user's whole collection — then pushed it to Firestore, which replaces
+    //    the document wholesale, so every other device adopted the loss.
+    //    _withRecords reads strictly: a failed read rejects and nothing is
+    //    written or pushed.
+    //  - Nothing was SERIALISED. Two quick stars both read the same array and
+    //    the second write discarded the first.
+    //
+    // `mutate(items)` either changes `items` in place and returns true, returns
+    // a replacement array, or returns a falsy value for "nothing to change".
+    // Resolves to whether the mutation changed anything.
+    async _updateFavourites(mutate) {
+        let migratedFolders = false;
+        let changed = false;
+        const written = await this._withRecords('favouriteItems', async stored => {
+            const normalised = await this._normaliseFavourites(stored);
+            migratedFolders = normalised.migratedFolders;
+            const outcome = await mutate(normalised.items);
+            changed = Boolean(outcome);
+            if (!changed && !normalised.changed) return null;
+            const records = Array.isArray(outcome) ? outcome : normalised.items;
+            // Invalidated inside the chain, before the write: a cache load is
+            // itself a link in this chain (_loadFavouriteIDs), so one queued
+            // behind this write cannot run until it has committed and will
+            // read the new list.
+            this._invalidateFavouriteCache();
+            return { write: true, records, value: records };
+        });
+        if (!written) return false;
+        if (migratedFolders) await this._dbSet('favouriteFolders', []);
+        if (this.currentUser) pushFavourites(this.currentUser.uid, written);
+        return changed;
     }
 
     async addTagToFavourite(settingID, tag) {
         settingID = String(settingID);
         tag = tag.trim();
         if (!tag) return;
-        this._invalidateFavouriteCache();
-        const items = await this.getFavourites();
-        const item = items.find(f => String(f.result.settingID) === settingID);
-        if (item) {
+        await this._updateFavourites(items => {
+            const item = items.find(f => String(f.result.settingID) === settingID);
+            if (!item) return false;
             if (!item.tags) item.tags = [];
-            if (!item.tags.includes(tag)) item.tags.push(tag);
-            await this._dbSet('favouriteItems', items);
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
-        }
+            if (item.tags.includes(tag)) return false;
+            item.tags.push(tag);
+            return true;
+        });
     }
 
     async getAllTags() {
@@ -464,38 +518,40 @@ class Store {
 
     async removeTagFromFavourite(settingID, tag) {
         settingID = String(settingID);
-        this._invalidateFavouriteCache();
-        const items = await this.getFavourites();
-        const item = items.find(f => String(f.result.settingID) === settingID);
-        if (item && item.tags) {
+        await this._updateFavourites(items => {
+            const item = items.find(f => String(f.result.settingID) === settingID);
+            if (!item || !item.tags || !item.tags.includes(tag)) return false;
             item.tags = item.tags.filter(t => t !== tag);
-            await this._dbSet('favouriteItems', items);
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
-        }
+            return true;
+        });
     }
 
     async renameTag(oldName, newName) {
         newName = newName.trim();
         if (!newName || oldName === newName) return;
-        this._invalidateFavouriteCache();
-        const items = await this.getFavourites();
-        items.forEach(item => {
-            if (item.tags && item.tags.includes(oldName)) {
-                item.tags = item.tags.map(t => (t === oldName ? newName : t));
-            }
+        await this._updateFavourites(items => {
+            let changed = false;
+            items.forEach(item => {
+                if (item.tags && item.tags.includes(oldName)) {
+                    item.tags = item.tags.map(t => (t === oldName ? newName : t));
+                    changed = true;
+                }
+            });
+            return changed;
         });
-        await this._dbSet('favouriteItems', items);
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
     async deleteTag(name) {
-        this._invalidateFavouriteCache();
-        const items = await this.getFavourites();
-        items.forEach(item => {
-            if (item.tags) item.tags = item.tags.filter(t => t !== name);
+        await this._updateFavourites(items => {
+            let changed = false;
+            items.forEach(item => {
+                if (item.tags && item.tags.includes(name)) {
+                    item.tags = item.tags.filter(t => t !== name);
+                    changed = true;
+                }
+            });
+            return changed;
         });
-        await this._dbSet('favouriteItems', items);
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
     }
 
     _isValidSettingID(settingID) {
@@ -505,12 +561,22 @@ class Store {
 
     async _loadFavouriteIDs() {
         if (this._favouriteIDs === null) {
-            let items = await this.getFavourites();
-            // Clean up any items with invalid settingIDs (stored from a previous bug)
-            const clean = items.filter(f => this._isValidSettingID(f.result.settingID));
-            if (clean.length !== items.length) {
-                await this._dbSet('favouriteItems', clean);
-                items = clean;
+            // Read as a link in the write chain, so a load can never land
+            // between a write committing and _updateFavourites invalidating
+            // the cache, and cache a list that predates the write.
+            let items;
+            try {
+                items = await this._withRecords('favouriteItems', async stored => {
+                    const { items: normalised, changed } = await this._normaliseFavourites(stored);
+                    // Persist the clean-up. Lenient on purpose: the read
+                    // succeeded, so this cannot write over anything unread, and
+                    // failing to tidy must not stop the stars from showing.
+                    if (changed) await this._dbSet('favouriteItems', normalised);
+                    return { value: normalised };
+                });
+            } catch (e) {
+                console.error('IndexedDB read error (favouriteItems)', e);
+                items = [];
             }
             this._favouriteIDs = new Set(items.map(f => String(f.result.settingID)));
             this._favouriteTuneIDs = new Set(
@@ -553,18 +619,14 @@ class Store {
             return;
         }
         result = { ...result, settingID: String(result.settingID) };
-        const ids = await this._loadFavouriteIDs();
-        if (!ids.has(result.settingID)) {
-            const items = await this.getFavourites();
+        // Decided against the list as read inside the chain, not the cached
+        // ID set, which can predate a write still in flight.
+        const added = await this._updateFavourites(items => {
+            if (items.some(f => String(f.result.settingID) === result.settingID)) return false;
             items.unshift(new FavouriteItem(result));
-            await this._dbSet('favouriteItems', items);
-            ids.add(result.settingID);
-            if (this._favouriteTuneIDs && result.setting && result.setting.tune_id) {
-                this._favouriteTuneIDs.add(String(result.setting.tune_id));
-            }
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
-            this._autoGenerateNote(result);
-        }
+            return true;
+        });
+        if (added) this._autoGenerateNote(result);
     }
 
     // Starring a tune writes its background note, when AI notes are on and a key
@@ -602,11 +664,10 @@ class Store {
 
     async removeFavourite(settingID) {
         settingID = String(settingID);
-        const items = (await this.getFavourites()).filter(f => String(f.result.settingID) !== settingID);
-        await this._dbSet('favouriteItems', items);
-        // Invalidate both caches — tune may still be favourited via another setting
-        this._invalidateFavouriteCache();
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        await this._updateFavourites(items => {
+            const kept = items.filter(f => String(f.result.settingID) !== settingID);
+            return kept.length !== items.length && kept;
+        });
     }
 
     async isFavourite(settingID) {
@@ -641,13 +702,12 @@ class Store {
 
     async setFavouriteTempo(settingID, tempoPercent) {
         settingID = String(settingID);
-        const items = await this.getFavourites();
-        const item = items.find(f => String(f.result.settingID) === settingID);
-        if (!item) return; // not a favourite — nothing to save
-        item.tempo = tempoPercent;
-        if (this._favouriteTempoCache) this._favouriteTempoCache.set(settingID, tempoPercent);
-        await this._dbSet('favouriteItems', items);
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        await this._updateFavourites(items => {
+            const item = items.find(f => String(f.result.settingID) === settingID);
+            if (!item) return false; // not a favourite — nothing to save
+            item.tempo = tempoPercent;
+            return true;
+        });
     }
 
     // Semitones the score is shown and played transposed, -12..12. Stored on
@@ -662,13 +722,12 @@ class Store {
     async setFavouriteTranspose(settingID, semitones) {
         settingID = String(settingID);
         const value = clampTranspose(semitones);
-        const items = await this.getFavourites();
-        const item = items.find(f => String(f.result.settingID) === settingID);
-        if (!item) return; // not a favourite — nothing to save
-        item.transpose = value;
-        if (this._favouriteTransposeCache) this._favouriteTransposeCache.set(settingID, value);
-        await this._dbSet('favouriteItems', items);
-        if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        await this._updateFavourites(items => {
+            const item = items.find(f => String(f.result.settingID) === settingID);
+            if (!item) return false; // not a favourite — nothing to save
+            item.transpose = value;
+            return true;
+        });
     }
 
     // ---- Anthropic API key -------------------------------------------------
@@ -802,23 +861,28 @@ class Store {
         // channel that syncs — sync.js knows about the favourites document and
         // nothing else — so a summary generated on the phone reaches the laptop
         // for tunes the user cares enough to have starred.
-        const items = await this.getFavourites();
-        let touched = false;
-        for (const item of items) {
-            const itemTuneID = item.result && item.result.setting && item.result.setting.tune_id;
-            if (itemTuneID != null && String(itemTuneID) === tuneID) {
-                item.aiSummary = stored;
-                // Regenerating after a clear must win. The tombstone is only
-                // meaningful against an older summary, and this one is newer by
-                // construction, so drop it rather than leave a stale marker for
-                // the comparison in _harvestAiSummaries to reason about.
-                delete item.aiSummaryDeletedAt;
-                touched = true;
-            }
-        }
-        if (touched) {
-            await this._dbSet('favouriteItems', items);
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
+        //
+        // A failure here is logged, not thrown: the note is already in the
+        // durable cache above, and only its synced copy is missing.
+        try {
+            await this._updateFavourites(items => {
+                let touched = false;
+                for (const item of items) {
+                    const itemTuneID = item.result && item.result.setting && item.result.setting.tune_id;
+                    if (itemTuneID != null && String(itemTuneID) === tuneID) {
+                        item.aiSummary = stored;
+                        // Regenerating after a clear must win. The tombstone is only
+                        // meaningful against an older summary, and this one is newer by
+                        // construction, so drop it rather than leave a stale marker for
+                        // the comparison in _harvestAiSummaries to reason about.
+                        delete item.aiSummaryDeletedAt;
+                        touched = true;
+                    }
+                }
+                return touched;
+            });
+        } catch (e) {
+            console.error('Could not mirror the note onto favourites', e);
         }
     }
 
@@ -844,15 +908,13 @@ class Store {
         const deletedAt = Date.now();
         localStorage.setItem(AI_CLEARED_AT_STORAGE_KEY, String(deletedAt));
 
-        const items = await this.getFavourites();
-        for (const item of items) {
-            delete item.aiSummary;
-            item.aiSummaryDeletedAt = deletedAt;
-        }
-        if (items.length) {
-            await this._dbSet('favouriteItems', items);
-            if (this.currentUser) pushFavourites(this.currentUser.uid, items);
-        }
+        await this._updateFavourites(items => {
+            for (const item of items) {
+                delete item.aiSummary;
+                item.aiSummaryDeletedAt = deletedAt;
+            }
+            return items.length > 0;
+        });
     }
 
     // Adopt the newest clear-all this snapshot tells us about, and return the
@@ -993,29 +1055,29 @@ class Store {
         await this._dbSet('historyItems', []);
     }
 
+    // Strict read through the write chain: a failed read used to be treated as
+    // an empty history and the new entry written over the whole of it. Callers
+    // fire and forget, so a failure is logged here and the history left as it
+    // was.
     async addToHistory(tuneHistoryItem) {
-        let historyItems;
         try {
-            historyItems = await get('historyItems') || [];
-        } catch (e) {
-            console.error('IndexedDB read error (historyItems)', e);
-            historyItems = [];
-        }
-
-        if (tuneHistoryItem.result.setting && tuneHistoryItem.result.setting.tune_id) {
-            let newTuneID = tuneHistoryItem.result.setting.tune_id;
-            for (let [i, oldHistoryItem] of historyItems.entries()) {
-                if (oldHistoryItem.result.setting && oldHistoryItem.result.setting.tune_id === newTuneID) {
-                    historyItems.splice(i, 1);
-                    break;
+            await this._withRecords('historyItems', historyItems => {
+                if (tuneHistoryItem.result.setting && tuneHistoryItem.result.setting.tune_id) {
+                    let newTuneID = tuneHistoryItem.result.setting.tune_id;
+                    for (let [i, oldHistoryItem] of historyItems.entries()) {
+                        if (oldHistoryItem.result.setting && oldHistoryItem.result.setting.tune_id === newTuneID) {
+                            historyItems.splice(i, 1);
+                            break;
+                        }
+                    }
                 }
-            }
+
+                historyItems.unshift(tuneHistoryItem);
+                return { write: true, records: historyItems.slice(0, 100) };
+            });
+        } catch (e) {
+            console.error('Could not add to history', e);
         }
-
-        historyItems.unshift(tuneHistoryItem);
-        historyItems = historyItems.slice(0, 100);
-
-        await this._dbSet('historyItems', historyItems);
     }
 
     // ---- Tune sightings (where a tune was heard) ---------------------------
@@ -1056,7 +1118,8 @@ class Store {
     } = {}) {
         if (tuneID == null || tuneID === '') return null;
 
-        const sightings = await this.getSightings();
+        // Places are only READ here, so the lenient getter is fine: a failed
+        // read records the sighting unplaced rather than losing it.
         const places = await this.getPlaces();
         const at = timestamp || Date.now();
 
@@ -1071,44 +1134,54 @@ class Store {
         // than against the unplaced bucket.
         const place = explicitPlace || (isValidFix(fix) ? matchPlace(fix, places) : null);
 
-        if (source === 'manual') {
-            // Deliberate acts are not deduplicated by time — the whole point is
-            // that the user is adding something the detector missed, possibly
-            // long after the fact. They ARE deduplicated by (tune, place): the
-            // UI says "this tune was heard here", which is a fact that is either
-            // true or not, so recording it twice adds nothing. The existing
-            // record is returned so the caller still sees success.
-            const already = sightings.find(s =>
-                String(s.tuneID) === String(tuneID) &&
-                (s.placeID || null) === (place ? place.id : null)
-            );
-            if (already) return already;
-        } else {
-            const duplicate = sightings.some(s =>
-                String(s.tuneID) === String(tuneID) &&
-                Math.abs((s.timestamp || 0) - at) < SIGHTING_DEDUP_MS
-            );
-            if (duplicate) return null;
-        }
+        // The duplicate checks and the write share one strict, serialised read
+        // of the log: two sightings landing together must both survive, and a
+        // failed read must not become an empty log with one entry written over it.
+        const outcome = await this._withRecords(KEY_SIGHTINGS, sightings => {
+            if (source === 'manual') {
+                // Deliberate acts are not deduplicated by time — the whole point is
+                // that the user is adding something the detector missed, possibly
+                // long after the fact. They ARE deduplicated by (tune, place): the
+                // UI says "this tune was heard here", which is a fact that is either
+                // true or not, so recording it twice adds nothing. The existing
+                // record is returned so the caller still sees success.
+                const already = sightings.find(s =>
+                    String(s.tuneID) === String(tuneID) &&
+                    (s.placeID || null) === (place ? place.id : null)
+                );
+                if (already) return { value: { sighting: already, isNew: false } };
+            } else {
+                const duplicate = sightings.some(s =>
+                    String(s.tuneID) === String(tuneID) &&
+                    Math.abs((s.timestamp || 0) - at) < SIGHTING_DEDUP_MS
+                );
+                if (duplicate) return null;
+            }
 
-        const sighting = {
-            id: `${at}-${tuneID}-${Math.random().toString(36).slice(2, 8)}`,
-            tuneID: String(tuneID),
-            settingID: settingID == null ? null : String(settingID),
-            displayName: displayName || '',
-            timestamp: at,
-            source, // 'live' | 'search' | 'manual' — how it came to be recorded
-            lat: isValidFix(fix) ? fix.lat : (explicitPlace ? explicitPlace.lat : null),
-            lon: isValidFix(fix) ? fix.lon : (explicitPlace ? explicitPlace.lon : null),
-            accuracy: isValidFix(fix) ? (fix.accuracy ?? null) : null,
-            placeID: place ? place.id : null,
-        };
+            const sighting = {
+                id: `${at}-${tuneID}-${Math.random().toString(36).slice(2, 8)}`,
+                tuneID: String(tuneID),
+                settingID: settingID == null ? null : String(settingID),
+                displayName: displayName || '',
+                timestamp: at,
+                source, // 'live' | 'search' | 'manual' — how it came to be recorded
+                lat: isValidFix(fix) ? fix.lat : (explicitPlace ? explicitPlace.lat : null),
+                lon: isValidFix(fix) ? fix.lon : (explicitPlace ? explicitPlace.lon : null),
+                accuracy: isValidFix(fix) ? (fix.accuracy ?? null) : null,
+                placeID: place ? place.id : null,
+            };
 
-        sightings.unshift(sighting);
-        await this._dbSet(KEY_SIGHTINGS, sightings.slice(0, MAX_SIGHTINGS));
-        this._syncPush('sightings', sighting);
-        eventBus.$emit('sightingsChanged');
-        return sighting;
+            sightings.unshift(sighting);
+            return {
+                write: true,
+                records: sightings.slice(0, MAX_SIGHTINGS),
+                value: { sighting, isNew: true },
+            };
+        }, 'sightingsChanged');
+
+        if (!outcome) return null;
+        if (outcome.isNew) this._syncPush('sightings', outcome.sighting);
+        return outcome.sighting;
     }
 
     // Un-tags a tune from a place: "we never actually played this here".
@@ -1127,16 +1200,19 @@ class Store {
     async removeTuneFromPlace(tuneID, placeID = null) {
         if (tuneID == null || tuneID === '') return [];
         const target = placeID || null;
-        const sightings = await this.getSightings();
-        const removed = sightings.filter(s =>
-            String(s.tuneID) === String(tuneID) && (s.placeID || null) === target
-        );
-        if (!removed.length) return [];
-
-        const removedIDs = new Set(removed.map(s => s.id));
-        await this._dbSet(KEY_SIGHTINGS, sightings.filter(s => !removedIDs.has(s.id)));
-        this._syncDeleteMany('sightings', [...removedIDs]);
-        eventBus.$emit('sightingsChanged');
+        const removed = await this._withRecords(KEY_SIGHTINGS, sightings => {
+            const matching = sightings.filter(s =>
+                String(s.tuneID) === String(tuneID) && (s.placeID || null) === target
+            );
+            if (!matching.length) return { value: [] };
+            const removedIDs = new Set(matching.map(s => s.id));
+            return {
+                write: true,
+                records: sightings.filter(s => !removedIDs.has(s.id)),
+                value: matching,
+            };
+        }, 'sightingsChanged');
+        if (removed.length) this._syncDeleteMany('sightings', removed.map(s => s.id));
         return removed;
     }
 
@@ -1145,16 +1221,16 @@ class Store {
     // removal does not quietly rewrite when the tune was heard.
     async restoreSightings(records) {
         if (!Array.isArray(records) || !records.length) return;
-        const sightings = await this.getSightings();
-        const known = new Set(sightings.map(s => s.id));
-        const missing = records.filter(r => r && r.id && !known.has(r.id));
-        if (!missing.length) return;
-        const merged = [...missing, ...sightings]
-            .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-            .slice(0, MAX_SIGHTINGS);
-        await this._dbSet(KEY_SIGHTINGS, merged);
-        this._syncPushMany('sightings', missing);
-        eventBus.$emit('sightingsChanged');
+        const missing = await this._withRecords(KEY_SIGHTINGS, sightings => {
+            const known = new Set(sightings.map(s => s.id));
+            const absent = records.filter(r => r && r.id && !known.has(r.id));
+            if (!absent.length) return { value: [] };
+            const merged = [...absent, ...sightings]
+                .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+                .slice(0, MAX_SIGHTINGS);
+            return { write: true, records: merged, value: absent };
+        }, 'sightingsChanged');
+        if (missing.length) this._syncPushMany('sightings', missing);
     }
 
     // Names a location. `fix` is the centre — normally the leader of an unnamed
@@ -1167,41 +1243,47 @@ class Store {
         const centre = { lat: Number(lat), lon: Number(lon) };
         if (!isValidFix(centre)) return null;
 
-        const places = await this.getPlaces();
-        let place = id ? places.find(p => p.id === id) : null;
+        // Places first, then sightings, each through its own chain — one after
+        // the other, never one inside the other.
+        const place = await this._withRecords(KEY_PLACES, places => {
+            let found = id ? places.find(p => p.id === id) : null;
+            if (found) {
+                found.name = trimmed;
+                found.lat = centre.lat;
+                found.lon = centre.lon;
+                found.radiusM = radiusM;
+            } else {
+                found = {
+                    id: `place-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+                    name: trimmed,
+                    lat: centre.lat,
+                    lon: centre.lon,
+                    radiusM,
+                    createdAt: Date.now(),
+                };
+                places.push(found);
+            }
+            return { write: true, records: places, value: found };
+        });
 
-        if (place) {
-            place.name = trimmed;
-            place.lat = centre.lat;
-            place.lon = centre.lon;
-            place.radiusM = radiusM;
-        } else {
-            place = {
-                id: `place-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-                name: trimmed,
-                lat: centre.lat,
-                lon: centre.lon,
-                radiusM,
-                createdAt: Date.now(),
-            };
-            places.push(place);
-        }
-        await this._dbSet(KEY_PLACES, places);
-
-        const sightings = await this.getSightings();
-        const adopting = new Set(sightingsToAdopt(place, sightings).map(s => s.id));
-        if (adopting.size) {
+        const adopted = await this._withRecords(KEY_SIGHTINGS, sightings => {
+            const adopting = new Set(sightingsToAdopt(place, sightings).map(s => s.id));
+            if (!adopting.size) return { value: [] };
             for (const sighting of sightings) {
                 if (adopting.has(sighting.id)) sighting.placeID = place.id;
             }
-            await this._dbSet(KEY_SIGHTINGS, sightings);
-        }
+            return {
+                write: true,
+                records: sightings,
+                value: sightings.filter(s => adopting.has(s.id)),
+            };
+        });
 
         this._syncPush('places', place);
         // Naming is retroactive, so it rewrites the placeID of every sighting
         // it adopted — those have to go up too, or the other device keeps
         // showing them as unplaced under a name it can already see.
-        this._syncPushMany('sightings', sightings.filter(s => adopting.has(s.id)));
+        this._syncPushMany('sightings', adopted);
         eventBus.$emit('sightingsChanged');
         return place;
     }
@@ -1211,18 +1293,21 @@ class Store {
     // evening's log because a name was tidied up would be the same class of
     // mistake as deleting the offline index on a failed update.
     async deletePlace(placeID) {
-        const places = (await this.getPlaces()).filter(p => p.id !== placeID);
-        await this._dbSet(KEY_PLACES, places);
+        await this._withRecords(KEY_PLACES, places => ({
+            write: true,
+            records: places.filter(p => p.id !== placeID),
+        }));
 
-        const sightings = await this.getSightings();
-        const orphaned = [];
-        for (const sighting of sightings) {
-            if (sighting.placeID === placeID) {
-                sighting.placeID = null;
-                orphaned.push(sighting);
+        const orphaned = await this._withRecords(KEY_SIGHTINGS, sightings => {
+            const unplaced = [];
+            for (const sighting of sightings) {
+                if (sighting.placeID === placeID) {
+                    sighting.placeID = null;
+                    unplaced.push(sighting);
+                }
             }
-        }
-        if (orphaned.length) await this._dbSet(KEY_SIGHTINGS, sightings);
+            return { write: unplaced.length > 0, records: sightings, value: unplaced };
+        });
 
         this._syncDelete('places', placeID);
         // The sightings survive the name being deleted, so they are UPDATED
@@ -1233,8 +1318,10 @@ class Store {
     }
 
     async deleteSighting(sightingID) {
-        const sightings = (await this.getSightings()).filter(s => s.id !== sightingID);
-        await this._dbSet(KEY_SIGHTINGS, sightings);
+        await this._withRecords(KEY_SIGHTINGS, sightings => ({
+            write: true,
+            records: sightings.filter(s => s.id !== sightingID),
+        }));
         this._syncDelete('sightings', sightingID);
         eventBus.$emit('sightingsChanged');
     }
@@ -1243,11 +1330,11 @@ class Store {
         // Read before wiping: the remote copies are addressed by id, so the
         // ids have to be collected while they still exist locally. Without
         // this the local log is cleared and the synced one is not, and the
-        // next snapshot puts every record straight back.
-        const sightingIDs = (await this.getSightings()).map(s => s.id);
-        const placeIDs = (await this.getPlaces()).map(p => p.id);
-        await this._dbSet(KEY_SIGHTINGS, []);
-        await this._dbSet(KEY_PLACES, []);
+        // next snapshot puts every record straight back. Strictly, and in the
+        // same link as the wipe, so the ids are exactly what was wiped.
+        const wipe = records => ({ write: true, records: [], value: records.map(r => r.id) });
+        const sightingIDs = await this._withRecords(KEY_SIGHTINGS, wipe);
+        const placeIDs = await this._withRecords(KEY_PLACES, wipe);
         this._syncDeleteMany('sightings', sightingIDs);
         this._syncDeleteMany('places', placeIDs);
         eventBus.$emit('sightingsChanged');
@@ -1721,7 +1808,7 @@ class Store {
         // Set before the listeners, since seeding pushes local-only records and
         // every push reads this.currentUser to address them.
         this._unsubscribeRecordSync = this._subscribeRecordCollections(user.uid);
-        this._unsubscribeSync = syncSubscribe(user.uid, () => this.getFavourites(), async (type, items) => {
+        this._unsubscribeSync = syncSubscribe(user.uid, () => this.getFavouritesStrict(), async (type, items) => {
             if (type === 'favourites') {
                 // The incoming array replaces the local one wholesale, so AI
                 // summaries have to be reconciled around that write: harvest
@@ -1730,8 +1817,16 @@ class Store {
                 // cannot silently delete them.
                 await this._harvestAiSummaries(items);
                 const restored = await this._reapplyAiSummaries(items);
-                await this._dbSet('favouriteItems', items);
-                this._invalidateFavouriteCache();
+                // Through the write chain, so a local edit in flight cannot
+                // interleave with this replacement.
+                try {
+                    await this._withRecords('favouriteItems', () => {
+                        this._invalidateFavouriteCache();
+                        return { write: true, records: items };
+                    });
+                } catch (e) {
+                    console.error('IndexedDB write error (favouriteItems)', e);
+                }
                 if (restored && this.currentUser) pushFavourites(this.currentUser.uid, items);
                 eventBus.$emit('syncComplete');
             }

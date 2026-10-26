@@ -989,6 +989,7 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 - First snapshot: if Firestore has no data (first device ever), seeds from local IndexedDB; otherwise replaces local with Firestore data
 - Subsequent snapshots: fire in real-time when any device writes favourites, update IndexedDB and emit `syncComplete` on `eventBus`
 - On every favourites write (`addFavourite`, `removeFavourite`): pushes the full updated array to Firestore immediately, with a `clientUpdatedAt` millis timestamp mirrored to localStorage so a stale echoed snapshot can't overwrite newer local data
+- **Every favourites write goes through `store._updateFavourites`** (October 2026), i.e. `_withRecords`: serialised per key, from a STRICT read. `getFavourites()` is lenient (`[]` on a failed read) and is for display only. Mutating on top of it wrote one star over the whole collection and pushed that over the Firestore document, which every device adopts. Two quick stars also lost one. Sightings, places and history are written through `_withRecords` for the same reason. The `getLocal` that sync.js pushes from (`getFavouritesStrict`) must reject rather than answer `[]`.
 - `addToHistory` writes only to IndexedDB. There is no Firestore mirror and no `onSnapshot` listener for history.
 - On sign-out: the favourites `onSnapshot` listener is unsubscribed
 - Firestore is the source of truth for favourites — deletions propagate correctly; no additive-merge that would re-add removed items

@@ -263,6 +263,42 @@ async function run() {
 
     // --- half 2: store.js, against a fake sync layer ------------------------
 
+    console.log('\nsync.js — favourites never push an unread list');
+
+    // Whatever getLocal returns is written OVER the favourites document, which
+    // every device then adopts. So a local copy that could not be read must
+    // push nothing at all — pushing [] deletes every favourite everywhere.
+    function favouritesSnapshot(data) {
+        return { exists: () => data !== null, data: () => data };
+    }
+
+    await test('a failed local read is not pushed when local looks newer', async () => {
+        const { sync, firestore } = await loadSync();
+        localStorage.setItem('favouritesLocalUpdatedAt', '2000');
+        sync.subscribe('u1', async () => { throw new Error('read failed'); }, () => {});
+
+        await firestore.__listeners[0].onNext(favouritesSnapshot({ items: [{ id: 1 }], clientUpdatedAt: 1000 }));
+
+        assert.deepEqual(firestore.__writes, [], 'nothing replaces the remote document');
+    });
+
+    await test('a failed local read does not seed, and the next snapshot retries', async () => {
+        const { sync, firestore } = await loadSync();
+        let fail = true;
+        sync.subscribe('u1', async () => {
+            if (fail) throw new Error('read failed');
+            return [{ id: 'local' }];
+        }, () => {});
+
+        await firestore.__listeners[0].onNext(favouritesSnapshot(null));
+        assert.deepEqual(firestore.__writes, [], 'no empty seed');
+
+        fail = false;
+        await firestore.__listeners[0].onNext(favouritesSnapshot(null));
+        assert.equal(firestore.__writes.length, 1);
+        assert.deepEqual(firestore.__writes[0].data.items, [{ id: 'local' }]);
+    });
+
     console.log('\nstore.js — what each change pushes');
 
     await test('a sighting is pushed as its own document', async () => {
@@ -584,6 +620,141 @@ async function run() {
         );
     });
 
+    console.log('\nstore.js — favourites, sightings and history are written from a strict, serialised read');
+
+    const fav = (settingID, tuneID, extra = {}) => ({
+        result: { settingID, setting: { tune_id: tuneID, setting_id: settingID }, displayName: `Tune ${tuneID}` },
+        timestamp: 1,
+        ...extra,
+    });
+    const storedFavouriteIDs = idb => (idb.__db.get('favouriteItems') || []).map(f => f.result.settingID);
+
+    await test('a failed favourites read does not write one star over the collection', async () => {
+        // getFavourites() answers a failed read with [], and every mutation
+        // used to build on it: starring one tune stored a one-item list and
+        // pushed it over the Firestore document, which every device adopts.
+        const { store, idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10'), fav('2', '20')]);
+
+        idb.__failReadsOf('favouriteItems');
+        try {
+            await assert.rejects(store.addFavourite({
+                settingID: '3', setting: { tune_id: '30', setting_id: '3' }, displayName: 'New',
+            }));
+        } finally { idb.__allowAll(); }
+
+        assert.deepEqual(storedFavouriteIDs(idb), ['1', '2'], 'the collection is untouched');
+        assert.deepEqual(sync.__pushes, [], 'and nothing reaches Firestore');
+    });
+
+    await test('every favourites mutation refuses on a failed read', async () => {
+        const { store, idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10', { tags: ['reel'] })]);
+
+        idb.__failReadsOf('favouriteItems');
+        try {
+            for (const call of [
+                () => store.removeFavourite('1'),
+                () => store.addTagToFavourite('1', 'jig'),
+                () => store.removeTagFromFavourite('1', 'reel'),
+                () => store.renameTag('reel', 'jig'),
+                () => store.deleteTag('reel'),
+                () => store.setFavouriteTempo('1', 80),
+                () => store.setFavouriteTranspose('1', 2),
+                () => store.clearAiSummaries(),
+            ]) await assert.rejects(call());
+        } finally { idb.__allowAll(); }
+
+        assert.deepEqual(idb.__db.get('favouriteItems'), [fav('1', '10', { tags: ['reel'] })]);
+        assert.deepEqual(sync.__pushes, []);
+    });
+
+    await test('two stars at the same moment are both kept', async () => {
+        const { store, idb, sync } = await signedInStore();
+        await Promise.all([
+            store.addFavourite({ settingID: '1', setting: { tune_id: '10' }, displayName: 'A' }),
+            store.addFavourite({ settingID: '2', setting: { tune_id: '20' }, displayName: 'B' }),
+        ]);
+
+        assert.deepEqual(new Set(storedFavouriteIDs(idb)), new Set(['1', '2']));
+        const lastPush = sync.__pushes[sync.__pushes.length - 1];
+        assert.deepEqual(new Set(lastPush.map(f => f.result.settingID)), new Set(['1', '2']),
+            'and the document Firestore ends up with has both');
+    });
+
+    await test('a tag added while a star lands is kept', async () => {
+        const { store, idb } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10')]);
+        await Promise.all([
+            store.addTagToFavourite('1', 'reel'),
+            store.addFavourite({ settingID: '2', setting: { tune_id: '20' }, displayName: 'B' }),
+        ]);
+
+        const items = idb.__db.get('favouriteItems');
+        assert.deepEqual(new Set(items.map(f => f.result.settingID)), new Set(['1', '2']));
+        assert.deepEqual(items.find(f => f.result.settingID === '1').tags, ['reel']);
+    });
+
+    await test('the star cache never answers from before a write it raced', async () => {
+        // A cache load reading just before a write commits, and assigning just
+        // after it is invalidated, would cache the old list until the next edit.
+        const { store } = await signedInStore();
+        const [, seen] = await Promise.all([
+            store.addFavourite({ settingID: '1', setting: { tune_id: '10' }, displayName: 'A' }),
+            store.isFavourite('1'),
+        ]);
+        assert.equal(seen, true, 'the check queued behind the write sees it');
+        assert.equal(await store.isFavourite('1'), true);
+    });
+
+    await test('a failed sightings read does not write one sighting over the log', async () => {
+        const { store, idb, sync } = await signedInStore();
+        const existing = { id: 's1', tuneID: '42', timestamp: 1, placeID: null };
+        idb.__db.set('tuneSightings', [existing]);
+
+        idb.__failReadsOf('tuneSightings');
+        try {
+            await assert.rejects(store.addSighting({ tuneID: '43', fix: COBBLESTONE }));
+            await assert.rejects(store.removeTuneFromPlace('42', null));
+            await assert.rejects(store.clearSightings());
+        } finally { idb.__allowAll(); }
+
+        assert.deepEqual(idb.__db.get('tuneSightings'), [existing]);
+        assert.deepEqual(sync.__records.filter(r => r.name === 'sightings'), []);
+    });
+
+    await test('two sightings at the same moment are both kept', async () => {
+        const { store, idb } = await signedInStore();
+        await Promise.all([
+            store.addSighting({ tuneID: '42', fix: COBBLESTONE }),
+            store.addSighting({ tuneID: '43', fix: COBBLESTONE }),
+        ]);
+        assert.deepEqual(new Set(idb.__db.get('tuneSightings').map(s => s.tuneID)), new Set(['42', '43']));
+    });
+
+    await test('naming a place while a sighting lands keeps the sighting', async () => {
+        const { store, idb } = await signedInStore();
+        await Promise.all([
+            store.namePlace({ name: 'The Cobblestone', ...COBBLESTONE }),
+            store.addSighting({ tuneID: '42', fix: NEARBY }),
+        ]);
+        assert.deepEqual(idb.__db.get('tuneSightings').map(s => s.tuneID), ['42']);
+        assert.equal(idb.__db.get('places').length, 1);
+    });
+
+    await test('a failed history read leaves the history as it was', async () => {
+        const { store, idb } = await signedInStore();
+        const old = { result: { setting: { tune_id: '1' } }, timestamp: 1 };
+        idb.__db.set('historyItems', [old]);
+
+        idb.__failReadsOf('historyItems');
+        try {
+            await store.addToHistory({ result: { setting: { tune_id: '2' } }, timestamp: 2 });
+        } finally { idb.__allowAll(); }
+
+        assert.deepEqual(idb.__db.get('historyItems'), [old]);
+    });
+
     await test('signing out stops the collection listeners', async () => {
         const { store, sync } = await signedInStore();
         assert.equal(sync.__subs.length, 3, 'places, sightings and sessions');
@@ -635,12 +806,16 @@ export const __db = new Map();
 const __failReads = new Set();
 export function __failReadsOf(key) { __failReads.add(key); }
 export function __allowAll() { __failReads.clear(); }
+// Values are CLONED in and out, as IndexedDB's structured clone does. Handing
+// every reader the same array would let two overlapping read-modify-writes
+// both mutate one object, and a lost-write test would pass against
+// unserialised code.
 export async function get(key) {
     await tick();
     if (__failReads.has(key)) throw new Error('read failed');
-    return __db.get(key);
+    return structuredClone(__db.get(key));
 }
-export async function set(key, value) { await tick(); __db.set(key, value); }
+export async function set(key, value) { await tick(); __db.set(key, structuredClone(value)); }
 export async function del(key) { await tick(); __db.delete(key); }
 `,
     'fake-sync.mjs': FAKE_SYNC,

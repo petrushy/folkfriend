@@ -165,6 +165,9 @@ export default {
                 }
                 this.$emit('added', sighting);
                 this.open = false;
+            } catch (e) {
+                console.error('Could not save sighting', e);
+                this.error = 'Could not save that.';
             } finally {
                 this.saving = false;
             }
