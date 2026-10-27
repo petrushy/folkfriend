@@ -3,7 +3,7 @@
 // Run with:  npm run test:rules
 //   (which is `firebase emulators:exec --only firestore` around this file —
 //    it needs the emulator and therefore Java, so it is deliberately NOT in
-//    the `npm test` chain, which stays dependency-free and fast.)
+//    `npm test`, which stays dependency-free and fast; test/run.mjs excludes it.)
 //
 // ⚠️ firebase-tools 14+ requires JDK 21. On a machine with an older JDK the
 // emulator refuses to start with "no longer supports Java version before 21",

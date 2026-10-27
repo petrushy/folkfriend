@@ -791,6 +791,12 @@ modes it was: never saved, or saved-then-evicted.
 
 ### Tests
 
+`npm test` is `test/run.mjs`, which discovers every `test/*.test.mjs` and runs
+each in its own process, in parallel, reporting every failure rather than the
+first. A new test file needs no registration. Files run concurrently, so each
+must write its scratch copies to a directory of its own (`--serial` rules a race
+in or out). `node test/run.mjs mic sessionAudio` runs a subset.
+
 - `app/test/tune-index-cache.test.mjs` (30 cases) — the store and network layers
   with in-memory fakes. Quota failure, partial writes, corrupt payloads, legacy
   reads, stall aborts, the datasets manifest, filename validation, and the
@@ -2826,8 +2832,8 @@ user's evening quietly not leaving their phone.
 cd app && npm run test:rules
 ```
 
-It is **not** in the `npm test` chain: it needs the emulator, and therefore
-Java, which that chain deliberately does not require.
+It is **not** in `npm test`: it needs the emulator, and therefore Java, which
+`npm test` deliberately does not require. `test/run.mjs` excludes it by name.
 
 > ⚠️ **firebase-tools 14+ requires JDK 21.** With an older JDK the emulator
 > refuses to start, with a message that has nothing to do with the rules. The
@@ -3496,7 +3502,7 @@ while an export is a snapshot that does not.
 
 #### Tests
 
-`app/test/sightings.test.mjs` (40 cases, in the `npm test` chain) — geometry and
+`app/test/sightings.test.mjs` (40 cases, in `npm test`) — geometry and
 clustering, the store log, and the geo service, with `store.js` and `geo.js`
 loaded from source against in-memory fakes and a scriptable `navigator.geolocation`.
 `places.mjs` is used **for real** rather than faked: it is pure geometry with no
@@ -4012,7 +4018,7 @@ mid-setup can't be routed to the wrong sink. `set_sample_rate` is a no-op in
 WASM when the rate is unchanged, so re-opening mid-session doesn't disturb
 audio already fed to the backend.
 
-**Tests:** `app/test/mic.test.mjs` (14 cases, in the `npm test` chain). Fakes the
+**Tests:** `app/test/mic.test.mjs` (14 cases, in `npm test`). Fakes the
 `getUserMedia`/Web Audio surface so the dead-track, muted-track, live-but-silent,
 background, foreground-return, failed-recovery and stop-during-recovery paths are
 all covered without a browser. Note that "live but silent" and "track ended" fail
