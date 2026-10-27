@@ -179,8 +179,8 @@ export default {
                 body = filtered.join('\n');
             }
             const maxBars = this.abcPreviewDisplayWidth < 300 ? 2
-                          : this.abcPreviewDisplayWidth < 390 ? 3
-                          : 4;
+                : this.abcPreviewDisplayWidth < 390 ? 3
+                    : 4;
             const targetPipes = maxBars + 1;
             let count = 0;
             let cutAt = body.length;

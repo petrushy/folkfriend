@@ -5,19 +5,19 @@ import { getFirestore, enableMultiTabIndexedDbPersistence } from 'firebase/fires
 // This **IS** okay to be public !!!
 const firebaseConfig = {
 
-  apiKey: "AIzaSyBrECdxMrbjPWWFkTu_Riqo2s1dbSVfjvM",
+  apiKey: 'AIzaSyBrECdxMrbjPWWFkTu_Riqo2s1dbSVfjvM',
 
-  authDomain: "folkfriend-petrush-fork.firebaseapp.com",
+  authDomain: 'folkfriend-petrush-fork.firebaseapp.com',
 
-  projectId: "folkfriend-petrush-fork",
+  projectId: 'folkfriend-petrush-fork',
 
-  storageBucket: "folkfriend-petrush-fork.firebasestorage.app",
+  storageBucket: 'folkfriend-petrush-fork.firebasestorage.app',
 
-  messagingSenderId: "253027926478",
+  messagingSenderId: '253027926478',
 
-  appId: "1:253027926478:web:08b816f209f93809de2b9f",
+  appId: '1:253027926478:web:08b816f209f93809de2b9f',
 
-  measurementId: "G-7WY6R8QZVD"
+  measurementId: 'G-7WY6R8QZVD'
 
 };
 

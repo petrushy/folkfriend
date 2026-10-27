@@ -135,7 +135,7 @@
 </template>
 <script>
 import { dropboxState, backupStatus, connectDropbox, disconnectDropbox, syncDropbox, restoreDropboxSessions, setWholeRecordings,
-    deleteDropboxCopy, deleteLocalCopy, enableSessionBackup, refreshDropboxStorage, sessionConflictMessage, sessionConflict, resolveSessionConflict } from '@/services/dropbox.js';
+         deleteDropboxCopy, deleteLocalCopy, enableSessionBackup, refreshDropboxStorage, sessionConflictMessage, sessionConflict, resolveSessionConflict } from '@/services/dropbox.js';
 import { formatBytes } from '@/services/sessionAudioStore.js';
 export default {
     name: 'DropboxBackup',

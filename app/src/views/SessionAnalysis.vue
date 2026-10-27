@@ -29,10 +29,10 @@
             <v-card class="pa-5">
                 <h2 class="text-h6 mb-3">Open a session</h2>
                 <v-autocomplete v-if="sessionPicker"
-                    :items="pastSessions" item-value="id" :item-text="sessionLabel" :filter="filterSession"
-                    label="Search by name, date or place" clearable autofocus
-                    :loading="pickerLoading" :menu-props="{ maxHeight: 320 }"
-                    no-data-text="No saved sessions" @change="selectSession"
+                                :items="pastSessions" item-value="id" :item-text="sessionLabel" :filter="filterSession"
+                                label="Search by name, date or place" clearable autofocus
+                                :loading="pickerLoading" :menu-props="{ maxHeight: 320 }"
+                                no-data-text="No saved sessions" @change="selectSession"
                 />
                 <p class="caption text--secondary">Opening a saved session keeps current listening running.</p>
                 <v-btn text @click="sessionPicker = false">Close</v-btn>
@@ -41,7 +41,7 @@
 
         <v-card v-if="viewMode !== 'file' && activeSession" class="pa-5 my-3">
             <v-text-field :value="activeSession.name || sessionLabel(activeSession)" label="Session name"
-                maxlength="160" hide-details class="mb-3" :disabled="workspaceBusy" @change="renameSession" />
+                          maxlength="160" hide-details class="mb-3" :disabled="workspaceBusy" @change="renameSession" />
             <p class="caption text--secondary">
                 {{ formatSessionDate(activeSession.startedAt) }} · {{ formatSecondsAsDuration(activeListenedSeconds) }} listened.
                 Changes are saved automatically.
@@ -538,7 +538,7 @@
                                         </v-icon>
                                     </v-btn>
                                     <v-btn icon small :aria-label="isTuneFavourited(detection) ? 'Remove favourite' : 'Add favourite'"
-                                        @click="toggleFavourite(detection)">
+                                           @click="toggleFavourite(detection)">
                                         <v-icon small :color="isTuneFavourited(detection) ? 'amber darken-2' : 'grey'">
                                             {{ isTuneFavourited(detection) ? icons.star : icons.starOutline }}
                                         </v-icon>
@@ -1960,9 +1960,9 @@ export default {
         },
         async toggleFavourite(tune) {
             tune = { ...tune,
-                tuneId: tune.selectedTuneId || tune.tuneId,
-                settingId: tune.selectedSettingId || tune.settingId,
-                title: tune.selectedTitle || tune.title,
+                     tuneId: tune.selectedTuneId || tune.tuneId,
+                     settingId: tune.selectedSettingId || tune.settingId,
+                     title: tune.selectedTitle || tune.title,
             };
             if (!tune.settingId) return;
             const settingID = String(tune.settingId);

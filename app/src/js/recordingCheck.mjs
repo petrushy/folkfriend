@@ -34,7 +34,7 @@ export function summariseCheck(report) {
         const badCache = segments.filter(s => s.stored !== 'not cached' && s.stored !== 'cached blob' &&
             !segmentReadable(s)).length;
         level = badCache ? 'warning' : 'info';
-        verdict = `This device has no copy of its own: it plays this recording from the Dropbox backup ` +
+        verdict = 'This device has no copy of its own: it plays this recording from the Dropbox backup ' +
             `(${segments.length} pieces, ${cached} downloaded to this device).`;
         if (stale) {
             verdict += ` ${stale} downloaded ${stale === 1 ? 'piece is' : 'pieces are'} in the old format, ` +
