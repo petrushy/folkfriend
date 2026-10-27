@@ -2,290 +2,290 @@
     <div class="sessionAudioPlayer">
         <v-alert v-if="!manifest && error" dense text type="warning">{{ error }}</v-alert>
         <template v-if="manifest">
-        <div class="d-flex align-center flex-wrap" style="gap: 12px;">
-            <!-- Landing on a given second by tapping a three-hour evening
+            <div class="d-flex align-center flex-wrap" style="gap: 12px;">
+                <!-- Landing on a given second by tapping a three-hour evening
                  mapped onto a phone-width strip is not something anyone can
                  do: one pixel is about twenty seconds. These are the precise
                  control, and they are also what the keyboard bindings on the
                  strip do. -->
-            <v-btn icon :disabled="!totalSeconds" aria-label="Back 15 seconds" @click="seekBy(-SKIP_SECONDS)">
-                <v-icon>{{ icons.rewind }}</v-icon>
-            </v-btn>
-            <v-btn icon :disabled="!totalSeconds" :aria-label="playing ? 'Pause playback' : 'Play recording'" @click="togglePlay">
-                <v-icon>{{ playing ? icons.pause : icons.play }}</v-icon>
-            </v-btn>
-            <v-btn icon :disabled="!totalSeconds" aria-label="Forward 15 seconds" @click="seekBy(SKIP_SECONDS)">
-                <v-icon>{{ icons.forward }}</v-icon>
-            </v-btn>
-            <!-- Loops the tune under the playhead, over the stretch the
+                <v-btn icon :disabled="!totalSeconds" aria-label="Back 15 seconds" @click="seekBy(-SKIP_SECONDS)">
+                    <v-icon>{{ icons.rewind }}</v-icon>
+                </v-btn>
+                <v-btn icon :disabled="!totalSeconds" :aria-label="playing ? 'Pause playback' : 'Play recording'" @click="togglePlay">
+                    <v-icon>{{ playing ? icons.pause : icons.play }}</v-icon>
+                </v-btn>
+                <v-btn icon :disabled="!totalSeconds" aria-label="Forward 15 seconds" @click="seekBy(SKIP_SECONDS)">
+                    <v-icon>{{ icons.forward }}</v-icon>
+                </v-btn>
+                <!-- Loops the tune under the playhead, over the stretch the
                  detector heard it in — for learning a tune by ear, alongside
                  the speed control below. -->
-            <v-btn
-                icon
-                :disabled="!totalSeconds || !playableDetections.length"
-                :color="loop ? 'primary' : undefined"
-                :aria-pressed="loop ? 'true' : 'false'"
-                :aria-label="loop ? `Stop looping ${loop.title}` : 'Loop the current tune'"
-                @click="toggleLoop"
-            >
-                <v-icon>{{ loop ? icons.loop : icons.loopOff }}</v-icon>
-            </v-btn>
-            <div class="playerClock">
-                {{ formatSecondsAsDuration(currentSeconds) }} / {{ formatSecondsAsDuration(totalSeconds) }}
+                <v-btn
+                    icon
+                    :disabled="!totalSeconds || !playableDetections.length"
+                    :color="loop ? 'primary' : undefined"
+                    :aria-pressed="loop ? 'true' : 'false'"
+                    :aria-label="loop ? `Stop looping ${loop.title}` : 'Loop the current tune'"
+                    @click="toggleLoop"
+                >
+                    <v-icon>{{ loop ? icons.loop : icons.loopOff }}</v-icon>
+                </v-btn>
+                <div class="playerClock">
+                    {{ formatSecondsAsDuration(currentSeconds) }} / {{ formatSecondsAsDuration(totalSeconds) }}
+                </div>
+                <v-spacer />
+                <div class="text--secondary caption">
+                    {{ formatBytes(manifest.bytes) }}<span v-if="bitrateLabel"> · {{ bitrateLabel }}</span><span
+                        v-if="channelsLabel"
+                    > · {{ channelsLabel }}</span>
+                </div>
             </div>
-            <v-spacer />
-            <div class="text--secondary caption">
-                {{ formatBytes(manifest.bytes) }}<span v-if="bitrateLabel"> · {{ bitrateLabel }}</span><span
-                    v-if="channelsLabel"
-                > · {{ channelsLabel }}</span>
-            </div>
-        </div>
 
-        <!-- Slowing a tune down to learn it. The stretch is the browser's own
+            <!-- Slowing a tune down to learn it. The stretch is the browser's own
              (playbackRate with preservesPitch), so its quality is whatever the
              platform provides — see setPlaybackRate(). Tapping the label puts
              it back to normal speed, which is the one value worth a shortcut. -->
-        <div class="d-flex flex-wrap align-center playerAdjust">
-            <div class="d-flex align-center playerSpeed" style="gap: 8px;">
-                <v-btn
-                    text
-                    small
-                    class="px-1 playerSpeedLabel"
-                    :aria-label="`Playback speed ${speedPercent}%. Reset to normal speed`"
-                    :disabled="playbackRate === 1"
-                    @click="setPlaybackRate(1)"
-                >
-                    Speed {{ speedPercent }}%
-                </v-btn>
-                <!-- Keyed so a refused speed can put the thumb back. A refusal
+            <div class="d-flex flex-wrap align-center playerAdjust">
+                <div class="d-flex align-center playerSpeed" style="gap: 8px;">
+                    <v-btn
+                        text
+                        small
+                        class="px-1 playerSpeedLabel"
+                        :aria-label="`Playback speed ${speedPercent}%. Reset to normal speed`"
+                        :disabled="playbackRate === 1"
+                        @click="setPlaybackRate(1)"
+                    >
+                        Speed {{ speedPercent }}%
+                    </v-btn>
+                    <!-- Keyed so a refused speed can put the thumb back. A refusal
                      sets the rate and resets it within one update, so from 100%
                      the bound value never changes and Vuetify keeps showing the
                      speed that was refused. Remounting is the public way to
                      make it re-read the value. -->
-                <v-slider
-                    :key="speedSliderKey"
-                    :value="speedPercent"
-                    :min="PLAYBACK_RATE_MIN * 100"
-                    :max="PLAYBACK_RATE_MAX * 100"
-                    :step="PLAYBACK_RATE_STEP * 100"
-                    dense
-                    hide-details
-                    aria-label="Playback speed"
-                    class="ma-0"
-                    @input="setPlaybackRate($event / 100)"
-                />
-            </div>
+                    <v-slider
+                        :key="speedSliderKey"
+                        :value="speedPercent"
+                        :min="PLAYBACK_RATE_MIN * 100"
+                        :max="PLAYBACK_RATE_MAX * 100"
+                        :step="PLAYBACK_RATE_STEP * 100"
+                        dense
+                        hide-details
+                        aria-label="Playback speed"
+                        class="ma-0"
+                        @input="setPlaybackRate($event / 100)"
+                    />
+                </div>
 
-            <!-- Loudness, beside the speed because both are for listening back
+                <!-- Loudness, beside the speed because both are for listening back
                  to one tune. Above 100% (and on iOS, anything other than 100%)
                  is only possible through Web Audio — see playbackLevel.mjs. -->
-            <div class="d-flex align-center playerVolume" style="gap: 8px;">
-                <v-btn
-                    text
-                    small
-                    class="px-1 playerVolumeLabel"
-                    :aria-label="`Volume ${volumePercent}%. Reset to normal volume`"
-                    :disabled="volume === 1"
-                    @click="setVolume(1)"
-                >
-                    Volume {{ volumePercent }}%
-                </v-btn>
-                <v-slider
-                    :value="volumePercent"
-                    :min="VOLUME_MIN * 100"
-                    :max="VOLUME_MAX * 100"
-                    :step="VOLUME_STEP * 100"
-                    dense
-                    hide-details
-                    aria-label="Volume"
-                    class="ma-0"
-                    @input="setVolume($event / 100)"
-                />
-                <v-btn
-                    small
-                    :text="!normalize"
-                    :depressed="normalize"
-                    :color="normalize ? 'primary' : undefined"
-                    class="px-2 playerNormalize"
-                    :aria-pressed="normalize ? 'true' : 'false'"
-                    aria-label="Normalize loudness"
-                    @click="setNormalize(!normalize)"
-                >
-                    Normalize
-                </v-btn>
+                <div class="d-flex align-center playerVolume" style="gap: 8px;">
+                    <v-btn
+                        text
+                        small
+                        class="px-1 playerVolumeLabel"
+                        :aria-label="`Volume ${volumePercent}%. Reset to normal volume`"
+                        :disabled="volume === 1"
+                        @click="setVolume(1)"
+                    >
+                        Volume {{ volumePercent }}%
+                    </v-btn>
+                    <v-slider
+                        :value="volumePercent"
+                        :min="VOLUME_MIN * 100"
+                        :max="VOLUME_MAX * 100"
+                        :step="VOLUME_STEP * 100"
+                        dense
+                        hide-details
+                        aria-label="Volume"
+                        class="ma-0"
+                        @input="setVolume($event / 100)"
+                    />
+                    <v-btn
+                        small
+                        :text="!normalize"
+                        :depressed="normalize"
+                        :color="normalize ? 'primary' : undefined"
+                        class="px-2 playerNormalize"
+                        :aria-pressed="normalize ? 'true' : 'false'"
+                        aria-label="Normalize loudness"
+                        @click="setNormalize(!normalize)"
+                    >
+                        Normalize
+                    </v-btn>
+                </div>
             </div>
-        </div>
 
-        <!-- The strip IS the link between the tune list and the recording:
+            <!-- The strip IS the link between the tune list and the recording:
              every detection with an audio offset is a block you can tap. -->
-        <!-- A slider, not a decorated div. It was click-only: no keyboard
+            <!-- A slider, not a decorated div. It was click-only: no keyboard
              seeking, nothing for a screen reader to read, and no way to land
              on a particular second. -->
-        <div
-            ref="strip"
-            class="audioStrip mt-2"
-            role="slider"
-            tabindex="0"
-            aria-label="Recording position"
-            aria-valuemin="0"
-            :aria-valuemax="Math.round(totalSeconds)"
-            :aria-valuenow="Math.round(currentSeconds)"
-            :aria-valuetext="positionLabel"
-            @click="onStripClick"
-            @keydown="onStripKey"
-        >
             <div
-                v-for="block in blocks"
-                :key="block.key"
-                class="audioStripBlock"
-                :style="block.style"
-                :title="block.title"
-            />
-            <!-- Stretches with no audio at all: a segment that could not be
+                ref="strip"
+                class="audioStrip mt-2"
+                role="slider"
+                tabindex="0"
+                aria-label="Recording position"
+                aria-valuemin="0"
+                :aria-valuemax="Math.round(totalSeconds)"
+                :aria-valuenow="Math.round(currentSeconds)"
+                :aria-valuetext="positionLabel"
+                @click="onStripClick"
+                @keydown="onStripKey"
+            >
+                <div
+                    v-for="block in blocks"
+                    :key="block.key"
+                    class="audioStripBlock"
+                    :style="block.style"
+                    :title="block.title"
+                />
+                <!-- Stretches with no audio at all: a segment that could not be
                  stored. Detection carried on through them, so tunes are listed
                  there and the strip has to say why they cannot be played. -->
-            <div
-                v-for="(block, index) in gapBlocks"
-                :key="`gap-${index}`"
-                class="audioStripGap"
-                :style="block"
-                title="Not recorded — storage was full"
-            />
-            <!-- Drawn OVER the tune blocks: a muted stretch still has tunes
+                <div
+                    v-for="(block, index) in gapBlocks"
+                    :key="`gap-${index}`"
+                    class="audioStripGap"
+                    :style="block"
+                    title="Not recorded — storage was full"
+                />
+                <!-- Drawn OVER the tune blocks: a muted stretch still has tunes
                  detected in it (detection never stops), so the two overlap and
                  the mute is the fact that has to win visually. Seeking into
                  unexplained silence is indistinguishable from a bug. -->
-            <div
-                v-for="(band, i) in mutedBands"
-                :key="`muted-${i}`"
-                class="audioStripMuted"
-                :style="band"
-                title="Audio muted here"
-            />
-            <!-- Reading a position off an unmarked bar means guessing. -->
-            <div
-                v-for="tick in ticks"
-                :key="`tick-${tick.seconds}`"
-                class="audioStripTick"
-                :style="{ left: tick.percent + '%' }"
-            />
-            <div class="audioStripCursor" :style="{ left: cursorPercent + '%' }" />
-        </div>
-        <div class="audioStripScale caption text--secondary" aria-hidden="true">
-            <span v-for="tick in ticks" :key="`label-${tick.seconds}`" :style="{ left: tick.percent + '%' }">
-                {{ tick.label }}
-            </span>
-        </div>
-        <div class="d-flex justify-space-between caption text--secondary">
-            <span>
-                <router-link v-if="currentTuneLink" :to="currentTuneLink" class="nowPlayingLink"
-                    title="Open the tune and its score">{{ nowPlayingLabel }}</router-link>
-                <template v-else>{{ nowPlayingLabel }}</template>
-                <router-link v-if="currentTuneLink" :to="currentTuneLink" class="nowPlayingScore"
-                    aria-label="Open the score">score &rarr;</router-link>
-            </span>
-            <span v-if="loop">Looping {{ loop.title }}
-                ({{ formatSecondsAsDuration(loop.from) }}–{{ formatSecondsAsDuration(loop.to) }})</span>
-            <span v-if="mutedSeconds > 0">{{ formatSecondsAsDuration(mutedSeconds) }} muted</span>
-            <span v-if="gapBlocks.length">Some audio was not saved</span>
-            <span v-if="manifest.stopped">Recording stopped early</span>
-        </div>
+                <div
+                    v-for="(band, i) in mutedBands"
+                    :key="`muted-${i}`"
+                    class="audioStripMuted"
+                    :style="band"
+                    title="Audio muted here"
+                />
+                <!-- Reading a position off an unmarked bar means guessing. -->
+                <div
+                    v-for="tick in ticks"
+                    :key="`tick-${tick.seconds}`"
+                    class="audioStripTick"
+                    :style="{ left: tick.percent + '%' }"
+                />
+                <div class="audioStripCursor" :style="{ left: cursorPercent + '%' }" />
+            </div>
+            <div class="audioStripScale caption text--secondary" aria-hidden="true">
+                <span v-for="tick in ticks" :key="`label-${tick.seconds}`" :style="{ left: tick.percent + '%' }">
+                    {{ tick.label }}
+                </span>
+            </div>
+            <div class="d-flex justify-space-between caption text--secondary">
+                <span>
+                    <router-link v-if="currentTuneLink" :to="currentTuneLink" class="nowPlayingLink"
+                                 title="Open the tune and its score">{{ nowPlayingLabel }}</router-link>
+                    <template v-else>{{ nowPlayingLabel }}</template>
+                    <router-link v-if="currentTuneLink" :to="currentTuneLink" class="nowPlayingScore"
+                                 aria-label="Open the score">score &rarr;</router-link>
+                </span>
+                <span v-if="loop">Looping {{ loop.title }}
+                    ({{ formatSecondsAsDuration(loop.from) }}–{{ formatSecondsAsDuration(loop.to) }})</span>
+                <span v-if="mutedSeconds > 0">{{ formatSecondsAsDuration(mutedSeconds) }} muted</span>
+                <span v-if="gapBlocks.length">Some audio was not saved</span>
+                <span v-if="manifest.stopped">Recording stopped early</span>
+            </div>
 
-        <v-alert v-if="manifest.stopped" type="warning" dense text class="mt-2 mb-0">
-            {{ manifest.stopped.message || 'Recording stopped before the end of the session.' }}
-            Audio covers the first {{ formatSecondsAsDuration(totalSeconds) }} of listening.
-        </v-alert>
+            <v-alert v-if="manifest.stopped" type="warning" dense text class="mt-2 mb-0">
+                {{ manifest.stopped.message || 'Recording stopped before the end of the session.' }}
+                Audio covers the first {{ formatSecondsAsDuration(totalSeconds) }} of listening.
+            </v-alert>
 
-        <v-alert v-if="listening" type="info" dense text class="mt-2 mb-0">
-            This session is still listening. Playback comes out of the speaker, so the
-            detector will hear it — expect stray tunes in the list while you listen back.
-        </v-alert>
+            <v-alert v-if="listening" type="info" dense text class="mt-2 mb-0">
+                This session is still listening. Playback comes out of the speaker, so the
+                detector will hear it — expect stray tunes in the list while you listen back.
+            </v-alert>
 
-        <v-alert v-if="error" type="error" dense text class="mt-2 mb-0">
-            {{ error }}
-        </v-alert>
+            <v-alert v-if="error" type="error" dense text class="mt-2 mb-0">
+                {{ error }}
+            </v-alert>
 
-        <div class="d-flex flex-wrap mt-2" style="gap: 8px;">
-            <v-btn
-                v-for="track in tracks"
-                :key="track.index"
-                text
-                small
-                color="primary"
-                :loading="exportingIndex === track.index"
-                :disabled="exportingIndex !== null"
-                @click="exportTrack(track)"
-            >
-                {{ tracks.length > 1 ? `Export part ${track.index + 1}` : 'Export audio' }}
-                ({{ formatSecondsAsDuration(track.durationSeconds) }})
-            </v-btn>
-            <v-btn text small :loading="checking" @click="runCheck">
-                Check recording
-            </v-btn>
-        </div>
-        <!-- The share sheet needs a user gesture, and building the file for a
+            <div class="d-flex flex-wrap mt-2" style="gap: 8px;">
+                <v-btn
+                    v-for="track in tracks"
+                    :key="track.index"
+                    text
+                    small
+                    color="primary"
+                    :loading="exportingIndex === track.index"
+                    :disabled="exportingIndex !== null"
+                    @click="exportTrack(track)"
+                >
+                    {{ tracks.length > 1 ? `Export part ${track.index + 1}` : 'Export audio' }}
+                    ({{ formatSecondsAsDuration(track.durationSeconds) }})
+                </v-btn>
+                <v-btn text small :loading="checking" @click="runCheck">
+                    Check recording
+                </v-btn>
+            </div>
+            <!-- The share sheet needs a user gesture, and building the file for a
              long part outlasts the one that asked for it. The file is kept
              ready and a fresh tap finishes the job. -->
-        <v-alert v-if="readyExport" type="info" dense text class="mt-2 mb-0">
-            <div>{{ readyExport.name }} is ready.</div>
-            <div class="d-flex flex-wrap mt-1" style="gap: 8px;">
-                <v-btn v-if="readyExport.canShare" small text color="primary"
-                    @click="shareReadyExport">Share…</v-btn>
-                <v-btn small text color="primary" @click="downloadReadyExport">Download</v-btn>
-                <v-btn small text @click="readyExport = null">Cancel</v-btn>
-            </div>
-        </v-alert>
-        <p v-if="tracks.length > 1" class="caption text--secondary mb-0 mt-1">
-            The session was paused (or the microphone was reacquired) {{ tracks.length - 1 }}
-            {{ tracks.length === 2 ? 'time' : 'times' }}, so the recording exports as
-            {{ tracks.length }} separate files.
-        </p>
+            <v-alert v-if="readyExport" type="info" dense text class="mt-2 mb-0">
+                <div>{{ readyExport.name }} is ready.</div>
+                <div class="d-flex flex-wrap mt-1" style="gap: 8px;">
+                    <v-btn v-if="readyExport.canShare" small text color="primary"
+                           @click="shareReadyExport">Share…</v-btn>
+                    <v-btn small text color="primary" @click="downloadReadyExport">Download</v-btn>
+                    <v-btn small text @click="readyExport = null">Cancel</v-btn>
+                </div>
+            </v-alert>
+            <p v-if="tracks.length > 1" class="caption text--secondary mb-0 mt-1">
+                The session was paused (or the microphone was reacquired) {{ tracks.length - 1 }}
+                {{ tracks.length === 2 ? 'time' : 'times' }}, so the recording exports as
+                {{ tracks.length }} separate files.
+            </p>
 
-        <!-- A recording whose second channel is silent plays out of one
+            <!-- A recording whose second channel is silent plays out of one
              speaker in every ordinary player. Playback here is corrected, but
              the stored bytes are what they are, so the export is not — and a
              note that says only the first half would be a false promise. -->
-        <p v-if="channelRepair" class="caption text--secondary mb-0 mt-2">
-            This recording has sound on one channel only. Playback here is corrected to
-            both speakers; an exported copy of it keeps the original channels.
-            Recordings made from now on are corrected as they are recorded.
-            <!-- The correction is the one part of playback that goes through
+            <p v-if="channelRepair" class="caption text--secondary mb-0 mt-2">
+                This recording has sound on one channel only. Playback here is corrected to
+                both speakers; an exported copy of it keeps the original channels.
+                Recordings made from now on are corrected as they are recorded.
+                <!-- The correction is the one part of playback that goes through
                  Web Audio, which iOS treats differently from a plain media
                  element (the ring/silent switch, the audio session). If it
                  goes silent there is no other way out: the element is bound
                  to the graph for good, so the escape swaps in a new one. -->
-            <a href="#" class="noCorrectionLink" @click.prevent="setChannelRepairOff(true)">
-                No sound? Play without the correction.</a>
-        </p>
-        <p v-else-if="channelRepairOff && channelProbe && channelProbe.oneSided"
-           class="caption text--secondary mb-0 mt-2">
-            Playing without the one-channel correction, so this recording comes out of
-            one speaker.
-            <a href="#" @click.prevent="setChannelRepairOff(false)">Correct it to both speakers.</a>
-        </p>
-        <!-- The same escape for the volume and normalize stages, which go
+                <a href="#" class="noCorrectionLink" @click.prevent="setChannelRepairOff(true)">
+                    No sound? Play without the correction.</a>
+            </p>
+            <p v-else-if="channelRepairOff && channelProbe && channelProbe.oneSided"
+               class="caption text--secondary mb-0 mt-2">
+                Playing without the one-channel correction, so this recording comes out of
+                one speaker.
+                <a href="#" @click.prevent="setChannelRepairOff(false)">Correct it to both speakers.</a>
+            </p>
+            <!-- The same escape for the volume and normalize stages, which go
              through the same graph for the same reason. -->
-        <p v-if="audioGraphBuilt && !channelRepair" class="caption text--secondary mb-0 mt-2">
-            <a href="#" class="noProcessingLink" @click.prevent="playWithoutProcessing">
-                No sound? Play without volume processing.</a>
-        </p>
-        <!-- Not cosmetic: one-sided playback with no correction is exactly
+            <p v-if="audioGraphBuilt && !channelRepair" class="caption text--secondary mb-0 mt-2">
+                <a href="#" class="noProcessingLink" @click.prevent="playWithoutProcessing">
+                    No sound? Play without volume processing.</a>
+            </p>
+            <!-- Not cosmetic: one-sided playback with no correction is exactly
              what this looks like, and without this line it is indistinguishable
              from a recording that genuinely has nothing to correct. -->
-        <p v-if="channelProbeFailed" class="caption text--secondary mb-0 mt-2">
-            This device could not examine the recording's channels, so playback is
-            not being corrected. If it plays out of one speaker only, an exported
-            copy will too.
-        </p>
-        <!-- The correction routes the element through a Web Audio graph, and a
+            <p v-if="channelProbeFailed" class="caption text--secondary mb-0 mt-2">
+                This device could not examine the recording's channels, so playback is
+                not being corrected. If it plays out of one speaker only, an exported
+                copy will too.
+            </p>
+            <!-- The correction routes the element through a Web Audio graph, and a
              suspended context in front of it is SILENCE rather than merely
              uncorrected sound. Saying nothing here would present as playback
              that runs with no audio at all. -->
-        <v-alert v-if="channelRepairStalled" type="warning" dense text class="mt-2 mb-0">
-            This device's audio engine is suspended, so playback through it (volume,
-            normalizing or the one-channel correction) cannot be heard. Tap play again,
-            or reload the page.
-        </v-alert>
+            <v-alert v-if="channelRepairStalled" type="warning" dense text class="mt-2 mb-0">
+                This device's audio engine is suspended, so playback through it (volume,
+                normalizing or the one-channel correction) cannot be heard. Tap play again,
+                or reload the page.
+            </v-alert>
 
         </template>
         <!-- The recording check. Reads every stored piece on THIS device and
@@ -1239,67 +1239,67 @@ export default {
         // window of several was asked for — and `prebuilt` a clip already
         // assembled by _prefetchNext(), so the handover waits on nothing.
         async _loadSegment(segment, seekSeconds, autoplay,
-            { fromTrackStart = false, toSeconds = null, prebuilt = null } = {}) {
-            const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
-            const audio = this.$refs.audio;
-            if (!audio) return;
-            this.error = '';
-            // A prefetch is for whatever follows the clip it was started from;
-            // any other load makes it the wrong clip.
-            if (!prebuilt) this._prefetch = null;
-            const track = (this.manifest.tracks || [])
-                .find(t => t.index === segment.trackIndex);
-            const from = fromTrackStart && track
-                ? track.startSeconds
-                : segment.startSeconds;
-            const to = toSeconds !== null ? toSeconds : segment.startSeconds + segment.durationSeconds;
-            try {
-                const clip = prebuilt || await buildClip(this.sessionId, from, to, this.manifest);
-                if (generation !== this._loadGeneration) return;
-                if (!clip) {
-                    this.error = 'That part of the recording is missing.';
-                    return;
-                }
-                this._revoke();
-                this.objectUrl = URL.createObjectURL(clip.blob);
-                this.clipMimeType = clip.mimeType || (clip.blob && clip.blob.type) || '';
-                this.clipBytes = (clip.blob && clip.blob.size) || 0;
-                this.clipShape = clip.shape || '';
-                this.clipHeaderBytes = clip.headerBytes || 0;
-                this.segmentIndex = segment.index;
-                // Which track's channel finding now applies. A correction
-                // worked out for the first track is not a claim about a later
-                // one: each is its own MediaRecorder run and can come back on
-                // a different device.
-                this.currentTrackIndex = segment.trackIndex || 0;
-                this._probeChannels(this.currentTrackIndex);
-                this._applyChannelRepair({ build: false });
-                this.trackStartSeconds = clip.trackStartSeconds || 0;
-                this.clipOriginSeconds = this.trackStartSeconds;
-                this.timelineMode = '';
-                this._clipStartSeconds = clip.startSeconds || 0;
-                this._clipEndSeconds = clip.endSeconds || 0;
-                this._lastSeek = null;
-                this._clipMediaEndSeconds =
-                    Math.max(0, clip.endSeconds - (clip.trackStartSeconds || 0));
-                this.driftRatio = 1;
-                this.driftSeconds = 0;
-                this.timelineBase = 0;
-                this.pendingSeekSeconds = seekSeconds;
-                this._autoplayAfterLoad = autoplay;
-                this._loadedSegment = segment;
-                this._loadedWholeFile = playsWhole(track);
-                this._loadedSeekSeconds = seekSeconds;
-                this._loadedToSeconds = to;
-                this._clipFromTrackStart = fromTrackStart;
-                audio.src = this.objectUrl;
-                audio.load();
-            } catch (e) {
-                if (generation !== this._loadGeneration) return;
-                if (e.code === 'auth') this._pendingCloudPlay = { id: this.sessionId, seconds: seekSeconds, autoplay };
-                this.error = `Could not load the recording: ${(e && e.message) || e}`;
-            }
-        },
+                           { fromTrackStart = false, toSeconds = null, prebuilt = null } = {}) {
+                               const generation = this._loadGeneration = (this._loadGeneration || 0) + 1;
+                               const audio = this.$refs.audio;
+                               if (!audio) return;
+                               this.error = '';
+                               // A prefetch is for whatever follows the clip it was started from;
+                               // any other load makes it the wrong clip.
+                               if (!prebuilt) this._prefetch = null;
+                               const track = (this.manifest.tracks || [])
+                                   .find(t => t.index === segment.trackIndex);
+                               const from = fromTrackStart && track
+                                   ? track.startSeconds
+                                   : segment.startSeconds;
+                               const to = toSeconds !== null ? toSeconds : segment.startSeconds + segment.durationSeconds;
+                               try {
+                                   const clip = prebuilt || await buildClip(this.sessionId, from, to, this.manifest);
+                                   if (generation !== this._loadGeneration) return;
+                                   if (!clip) {
+                                       this.error = 'That part of the recording is missing.';
+                                       return;
+                                   }
+                                   this._revoke();
+                                   this.objectUrl = URL.createObjectURL(clip.blob);
+                                   this.clipMimeType = clip.mimeType || (clip.blob && clip.blob.type) || '';
+                                   this.clipBytes = (clip.blob && clip.blob.size) || 0;
+                                   this.clipShape = clip.shape || '';
+                                   this.clipHeaderBytes = clip.headerBytes || 0;
+                                   this.segmentIndex = segment.index;
+                                   // Which track's channel finding now applies. A correction
+                                   // worked out for the first track is not a claim about a later
+                                   // one: each is its own MediaRecorder run and can come back on
+                                   // a different device.
+                                   this.currentTrackIndex = segment.trackIndex || 0;
+                                   this._probeChannels(this.currentTrackIndex);
+                                   this._applyChannelRepair({ build: false });
+                                   this.trackStartSeconds = clip.trackStartSeconds || 0;
+                                   this.clipOriginSeconds = this.trackStartSeconds;
+                                   this.timelineMode = '';
+                                   this._clipStartSeconds = clip.startSeconds || 0;
+                                   this._clipEndSeconds = clip.endSeconds || 0;
+                                   this._lastSeek = null;
+                                   this._clipMediaEndSeconds =
+                                       Math.max(0, clip.endSeconds - (clip.trackStartSeconds || 0));
+                                   this.driftRatio = 1;
+                                   this.driftSeconds = 0;
+                                   this.timelineBase = 0;
+                                   this.pendingSeekSeconds = seekSeconds;
+                                   this._autoplayAfterLoad = autoplay;
+                                   this._loadedSegment = segment;
+                                   this._loadedWholeFile = playsWhole(track);
+                                   this._loadedSeekSeconds = seekSeconds;
+                                   this._loadedToSeconds = to;
+                                   this._clipFromTrackStart = fromTrackStart;
+                                   audio.src = this.objectUrl;
+                                   audio.load();
+                               } catch (e) {
+                                   if (generation !== this._loadGeneration) return;
+                                   if (e.code === 'auth') this._pendingCloudPlay = { id: this.sessionId, seconds: seekSeconds, autoplay };
+                                   this.error = `Could not load the recording: ${(e && e.message) || e}`;
+                               }
+                           },
 
         onLoadedMetadata() {
             const audio = this.$refs.audio;
@@ -2078,7 +2078,7 @@ export default {
         _syncMediaSession() {
             const nav = browserNavigator();
             this._mediaMetadata = applyMetadata(nav, mediaMetadataCtor(),
-                this.mediaInfo, this._mediaMetadata);
+                                                this.mediaInfo, this._mediaMetadata);
             applyPlaybackState(nav, this.playing);
             if (!this._mediaHandlersSet) {
                 this._mediaHandlersSet = true;
@@ -2090,7 +2090,7 @@ export default {
                     seekto: (d) => {
                         if (!d || typeof d.seekTime !== 'number') return;
                         this.playFrom(Math.min(this.totalSeconds, Math.max(0, d.seekTime)),
-                            { autoplay: this.playing });
+                                      { autoplay: this.playing });
                     },
                     previoustrack: () => this.skipTune(-1),
                     nexttrack: () => this.skipTune(1),
@@ -2143,7 +2143,7 @@ export default {
             if (generation !== (this._loadGeneration || 0)) return;
             if (clip) {
                 await this._loadSegment(next, next.startSeconds, true,
-                    { toSeconds: ready.toSeconds, prebuilt: clip });
+                                        { toSeconds: ready.toSeconds, prebuilt: clip });
             } else {
                 // Nothing built in time (a clip shorter than the lead, or a
                 // failed prefetch): the one segment is the quickest start, and
@@ -2226,7 +2226,7 @@ export default {
             this._retryingFromTrackStart = true;
             const done = () => { this._retryingFromTrackStart = false; };
             this._loadSegment(segment, this._loadedSeekSeconds, autoplay,
-                { fromTrackStart: true, toSeconds: this._loadedToSeconds || null }).then(done, done);
+                              { fromTrackStart: true, toSeconds: this._loadedToSeconds || null }).then(done, done);
             return true;
         },
 
@@ -2238,7 +2238,7 @@ export default {
             // 4 is SRC_NOT_SUPPORTED: these BYTES, not this situation.
             if (code === 4 && this._retryFromTrackStart(this._autoplayAfterLoad)) return;
             this.playing = false;
-            this.error = `This browser could not play the recorded audio` +
+            this.error = 'This browser could not play the recorded audio' +
                 ` (${this._clipDetail(audio)}).${this._exportHint()}`;
         },
 
@@ -2248,7 +2248,7 @@ export default {
         seekBy(deltaSeconds) {
             if (!this.totalSeconds) return;
             const target = Math.min(this.totalSeconds,
-                Math.max(0, this.currentSeconds + deltaSeconds));
+                                    Math.max(0, this.currentSeconds + deltaSeconds));
             return this.playFrom(target, { autoplay: this.playing });
         },
 
@@ -2306,7 +2306,7 @@ export default {
                 // exported to whatever the user opens the file in. A container
                 // we cannot name is better left unnamed.
                 const file = new File([clip.blob], name,
-                    { type: clip.mimeType || 'application/octet-stream' });
+                                      { type: clip.mimeType || 'application/octet-stream' });
 
                 const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
                 if (!canShare) {

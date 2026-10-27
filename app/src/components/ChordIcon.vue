@@ -1,6 +1,6 @@
 <template>
     <svg version="1.0" xmlns="http://www.w3.org/2000/svg" width="320.000000pt" height="320.000000pt"
-        viewBox="0 0 320.000000 320.000000" preserveAspectRatio="xMidYMid meet" class="v-icon__svg">
+         viewBox="0 0 320.000000 320.000000" preserveAspectRatio="xMidYMid meet" class="v-icon__svg">
         <g transform="translate(0.000000,320.000000) scale(0.100000,-0.100000)">
             <path d="M290 1605 l0 -1485 1350 0 1350 0 0 1485 0 1485 -1350 0 -1350 0 0
                     -1485z m610 1233 l0 -103 -47 -19 c-55 -23 -113 -78 -145 -138 -31 -59 -33

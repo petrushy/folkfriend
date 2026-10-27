@@ -73,9 +73,9 @@
         </v-alert>
 
         <v-expansion-panels ref="expansionPanels" v-model="expandedIndex" :class="{ abcFullScreen: abcFullScreen }"
-            multiple>
+                            multiple>
             <v-expansion-panel v-for="(settingData, i) in settings" :key="settingData.setting_id" class="expansionPanel"
-                :setting="settingData">
+                               :setting="settingData">
                 <v-expansion-panel-header>
                     <div class="headerLeft">
                         <h3 class="descriptor font-weight-medium">
@@ -128,15 +128,15 @@
                             </v-card>
                         </v-menu>
                         <v-icon v-if="expandedIndex.includes(i) || favouritedSettings[settingData.setting_id]" class="settingStarIcon"
-                            :color="favouritedSettings[settingData.setting_id] ? 'amber darken-1' : 'grey lighten-1'"
-                            @click.stop="toggleFavourite(settingData)">
+                                :color="favouritedSettings[settingData.setting_id] ? 'amber darken-1' : 'grey lighten-1'"
+                                @click.stop="toggleFavourite(settingData)">
                             {{ favouritedSettings[settingData.setting_id] ? icons.star : icons.starOutline }}
                         </v-icon>
                         <v-icon v-if="settingData.hasChords" class="tabChordIcon">
                             $vuetify.icons.tabChord
                         </v-icon>
                         <v-chip v-if="expandedIndex.includes(i)" small class="sourceChip settingSourceChip px-2"
-                            @click.stop="$openUrl(settingSourceUrl(settingData))">
+                                @click.stop="$openUrl(settingSourceUrl(settingData))">
                             {{ settingSourceName(settingData) }}&nbsp;<v-icon small>{{ icons.openInNew }}</v-icon>
                         </v-chip>
                     </div>
@@ -151,16 +151,16 @@
                         </span>
                     </div>
                     <AbcDisplay :abc="settingData.abc" :transpose="transposeFor(settingData)" :instrumentShift="instrumentShift" :mode="settingData.mode" :meter="settingData.meter"
-                        :title="name" :settingID="settingData.setting_id"
-                        @abcGoFullScreen="abcGoFullScreen" @abcExitFullScreen="abcExitFullScreen"
-                        @abcRendered="scrollIntoView">
+                                :title="name" :settingID="settingData.setting_id"
+                                @abcGoFullScreen="abcGoFullScreen" @abcExitFullScreen="abcExitFullScreen"
+                                @abcRendered="scrollIntoView">
                         <!-- Session recording ▶ — only when a saved session recorded this tune -->
                         <template #controls>
                             <v-menu v-model="settingsMenus[settingData.setting_id]" :close-on-content-click="false"
-                                offset-y top>
+                                    offset-y top>
                                 <template #activator="{ on, attrs }">
                                     <v-btn small class="mx-1 px-2 abcControls" aria-label="Score settings"
-                                        title="Transpose and instrument" v-bind="attrs" :color="scoreAdjusted(settingData) ? 'primary' : ''" v-on="on">
+                                           title="Transpose and instrument" v-bind="attrs" :color="scoreAdjusted(settingData) ? 'primary' : ''" v-on="on">
                                         <v-icon small>{{ icons.cog }}</v-icon>
                                     </v-btn>
                                 </template>
@@ -169,23 +169,23 @@
                                     <div class="text-caption">Changes the score and the sound.</div>
                                     <div class="transposeRow">
                                         <v-btn icon small :disabled="transposeFor(settingData) <= -12"
-                                            aria-label="Transpose down one semitone"
-                                            @click="changeTranspose(settingData, -1)">
+                                               aria-label="Transpose down one semitone"
+                                               @click="changeTranspose(settingData, -1)">
                                             <v-icon small>{{ icons.minus }}</v-icon>
                                         </v-btn>
                                         <span class="transposeValue" aria-live="polite">{{ transposeLabel(settingData) }}</span>
                                         <v-btn icon small :disabled="transposeFor(settingData) >= 12"
-                                            aria-label="Transpose up one semitone"
-                                            @click="changeTranspose(settingData, 1)">
+                                               aria-label="Transpose up one semitone"
+                                               @click="changeTranspose(settingData, 1)">
                                             <v-icon small>{{ icons.plus }}</v-icon>
                                         </v-btn>
                                         <v-btn v-if="transposeFor(settingData) !== 0" text x-small class="px-1"
-                                            @click="setTranspose(settingData, 0)">Reset</v-btn>
+                                               @click="setTranspose(settingData, 0)">Reset</v-btn>
                                     </div>
                                     <div class="settingMetaLabel mt-3">My instrument</div>
                                     <div class="text-caption">Your instrument's key. Changes the written score only, for all tunes.</div>
                                     <v-select :value="instrumentShift" :items="instrumentItems" dense hide-details
-                                        class="mt-1" @change="setInstrumentShift" />
+                                              class="mt-1" @change="setInstrumentShift" />
                                 </v-card>
                             </v-menu>
                             <v-btn
@@ -210,7 +210,7 @@
                 <v-card-title class="text-subtitle-1">Play {{ name }} from…</v-card-title>
                 <v-list dense>
                     <v-list-item v-for="entry in recordingEntries" :key="entry.sessionId"
-                        @click="playRecordingEntry(entry)">
+                                 @click="playRecordingEntry(entry)">
                         <v-list-item-content>
                             <v-list-item-title>{{ entry.sessionName }}</v-list-item-title>
                             <v-list-item-subtitle>{{ formatSessionDate(entry.startedAt) }}</v-list-item-subtitle>
@@ -474,7 +474,7 @@ export default {
                     this.$set(this.settingTags, s.setting_id, tags);
                     if (v) {
                         this.$set(this.transposeBySetting, s.setting_id,
-                            await store.getFavouriteTranspose(s.setting_id));
+                                  await store.getFavouriteTranspose(s.setting_id));
                     }
                 }),
             ]);

@@ -192,8 +192,8 @@ export default {
             // Each bar is roughly 110px at scale 0.65, so derive bar count from width.
             // +1 to account for the leading |: repeat marker which counts as a pipe but isn't a bar.
             const maxBars = this.abcPreviewDisplayWidth < 300 ? 2
-                          : this.abcPreviewDisplayWidth < 390 ? 3
-                          : 4;
+                : this.abcPreviewDisplayWidth < 390 ? 3
+                    : 4;
             const targetPipes = maxBars + 1;
             let count = 0;
             let cutAt = body.length;
