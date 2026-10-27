@@ -14,7 +14,10 @@ import assert from 'node:assert/strict';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const srcDir = path.join(here, '..', '..', 'src');
-const tmpDir = path.join(here, '..', '.tmp-session-analysis');
+// Per process: several test files load this helper, and the runner may run
+// them at once. A shared directory would be rewritten or deleted under a
+// file that is still importing from it.
+const tmpDir = path.join(here, '..', `.tmp-session-analysis-${process.pid}`);
 
 export async function loadSessionAnalysisModule() {
     await mkdir(tmpDir, { recursive: true });

@@ -9,7 +9,7 @@
 // rewritten to fakes, and the property it exists for is ORDER: the tune list
 // is saved first and survives a failure to keep the audio.
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import assert from 'node:assert/strict';
@@ -236,5 +236,6 @@ await test('nothing is saved without a length or a valid start', async () => {
     assert.equal(store.__calls.length, 0);
 });
 
+await rm(sessionAnalysisTmpDir, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

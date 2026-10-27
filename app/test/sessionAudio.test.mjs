@@ -25,7 +25,7 @@
 // The store and the recorder are loaded from source with their imports
 // rewritten to in-memory fakes, following mic.test.mjs and liveSessions.test.mjs.
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { loadSessionAnalysisModule, sessionAnalysisTmpDir } from './helpers/loadSessionAnalysis.mjs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -2722,5 +2722,6 @@ await test('imported types are canonical, and name the right export extension', 
     assert.equal(store.fileExtensionFor('audio/mp3;codecs=mp4a.40.2'), 'bin');
 });
 
+await rm(sessionAnalysisTmpDir, { recursive: true, force: true });
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);
