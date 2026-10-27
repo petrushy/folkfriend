@@ -4,7 +4,7 @@ import { get, set, del, keys } from 'idb-keyval';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
 import recorder from '@/services/sessionRecorder.js';
-import { listManifests, readManifest, readSegment, buildClip, asBlob, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
+import { listManifests, readSegment, buildClip, asBlob, fileExtensionFor, headroomBytes, deleteSessionAudio, configureCloudAudio } from '@/services/sessionAudioStore.js';
 import { DropboxClient, DropboxError, base64url } from './dropboxClient.mjs';
 import { authFromTokenResponse, createTokenSource, credentialsUsable } from './dropboxAuth.mjs';
 import { backupSession, backupWholeRecordings, downloadSegment, playableManifest, validateWholeRecordings, validateManifest, validateSession, mayReplaceRemoteSession, sessionPath, deletionPath, deletionRecord, sessionSummary } from './dropboxBackup.mjs';
@@ -274,10 +274,11 @@ export function syncDropbox(force = false) {
                     noteConflict(id, '');
                     status(id, recorder.sessionId === id && recorder.isRecording ? 'Syncing' : 'Backed up'); changed(id);
                 } catch (e) {
+                    let error = e;
                     try { if (await reconcileDeletedSession(id)) continue; }
-                    catch (cleanupError) { e = cleanupError; }
-                    report(e, id);
-                    if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break;
+                    catch (cleanupError) { error = cleanupError; }
+                    report(error, id);
+                    if (['auth', 'full', 'rate', 'network'].includes(error.code) || !error.code) break;
                 }
             }
             for (const session of sessions) {
@@ -313,10 +314,11 @@ export function syncDropbox(force = false) {
                     // of every session after it, silently and indefinitely.
                     // Same rule as the audio loop above.
                 } catch (e) {
+                    let error = e;
                     try { if (await reconcileDeletedSession(id)) continue; }
-                    catch (cleanupError) { e = cleanupError; }
-                    report(e, id);
-                    if (['auth', 'full', 'rate', 'network'].includes(e.code) || !e.code) break;
+                    catch (cleanupError) { error = cleanupError; }
+                    report(error, id);
+                    if (['auth', 'full', 'rate', 'network'].includes(error.code) || !error.code) break;
                 }
             }
         } catch (e) { report(e); }

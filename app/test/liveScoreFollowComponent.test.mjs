@@ -123,7 +123,6 @@ async function loadOverlay() {
         ["from '@/components/AbcDisplay.vue'", "from './fake-component.mjs'"],
         ["from '@/components/TuneBackgroundButton.vue'", "from './fake-component.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
-        ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
         // Deliberately the real module.
         ["from '@/js/liveScoreFollow.mjs'", `from '${followModule}'`],
     ];

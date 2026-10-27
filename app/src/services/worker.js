@@ -166,6 +166,18 @@ export function vetUserParts(parts) {
     };
 }
 
+// The reason for each part vetUserParts dropped, keyed by id, for
+// `datasetErrors`. Without it a dropped dataset shows as missing with nothing
+// to say why.
+function rejectionReasons(rejected) {
+    const reasons = {};
+    for (const bad of rejected || []) {
+        reasons[bad.id] = `reuses ${bad.settings} setting and ${bad.tunes} tune `
+            + 'IDs that another database already uses';
+    }
+    return reasons;
+}
+
 export function mergeIndexParts(parts) {
     if (parts.length === 1) {
         // Overwhelmingly the common case; skip copying 62k keys.
@@ -913,16 +925,12 @@ class FolkFriendWASMWrapper {
                 // collisionsForPart.
                 if (entry.origin === 'user') {
                     this._assertNoCollisions(
-                        collisionsForPart(part, [...base, ...others]), entry.id);
+                        collisionsForPart(part, [...base, ...others]));
                 }
                 const merged = await this.loadMergedIndex(
                     [...base, ...others, part]);
                 loadedThisEntry = true;
-                for (const bad of merged.rejected || []) {
-                    rejected[bad.id] =
-                        `reuses ${bad.settings} setting and ${bad.tunes} tune `
-                        + 'IDs that another database already uses';
-                }
+                Object.assign(rejected, rejectionReasons(merged.rejected));
                 if (merged.empty.includes(entry.id)) {
                     throw new Error(
                         'duplicate of an already-loaded dataset — check the '
@@ -1453,7 +1461,7 @@ class FolkFriendWASMWrapper {
             const base = await this._migrationBase(
                 [id, ...others.map(p => p.id)]);
             this._assertNoCollisions(
-                collisionsForPart(part, [...base, ...others]), id);
+                collisionsForPart(part, [...base, ...others]));
             const merged = await this.loadMergedIndex(
                 [...base, ...this._selectedOf(others), part]);
 
@@ -1482,10 +1490,15 @@ class FolkFriendWASMWrapper {
             if (!this.selectedDatasets.includes(id)) {
                 this.selectedDatasets = [...this.selectedDatasets, id];
             }
+            // The candidate itself cannot be dropped — it was vetted against
+            // every stored dataset above — but an earlier import already
+            // being dropped is dropped again by this merge, and its reason has
+            // to survive into the status like on every other merge path.
             await this._afterInstall(
                 { [id]: { v: Number(parsed.v) || 0, date: parsed.date || null } },
                 {},
-                persistError ? { [id]: persistError } : {});
+                persistError ? { [id]: persistError } : {},
+                rejectionReasons(merged.rejected));
 
             return done({ ok: true, id, label, persistError });
         } catch (e) {
@@ -1505,7 +1518,7 @@ class FolkFriendWASMWrapper {
     // does not fail loudly — one setting shadows another, one tune's aliases
     // overwrite another's name — and because favourites are keyed by setting id
     // alone, the visible symptom is a favourite opening the wrong tune.
-    _assertNoCollisions(counts, id) {
+    _assertNoCollisions(counts) {
         const parts = [];
         if (counts.settings) parts.push(`${counts.settings} setting IDs`);
         if (counts.tunes) parts.push(`${counts.tunes} tune IDs`);
