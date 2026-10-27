@@ -1625,6 +1625,45 @@ async function run() {
             'this test is meaningless if no merge happened');
     });
 
+    await test('a later import keeps the reason an earlier import is not loaded', async () => {
+        // Every merge path has to carry merged.rejected into its bookkeeping.
+        // The import path did not: a refused import, merged again alongside a
+        // clean new one, stayed out of WASM (correctly) but lost its entry in
+        // datasetErrors, so Settings showed it missing with no reason.
+        resetFakes();
+        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
+        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        // A colliding import already on disk and selected, as in the test above.
+        const shadowing = JSON.stringify({
+            ...JSON.parse(makeIndex('thesession', 'shadow')),
+            id: 'shadow', label: 'Shadow', v: 1, date: '2026-01-01',
+        });
+        await storeMod.writeDataset('shadow', shadowing,
+            { v: 1, date: '2026-01-01', origin: 'user', label: 'Shadow' });
+        await new Promise(r => wrapper.setSelectedDatasets(
+            ['thesession', 'folkwiki', 'shadow'], r));
+        assert.match((wrapper.indexDetail.datasetErrors || {}).shadow || '',
+            /reuses/i, 'precondition: the colliding import is refused');
+
+        // A clean import, in an ID space nothing else uses.
+        const clean = JSON.stringify({
+            ...JSON.parse(makeIndex('norbeck', 'clean')),
+            id: 'clean', label: 'Clean', v: 1, date: '2026-01-01',
+        });
+        const added = await new Promise(
+            r => wrapper.addUserDataset({ text: clean }, r));
+        assert.equal(added.ok, true, added.error);
+
+        const detail = wrapper.indexDetail;
+        assert.ok((detail.datasetsLoaded || []).includes('clean'));
+        assert.ok(!(detail.datasetsLoaded || []).includes('shadow'),
+            'the colliding import must still not be loaded');
+        assert.match((detail.datasetErrors || {}).shadow || '', /reuses/i,
+            'its reason must survive the later import');
+    });
+
     await test('a DOWNLOAD that displaces an import updates the bookkeeping', async () => {
         // The install path, not the cache/selection path. A newly published
         // dataset arrives, collides with an already-loaded import, and the

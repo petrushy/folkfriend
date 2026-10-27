@@ -573,9 +573,6 @@ export default {
             // manifest claims. 1 when they agree — see _measureDrift().
             driftRatio: 1,
             driftSeconds: 0,
-            // Where the manifest says the loaded clip ends, on its own media
-            // timeline (i.e. measured from the track's start).
-            _clipMediaEndSeconds: 0,
             objectUrl: null,
             pendingSeekSeconds: null,
             // What the recording's channels actually CONTAIN, measured from
@@ -871,6 +868,11 @@ export default {
         },
     },
     created() {
+        // Where the manifest says the loaded clip ends, on its own media
+        // timeline (i.e. measured from the track's start). Not in data():
+        // Vue 2 does not proxy a data key starting with '_', so it was only
+        // ever a plain instance property, and read as undefined until set.
+        this._clipMediaEndSeconds = 0;
         this.reload();
         // A live session's recording grows under the player: without this the
         // timeline strip would stop at whatever had been written when the view
@@ -1699,6 +1701,8 @@ export default {
             this.channelRepairStalled = false;
             if (ctx && ctx.close) ctx.close().catch(() => {});
             this.audioKey++;
+            // Guarded for the test harness, which has no Vue runtime.
+            // eslint-disable-next-line vue/valid-next-tick
             if (this.$nextTick) await this.$nextTick();
             if (this.covers(at)) this.playFrom(at, { autoplay: wasPlaying });
         },

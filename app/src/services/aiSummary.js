@@ -220,10 +220,6 @@ export function sessionTuneJsonUrl(tuneID) {
     return `https://thesession.org/tunes/${encodeURIComponent(String(tuneID))}?format=json`;
 }
 
-function firstSetting(data) {
-    return Array.isArray(data.settings) && data.settings.length ? data.settings[0] : {};
-}
-
 // Hard facts for the prompt, so the model has authoritative names/type/meter/
 // mode even if its page read is poor. Every failure degrades to null: this is a
 // nice-to-have, and a tune with an unreachable JSON endpoint should still get a

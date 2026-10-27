@@ -141,7 +141,6 @@ import liveAnalysisService from '@/services/liveAnalysis.js';
 import AbcDisplay from '@/components/AbcDisplay.vue';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
-import { detectionFreshness } from '@/js/detectionFreshness.mjs';
 import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
 
 export default {

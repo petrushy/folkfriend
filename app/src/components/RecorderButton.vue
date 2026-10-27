@@ -88,7 +88,6 @@ import micService from '@/services/mic.js';
 import ffBackend from '@/services/backend.js';
 import geoService from '@/services/geo.js';
 import store from '@/services/store.js';
-import ffConfig from '@/ffConfig.js';
 import eventBus from '@/eventBus.js';
 
 export default {

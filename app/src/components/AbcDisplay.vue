@@ -193,8 +193,6 @@ export default {
         };
         document.addEventListener('keydown', this._onKeyDown);
 
-        const svgDiv = this.$refs.abcTarget;
-
         this.drawScore();
         this.$emit('abcRendered');
 
