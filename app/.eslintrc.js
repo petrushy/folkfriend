@@ -26,7 +26,7 @@ module.exports = {
         'no-constant-condition': ['error', { checkLoops: false }],
         'vue/html-indent': ['error', 4],
         'vue/script-indent': ['error', 4],
-        'quotes': ['error', 'single'],
+        'quotes': ['error', 'single', { avoidEscape: true }],
         'semi': ['error', 'always']
     },
     ignorePatterns: ['src/js/comlink.js', 'src/wasm/*']
