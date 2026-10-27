@@ -50,6 +50,13 @@ jobs:
         working-directory: app
         run: npm ci
 
+      # Straight after install, before the slow Rust steps, so a lint error
+      # fails the job in seconds. Errors only fail it; warnings (template
+      # style) are reported and do not.
+      - name: Lint
+        working-directory: app
+        run: npm run lint
+
       # The Rust integration tests read the real tune index from
       # app/public/res/ (it is gitignored — far too large to commit), so it has
       # to be fetched before `cargo test`. It is removed again before the app
