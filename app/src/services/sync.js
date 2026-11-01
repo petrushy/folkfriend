@@ -1,105 +1,145 @@
 import {
-    doc, collection, setDoc, deleteDoc, writeBatch, onSnapshot, serverTimestamp,
+    doc, collection, setDoc, deleteDoc, writeBatch, onSnapshot,
 } from 'firebase/firestore';
 import { firestore as db } from './firebase.js';
 import eventBus from '@/eventBus';
 
-// localStorage key for tracking when local favourites were last modified
-const FAV_TS_KEY = 'favouritesLocalUpdatedAt';
+// ---- Favourites -------------------------------------------------------------
+//
+// ONE DOCUMENT PER FAVOURITE, under users/{uid}/favourites/{settingID}
+// (November 2026). Favourites used to be one document holding the whole array,
+// rewritten wholesale on every star, and that broke in two ways that both end
+// with two devices showing different lists:
+//
+//   • Size. Every item carries its setting's full ABC, its contour and, since
+//     3.9.0, a mirrored AI note of up to 1200 characters. A few hundred
+//     favourites reach Firestore's 1 MiB document limit, after which EVERY
+//     write is rejected — and pushFavourites ended in `.catch(console.error)`,
+//     so the rejection was invisible. Each device kept its own edits locally
+//     while the account copy sat frozen, and the sign-in light stayed green.
+//   • Last writer wins, for the WHOLE LIST. Whichever device pushed last
+//     replaced every other device's list, so a star made on one device while
+//     the other was offline (or behind on a snapshot) was simply overwritten.
+//
+// Now each favourite is its own small document, `{ id, updatedAt, item }`, and
+// a removal is a TOMBSTONE, `{ id, updatedAt, deleted: true }`, rather than an
+// absence — absence cannot be told apart from "not synced yet". Conflicts are
+// decided per favourite by `updatedAt`, which the store keeps monotone per
+// record, so editing one tune can never cost another.
+//
+// The old single document is still READ, never written: at sign-in its items
+// are merged in additively (anything missing here and never deleted in the
+// collection is added), which both migrates an install and recovers anything
+// that only ever reached the old document. It is left in place as a backup.
+export const FAVOURITES_COLLECTION = 'favourites';
 
-function favDoc(uid) {
+function legacyFavDoc(uid) {
     return doc(db, 'users', uid, 'data', 'favourites');
 }
 
-// Subscribe to real-time Firestore updates for favourites.
-//
-// getLocalFavs — async function that returns the current local favourites array.
-//   Called lazily (only when needed) so it's never stale. It must REJECT when
-//   the local copy cannot be read: what it returns is pushed over the
-//   Firestore document, so answering [] for a failed read would delete every
-//   favourite on every device. A rejection skips the push.
-//
-// Conflict resolution: every Firestore document now carries clientUpdatedAt
-// (a client-side Date.now() millis). The same value is mirrored in
-// localStorage[FAV_TS_KEY] after every local write. On each snapshot:
-//   • Firestore newer (or no timestamps yet)  → apply Firestore to local
-//   • Local newer                             → push local to Firestore
-//
-// This prevents a stale write from another session/tab from silently
-// overwriting newer local data when the snapshot arrives.
-//
-// Returns an unsubscribe function to call on sign-out.
-export function subscribe(uid, getLocalFavs, onChange) {
+// handlers:
+//   applyRemote(docs)        — docs that changed remotely (tombstones included).
+//                              Must merge, never replace.
+//   seed(remoteByID)         — once, after the first SERVER snapshot has been
+//                              applied: push whatever this device has that the
+//                              account does not, or has newer.
+//   applyLegacy(items, remoteByID) — the old single document's items, after
+//                              seeding. Additive only.
+export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy }) {
+    const remoteByID = new Map();
     let seeded = false;
-    let pushInFlight = false;
+    let legacyItems = null;
+    let legacyApplied = false;
 
-    const unsubFav = onSnapshot(favDoc(uid), async snap => {
-        if (!snap.exists()) {
-            if (!seeded) {
-                seeded = true;
-                let items;
-                try {
-                    items = await getLocalFavs();
-                } catch (e) {
-                    // Try again on the next snapshot rather than seed nothing.
-                    seeded = false;
-                    console.error('[folkfriend sync] could not read local favourites to seed', e);
-                    return;
-                }
-                pushFavourites(uid, items);
-            }
-            return;
+    // Serialised: a seed must see the merge of the snapshot that triggered it,
+    // and two snapshots must not merge concurrently.
+    let chain = Promise.resolve();
+    const enqueue = fn => { chain = chain.then(fn).catch(e => console.error('[folkfriend sync] favourites', e)); return chain; };
+
+    const runLegacy = () => enqueue(async () => {
+        if (!seeded || !legacyItems || legacyApplied) return;
+        legacyApplied = true;
+        try {
+            await applyLegacy(legacyItems, remoteByID);
+        } catch (e) {
+            legacyApplied = false;
+            console.error('[folkfriend sync] could not merge the old favourites document', e);
         }
+    });
 
-        const data = snap.data();
-        const firestoreTs = typeof data.clientUpdatedAt === 'number' ? data.clientUpdatedAt : 0;
-        const localTs = Number(localStorage.getItem(FAV_TS_KEY) || 0);
-
-        if (firestoreTs > 0 && localTs > firestoreTs && !pushInFlight) {
-            // Local was modified more recently — push local to Firestore, don't
-            // overwrite local with stale Firestore data.
-            pushInFlight = true;
+    const unsubCollection = onSnapshot(collectionRef(uid, FAVOURITES_COLLECTION), snap => enqueue(async () => {
+        const changed = [];
+        for (const change of snap.docChanges()) {
+            // A hard delete of a document (only ever done by hand, in the
+            // console) is ignored: nothing in the app deletes these, and
+            // reading it as "remove the favourite" is the one interpretation
+            // that can lose data.
+            if (change.type === 'removed') continue;
+            const data = change.doc.data();
+            if (!data || data.id == null) continue;
+            remoteByID.set(String(data.id), data);
+            changed.push(data);
+        }
+        if (changed.length) {
             try {
-                const localItems = await getLocalFavs();
-                await pushFavourites(uid, localItems);
+                await applyRemote(changed);
             } catch (e) {
-                console.error('[folkfriend sync] could not read local favourites to push', e);
-            } finally {
-                pushInFlight = false;
-            }
-        } else {
-            // Firestore is same or newer (or documents predate this versioning) —
-            // apply to local and record the Firestore timestamp so future snapshots
-            // of our own write don't look "stale".
-            onChange('favourites', data.items || []);
-            if (firestoreTs > 0) {
-                localStorage.setItem(FAV_TS_KEY, String(firestoreTs));
+                const reason = (e && (e.name || e.message)) || 'unknown error';
+                console.error('[folkfriend sync] could not store favourites locally:', e);
+                reportSyncProblem('local:favourites', `Could not save favourites on this device (${reason}).`);
+                return;
             }
         }
-    }, err => {
+        if (!seeded && !snap.metadata.fromCache) {
+            try {
+                await seed(remoteByID);
+                seeded = true;
+            } catch (e) {
+                // Retried on the next server snapshot rather than seeding nothing.
+                console.error('[folkfriend sync] could not read local favourites to seed', e);
+            }
+        }
+    }).then(runLegacy), err => {
         console.error('[folkfriend sync] favourites listener failed:', err.code, err.message, err);
-        eventBus.$emit('syncError',
+        reportSyncProblem('listen:favourites',
             `Favourites sync failed (${err.code || 'unknown'}) — they may be out of date.`);
     });
 
-    return () => { unsubFav(); };
+    const unsubLegacy = onSnapshot(legacyFavDoc(uid), snap => {
+        if (!snap.exists()) return;
+        const data = snap.data();
+        // Re-read whenever an older build on another device writes it, so its
+        // additions keep arriving until that device updates.
+        legacyItems = Array.isArray(data && data.items) ? data.items : [];
+        legacyApplied = false;
+        runLegacy();
+    }, err => {
+        console.error('[folkfriend sync] old favourites document unreadable:', err.code, err);
+    });
+
+    return () => { unsubCollection(); unsubLegacy(); };
+}
+
+// Writes favourite documents (upserts and tombstones). Failures are REPORTED:
+// a rejected write here is the whole bug this layout replaces.
+export async function pushFavouriteRecords(uid, docs) {
+    const usable = (docs || []).filter(d => d && d.id != null);
+    for (let i = 0; i < usable.length; i += BATCH_LIMIT) {
+        const batch = writeBatch(db);
+        for (const d of usable.slice(i, i + BATCH_LIMIT)) {
+            batch.set(recordRef(uid, FAVOURITES_COLLECTION, d.id), toPlain(d));
+        }
+        await batch.commit().catch(e => {
+            console.error('[folkfriend sync] could not push favourites:', e && e.code, e);
+            reportSyncProblem('push:favourites',
+                `Could not sync favourites to your account (${(e && e.code) || 'unknown'}). ` +
+                'They are safe on this device.');
+        });
+    }
 }
 
 function toPlain(items) {
     return JSON.parse(JSON.stringify(items));
-}
-
-// Write favourites to Firestore.
-// Sets clientUpdatedAt so onSnapshot can tell whether Firestore or local is newer.
-// Also updates localStorage so our own echoed snapshot doesn't look stale.
-export function pushFavourites(uid, items) {
-    const clientUpdatedAt = Date.now();
-    localStorage.setItem(FAV_TS_KEY, String(clientUpdatedAt));
-    return setDoc(favDoc(uid), {
-        items: toPlain(items),
-        updatedAt: serverTimestamp(),
-        clientUpdatedAt,
-    }).catch(console.error);
 }
 
 // ---- Record-per-document collections -------------------------------------

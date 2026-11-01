@@ -19,6 +19,13 @@ rules_version = '2';
 // 1 MiB limit, and because a live session writes on every tune change — see
 // the comment in app/src/services/sync.js.
 //
+// users/{uid}/favourites/{settingID}  — ONE DOCUMENT PER FAVOURITE (Nov 2026);
+//                                        the data/favourites array above is
+//                                        still read for migration, no longer
+//                                        written (it hit the 1 MiB limit)
+//   - id: string (matches the document id), updatedAt: number
+//   - item: map (the FavouriteItem)  — or —  deleted: true (a tombstone)
+//
 // users/{uid}/places/{placeID}
 //   - id: string (matches the document id), name: string
 //   - lat/lon: number, radiusM: number, createdAt: number
@@ -52,6 +59,13 @@ service cloud.firestore {
         && request.resource.data.id == docID;
     }
 
+    function isValidFavourite(docID) {
+      return idMatches(docID)
+        && request.resource.data.updatedAt is number
+        && (request.resource.data.get('deleted', false) == true
+            || request.resource.data.item is map);
+    }
+
     function isValidPlace(docID) {
       return idMatches(docID)
         && request.resource.data.name is string
@@ -78,6 +92,11 @@ service cloud.firestore {
 
     match /users/{uid}/data/{doc} {
       allow read, write: if isOwner(uid);
+    }
+
+    match /users/{uid}/favourites/{settingID} {
+      allow read, delete: if isOwner(uid);
+      allow create, update: if isOwner(uid) && isValidFavourite(settingID);
     }
 
     match /users/{uid}/places/{placeID} {

@@ -9,7 +9,7 @@ import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '
 import {deleteSessionAudio, reclaimAudioForMissingSessions} from './sessionAudioStore.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
 import {
-    subscribe as syncSubscribe, pushFavourites,
+    subscribeFavourites, pushFavouriteRecords,
     subscribeCollection, pushRecord, pushRecords, deleteRecord, deleteRecords,
 } from './sync.js';
 import {
@@ -476,10 +476,13 @@ class Store {
         let changed = false;
         await this._withRecords('favouriteItems', async stored => {
             const normalised = await this._normaliseFavourites(stored);
+            // Taken BEFORE mutate, which edits the items in place.
+            const before = this._favouriteSnapshot(normalised.items);
             const outcome = await mutate(normalised.items);
             changed = Boolean(outcome);
             if (!changed && !normalised.changed) return null;
             const records = Array.isArray(outcome) ? outcome : normalised.items;
+            const docs = this._stampFavouriteChanges(before, records);
             // Invalidated inside the chain, before the write: a cache load is
             // itself a link in this chain (_loadFavouriteIDs), so one queued
             // behind this write cannot run until it has committed and will
@@ -488,16 +491,156 @@ class Store {
             await this._dbSetStrict('favouriteItems', records);
             if (normalised.migratedFolders) await this._dbSet('favouriteFolders', []);
             // PUSHED INSIDE THE CHAIN, so pushes leave in the order the writes
-            // committed. pushFavourites stamps clientUpdatedAt when called, and
-            // Firestore keeps the newest stamp: a push made after the chain
-            // released could land behind a later edit's push and replace the
-            // newer list with this older one on every device. Not awaited —
-            // offline, setDoc does not resolve until the server acknowledges,
-            // and the chain must not wait on the network.
-            if (this.currentUser) pushFavourites(this.currentUser.uid, records);
+            // committed. Only the favourites that actually changed are sent,
+            // each as its own document with its own stamp — see sync.js for why
+            // the whole-list document had to go. Not awaited: offline, a write
+            // does not resolve until the server acknowledges, and the chain
+            // must not wait on the network.
+            if (this.currentUser && docs.length) pushFavouriteRecords(this.currentUser.uid, docs);
             return null;
         });
         return changed;
+    }
+
+    // ---- Favourites sync (one document per favourite) -----------------------
+    //
+    // Every favourite carries `updatedAt`, a per-record version that is bumped
+    // whenever its content changes on this device and decides, per favourite,
+    // which device's copy wins. A removal is pushed as a tombstone carrying the
+    // next stamp, so a deletion can beat an older copy and lose to a newer one
+    // (re-starring after an unstar). See sync.js.
+
+    _favouriteID(item) {
+        return String(item && item.result && item.result.settingID);
+    }
+
+    // Content without the stamp, for change detection.
+    _favouriteBody(item) {
+        // eslint-disable-next-line no-unused-vars
+        const { updatedAt, ...rest } = item || {};
+        return JSON.stringify(rest);
+    }
+
+    _favouriteSnapshot(items) {
+        const map = new Map();
+        for (const item of items || []) {
+            map.set(this._favouriteID(item), { body: this._favouriteBody(item), updatedAt: Number(item.updatedAt) || 0 });
+        }
+        return map;
+    }
+
+    // Stamps every favourite that is new or changed since `before` (in place)
+    // and returns the documents to push: upserts, plus a tombstone for every
+    // favourite that is gone.
+    _stampFavouriteChanges(before, records) {
+        const docs = [];
+        const present = new Set();
+        for (const item of records || []) {
+            const id = this._favouriteID(item);
+            present.add(id);
+            const prev = before.get(id);
+            if (prev && prev.body === this._favouriteBody(item)) continue;
+            item.updatedAt = nextUpdatedAt(Math.max(prev ? prev.updatedAt : 0, Number(item.updatedAt) || 0));
+            docs.push({ id, updatedAt: item.updatedAt, item });
+        }
+        for (const [id, prev] of before) {
+            if (!present.has(id)) docs.push({ id, updatedAt: nextUpdatedAt(prev.updatedAt), deleted: true });
+        }
+        return docs;
+    }
+
+    // Remote favourite documents changed. MERGED per favourite, never a
+    // replacement of the list: a favourite this device has and the snapshot
+    // does not mention is left exactly as it is.
+    async _applyRemoteFavourites(docs) {
+        const incoming = docs.filter(d => d && !d.deleted && d.item).map(d => d.item);
+        // Harvest first, as before: the local cache is the durable copy.
+        await this._harvestAiSummaries(incoming);
+        let changedAny = false;
+        await this._withRecords('favouriteItems', async stored => {
+            const { items } = await this._normaliseFavourites(stored);
+            const byID = new Map(items.map(f => [this._favouriteID(f), f]));
+            let changed = false;
+            for (const d of docs) {
+                const id = String(d.id);
+                const stamp = Number(d.updatedAt) || 0;
+                const local = byID.get(id);
+                const localStamp = local ? Number(local.updatedAt) || 0 : 0;
+                if (d.deleted) {
+                    if (local && localStamp <= stamp) { byID.delete(id); changed = true; }
+                    continue;
+                }
+                if (!d.item || !d.item.result || !this._isValidSettingID(d.item.result.settingID)) continue;
+                if (local && localStamp > stamp) continue; // ours is newer; already pushed or seeded
+                const adopted = { ...JSON.parse(JSON.stringify(d.item)), updatedAt: stamp };
+                if (local && this._favouriteBody(local) === this._favouriteBody(adopted)) {
+                    if (localStamp !== stamp) { local.updatedAt = stamp; changed = true; }
+                    continue;
+                }
+                byID.set(id, adopted);
+                changed = true;
+            }
+            const merged = [...byID.values()].sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
+            // Put back any AI note the sender did not know about, and push
+            // that repair out, exactly as the whole-list sync did.
+            const beforeRepair = this._favouriteSnapshot(merged);
+            const restored = await this._reapplyAiSummaries(merged);
+            const repairs = restored ? this._stampFavouriteChanges(beforeRepair, merged) : [];
+            if (!changed && !repairs.length) return null;
+            this._invalidateFavouriteCache();
+            await this._dbSetStrict('favouriteItems', merged);
+            changedAny = true;
+            if (repairs.length && this.currentUser) pushFavouriteRecords(this.currentUser.uid, repairs);
+            return null;
+        });
+        if (changedAny) eventBus.$emit('syncComplete');
+    }
+
+    // After the first server snapshot: push every favourite the account does
+    // not have, or has an older copy of. A UNION, like the record logs —
+    // favourites made before signing in, or while a push was being refused,
+    // are exactly what this exists to carry up.
+    async _seedFavourites(remoteByID) {
+        await this._withRecords('favouriteItems', async stored => {
+            const { items } = await this._normaliseFavourites(stored);
+            const docs = [];
+            for (const item of items) {
+                const id = this._favouriteID(item);
+                const remote = remoteByID.get(id);
+                const stamp = Number(item.updatedAt) || 0;
+                if (!remote || stamp > (Number(remote.updatedAt) || 0)) docs.push({ id, updatedAt: stamp, item });
+            }
+            if (docs.length && this.currentUser) pushFavouriteRecords(this.currentUser.uid, docs);
+            return null;
+        });
+    }
+
+    // The pre-November-2026 single favourites document. ADDITIVE ONLY: a
+    // favourite it holds that this device lacks, and that the collection has
+    // no record of at all (not even a tombstone), is added — and, being new
+    // here, pushed into the collection. Nothing is ever removed on its account.
+    async _applyLegacyFavourites(legacyItems, remoteByID) {
+        const candidates = (legacyItems || []).filter(item =>
+            item && item.result && this._isValidSettingID(item.result.settingID) &&
+            !remoteByID.has(this._favouriteID(item)));
+        if (!candidates.length) return;
+        await this._harvestAiSummaries(candidates);
+        const added = await this._updateFavourites(items => {
+            const have = new Set(items.map(f => this._favouriteID(f)));
+            let any = false;
+            for (const candidate of candidates) {
+                const id = this._favouriteID(candidate);
+                if (have.has(id)) continue;
+                // eslint-disable-next-line no-unused-vars
+                const { updatedAt, clientUpdatedAt, ...item } = JSON.parse(JSON.stringify(candidate));
+                items.push(item);
+                have.add(id);
+                any = true;
+            }
+            if (any) items.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
+            return any;
+        });
+        if (added) eventBus.$emit('syncComplete');
     }
 
     async addTagToFavourite(settingID, tag) {
@@ -1745,7 +1888,16 @@ class Store {
         if (payload.places) writes.push([KEY_PLACES, payload.places]);
         if (payload.liveSessions) writes.push([KEY_LIVE_SESSIONS, payload.liveSessions]);
         // v1/v2 exports may have folderId on items; getFavourites() migrates them on next load.
-        if (payload.favouriteItems) writes.push(['favouriteItems', payload.favouriteItems]);
+        if (payload.favouriteItems) {
+            // Stamped as edits made now, so the restored copies win over the
+            // account's — a restore is an explicit request for its contents.
+            // Favourites the backup does not hold are NOT tombstoned: a restore
+            // must never delete anything on the user's other devices.
+            for (const item of payload.favouriteItems) {
+                if (item && typeof item === 'object') item.updatedAt = nextUpdatedAt(item.updatedAt);
+            }
+            writes.push(['favouriteItems', payload.favouriteItems]);
+        }
         if (payload.favouriteFolders) writes.push(['favouriteFolders', payload.favouriteFolders]);
 
         // ALL OR NOTHING, as far as IndexedDB allows.
@@ -1789,6 +1941,11 @@ class Store {
             if (key === KEY_SIGHTINGS) this._syncPushMany('sightings', value);
             if (key === KEY_PLACES) this._syncPushMany('places', value);
             if (key === KEY_LIVE_SESSIONS) this._syncPushMany('liveSessions', value);
+            if (key === 'favouriteItems' && this.currentUser) {
+                pushFavouriteRecords(this.currentUser.uid, value
+                    .filter(item => item && item.result && this._isValidSettingID(item.result.settingID))
+                    .map(item => ({ id: this._favouriteID(item), updatedAt: item.updatedAt, item })));
+            }
         }
         // Backups made after 3.9.0 carry AI summaries on favourited settings.
         // Restoring a backup is an explicit request for its contents, so it
@@ -1820,30 +1977,10 @@ class Store {
         // Set before the listeners, since seeding pushes local-only records and
         // every push reads this.currentUser to address them.
         this._unsubscribeRecordSync = this._subscribeRecordCollections(user.uid);
-        this._unsubscribeSync = syncSubscribe(user.uid, () => this.getFavouritesStrict(), async (type, items) => {
-            if (type === 'favourites') {
-                // The incoming array replaces the local one wholesale, so AI
-                // summaries have to be reconciled around that write: harvest
-                // anything new the remote device knows, then re-apply anything
-                // it does not, so a device that has never generated a summary
-                // cannot silently delete them.
-                await this._harvestAiSummaries(items);
-                const restored = await this._reapplyAiSummaries(items);
-                // Through the write chain, so a local edit in flight cannot
-                // interleave with this replacement — and the repair push goes
-                // out from inside it, for the reason given in _updateFavourites.
-                try {
-                    await this._withRecords('favouriteItems', async () => {
-                        this._invalidateFavouriteCache();
-                        await this._dbSetStrict('favouriteItems', items);
-                        if (restored && this.currentUser) pushFavourites(this.currentUser.uid, items);
-                        return null;
-                    });
-                } catch (e) {
-                    console.error('IndexedDB write error (favouriteItems)', e);
-                }
-                eventBus.$emit('syncComplete');
-            }
+        this._unsubscribeSync = subscribeFavourites(user.uid, {
+            applyRemote: docs => this._applyRemoteFavourites(docs),
+            seed: remoteByID => this._seedFavourites(remoteByID),
+            applyLegacy: (items, remoteByID) => this._applyLegacyFavourites(items, remoteByID),
         });
     }
 

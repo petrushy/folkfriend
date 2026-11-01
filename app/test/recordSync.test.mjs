@@ -83,15 +83,22 @@ export function writeBatch() {
     return {
         set(ref, data) { ops.push({ op: 'set', path: ref.path, data }); },
         delete(ref) { ops.push({ op: 'delete', path: ref.path }); },
-        commit() { for (const o of ops) __writes.push(o); return Promise.resolve(); },
+        commit() {
+            if (__commitError) return Promise.reject(__commitError);
+            for (const o of ops) __writes.push(o);
+            return Promise.resolve();
+        },
     };
 }
+let __commitError = null;
+export function __failCommits(code) { __commitError = code ? Object.assign(new Error(code), { code }) : null; }
 export function onSnapshot(ref, onNext, onError) {
     const listener = { path: ref.path, onNext, onError, active: true };
     __listeners.push(listener);
     return () => { listener.active = false; };
 }
 export function __reset() {
+    __commitError = null;
     __listeners.length = 0;
     __writes.length = 0;
     __batches.length = 0;
@@ -263,40 +270,89 @@ async function run() {
 
     // --- half 2: store.js, against a fake sync layer ------------------------
 
-    console.log('\nsync.js — favourites never push an unread list');
+    console.log('\nsync.js — favourites, one document each');
 
-    // Whatever getLocal returns is written OVER the favourites document, which
-    // every device then adopts. So a local copy that could not be read must
-    // push nothing at all — pushing [] deletes every favourite everywhere.
-    function favouritesSnapshot(data) {
-        return { exists: () => data !== null, data: () => data };
-    }
+    const favPath = 'users/u1/favourites';
+    const legacyPath = 'users/u1/data/favourites';
+    const listenerFor = (firestore, p) => firestore.__listeners.find(l => l.path === p && l.active);
+    const legacySnapshot = items => ({ exists: () => items !== null, data: () => ({ items }) });
+    const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 
-    await test('a failed local read is not pushed when local looks newer', async () => {
+    await test('seeding waits for the server, and a failed read is retried rather than skipped', async () => {
         const { sync, firestore } = await loadSync();
-        localStorage.setItem('favouritesLocalUpdatedAt', '2000');
-        sync.subscribe('u1', async () => { throw new Error('read failed'); }, () => {});
-
-        await firestore.__listeners[0].onNext(favouritesSnapshot({ items: [{ id: 1 }], clientUpdatedAt: 1000 }));
-
-        assert.deepEqual(firestore.__writes, [], 'nothing replaces the remote document');
-    });
-
-    await test('a failed local read does not seed, and the next snapshot retries', async () => {
-        const { sync, firestore } = await loadSync();
+        const seeds = [];
         let fail = true;
-        sync.subscribe('u1', async () => {
-            if (fail) throw new Error('read failed');
-            return [{ id: 'local' }];
-        }, () => {});
+        sync.subscribeFavourites('u1', {
+            applyRemote: async () => {},
+            seed: async remote => { if (fail) throw new Error('read failed'); seeds.push(new Map(remote)); },
+            applyLegacy: async () => {},
+        });
+        await listenerFor(firestore, favPath).onNext(snapshot([{ id: '1', updatedAt: 5 }], { fromCache: true }));
+        await settle();
+        assert.equal(seeds.length, 0, 'not from the local cache');
 
-        await firestore.__listeners[0].onNext(favouritesSnapshot(null));
-        assert.deepEqual(firestore.__writes, [], 'no empty seed');
+        await listenerFor(firestore, favPath).onNext(snapshot([{ id: '1', updatedAt: 5 }]));
+        await settle();
+        assert.equal(seeds.length, 0, 'the read failed');
 
         fail = false;
-        await firestore.__listeners[0].onNext(favouritesSnapshot(null));
-        assert.equal(firestore.__writes.length, 1);
-        assert.deepEqual(firestore.__writes[0].data.items, [{ id: 'local' }]);
+        await listenerFor(firestore, favPath).onNext(snapshot([], { changes: [] }));
+        await settle();
+        assert.equal(seeds.length, 1, 'retried on the next server snapshot');
+        assert.ok(seeds[0].has('1'), 'with everything the account holds');
+    });
+
+    await test('a removed document is never read as an unstar', async () => {
+        const { sync, firestore } = await loadSync();
+        const applied = [];
+        sync.subscribeFavourites('u1', {
+            applyRemote: async docs => { applied.push(docs); },
+            seed: async () => {}, applyLegacy: async () => {},
+        });
+        await listenerFor(firestore, favPath).onNext(snapshot([], { changes: [removal('1')] }));
+        await settle();
+        assert.deepEqual(applied, [], 'only an explicit tombstone removes a favourite');
+    });
+
+    await test('the old single document is merged only after seeding, and is never written', async () => {
+        const { sync, firestore } = await loadSync();
+        const legacy = [];
+        sync.subscribeFavourites('u1', {
+            applyRemote: async () => {}, seed: async () => {},
+            applyLegacy: async (items, remote) => { legacy.push({ items, remote: new Map(remote) }); },
+        });
+        await listenerFor(firestore, legacyPath).onNext(legacySnapshot([{ result: { settingID: '9' } }]));
+        await settle();
+        assert.equal(legacy.length, 0, 'not before the collection is known — its tombstones decide');
+
+        await listenerFor(firestore, favPath).onNext(snapshot([{ id: '3', updatedAt: 1, deleted: true }]));
+        await settle();
+        assert.equal(legacy.length, 1);
+        assert.ok(legacy[0].remote.get('3').deleted, 'tombstones are passed along');
+        assert.ok(!firestore.__writes.some(w => w.path === legacyPath), 'the old document is left alone');
+    });
+
+    await test('each favourite is its own document', async () => {
+        const { sync, firestore } = await loadSync();
+        await sync.pushFavouriteRecords('u1', [
+            { id: '1', updatedAt: 1, item: { result: { settingID: '1' } } },
+            { id: '2', updatedAt: 2, deleted: true },
+        ]);
+        assert.deepEqual(firestore.__writes.map(w => w.path), [`${favPath}/1`, `${favPath}/2`]);
+        assert.equal(firestore.__writes[1].data.deleted, true, 'an unstar is a tombstone, not a delete');
+    });
+
+    await test('a refused favourites write is reported, not swallowed', async () => {
+        // The bug this layout replaces: a write over Firestore's 1 MiB document
+        // limit was refused on every star, and .catch(console.error) meant two
+        // devices quietly drifted apart behind a green sign-in light.
+        const { sync, firestore } = await loadSync();
+        const events = await import(path.join(tmpDir, 'fake-eventbus.mjs'));
+        events.__reset();
+        firestore.__failCommits('invalid-argument');
+        await sync.pushFavouriteRecords('u9', [{ id: '1', updatedAt: 1, item: { result: { settingID: '1' } } }]);
+        assert.ok(events.__events.some(e => e.name === 'syncError' && /favourites/.test(e.payload)),
+            'the user is told');
     });
 
     console.log('\nstore.js — what each change pushes');
@@ -677,9 +733,9 @@ async function run() {
         ]);
 
         assert.deepEqual(new Set(storedFavouriteIDs(idb)), new Set(['1', '2']));
-        const lastPush = sync.__pushes[sync.__pushes.length - 1];
-        assert.deepEqual(new Set(lastPush.map(f => f.result.settingID)), new Set(['1', '2']),
-            'and the document Firestore ends up with has both');
+        const pushedIDs = new Set(sync.__pushes.flat().filter(d => !d.deleted).map(d => d.id));
+        assert.deepEqual(pushedIDs, new Set(['1', '2']), 'and both reach Firestore');
+        assert.ok(!sync.__pushes.flat().some(d => d.deleted), 'neither push unstars the other');
     });
 
     await test('a tag added while a star lands is kept', async () => {
@@ -712,10 +768,84 @@ async function run() {
             ]);
         } finally { idb.__allowAll(); }
 
-        const lastPush = sync.__pushes[sync.__pushes.length - 1];
-        assert.deepEqual(new Set(lastPush.map(f => f.result.settingID)), new Set(['1', '2']),
-            'the last push is the newest list, not an older one stamped later');
-        assert.deepEqual(lastPush.find(f => f.result.settingID === '1').tags, ['Reels', 'jig']);
+        const docs = sync.__pushes.flat();
+        const last1 = docs.filter(d => d.id === '1').pop();
+        assert.deepEqual(last1.item.tags, ['Reels', 'jig'], 'the newest copy of each favourite goes last');
+        const stamps = docs.filter(d => d.id === '1').map(d => d.updatedAt);
+        assert.deepEqual(stamps, [...stamps].sort((a, b) => a - b), 'with rising stamps');
+        assert.ok(docs.some(d => d.id === '2' && !d.deleted));
+    });
+
+    console.log('\nstore.js — favourites merge per favourite, never replace');
+
+    const remoteDoc = (settingID, updatedAt, extra = {}) =>
+        ({ id: String(settingID), updatedAt, item: fav(String(settingID), `${settingID}0`, extra) });
+
+    await test('a snapshot never removes a favourite it does not mention', async () => {
+        // The whole-list sync replaced this device's favourites with the
+        // sender's. Two devices that had each starred something the other had
+        // not ended up with whichever list was pushed last.
+        const { idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10'), fav('2', '20')]);
+        await sync.__favHandlers.applyRemote([remoteDoc('3', 50)]);
+        assert.deepEqual(new Set(storedFavouriteIDs(idb)), new Set(['1', '2', '3']));
+    });
+
+    await test('a remote unstar removes only an older copy', async () => {
+        const { idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10', { updatedAt: 100 })]);
+        await sync.__favHandlers.applyRemote([{ id: '1', updatedAt: 50, deleted: true }]);
+        assert.deepEqual(storedFavouriteIDs(idb), ['1'], 'starred again here since: kept');
+        await sync.__favHandlers.applyRemote([{ id: '1', updatedAt: 150, deleted: true }]);
+        assert.deepEqual(storedFavouriteIDs(idb), [], 'unstarred elsewhere later: removed');
+    });
+
+    await test('an older remote copy does not overwrite a newer local edit', async () => {
+        const { idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10', { tags: ['mine'], updatedAt: 100 })]);
+        await sync.__favHandlers.applyRemote([remoteDoc('1', 50, { tags: ['stale'] })]);
+        assert.deepEqual(idb.__db.get('favouriteItems')[0].tags, ['mine']);
+        await sync.__favHandlers.applyRemote([remoteDoc('1', 200, { tags: ['newer'] })]);
+        assert.deepEqual(idb.__db.get('favouriteItems')[0].tags, ['newer']);
+    });
+
+    await test('editing one favourite pushes only that one; unstarring pushes a tombstone', async () => {
+        const { store, idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10'), fav('2', '20')]);
+        await store.addTagToFavourite('1', 'reel');
+        assert.deepEqual(sync.__pushes.flat().map(d => d.id), ['1']);
+        sync.__reset();
+        await store.removeFavourite('2');
+        const [tomb] = sync.__pushes.flat();
+        assert.equal(tomb.id, '2');
+        assert.equal(tomb.deleted, true);
+        assert.ok(tomb.updatedAt > 0);
+    });
+
+    await test('seeding pushes what the account lacks or holds an older copy of', async () => {
+        const { idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [
+            fav('1', '10', { updatedAt: 100 }), fav('2', '20', { updatedAt: 5 }), fav('3', '30'),
+        ]);
+        await sync.__favHandlers.seed(new Map([
+            ['1', { id: '1', updatedAt: 50 }],
+            ['2', { id: '2', updatedAt: 5 }],
+        ]));
+        assert.deepEqual(new Set(sync.__pushes.flat().map(d => d.id)), new Set(['1', '3']));
+    });
+
+    await test('the old single document adds what is missing and removes nothing', async () => {
+        // How two devices that already drifted apart under the old layout get
+        // back to the same list: each adds what it lacks, nobody deletes.
+        const { idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10'), fav('2', '20')]);
+        await sync.__favHandlers.applyLegacy(
+            [fav('2', '20'), fav('4', '40'), fav('5', '50')],
+            new Map([['5', { id: '5', updatedAt: 9, deleted: true }]]),
+        );
+        assert.deepEqual(new Set(storedFavouriteIDs(idb)), new Set(['1', '2', '4']),
+            'only 4 is new; 5 was unstarred on a device already on the new layout');
+        assert.deepEqual(sync.__pushes.flat().map(d => d.id), ['4'], 'and 4 is carried into the collection');
     });
 
     await test('the star cache never answers from before a write it raced', async () => {
@@ -835,8 +965,9 @@ const FAKE_SYNC = `
 export const __pushes = [];
 export const __records = [];
 export const __subs = [];
-export function pushFavourites(uid, items) { __pushes.push(items); }
-export function subscribe() { return () => {}; }
+export function pushFavouriteRecords(uid, docs) { __pushes.push(docs); }
+export let __favHandlers = null;
+export function subscribeFavourites(uid, handlers) { __favHandlers = handlers; return () => { __favHandlers = null; }; }
 export function subscribeCollection(uid, name, handlers) {
     const sub = { uid, name, handlers, active: true };
     __subs.push(sub);

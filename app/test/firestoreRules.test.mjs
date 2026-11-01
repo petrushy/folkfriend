@@ -122,7 +122,28 @@ const liveSession = (over = {}) => ({
     ...over,
 });
 
+// Exactly what store._stampFavouriteChanges / pushFavouriteRecords write: a
+// starred favourite, and an unstar as a tombstone.
+const favouriteDoc = (over = {}) => ({
+    id: '420',
+    updatedAt: 1757003600001,
+    item: {
+        result: {
+            settingID: '420',
+            displayName: 'The Kesh',
+            setting: { tune_id: '42', setting_id: '420', abc: '|:GAB:|', dance: 'jig', mode: 'Gmajor' },
+        },
+        timestamp: 1757003600000,
+        tags: ['jigs'],
+        tempo: null,
+        updatedAt: 1757003600001,
+    },
+    ...over,
+});
+const favouriteTombstone = (over = {}) => ({ id: '421', updatedAt: 1757003600002, deleted: true, ...over });
+
 const PATHS = {
+    favourites: r => `users/alice/favourites/${r.id}`,
     sightings: r => `users/alice/sightings/${r.id}`,
     places: r => `users/alice/places/${r.id}`,
     liveSessions: r => `users/alice/liveSessions/${r.id}`,
@@ -245,6 +266,25 @@ async function run() {
     await test('nothing outside users/{uid} is reachable at all', async () => {
         await assertFails(getDoc(doc(alice, 'somethingElse/x')));
         await assertFails(setDoc(doc(alice, 'somethingElse/x'), { a: 1 }));
+    });
+
+    console.log('\nfavourites, one document each');
+
+    await test('the owner can star and unstar', async () => {
+        await assertSucceeds(write(alice, 'favourites', favouriteDoc()));
+        await assertSucceeds(write(alice, 'favourites', favouriteTombstone()));
+        await assertSucceeds(getDoc(doc(alice, PATHS.favourites(favouriteDoc()))));
+    });
+
+    await test('nobody else can read or write them', async () => {
+        await assertFails(getDoc(doc(bob, PATHS.favourites(favouriteDoc()))));
+        await assertFails(write(bob, 'favourites', favouriteDoc({ id: '999' })));
+        await assertFails(write(anon, 'favourites', favouriteDoc({ id: '998' })));
+    });
+
+    await test('a favourite with neither an item nor a tombstone is refused', async () => {
+        await assertFails(write(alice, 'favourites', { id: '500', updatedAt: 1 }));
+        await assertFails(setDoc(doc(alice, 'users/alice/favourites/501'), favouriteDoc({ id: '502' })));
     });
 
     console.log('\nmalformed records are refused');

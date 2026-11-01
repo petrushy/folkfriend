@@ -58,11 +58,19 @@ export default { $emit: (name, payload) => __events.push({ name, payload }), $on
     'fake-sync.mjs': `
 export const __pushes = [];
 export let __onChange = null;
-export function pushFavourites(uid, items) {
-    __pushes.push(JSON.parse(JSON.stringify(items)));
+// Pushes are per-favourite documents now; recorded as the list of favourites
+// each push carried, so assertions read the same as for the old whole-list push.
+export function pushFavouriteRecords(uid, docs) {
+    __pushes.push(JSON.parse(JSON.stringify(docs.filter(d => !d.deleted).map(d => d.item))));
 }
-export function subscribe(uid, getLocal, onChange) {
-    __onChange = onChange;
+// A "snapshot carrying these favourites" is modelled as each of them arriving
+// as a remote document newer than anything local — the case the whole-list
+// replace used to model.
+let __remoteStamp = 1e15;
+export function subscribeFavourites(uid, handlers) {
+    __onChange = (type, items) => handlers.applyRemote(items.map(item => ({
+        id: String(item.result.settingID), updatedAt: ++__remoteStamp, item,
+    })));
     return () => { __onChange = null; };
 }
 export const __records = [];
