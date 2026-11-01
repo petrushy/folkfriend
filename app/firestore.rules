@@ -7,22 +7,13 @@ rules_version = '2';
 // Everything lives under users/{uid} and is private to that user. There is no
 // sharing, no public data and no cross-user read of any kind in this app.
 //
-// users/{uid}/data/favourites          — one document holding the whole
-//                                        favourites array (small, always
-//                                        rewritten wholesale)
-//   - items: list
-//   - clientUpdatedAt: number (millis)  — conflict arbitration
-//   - updatedAt: server timestamp
+// Everything is ONE DOCUMENT PER RECORD: an array document would pass
+// Firestore's 1 MiB limit (favourites carry their ABC; 5000 sightings, 300
+// sessions), and a live session writes on every tune change — see the comment
+// in app/src/services/sync.js. (Favourites were once a single array document
+// at users/{uid}/data/favourites; it hit that limit and is no longer used.)
 //
-// The three below are ONE DOCUMENT PER RECORD, because at their local caps
-// (5000 sightings, 300 sessions) an array document would pass Firestore's
-// 1 MiB limit, and because a live session writes on every tune change — see
-// the comment in app/src/services/sync.js.
-//
-// users/{uid}/favourites/{settingID}  — ONE DOCUMENT PER FAVOURITE (Nov 2026);
-//                                        the data/favourites array above is
-//                                        still read for migration, no longer
-//                                        written (it hit the 1 MiB limit)
+// users/{uid}/favourites/{settingID}  — ONE DOCUMENT PER FAVOURITE (Nov 2026)
 //   - id: string (matches the document id), updatedAt: number
 //   - item: map (the FavouriteItem)  — or —  deleted: true (a tombstone)
 //
@@ -89,10 +80,6 @@ service cloud.firestore {
     }
 
     // ---- Rules -----------------------------------------------------------
-
-    match /users/{uid}/data/{doc} {
-      allow read, write: if isOwner(uid);
-    }
 
     match /users/{uid}/favourites/{settingID} {
       allow read, delete: if isOwner(uid);

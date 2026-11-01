@@ -644,34 +644,6 @@ class Store {
         return docs.length;
     }
 
-    // The pre-November-2026 single favourites document. ADDITIVE ONLY: a
-    // favourite it holds that this device lacks, and that the collection has
-    // no record of at all (not even a tombstone), is added — and, being new
-    // here, pushed into the collection. Nothing is ever removed on its account.
-    async _applyLegacyFavourites(legacyItems, remoteByID) {
-        const candidates = (legacyItems || []).filter(item =>
-            item && item.result && this._isValidSettingID(item.result.settingID) &&
-            !remoteByID.has(this._favouriteID(item)));
-        if (!candidates.length) return;
-        await this._harvestAiSummaries(candidates);
-        const added = await this._updateFavourites(items => {
-            const have = new Set(items.map(f => this._favouriteID(f)));
-            let any = false;
-            for (const candidate of candidates) {
-                const id = this._favouriteID(candidate);
-                if (have.has(id)) continue;
-                // eslint-disable-next-line no-unused-vars
-                const { updatedAt, clientUpdatedAt, ...item } = JSON.parse(JSON.stringify(candidate));
-                items.push(item);
-                have.add(id);
-                any = true;
-            }
-            if (any) items.sort((a, b) => (Number(b.timestamp) || 0) - (Number(a.timestamp) || 0));
-            return any;
-        });
-        if (added) eventBus.$emit('syncComplete');
-    }
-
     async addTagToFavourite(settingID, tag) {
         settingID = String(settingID);
         tag = tag.trim();
@@ -2009,7 +1981,6 @@ class Store {
         this._unsubscribeSync = subscribeFavourites(user.uid, {
             applyRemote: docs => this._applyRemoteFavourites(docs),
             seed: remoteByID => this._seedFavourites(remoteByID),
-            applyLegacy: (items, remoteByID) => this._applyLegacyFavourites(items, remoteByID),
             retry: () => this.retryFavouritesSync().catch(e => console.error('[folkfriend sync] retry failed', e)),
         });
     }

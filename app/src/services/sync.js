@@ -26,16 +26,7 @@ import eventBus from '@/eventBus';
 // absence — absence cannot be told apart from "not synced yet". Conflicts are
 // decided per favourite by `updatedAt`, which the store keeps monotone per
 // record, so editing one tune can never cost another.
-//
-// The old single document is still READ, never written: at sign-in its items
-// are merged in additively (anything missing here and never deleted in the
-// collection is added), which both migrates an install and recovers anything
-// that only ever reached the old document. It is left in place as a backup.
 export const FAVOURITES_COLLECTION = 'favourites';
-
-function legacyFavDoc(uid) {
-    return doc(db, 'users', uid, 'data', 'favourites');
-}
 
 // ---- Favourites sync status ----------------------------------------------
 //
@@ -119,31 +110,16 @@ export function __resetFavouritesSyncState() {
 //   seed(remoteByID)         — once, after the first SERVER snapshot has been
 //                              applied: push whatever this device has that the
 //                              account does not, or has newer.
-//   applyLegacy(items, remoteByID) — the old single document's items, after
-//                              seeding. Additive only.
 //   retry()                  — re-push whatever is pending; called when the
 //                              browser comes back online.
-export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy, retry }) {
+export function subscribeFavourites(uid, { applyRemote, seed, retry }) {
     const remoteByID = new Map();
     let seeded = false;
-    let legacyItems = null;
-    let legacyApplied = false;
 
     // Serialised: a seed must see the merge of the snapshot that triggered it,
     // and two snapshots must not merge concurrently.
     let chain = Promise.resolve();
     const enqueue = fn => { chain = chain.then(fn).catch(e => console.error('[folkfriend sync] favourites', e)); return chain; };
-
-    const runLegacy = () => enqueue(async () => {
-        if (!seeded || !legacyItems || legacyApplied) return;
-        legacyApplied = true;
-        try {
-            await applyLegacy(legacyItems, remoteByID);
-        } catch (e) {
-            legacyApplied = false;
-            console.error('[folkfriend sync] could not merge the old favourites document', e);
-        }
-    });
 
     favSync.listening = true;
     favSync.listenerError = null;
@@ -196,7 +172,7 @@ export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy, retry
                 console.error('[folkfriend sync] could not read local favourites to seed', e);
             }
         }
-    }).then(runLegacy), err => {
+    }), err => {
         console.error('[folkfriend sync] favourites listener failed:', err.code, err.message, err);
         reportSyncProblem('listen:favourites',
             `Favourites sync failed (${err.code || 'unknown'}) — they may be out of date.`);
@@ -205,24 +181,11 @@ export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy, retry
         emitFavSync();
     });
 
-    const unsubLegacy = onSnapshot(legacyFavDoc(uid), snap => {
-        if (!snap.exists()) return;
-        const data = snap.data();
-        // Re-read whenever an older build on another device writes it, so its
-        // additions keep arriving until that device updates.
-        legacyItems = Array.isArray(data && data.items) ? data.items : [];
-        legacyApplied = false;
-        runLegacy();
-    }, err => {
-        console.error('[folkfriend sync] old favourites document unreadable:', err.code, err);
-    });
-
     const onOnline = () => { if (favSync.pending.size && retry) retry(); };
     if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('online', onOnline);
 
     return () => {
         unsubCollection();
-        unsubLegacy();
         if (typeof window !== 'undefined' && window.removeEventListener) window.removeEventListener('online', onOnline);
         favSync.listening = false;
         emitFavSync();

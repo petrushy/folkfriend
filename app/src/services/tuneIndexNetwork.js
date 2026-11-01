@@ -16,17 +16,12 @@
 // ~600 bytes, and required before any download can start.
 const DATASETS_MANIFEST_PATH = 'datasets.json';
 
-// Legacy single-blob paths. Still published for installed apps that predate
-// dataset selection; this build no longer fetches them.
-const META_PATH = 'nud-meta.json';
-const INDEX_PATH = 'folkfriend-non-user-data.json';
-
 // eslint-disable-next-line no-undef
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const BASE_URL = IS_PRODUCTION ? 'https://folkfriend-data.web.app/' : '/res/';
 
 export const TIMEOUTS = {
-    // nud-meta.json is ~50 bytes. If it hasn't answered in 8s the network is
+    // datasets.json is ~600 bytes. If it hasn't answered in 8s the network is
     // not usable, whatever navigator.onLine claims.
     METADATA_MS: 8000,
     // The index is ~42 MB, so no useful overall deadline exists on a slow
@@ -38,14 +33,6 @@ export const TIMEOUTS = {
 
 function withCacheBuster(url, bypassCacheVersion) {
     return bypassCacheVersion === null ? url : `${url}?v=${bypassCacheVersion}`;
-}
-
-export function tuneIndexMetadataUrl() {
-    return BASE_URL + META_PATH;
-}
-
-export function tuneIndexDataUrl(bypassCacheVersion = null) {
-    return withCacheBuster(BASE_URL + INDEX_PATH, bypassCacheVersion);
 }
 
 export function datasetsManifestUrl(bypassCacheVersion = null) {
@@ -101,17 +88,6 @@ async function fetchWithDeadline(url, timeoutMs) {
     } finally {
         clearTimeout(timer);
     }
-}
-
-export async function fetchTuneIndexMetadata() {
-    if (isDefinitelyOffline()) {
-        throw new NetworkUnavailableError('Device is offline');
-    }
-    const response = await fetchWithDeadline(tuneIndexMetadataUrl(), TIMEOUTS.METADATA_MS);
-    if (!response.ok) {
-        throw new NetworkUnavailableError(`Tune index metadata HTTP ${response.status}`);
-    }
-    return response.json();
 }
 
 // Fetch and validate datasets.json.
@@ -210,13 +186,6 @@ export async function fetchUserDatasetText(url, onProgress = null) {
         }
         throw e;
     }
-}
-
-// Legacy single-blob download. Kept for the migration path and the recovery
-// e2e test; new installs never call it.
-export async function fetchTuneIndexText(bypassCacheVersion = null, onProgress = null) {
-    return await fetchTextStreaming(
-        tuneIndexDataUrl(bypassCacheVersion), onProgress);
 }
 
 // NOTE ON TIMEOUTS: INDEX_TOTAL_MS is now applied PER DATASET, so installing

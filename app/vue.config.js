@@ -67,8 +67,8 @@ module.exports = {
             // it was "smaller than the smallest dataset" — and the index is now
             // published one file per source, the smallest of which is ~3 MB.
             // A local build leaves those in public/res/, so norbeck.json would
-            // be silently precached, reintroducing exactly the double-storage
-            // failure sw-cleanup.js exists to undo.
+            // be silently precached, reintroducing the double storage
+            // described below.
             //
             // The datasets are therefore excluded BY NAME below. Do not go back
             // to relying on a size threshold.
@@ -101,8 +101,6 @@ module.exports = {
             // navigator.storage.persist()) is now the single durable store; the
             // worker never re-fetches the index unless the version changed.
             //
-            // Delete the stale cache left over from previous builds so upgrading
-            // users get that 42 MB back.
             // The ONE runtime cache, and the reasoning above is exactly why it
             // is safe: map tiles are small, bounded here by maxEntries, and —
             // unlike the tune index — they are not a second copy of something
@@ -136,7 +134,6 @@ module.exports = {
                 },
             }],
             cleanupOutdatedCaches: true,
-            importScripts: ['sw-cleanup.js'],
         },
     },
 };
