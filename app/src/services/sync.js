@@ -37,6 +37,82 @@ function legacyFavDoc(uid) {
     return doc(db, 'users', uid, 'data', 'favourites');
 }
 
+// ---- Favourites sync status ----------------------------------------------
+//
+// What Settings shows as "All 312 favourites synced" or "10 favourites not
+// synced". A favourite is PENDING from the moment it is pushed until the
+// SERVER has confirmed it — either the write's own acknowledgement, or a
+// server snapshot (not from cache, no pending local writes) carrying that
+// stamp or newer. Offline, a write is queued by the SDK and not acknowledged,
+// so it rightly counts as not synced.
+//
+// Persisted in localStorage, so an app relaunched offline still says how many
+// are waiting rather than claiming everything is fine.
+const PENDING_KEY = 'favouritesUnsynced';
+const favSync = {
+    pending: new Map(), // id -> { updatedAt, deleted }
+    lastError: null,    // code of the last refused push, until one succeeds
+    localError: null,   // a remote change this device could not store
+    listenerError: null,
+    listening: false,
+    serverSeen: false,  // a server snapshot has arrived this session
+    confirmedAt: 0,     // last time the server confirmed anything
+};
+
+(function loadPending() {
+    try {
+        const raw = JSON.parse(globalThis.localStorage.getItem(PENDING_KEY) || '[]');
+        for (const [id, entry] of raw) favSync.pending.set(String(id), entry);
+    } catch (e) { /* nothing persisted, or no localStorage */ }
+})();
+
+function emitFavSync() {
+    try {
+        globalThis.localStorage.setItem(PENDING_KEY, JSON.stringify([...favSync.pending]));
+    } catch (e) { /* the in-memory count still works */ }
+    eventBus.$emit('favouritesSyncState', getFavouritesSyncState());
+}
+
+export function getFavouritesSyncState() {
+    return {
+        pending: favSync.pending.size,
+        pendingRemovals: [...favSync.pending.values()].filter(p => p.deleted).length,
+        lastError: favSync.lastError,
+        localError: favSync.localError,
+        listenerError: favSync.listenerError,
+        listening: favSync.listening,
+        serverSeen: favSync.serverSeen,
+        confirmedAt: favSync.confirmedAt,
+    };
+}
+
+// The pending entries, for a retry: id -> { updatedAt, deleted }.
+export function pendingFavourites() {
+    return new Map(favSync.pending);
+}
+
+// Confirmed by the server at `updatedAt` or newer: no longer pending.
+function confirmFavourite(id, updatedAt) {
+    const entry = favSync.pending.get(String(id));
+    if (entry && (Number(entry.updatedAt) || 0) <= (Number(updatedAt) || 0)) {
+        favSync.pending.delete(String(id));
+        return true;
+    }
+    return false;
+}
+
+// A pending entry that no longer describes anything this device can push.
+export function forgetPendingFavourite(id) {
+    if (favSync.pending.delete(String(id))) emitFavSync();
+}
+
+// For tests: start from a clean slate.
+export function __resetFavouritesSyncState() {
+    favSync.pending.clear();
+    Object.assign(favSync, { lastError: null, localError: null, listenerError: null,
+        listening: false, serverSeen: false, confirmedAt: 0 });
+}
+
 // handlers:
 //   applyRemote(docs)        — docs that changed remotely (tombstones included).
 //                              Must merge, never replace.
@@ -45,7 +121,9 @@ function legacyFavDoc(uid) {
 //                              account does not, or has newer.
 //   applyLegacy(items, remoteByID) — the old single document's items, after
 //                              seeding. Additive only.
-export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy }) {
+//   retry()                  — re-push whatever is pending; called when the
+//                              browser comes back online.
+export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy, retry }) {
     const remoteByID = new Map();
     let seeded = false;
     let legacyItems = null;
@@ -67,8 +145,15 @@ export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy }) {
         }
     });
 
+    favSync.listening = true;
+    favSync.listenerError = null;
+    favSync.serverSeen = false;
+    emitFavSync();
+
     const unsubCollection = onSnapshot(collectionRef(uid, FAVOURITES_COLLECTION), snap => enqueue(async () => {
         const changed = [];
+        const fromServer = !(snap.metadata && snap.metadata.fromCache);
+        let confirmed = false;
         for (const change of snap.docChanges()) {
             // A hard delete of a document (only ever done by hand, in the
             // console) is ignored: nothing in the app deletes these, and
@@ -79,14 +164,26 @@ export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy }) {
             if (!data || data.id == null) continue;
             remoteByID.set(String(data.id), data);
             changed.push(data);
+            // Only the server's own copy confirms anything: a cached or
+            // latency-compensated document is this device's write echoed back.
+            const local = change.doc.metadata && change.doc.metadata.hasPendingWrites;
+            if (fromServer && !local && confirmFavourite(data.id, data.updatedAt)) confirmed = true;
+        }
+        if (fromServer && (!favSync.serverSeen || confirmed)) {
+            favSync.serverSeen = true;
+            favSync.confirmedAt = Date.now();
+            emitFavSync();
         }
         if (changed.length) {
             try {
                 await applyRemote(changed);
+                if (favSync.localError) { favSync.localError = null; emitFavSync(); }
             } catch (e) {
                 const reason = (e && (e.name || e.message)) || 'unknown error';
                 console.error('[folkfriend sync] could not store favourites locally:', e);
                 reportSyncProblem('local:favourites', `Could not save favourites on this device (${reason}).`);
+                favSync.localError = reason;
+                emitFavSync();
                 return;
             }
         }
@@ -103,6 +200,9 @@ export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy }) {
         console.error('[folkfriend sync] favourites listener failed:', err.code, err.message, err);
         reportSyncProblem('listen:favourites',
             `Favourites sync failed (${err.code || 'unknown'}) — they may be out of date.`);
+        favSync.listenerError = err.code || 'unknown';
+        favSync.listening = false;
+        emitFavSync();
     });
 
     const unsubLegacy = onSnapshot(legacyFavDoc(uid), snap => {
@@ -117,24 +217,52 @@ export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy }) {
         console.error('[folkfriend sync] old favourites document unreadable:', err.code, err);
     });
 
-    return () => { unsubCollection(); unsubLegacy(); };
+    const onOnline = () => { if (favSync.pending.size && retry) retry(); };
+    if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('online', onOnline);
+
+    return () => {
+        unsubCollection();
+        unsubLegacy();
+        if (typeof window !== 'undefined' && window.removeEventListener) window.removeEventListener('online', onOnline);
+        favSync.listening = false;
+        emitFavSync();
+    };
 }
 
 // Writes favourite documents (upserts and tombstones). Failures are REPORTED:
 // a rejected write here is the whole bug this layout replaces.
 export async function pushFavouriteRecords(uid, docs) {
     const usable = (docs || []).filter(d => d && d.id != null);
+    if (!usable.length) return;
+    // Pending from now until the server confirms it. A newer stamp replaces
+    // an older pending one; an older one never lowers it.
+    for (const d of usable) {
+        const id = String(d.id);
+        const prev = favSync.pending.get(id);
+        if (!prev || (Number(d.updatedAt) || 0) >= (Number(prev.updatedAt) || 0)) {
+            favSync.pending.set(id, { updatedAt: Number(d.updatedAt) || 0, deleted: Boolean(d.deleted) });
+        }
+    }
+    emitFavSync();
     for (let i = 0; i < usable.length; i += BATCH_LIMIT) {
+        const slice = usable.slice(i, i + BATCH_LIMIT);
         const batch = writeBatch(db);
-        for (const d of usable.slice(i, i + BATCH_LIMIT)) {
+        for (const d of slice) {
             batch.set(recordRef(uid, FAVOURITES_COLLECTION, d.id), toPlain(d));
         }
-        await batch.commit().catch(e => {
+        try {
+            await batch.commit();
+            for (const d of slice) confirmFavourite(d.id, d.updatedAt);
+            favSync.lastError = null;
+            favSync.confirmedAt = Date.now();
+        } catch (e) {
             console.error('[folkfriend sync] could not push favourites:', e && e.code, e);
+            favSync.lastError = (e && e.code) || (e && e.message) || 'unknown';
             reportSyncProblem('push:favourites',
-                `Could not sync favourites to your account (${(e && e.code) || 'unknown'}). ` +
+                `Could not sync favourites to your account (${favSync.lastError}). ` +
                 'They are safe on this device.');
-        });
+        }
+        emitFavSync();
     }
 }
 

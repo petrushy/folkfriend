@@ -81,6 +81,9 @@ export default { $emit: (name, payload) => __events.push({ name, payload }), $on
 export const __records = [];
 export const __subs = [];
 export function pushFavouriteRecords() {}
+export function pendingFavourites() { return new Map(); }
+export function forgetPendingFavourite() {}
+export function getFavouritesSyncState() { return { pending: 0 }; }
 export function subscribeFavourites() { return () => {}; }
 export function subscribeCollection(uid, name, handlers) {
     __subs.push({ uid, name, handlers });

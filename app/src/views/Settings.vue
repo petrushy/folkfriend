@@ -227,6 +227,31 @@
                     </v-icon>
                     <span>Signed in as <strong>{{ currentUser.email }}</strong></span>
                 </v-row>
+                <!-- Signed in is not the same as synced: this line is about
+                     what the account has actually confirmed. -->
+                <v-row
+                    align="center"
+                    class="px-2 mb-3 favouritesSyncStatus"
+                    :class="`favouritesSync-${favouritesSync.level}`"
+                >
+                    <v-icon
+                        left
+                        :color="favouritesSyncColour"
+                    >
+                        {{ favouritesSyncIcon }}
+                    </v-icon>
+                    <span>{{ favouritesSync.text }}</span>
+                    <v-btn
+                        v-if="favouritesSync.retry"
+                        small
+                        text
+                        class="ml-2"
+                        :loading="retryingFavouritesSync"
+                        @click="retryFavouritesSync"
+                    >
+                        Retry
+                    </v-btn>
+                </v-row>
                 <v-btn
                     :loading="signingOut"
                     @click="signOut"
@@ -933,6 +958,7 @@ import eventBus from '@/eventBus.js';
 import { instrumentItems } from '@/js/instruments.mjs';
 import utils from '@/js/utils.js';
 import { fetchDatasetsManifest } from '@/services/tuneIndexNetwork.js';
+import { describeFavouriteSync } from '@/js/favouriteSyncStatus.mjs';
 import {
     MODELS as AI_MODELS,
     DEFAULT_MODEL as DEFAULT_AI_MODEL,
@@ -941,6 +967,9 @@ import {
 import {
     // mdiCellphoneArrowDownVariant,
     mdiAccountCircle,
+    mdiAlertCircleOutline,
+    mdiCloudCheckOutline,
+    mdiCloudSyncOutline,
     mdiCellphoneArrowDown,
     mdiCheckCircleOutline,
     mdiDotsVertical,
@@ -992,6 +1021,12 @@ export default {
         sessionAudioHeadroom: null,
         deletingSessionAudio: false,
         currentUser: null,
+        // Refreshed from sync.js's 'favouritesSyncState' event — store state
+        // is not Vue-reactive, so it has to live in data().
+        favouritesSyncState: null,
+        favouriteCount: null,
+        onlineNow: typeof navigator === 'undefined' ? true : navigator.onLine !== false,
+        retryingFavouritesSync: false,
         signingIn: false,
         signingOut: false,
         authError: null,
@@ -1067,6 +1102,18 @@ export default {
         clearAiDialog: false,
     }),
     computed: {
+        favouritesSync() {
+            const options = { total: this.favouriteCount, online: this.onlineNow };
+            return describeFavouriteSync(this.favouritesSyncState, options);
+        },
+        favouritesSyncColour() {
+            return { ok: 'success', pending: 'warning', error: 'error' }[this.favouritesSync.level] || 'grey';
+        },
+        favouritesSyncIcon() {
+            if (this.favouritesSync.level === 'ok') return mdiCloudCheckOutline;
+            if (this.favouritesSync.level === 'error') return mdiAlertCircleOutline;
+            return mdiCloudSyncOutline;
+        },
         instrumentItems() {
             return instrumentItems(this.userSettings.instrumentShift);
         },
@@ -1265,8 +1312,16 @@ export default {
     created: function() {
         this.ua = utils.checkUserAgent();
         this.currentUser = store.currentUser;
-        this._onAuthStateChanged = user => { this.currentUser = user; };
+        this._onAuthStateChanged = user => { this.currentUser = user; this._refreshFavouritesSync(); };
         eventBus.$on('authStateChanged', this._onAuthStateChanged);
+        this._onFavouritesSync = state => { this.favouritesSyncState = state; this._refreshFavouriteCount(); };
+        eventBus.$on('favouritesSyncState', this._onFavouritesSync);
+        this._onFavouritesChanged = () => this._refreshFavouriteCount();
+        eventBus.$on('syncComplete', this._onFavouritesChanged);
+        this._onOnlineChange = () => { this.onlineNow = navigator.onLine !== false; };
+        window.addEventListener('online', this._onOnlineChange);
+        window.addEventListener('offline', this._onOnlineChange);
+        this._refreshFavouritesSync();
         this._onTuneIndexReady = () => {
             this.localVersion = store.state.tuneIndexVersion;
             this.localDate = store.state.tuneIndexDate;
@@ -1305,11 +1360,40 @@ export default {
     },
     beforeDestroy() {
         eventBus.$off('authStateChanged', this._onAuthStateChanged);
+        eventBus.$off('favouritesSyncState', this._onFavouritesSync);
+        eventBus.$off('syncComplete', this._onFavouritesChanged);
+        window.removeEventListener('online', this._onOnlineChange);
+        window.removeEventListener('offline', this._onOnlineChange);
         eventBus.$off('tuneIndexReady', this._onTuneIndexReady);
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
     },
     methods: {
         formatBytes: formatAudioBytes,
+
+        _refreshFavouritesSync() {
+            this.favouritesSyncState = store.getFavouritesSyncState();
+            this._refreshFavouriteCount();
+        },
+
+        async _refreshFavouriteCount() {
+            try {
+                this.favouriteCount = (await store.getFavouritesStrict()).length;
+            } catch (e) {
+                this.favouriteCount = null;
+            }
+        },
+
+        async retryFavouritesSync() {
+            this.retryingFavouritesSync = true;
+            try {
+                await store.retryFavouritesSync();
+            } catch (e) {
+                console.error('retry favourites sync', e);
+            } finally {
+                this.retryingFavouritesSync = false;
+                this._refreshFavouritesSync();
+            }
+        },
 
         async _refreshSessionAudio() {
             try {
