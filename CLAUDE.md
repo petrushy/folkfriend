@@ -943,6 +943,14 @@ Now (`sync.js` `subscribeFavourites`, store `_applyRemoteFavourites` /
   is well, and zero pending before any server snapshot reads as "checking",
   never "synced". Retry (and the browser's `online` event) re-pushes each
   pending favourite as it is NOW.
+- **Every listener needs `{ includeMetadataChanges: true }`** (found
+  November 2026 — both devices stuck on "Checking favourites…"). With the
+  offline cache warm, the server's answer changes no document and only flips
+  `metadata.fromCache`; the SDK does not deliver that without the option. So
+  no server snapshot was ever seen: the status never left "Checking", and the
+  seed (favourites AND places/sightings/sessions) never ran after the first
+  launch. The test fake now suppresses such snapshots the way the SDK does —
+  the old fake delivered everything and passed against the bug.
 
 Known trade-offs of the per-favourite layout: two devices editing the SAME
 favourite at once keep only the newer edit (tags are not merged); an unstar
