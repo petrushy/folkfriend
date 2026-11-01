@@ -472,7 +472,7 @@ tune index out of the precache. That reasoning was never "20 MB is a sensible
 cap" — it was **"smaller than the smallest dataset"** — and the smallest is now
 ~3 MB, well under the limit. A local build leaves the dataset files in
 `public/res/`, so `norbeck.json` would have been **silently precached**,
-reintroducing exactly the double-storage failure `sw-cleanup.js` exists to undo.
+reintroducing exactly the double-storage failure of the plane incident.
 
 They are excluded **by name** in `vue.config.js` now, and CI asserts none of the
 five data filenames appear in the emitted service worker. Do not go back to
@@ -747,9 +747,8 @@ must be treated as sacred:
 
   **Anything else added here needs the same argument made explicitly.**
 
-  `public/sw-cleanup.js` is `importScripts`-ed into the generated service worker
-  and deletes the obsolete `folkfriend-tune-data` cache on activate, reclaiming
-  ~42 MB from existing installs.
+  (`public/sw-cleanup.js`, which deleted the obsolete `folkfriend-tune-data`
+  cache on activate, was removed in November 2026 once every device had run it.)
 - ABCJS soundfonts are served from `public/soundfont/` and precached, so
   playback works offline without a runtime cache — **but only if the files are
   actually there at build time.** `public/soundfont/` is gitignored
@@ -911,7 +910,7 @@ last-writer-wins meant any device that pushed replaced every other device's
 list.
 
 Now (`sync.js` `subscribeFavourites`, store `_applyRemoteFavourites` /
-`_seedFavourites` / `_applyLegacyFavourites`):
+`_seedFavourites`):
 
 - **One document per favourite**, `{ id, updatedAt, item }`. An unstar is a
   **tombstone** `{ id, updatedAt, deleted: true }`, never an absence or a
@@ -925,12 +924,10 @@ Now (`sync.js` `subscribeFavourites`, store `_applyRemoteFavourites` /
   favourite, ties go to the remote, unmentioned favourites are untouched.
 - **Seeding is a union** after the first server snapshot: push what the
   account lacks or holds older.
-- **The old `data/favourites` document is read, never written**, and merged
-  ADDITIVELY after seeding (add only what this device lacks and the collection
-  has no record of, tombstones included). That is both the migration and the
-  recovery for devices that already drifted: each adds what it lacks, nobody
-  deletes. An unstar made only under the old layout can therefore come back
-  once — the price of never losing a star.
+- **The old `data/favourites` document is no longer read** (November 2026,
+  once every device had migrated). It was merged additively after seeding
+  during the migration; the code and its Firestore rule are gone, and
+  `users/{uid}/data/*` is now denied by default.
 - **A refused push is reported** (`syncError` snackbar).
 - A restored backup stamps its favourites as new edits and pushes them, but
   never tombstones favourites the backup lacks.
@@ -958,9 +955,7 @@ Now (`sync.js` `subscribeFavourites`, store `_applyRemoteFavourites` /
 Known trade-offs of the per-favourite layout: two devices editing the SAME
 favourite at once keep only the newer edit (tags are not merged); an unstar
 made while signed out does not propagate; tombstones are kept for ever (a few
-dozen bytes each); a device still on an older build writes only the old
-document, which new builds merge additively but which never receives their
-changes until it updates.
+dozen bytes each).
 
 ⚠️ Needs `cd app && firebase deploy --only firestore:rules` — without the new
 `favourites/{settingID}` rule every push is refused (and now reported).
@@ -1054,7 +1049,7 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 **How it works:**
 
 - ⚠️ The bullets below describe the pre-November-2026 single-document favourites sync; see "Favourites: why the single document went" for the current design.
-- On sign-in: `sync.subscribe()` sets up an `onSnapshot` listener on `users/{uid}/data/favourites` only — **history is intentionally not synced**, it stays per-device in IndexedDB
+- On sign-in: `sync.subscribe()` set up an `onSnapshot` listener on `users/{uid}/data/favourites` only — **history is intentionally not synced**, it stays per-device in IndexedDB
 - First snapshot: if Firestore has no data (first device ever), seeds from local IndexedDB; otherwise replaces local with Firestore data
 - Subsequent snapshots: fire in real-time when any device writes favourites, update IndexedDB and emit `syncComplete` on `eventBus`
 - On every favourites write (`addFavourite`, `removeFavourite`): pushes the full updated array to Firestore immediately, with a `clientUpdatedAt` millis timestamp mirrored to localStorage so a stale echoed snapshot can't overwrite newer local data

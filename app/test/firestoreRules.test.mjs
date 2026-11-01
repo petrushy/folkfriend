@@ -218,8 +218,8 @@ async function run() {
         })));
     });
 
-    await test('the favourites document still works', async () => {
-        await assertSucceeds(setDoc(doc(alice, 'users/alice/data/favourites'), {
+    await test('the retired single favourites document is no longer writable', async () => {
+        await assertFails(setDoc(doc(alice, 'users/alice/data/favourites'), {
             items: [], clientUpdatedAt: Date.now(),
         }));
     });

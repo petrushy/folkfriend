@@ -304,7 +304,6 @@ async function run() {
     const favPath = 'users/u1/favourites';
     const legacyPath = 'users/u1/data/favourites';
     const listenerFor = (firestore, p) => firestore.__listeners.find(l => l.path === p && l.active);
-    const legacySnapshot = items => ({ exists: () => items !== null, data: () => ({ items }) });
     const settle = () => new Promise(resolve => setTimeout(resolve, 0));
 
     await test('seeding waits for the server, and a failed read is retried rather than skipped', async () => {
@@ -314,7 +313,6 @@ async function run() {
         sync.subscribeFavourites('u1', {
             applyRemote: async () => {},
             seed: async remote => { if (fail) throw new Error('read failed'); seeds.push(new Map(remote)); },
-            applyLegacy: async () => {},
         });
         await listenerFor(firestore, favPath).onNext(snapshot([{ id: '1', updatedAt: 5 }], { fromCache: true }));
         await settle();
@@ -336,29 +334,20 @@ async function run() {
         const applied = [];
         sync.subscribeFavourites('u1', {
             applyRemote: async docs => { applied.push(docs); },
-            seed: async () => {}, applyLegacy: async () => {},
+            seed: async () => {},
         });
         await listenerFor(firestore, favPath).onNext(snapshot([], { changes: [removal('1')] }));
         await settle();
         assert.deepEqual(applied, [], 'only an explicit tombstone removes a favourite');
     });
 
-    await test('the old single document is merged only after seeding, and is never written', async () => {
+    await test('the retired single favourites document is neither read nor written', async () => {
         const { sync, firestore } = await loadSync();
-        const legacy = [];
-        sync.subscribeFavourites('u1', {
-            applyRemote: async () => {}, seed: async () => {},
-            applyLegacy: async (items, remote) => { legacy.push({ items, remote: new Map(remote) }); },
-        });
-        await listenerFor(firestore, legacyPath).onNext(legacySnapshot([{ result: { settingID: '9' } }]));
+        sync.subscribeFavourites('u1', { applyRemote: async () => {}, seed: async () => {} });
+        await listenerFor(firestore, favPath).onNext(snapshot([{ id: '3', updatedAt: 1 }]));
         await settle();
-        assert.equal(legacy.length, 0, 'not before the collection is known — its tombstones decide');
-
-        await listenerFor(firestore, favPath).onNext(snapshot([{ id: '3', updatedAt: 1, deleted: true }]));
-        await settle();
-        assert.equal(legacy.length, 1);
-        assert.ok(legacy[0].remote.get('3').deleted, 'tombstones are passed along');
-        assert.ok(!firestore.__writes.some(w => w.path === legacyPath), 'the old document is left alone');
+        assert.ok(!firestore.__listeners.some(l => l.path === legacyPath), 'no listener on it');
+        assert.ok(!firestore.__writes.some(w => w.path === legacyPath), 'and no write to it');
     });
 
     await test('a warm cache confirmed by the server with no changes is not "Checking…" for ever', async () => {
@@ -414,7 +403,7 @@ async function run() {
         const { sync, firestore } = await loadSync();
         firestore.__failCommits('unavailable');
         await sync.pushFavouriteRecords('u1', [favDoc('1', 5)]);
-        sync.subscribeFavourites('u1', { applyRemote: async () => {}, seed: async () => {}, applyLegacy: async () => {} });
+        sync.subscribeFavourites('u1', { applyRemote: async () => {}, seed: async () => {} });
 
         await listenerFor(firestore, favPath).onNext(snapshot([favDoc('1', 5)], { fromCache: true }));
         await settle();
@@ -433,7 +422,7 @@ async function run() {
 
     await test('a dead listener is reported as not connected', async () => {
         const { sync, firestore } = await loadSync();
-        sync.subscribeFavourites('u1', { applyRemote: async () => {}, seed: async () => {}, applyLegacy: async () => {} });
+        sync.subscribeFavourites('u1', { applyRemote: async () => {}, seed: async () => {} });
         listenerFor(firestore, favPath).onError({ code: 'permission-denied', message: 'no' });
         assert.equal(sync.getFavouritesSyncState().listenerError, 'permission-denied');
     });
@@ -938,20 +927,6 @@ async function run() {
             ['2', { id: '2', updatedAt: 5 }],
         ]));
         assert.deepEqual(new Set(sync.__pushes.flat().map(d => d.id)), new Set(['1', '3']));
-    });
-
-    await test('the old single document adds what is missing and removes nothing', async () => {
-        // How two devices that already drifted apart under the old layout get
-        // back to the same list: each adds what it lacks, nobody deletes.
-        const { idb, sync } = await signedInStore();
-        idb.__db.set('favouriteItems', [fav('1', '10'), fav('2', '20')]);
-        await sync.__favHandlers.applyLegacy(
-            [fav('2', '20'), fav('4', '40'), fav('5', '50')],
-            new Map([['5', { id: '5', updatedAt: 9, deleted: true }]]),
-        );
-        assert.deepEqual(new Set(storedFavouriteIDs(idb)), new Set(['1', '2', '4']),
-            'only 4 is new; 5 was unstarred on a device already on the new layout');
-        assert.deepEqual(sync.__pushes.flat().map(d => d.id), ['4'], 'and 4 is carried into the collection');
     });
 
     await test('Retry re-sends each pending favourite as it is now, and pending unstars as tombstones', async () => {
