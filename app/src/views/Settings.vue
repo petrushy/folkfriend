@@ -1292,10 +1292,6 @@ export default {
             if (d.persistError) {
                 return `Could not save the offline copy: ${d.persistError}. Free up space on your device and try again.`;
             }
-            if (d.migrationPending || d.legacy) {
-                return 'Saved in an older storage format — it still works. '
-                    + 'Tap "Update offline copies" to re-save it per database.';
-            }
             const missing = (d.datasetsMissing || []).length;
             if (d.usable && missing) {
                 return `${missing} selected database${missing === 1 ? ' is' : 's are'} `

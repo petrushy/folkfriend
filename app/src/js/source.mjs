@@ -5,8 +5,9 @@
 // That label is authoritative. Everything here takes an optional `dataset` and
 // prefers it.
 //
-// The ID-range fallback below applies when a tune carries no label: a legacy
-// merged blob, or a favourite saved before labelling existed.
+// The ID-range fallback below applies when a tune carries no label — in
+// practice a favourite saved before labelling existed (favourites are
+// self-contained snapshots, so old ones keep reaching this code).
 //
 // It originally covered only thesession and folkwiki, on the argument that a
 // merged blob contains nothing else by construction so a norbeck range would be

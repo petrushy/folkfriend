@@ -19,9 +19,9 @@
 //   genuinely has no usable copy, or the selection is empty. The searchable set
 //   never collapses to empty while a usable copy of any selected dataset exists.
 //
-//   P3 — MIGRATION. The pre-multi-dataset merged blob is present until every
-//   dataset it covers has a committed per-dataset copy that has loaded into
-//   WASM, and absent afterwards. There is no state in which both are missing.
+//   The pre-multi-dataset merged blob is no longer read (November 2026). A
+//   leftover copy is ignored, and deleted only once a per-dataset index is
+//   working — never while it might be all a device has.
 //
 // This drives the real worker.js (imports rewritten to in-memory fakes) rather
 // than a reimplementation of it, because the bug lived entirely in the ORDER of
@@ -239,7 +239,7 @@ function makeSelfDescribing(dataset, tag, extra = {}) {
     });
 }
 
-// The pre-multi-dataset merged blob: thesession + folkwiki in one document.
+// The retired merged blob: thesession + folkwiki in one document.
 function makeMerged(tag) {
     const a = JSON.parse(makeIndex('thesession', tag));
     const b = JSON.parse(makeIndex('folkwiki', tag));
@@ -729,131 +729,52 @@ async function run() {
         await assertOfflineCopyIs('norbeck', 'v2', 5, 'download over retained junk');
     });
 
-    // --- migration from the merged blob ------------------------------------
+    // --- the retired merged blob -------------------------------------------
 
-    console.log('\nMigration from the pre-multi-dataset merged copy');
+    console.log('\nThe retired pre-multi-dataset copy');
 
-    await test('an upgrading install is READY from the merged blob immediately', async () => {
-        resetFakes();
-        idbMod.__db.set('ffIndexRaw', makeMerged('old'));
+    const seedRetired = () => {
+        const merged = makeMerged('old');
+        idbMod.__db.set('ffIndexRaw', merged);
         idbMod.__db.set('ffIndexManifest',
-            { schema: 2, v: 2299, date: '2026-04-17', bytes: makeMerged('old').length });
-        // No network at all: the whole point is that the user is not stranded.
+            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
+        idbMod.__db.set('tuneIndex', { indexData: {}, abcStrings: {} });
+        idbMod.__db.set('tuneIndexMetadata', { v: 1 });
+    };
+    const RETIRED = ['ffIndexRaw', 'ffIndexManifest', 'tuneIndex', 'tuneIndexMetadata'];
+
+    await test('a retired copy is not loaded, and is kept while it is all there is', async () => {
+        resetFakes();
+        seedRetired();
         netMod.__net.offline = true;
 
         const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
         await new Promise(r => wrapper.setupTuneIndex(r));
+        for (let i = 0; i < 50; i++) await new Promise(r => setImmediate(r));
 
-        assert.equal(wrapper.indexStatus, 'ready',
-            'an upgrading user must not lose their tunes while migrating');
-        assert.equal(wrapper.indexUsable, true);
-        assert.equal(wrapper.indexDetail.migrationPending, true);
-        assert.equal(idbMod.__db.has('ffIndexRaw'), true,
-            'the merged blob must survive until per-dataset copies exist');
+        assert.equal(wrapper.indexUsable, false, 'this build does not read it');
+        assert.equal(wasmMod.__wasm.loadCalls, 0);
+        for (const key of RETIRED) {
+            assert.equal(idbMod.__db.has(key), true,
+                `${key} must survive: an older build rolled back to could still use it`);
+        }
     });
 
-    await test('migration replaces the merged blob only once coverage is complete', async () => {
+    await test('once per-dataset copies are working, the retired copy is swept', async () => {
         resetFakes();
-        const merged = makeMerged('old');
-        idbMod.__db.set('ffIndexRaw', merged);
-        idbMod.__db.set('ffIndexManifest',
-            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
+        await seedGoodCopies(['thesession', 'folkwiki']);
+        seedRetired();
+        netMod.__net.offline = true;
 
-        const wrapper = await newWorker({
-            autoUpdate: true, datasets: ['thesession', 'folkwiki'],
-        });
+        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
         await new Promise(r => wrapper.setupTuneIndex(r));
-        // Migration is fire-and-forget; let it finish.
-        for (let i = 0; i < 200 && idbMod.__db.has('ffIndexRaw'); i++) {
+        for (let i = 0; i < 200 && RETIRED.some(k => idbMod.__db.has(k)); i++) {
             await new Promise(r => setImmediate(r));
         }
 
-        // P3: the merged blob is gone, and both datasets it covered are on disk.
-        assert.equal(idbMod.__db.has('ffIndexRaw'), false,
-            'the merged blob should be reclaimed once superseded');
-        await assertOfflineCopyIs('thesession', 'v1', 1, 'after migration');
-        await assertOfflineCopyIs('folkwiki', 'v1', 1, 'after migration');
-    });
-
-    await test('a migration that fails part-way keeps the merged blob', async () => {
-        // P3's other half: there must be no state in which both are missing.
-        resetFakes();
-        const merged = makeMerged('old');
-        idbMod.__db.set('ffIndexRaw', merged);
-        idbMod.__db.set('ffIndexManifest',
-            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
-        // thesession lands, folkwiki dies mid-transfer.
-        netMod.__net.bodyErrors[FILENAME.folkwiki] = 'connection reset';
-
-        const wrapper = await newWorker({
-            autoUpdate: true, datasets: ['thesession', 'folkwiki'],
-        });
-        await new Promise(r => wrapper.setupTuneIndex(r));
-        for (let i = 0; i < 200; i++) await new Promise(r => setImmediate(r));
-
-        assert.equal(idbMod.__db.has('ffIndexRaw'), true,
-            'folkwiki still lives only in the merged blob; it must not be deleted');
         assert.equal(wrapper.indexUsable, true);
-    });
-
-    // The review finding: during migration the first per-dataset load replaces
-    // WASM with ONLY that dataset, because the others still live in the merged
-    // blob and _partsToKeep reads per-dataset copies from disk. If a later
-    // download then fails, the un-migrated source silently vanishes from search
-    // for the rest of the session — while _afterInstall still reports it loaded,
-    // because it inherits the 'merged' entry. Nothing is lost on disk, but the
-    // app quietly stops finding half its tunes and says everything is fine.
-    await test('a half-finished migration never drops a source from search', async () => {
-        resetFakes();
-        const merged = makeMerged('old');
-        idbMod.__db.set('ffIndexRaw', merged);
-        idbMod.__db.set('ffIndexManifest',
-            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
-        // thesession migrates cleanly; folkwiki dies mid-transfer.
-        netMod.__net.bodyErrors[FILENAME.folkwiki] = 'connection reset';
-
-        const wrapper = await newWorker({
-            autoUpdate: true, datasets: ['thesession', 'folkwiki'],
-        });
-        await new Promise(r => wrapper.setupTuneIndex(r));
-        for (let i = 0; i < 300; i++) await new Promise(r => setImmediate(r));
-
-        // Whatever the pipeline did, folkwiki tunes must still be findable —
-        // they are on disk in the merged blob, so there is no excuse.
-        const loaded = wasmMod.__wasm.loaded || { settings: {} };
-        assert.ok(loaded.settings['2000000'],
-            'folkwiki disappeared from the loaded index mid-migration');
-        assert.ok(loaded.settings['1000'],
-            'thesession disappeared from the loaded index mid-migration');
-
-        // ...and the reported state must match what is actually searchable.
-        const reported = wrapper.indexDetail.datasetsLoaded || [];
-        for (const id of reported) {
-            const probe = id === 'folkwiki' ? '2000000' : '1000';
-            assert.ok(loaded.settings[probe],
-                `${id} is reported loaded but is not in the index`);
-        }
-    });
-
-    await test('migration is deferred when automatic updates are off', async () => {
-        // ~42 MB for zero new content is exactly the download a user who turned
-        // auto-update off has asked not to be given.
-        resetFakes();
-        const merged = makeMerged('old');
-        idbMod.__db.set('ffIndexRaw', merged);
-        idbMod.__db.set('ffIndexManifest',
-            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
-
-        const wrapper = await newWorker({
-            autoUpdate: false, datasets: ['thesession', 'folkwiki'],
-        });
-        await new Promise(r => wrapper.setupTuneIndex(r));
-        for (let i = 0; i < 100; i++) await new Promise(r => setImmediate(r));
-
-        assert.equal(netMod.__net.requests.length, 0,
-            'no download may start when the user has turned updates off');
-        assert.equal(idbMod.__db.has('ffIndexRaw'), true);
-        assert.equal(wrapper.indexUsable, true);
+        for (const key of RETIRED) assert.equal(idbMod.__db.has(key), false, key);
+        await assertAllIntact('v1', 1, 'after the sweep', ['thesession', 'folkwiki']);
     });
 
     // --- changing the selection --------------------------------------------
@@ -1259,27 +1180,6 @@ async function run() {
         }
     });
 
-    await test('a legacy merged blob leaves tunes unlabelled, not mislabelled', async () => {
-        // The merged blob cannot say which tune came from which source, so
-        // source.mjs must fall back to the ID range. An empty label is the
-        // signal for that; a WRONG label would defeat it.
-        resetFakes();
-        const merged = makeMerged('old');
-        idbMod.__db.set('ffIndexRaw', merged);
-        idbMod.__db.set('ffIndexManifest',
-            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
-        netMod.__net.offline = true;
-
-        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
-        await new Promise(r => wrapper.setupTuneIndex(r));
-
-        const settings = await new Promise(r => wrapper.settingsFromTuneID('0', r));
-        assert.ok(settings.length > 0);
-        assert.equal(settings[0].dataset, '',
-            'tunes from a merged blob must be unlabelled so the ID-range '
-            + 'fallback applies');
-    });
-
     // --- datasets the user supplies ---------------------------------------
 
     console.log('\nImporting a dataset the app does not host');
@@ -1507,54 +1407,6 @@ async function run() {
         const found = await new Promise(r => wrapper.settingsFromTuneID('0', r));
         assert.ok(found.length > 0);
         assert.equal(found[0].dataset, 'thesession');
-    });
-
-    await test('an import cannot shadow IDs that live only in the merged blob', async () => {
-        // The base exemption is right for a published dataset replacing itself
-        // and wrong for an import. And because the base is processed LAST, a
-        // candidate processed before it never saw the overlap either — so an
-        // import made while migration is deferred could shadow thesession or
-        // folkwiki IDs that currently exist only inside the merged blob.
-        //
-        // Reachable on a real upgrade: auto-update off (or a migration that
-        // failed) leaves _migrationPending true indefinitely.
-        resetFakes();
-        netMod.__net.manifest = manifestFor({ thesession: 1, folkwiki: 1 });
-        const merged = makeMerged('old');
-        idbMod.__db.set('ffIndexRaw', merged);
-        idbMod.__db.set('ffIndexManifest',
-            { schema: 2, v: 1, date: '2026-04-17', bytes: merged.length });
-
-        // autoUpdate off: migration is deferred, so the blob stays the base.
-        const wrapper = await newWorker({
-            autoUpdate: false, datasets: ['thesession', 'folkwiki'],
-        });
-        await new Promise(r => wrapper.setupTuneIndex(r));
-        assert.equal(wrapper.indexDetail.migrationPending, true,
-            'this test is meaningless unless migration is actually deferred');
-        assert.equal(idbMod.__db.has('ffIndexRaw:thesession'), false,
-            'thesession must exist ONLY in the merged blob here');
-
-        // An import claiming thesession's setting and tune ids.
-        const shadowing = JSON.stringify({
-            ...JSON.parse(makeIndex('thesession', 'shadow')),
-            id: 'shadow', label: 'Shadow', v: 1, date: '2026-01-01',
-        });
-        const loadsBefore = wasmMod.__wasm.loadCalls;
-        const result = await new Promise(
-            r => wrapper.addUserDataset({ text: shadowing }, r));
-
-        assert.equal(result.ok, false,
-            'an import overlapping the merged blob must be refused');
-        assert.match(result.error, /reuses/i);
-        assert.equal(wasmMod.__wasm.loadCalls, loadsBefore,
-            'the refused import must never be loaded into WASM');
-
-        // The legacy data is untouched and still owns its tunes.
-        assert.equal(idbMod.__db.has('ffIndexRaw'), true,
-            'the merged blob must survive a refused import');
-        const found = await new Promise(r => wrapper.settingsFromTuneID('0', r));
-        assert.ok(found.length > 0, 'thesession tunes are still findable');
     });
 
     await test('an import cannot collide with a DESELECTED stored dataset', async () => {

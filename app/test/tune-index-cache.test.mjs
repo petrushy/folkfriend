@@ -368,85 +368,46 @@ await test('an orphaned payload is adopted rather than binned', async () => {
     assert.equal(idb.__db.has('ffIndexRaw:norbeck'), true);
 });
 
-console.log('\ntuneIndexStore — migration from the merged blob');
+console.log('\ntuneIndexStore — sweeping the retired layouts');
 
-await test('the schema-2 merged blob is readable and names its datasets', async () => {
+const RETIRED = ['ffIndexRaw', 'ffIndexManifest', 'tuneIndex', 'tuneIndexMetadata'];
+
+await test('the retired copies are deleted, and every per-dataset copy survives', async () => {
     const { store, idb } = await loadStore();
-    idb.__db.set('ffIndexRaw', PAYLOAD.thesession);
-    idb.__db.set('ffIndexManifest',
-        { schema: 2, v: 2299, date: '2026-04-17', bytes: PAYLOAD.thesession.length });
-
-    const merged = await store.readMergedLegacyIndex();
-    assert.ok(merged, 'the merged blob must keep working while migration runs');
-    assert.equal(merged.manifest.v, 2299);
-    assert.equal(merged.manifest.merged, true);
-    assert.deepEqual(merged.datasets, ['thesession', 'folkwiki']);
-    assert.equal(merged.index.abcStrings['101'], 'ABC-ONE');
-    assert.ok(merged.index.tuneIDs.has('7'));
-});
-
-await test('the schema-1 legacy blob is still readable — no forced re-download', async () => {
-    const { store, idb } = await loadStore();
-    idb.__db.set('tuneIndex', {
-        indexData: { settings: { '101': { tune_id: '7', abc: '' } }, aliases: {} },
-        abcStrings: { '101': 'LEGACY-ABC' },
-        sourceUrls: {},
-    });
-    idb.__db.set('tuneIndexMetadata', { v: 999, date: '2025-01-01' });
-
-    const result = await store.readMergedLegacyIndex();
-    assert.ok(result, 'legacy cache must still load');
-    assert.equal(result.manifest.legacy, true);
-    assert.equal(result.manifest.v, 999);
-    assert.equal(result.index.abcStrings['101'], 'LEGACY-ABC');
-    // Schema 1 never persisted tuneIDs; they are derived so a legacy blob
-    // labels its tunes the same way a fresh dataset does.
-    assert.ok(result.index.tuneIDs.has('7'));
-
-    const inventory = await store.readOfflineInventory(ALL);
-    assert.equal(inventory.legacy.legacy, true);
-});
-
-// This test INVERTS the old "a successful schema-2 write reclaims the legacy
-// copy" rule, and the inversion is the point. The merged blob covers two
-// datasets; one per-dataset write covers one. Dropping it on the first write
-// would delete data nothing has replaced yet.
-await test('a per-dataset write does NOT reclaim the merged copy', async () => {
-    const { store, idb } = await loadStore();
-    idb.__db.set('ffIndexRaw', PAYLOAD.thesession);
-    idb.__db.set('ffIndexManifest', { schema: 2, v: 1 });
-
-    await store.writeDataset('thesession', PAYLOAD.thesession, { v: 2 });
-    assert.equal(idb.__db.has('ffIndexRaw'), true,
-        'folkwiki still lives only in the merged blob; it must not be deleted');
-});
-
-await test('the merged copy is reclaimed only once its datasets are covered', async () => {
-    const { store, idb } = await loadStore();
+    await seedAll(store);
     idb.__db.set('ffIndexRaw', PAYLOAD.thesession);
     idb.__db.set('ffIndexManifest', { schema: 2, v: 1 });
     idb.__db.set('tuneIndex', { indexData: {}, abcStrings: {} });
     idb.__db.set('tuneIndexMetadata', { v: 1 });
 
-    assert.equal(await store.clearSupersededMergedCopies(['thesession']), false,
-        'partial coverage must not reclaim the merged blob');
-    assert.equal(idb.__db.has('ffIndexRaw'), true);
-
-    assert.equal(
-        await store.clearSupersededMergedCopies(['thesession', 'folkwiki']), true);
-    assert.equal(idb.__db.has('ffIndexRaw'), false);
-    assert.equal(idb.__db.has('ffIndexManifest'), false);
-    assert.equal(idb.__db.has('tuneIndex'), false);
-    assert.equal(idb.__db.has('tuneIndexMetadata'), false);
+    assert.equal(await store.deleteRetiredIndexCopies(), true);
+    for (const key of RETIRED) assert.equal(idb.__db.has(key), false, key);
+    // 'ffIndexRaw' is a whole key, not a prefix: 'ffIndexRaw:<id>' is untouched.
+    for (const id of ALL) await assertIntact(store, id, 'after the sweep');
 });
 
-await test('reclaiming the merged copy never touches per-dataset copies', async () => {
+await test('the sweep finds them by name and never reads the 42 MB value', async () => {
+    const { store, idb } = await loadStore();
+    idb.__db.set('ffIndexRaw', PAYLOAD.thesession);
+    idb.__state.throwOn = 'ffIndexRaw';
+    assert.equal(await store.deleteRetiredIndexCopies(), true);
+    assert.equal(idb.__state.throwOnHits, 0, 'a get() would load the whole blob into memory');
+    assert.equal(idb.__db.has('ffIndexRaw'), false);
+});
+
+await test('with nothing retired on disk the sweep is a no-op', async () => {
     const { store } = await loadStore();
     await seedAll(store);
-    await store.clearSupersededMergedCopies(ALL);
-    for (const id of ALL) {
-        await assertIntact(store, id, 'after reclaiming the merged blob');
-    }
+    assert.equal(await store.deleteRetiredIndexCopies(), false);
+    for (const id of ALL) await assertIntact(store, id, 'after a no-op sweep');
+});
+
+await test('the inventory no longer reports retired layouts', async () => {
+    const { store, idb } = await loadStore();
+    idb.__db.set('ffIndexRaw', PAYLOAD.thesession);
+    idb.__db.set('ffIndexManifest', { schema: 2, v: 1 });
+    const inventory = await store.readOfflineInventory(ALL);
+    assert.deepEqual(Object.keys(inventory).sort(), ['datasets', 'storage']);
 });
 
 console.log('\ntuneIndexStore — exhaustive fault injection');

@@ -45,15 +45,10 @@ import { get, set, del, keys } from 'idb-keyval';
 
 // Bump when the on-disk format changes; a mismatched manifest is discarded.
 //
-// Schema 3 is the per-dataset layout. Bumping is load-bearing, not cosmetic:
-// the "this payload is not a tune index, discard it" branch in readDataset
-// fires only when the manifest names OUR schema. If the per-dataset reader
-// still called itself schema 2 it would consider the old merged blob's
-// manifest its own and could delete the very thing migration depends on.
+// Schema 3 is the per-dataset layout. The "this payload is not a tune index,
+// discard it" branch in readDataset fires only when the manifest names OUR
+// schema, so a future format is never deleted by this build.
 export const SCHEMA_VERSION = 3;
-
-// The pre-multi-dataset single-blob layout. Read-only from here on.
-export const MERGED_SCHEMA_VERSION = 2;
 
 // A real index carries ~62k settings. This floor exists only to reject things
 // that are obviously not the tune index at all — an error document, a captive
@@ -66,18 +61,13 @@ export const MIN_PLAUSIBLE_SETTINGS = 100;
 const rawKey = (id) => `ffIndexRaw:${id}`;
 const manifestKey = (id) => `ffIndexManifest:${id}`;
 
-// Schema 2: the merged thesession+folkwiki blob. Still read, so an upgrading
-// user keeps working offline while the per-dataset copies download, and only
-// deleted once every selected dataset is committed AND loaded (see
-// clearSupersededMergedCopies).
-const KEY_MERGED_MANIFEST = 'ffIndexManifest';
-const KEY_MERGED_RAW = 'ffIndexRaw';
-
-// Pre-schema-2 layout: a single structured-cloned object under 'tuneIndex'
-// plus its version under 'tuneIndexMetadata'. Still readable so existing
-// installs keep working offline without a 42 MB re-download.
-const LEGACY_KEY_INDEX = 'tuneIndex';
-const LEGACY_KEY_META = 'tuneIndexMetadata';
+// Keys of the retired pre-multi-dataset layouts: the schema-2 merged
+// thesession+folkwiki blob, and the schema-1 structured-cloned object before
+// it. Nothing reads them any more (November 2026); they are only swept away by
+// deleteRetiredIndexCopies, so a copy left behind cannot sit on ~42 MB of
+// quota unseen. Note 'ffIndexRaw' is NOT a prefix match — the per-dataset keys
+// are 'ffIndexRaw:<id>' and are never touched here.
+const RETIRED_KEYS = ['ffIndexRaw', 'ffIndexManifest', 'tuneIndex', 'tuneIndexMetadata'];
 
 async function safeGet(key) {
     try {
@@ -309,7 +299,7 @@ export async function readDatasets(ids) {
 // Manifests only, no payload reads or parses. This is what Settings renders,
 // and it must stay cheap enough to call on every visit.
 //
-// Returns { datasets: {id: manifest|null}, merged, legacy, storage }.
+// Returns { datasets: {id: manifest|null}, storage }.
 export async function readOfflineInventory(ids) {
     const datasets = {};
     // Anything stored counts, not just what was asked for — see
@@ -323,99 +313,7 @@ export async function readOfflineInventory(ids) {
     }
     return {
         datasets,
-        merged: await readMergedManifest(),
-        legacy: await readLegacyManifest(),
         storage: await estimateStorage(),
-    };
-}
-
-async function readMergedManifest() {
-    const manifest = await safeGet(KEY_MERGED_MANIFEST);
-    if (manifest && manifest.schema === MERGED_SCHEMA_VERSION) {
-        return manifest;
-    }
-    return null;
-}
-
-async function readLegacyManifest() {
-    const legacy = await safeGet(LEGACY_KEY_INDEX);
-    if (legacy && legacy.indexData && legacy.abcStrings) {
-        const meta = (await safeGet(LEGACY_KEY_META)) || {};
-        return {
-            schema: 1, v: meta.v || 0, date: meta.date || null,
-            savedAt: null, bytes: null, legacy: true,
-        };
-    }
-    return null;
-}
-
-// The pre-multi-dataset merged copy: schema 2 first, then schema 1.
-//
-// This is what keeps an upgrading user working. It is loaded at startup so the
-// app is READY immediately, and only deleted once every selected dataset has a
-// committed per-dataset copy that has loaded into WASM.
-//
-// Resolves to { index, manifest, datasets } or null. `datasets` names what the
-// blob is known to contain — always thesession + folkwiki, because no merged
-// blob was ever published with anything else in it.
-export async function readMergedLegacyIndex() {
-    const raw = await safeGet(KEY_MERGED_RAW);
-    const manifest = await safeGet(KEY_MERGED_MANIFEST);
-
-    if (typeof raw === 'string' && raw.length > 0) {
-        try {
-            console.time('index-parse-from-cache:merged');
-            const parsed = JSON.parse(raw);
-            console.timeEnd('index-parse-from-cache:merged');
-            const problem = indexPayloadProblem(parsed);
-            if (problem) {
-                console.warn(`Merged tune index is not a tune index (${problem}); `
-                    + 'keeping it but not using it');
-                return null;
-            }
-            return {
-                index: splitIndexPayload(parsed),
-                manifest: manifest && manifest.schema === MERGED_SCHEMA_VERSION
-                    ? { ...manifest, merged: true }
-                    : { schema: MERGED_SCHEMA_VERSION, v: 0, date: null,
-                        savedAt: null, bytes: raw.length,
-                        versionUnknown: true, merged: true },
-                datasets: ['thesession', 'folkwiki'],
-            };
-        } catch (e) {
-            console.warn('Merged tune index failed to parse; discarding', e);
-            await safeDel(KEY_MERGED_RAW);
-            await safeDel(KEY_MERGED_MANIFEST);
-        }
-    }
-
-    const legacy = await safeGet(LEGACY_KEY_INDEX);
-    if (!legacy || !legacy.indexData || !legacy.abcStrings) {
-        return null;
-    }
-    const meta = (await safeGet(LEGACY_KEY_META)) || {};
-    console.debug('Loaded tune index from legacy (schema 1) cache');
-
-    // Schema 1 stored the split form, so tuneIDs was never persisted. Derive
-    // it, so a legacy blob labels its tunes the same way a fresh one does.
-    const tuneIDs = new Set();
-    const settings = (legacy.indexData && legacy.indexData.settings) || {};
-    for (const settingID in settings) {
-        tuneIDs.add(settings[settingID].tune_id);
-    }
-
-    return {
-        index: {
-            indexData: legacy.indexData,
-            abcStrings: legacy.abcStrings,
-            sourceUrls: legacy.sourceUrls || {},
-            tuneIDs,
-        },
-        manifest: {
-            schema: 1, v: meta.v || 0, date: meta.date || null,
-            savedAt: null, bytes: null, legacy: true, merged: true,
-        },
-        datasets: ['thesession', 'folkwiki'],
     };
 }
 
@@ -426,11 +324,6 @@ export async function readMergedLegacyIndex() {
 // THIS DESTROYS THAT DATASET'S PREVIOUS OFFLINE COPY. Call it only with a
 // payload that has already been parsed, passed indexPayloadProblem() and been
 // loaded into WASM successfully — see rule 5 at the top of this file.
-//
-// It does NOT touch the merged blob. The merged copy covers two datasets and
-// one per-dataset write covers one, so deleting it here would drop data that
-// nothing has replaced yet. That is clearSupersededMergedCopies' job, and it
-// only runs once the whole selection is committed.
 //
 // `metadata` is { v, date } from datasets.json.
 // Plain text, bounded: it comes from a file anyone can import and is shown
@@ -526,32 +419,23 @@ export async function clearDataset(id) {
     await safeDel(rawKey(id));
 }
 
-// Drop the superseded merged copies (schema 2 and schema 1).
+// Delete whatever is left of the retired layouts (see RETIRED_KEYS).
 //
-// `coveredIds` is the set of datasets the caller has PROVED are committed —
-// re-read from disk, not remembered from an install — and loaded into WASM.
-// The merged blob holds thesession and folkwiki, so it is only redundant once
-// both of those are covered.
-//
-// Returns true when something was deleted. A failure to delete is wasted quota,
-// never data loss, so it is a warning rather than a throw.
-export async function clearSupersededMergedCopies(coveredIds) {
-    const covered = new Set(coveredIds || []);
-    const needed = ['thesession', 'folkwiki'];
-    if (!needed.every((id) => covered.has(id))) {
+// Checked by KEY NAME rather than by reading the values: a get() on
+// 'ffIndexRaw' would pull a 42 MB string into memory just to learn it exists.
+// Best-effort and never awaited by anything that gates readiness — a failure
+// here is wasted quota, never data loss, since nothing can read these copies.
+export async function deleteRetiredIndexCopies() {
+    let present;
+    try {
+        const all = new Set(await keys());
+        present = RETIRED_KEYS.filter(key => all.has(key));
+    } catch (e) {
         return false;
     }
-    const hadMerged = (await safeGet(KEY_MERGED_RAW)) !== undefined
-        || (await safeGet(KEY_MERGED_MANIFEST)) !== undefined
-        || (await safeGet(LEGACY_KEY_INDEX)) !== undefined;
-    if (!hadMerged) {
-        return false;
-    }
-    console.debug('Per-dataset copies cover the merged blob; reclaiming it');
-    await safeDel(KEY_MERGED_MANIFEST);
-    await safeDel(KEY_MERGED_RAW);
-    await safeDel(LEGACY_KEY_INDEX);
-    await safeDel(LEGACY_KEY_META);
+    if (!present.length) return false;
+    console.debug('Deleting retired tune index copies:', present.join(', '));
+    for (const key of present) await safeDel(key);
     return true;
 }
 

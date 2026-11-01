@@ -150,8 +150,9 @@ function check(name, ok, detail = '') {
 }
 
 // The index is stored one payload per dataset: 'ffIndexRaw:<id>' plus
-// 'ffIndexManifest:<id>'. 'ffIndexRaw' with no suffix is the superseded
-// schema-2 merged blob, and 'tuneIndex' the schema-1 one.
+// 'ffIndexManifest:<id>'. 'ffIndexRaw' with no suffix is the retired
+// schema-2 merged blob, and 'tuneIndex' the schema-1 one; neither is read any
+// more, and both are swept once per-dataset copies are working.
 const IDB_STATE = `
 (async () => {
     const req = indexedDB.open('keyval-store');
@@ -172,9 +173,8 @@ const IDB_STATE = `
         datasets[id] = { manifest, rawLength: len };
         rawLength += len;
     }
-    const mergedLength = await new Promise(res => { const r = tx.get('ffIndexRaw'); r.onsuccess = () => res(r.result ? r.result.length : 0); });
     const manifest = Object.values(datasets)[0] ? Object.values(datasets)[0].manifest : undefined;
-    return { keys, datasets, manifest, rawLength, mergedLength };
+    return { keys, datasets, manifest, rawLength };
 })()`;
 
 const WIPE_INDEX = `
@@ -279,98 +279,28 @@ try {
     check('tune renders promptly', Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
 
 
-    // ---- 4. Upgrading from the pre-schema-2 layout -----------------------
-    // Existing installs hold the index as one structured-cloned object under
-    // 'tuneIndex'. Upgrading must NOT strand them with a 40 MB re-download they
-    // can only do online.
-    const SEED_LEGACY = v => `
-    (async () => {
-        const req = indexedDB.open('keyval-store');
-        const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
-        const store0 = db.transaction('keyval', 'readonly').objectStore('keyval');
-        const keys = await new Promise(res => { const r = store0.getAllKeys(); r.onsuccess = () => res(r.result); });
-        const rawKeys = keys.filter(k => String(k).startsWith('ffIndexRaw'));
-        if (!rawKeys.length) return 'no raw payload to convert';
-        // Fold every per-dataset payload back into one blob, which is exactly
-        // the shape a pre-multi-dataset install holds.
-        const parsedAll = { settings: {}, aliases: {} };
-        for (const key of rawKeys) {
-            const body = await new Promise(res => {
-                const r = db.transaction('keyval', 'readonly').objectStore('keyval').get(key);
-                r.onsuccess = () => res(r.result);
-            });
-            if (typeof body !== 'string') continue;
-            const part = JSON.parse(body);
-            Object.assign(parsedAll.settings, part.settings || {});
-            Object.assign(parsedAll.aliases, part.aliases || {});
-        }
-        const raw = JSON.stringify(parsedAll);
-        const parsed = JSON.parse(raw);
-        const abcStrings = {}, sourceUrls = {};
-        for (const id in parsed.settings) {
-            const st = parsed.settings[id];
-            abcStrings[id] = st.abc; st.abc = '';
-            if (st.source_url) { sourceUrls[id] = st.source_url; delete st.source_url; }
-        }
-        const tx = db.transaction('keyval', 'readwrite');
-        const store = tx.objectStore('keyval');
-        store.put({ indexData: parsed, abcStrings, sourceUrls }, 'tuneIndex');
-        store.put({ v: ${v}, date: '2020-01-01' }, 'tuneIndexMetadata');
-        for (const key of keys) {
-            if (String(key).startsWith('ffIndexRaw') || String(key).startsWith('ffIndexManifest')) {
-                store.delete(key);
-            }
-        }
-        await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
-        return 'ok';
-    })()`;
-
-    console.log('\n4. Existing install with the old (schema 1) offline copy, offline');
+    // ---- 4. A retired copy left behind is swept -------------------------
+    // The pre-multi-dataset layouts are no longer read (November 2026). A copy
+    // left beside working per-dataset copies is dead quota and is deleted in
+    // the background — without touching the per-dataset copies.
+    console.log('\n4. A leftover retired copy is swept, and the real copies still work');
     await setOffline(false);
-    const currentVersion = (await evaluate(IDB_STATE)).manifest.v;
-    // Seed at the CURRENT version so no background update fires — this isolates
-    // "can the legacy copy be read" from "does an update replace it".
-    check('seeded a schema-1 offline copy', await evaluate(SEED_LEGACY(currentVersion)) === 'ok');
-
-    await setOffline(true);
-    await navigate(APP);
-    ms = await waitFor(INDEX_READY, 60000, 'index ready from the legacy copy');
-    check('legacy offline copy loads — no forced re-download', true, `${ms} ms`);
-
-    t0 = Date.now();
-    await evaluate(OPEN_TUNE);
-    await waitFor(`!!document.querySelector('.expansionPanel')`, 20000, 'tune rendered');
-    check('tunes and their ABC come from the legacy copy', Date.now() - t0 < 3000,
-        `${Date.now() - t0} ms`);
-    // P3: never both missing. The legacy blob is either still there, or it has
-    // already been superseded by per-dataset copies — but there is no moment
-    // where the user has neither.
-    //
-    // Note CDP's network emulation does NOT reach Web Workers (see README), so
-    // the worker can migrate here even though the main thread believes it is
-    // offline. Either outcome is correct; having nothing is not.
-    const stillLegacy = await evaluate(IDB_STATE);
-    const legacyPresent = stillLegacy.keys.includes('tuneIndex');
-    const perDataset = Object.keys(stillLegacy.datasets).length;
-    check('the user is never left with no offline copy at all',
-        legacyPresent || perDataset > 0,
-        legacyPresent
-            ? 'legacy blob still present'
-            : `superseded by ${perDataset} per-dataset cop${perDataset === 1 ? 'y' : 'ies'}`);
-
-    // ---- 5. Legacy copy is migrated on the next version bump -------------
-    console.log('\n5. Legacy copy migrates to the new format when an update lands');
-    await setOffline(false);
-    // The legacy copy from scenario 4 is still in place; just age its version.
-    check('aged the schema-1 copy so an update is due', await evaluate(`
+    const RETIRED = ['ffIndexRaw', 'ffIndexManifest', 'tuneIndex', 'tuneIndexMetadata'];
+    check('seeded the retired keys', await evaluate(`
     (async () => {
         const req = indexedDB.open('keyval-store');
         const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
         const tx = db.transaction('keyval', 'readwrite');
-        tx.objectStore('keyval').put({ v: 1, date: '2020-01-01' }, 'tuneIndexMetadata');
+        const st = tx.objectStore('keyval');
+        st.put('{"settings":{},"aliases":{}}', 'ffIndexRaw');
+        st.put({ schema: 2, v: 1 }, 'ffIndexManifest');
+        st.put({ indexData: {}, abcStrings: {} }, 'tuneIndex');
+        st.put({ v: 1 }, 'tuneIndexMetadata');
         await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
         return 'ok';
     })()`) === 'ok');
+    const before = await evaluate(IDB_STATE);
+
     await navigate(APP);
     await waitFor(INDEX_READY, 60000, 'index ready');
     ms = await waitFor(`(async () => {
@@ -378,27 +308,20 @@ try {
         const db = await new Promise(res => { req.onsuccess = () => res(req.result); });
         const st = db.transaction('keyval', 'readonly').objectStore('keyval');
         const keys = await new Promise(res => { const r = st.getAllKeys(); r.onsuccess = () => res(r.result); });
-        return keys.some(k => String(k).startsWith('ffIndexManifest:'))
-            && !keys.includes('tuneIndex');
-    })()`, 300000, 'migration to schema 2');
-    check('40 MB legacy duplicate is reclaimed after migrating', true, `${(ms / 1000).toFixed(1)} s`);
+        return !${JSON.stringify(RETIRED)}.some(k => keys.includes(k));
+    })()`, 60000, 'retired keys swept');
+    check('the retired keys are deleted', true, `${ms} ms`);
 
-    // ---- 6. The merged blob survives until per-dataset copies exist -------
-    // P3: there is no state in which both the merged blob and the per-dataset
-    // copies are missing. An upgrading user must never be stranded.
-    console.log('\n6. Migration never leaves the user with nothing');
-    const migrated = await evaluate(IDB_STATE);
-    check('per-dataset copies exist after migration',
-        Object.keys(migrated.datasets).length >= 1,
-        `datasets: ${Object.keys(migrated.datasets).join(', ') || 'none'}`);
-    check('the superseded merged blob is gone', migrated.mergedLength === 0,
-        `merged blob is ${migrated.mergedLength} chars`);
-    check('the schema-1 blob is gone too', !migrated.keys.includes('tuneIndex'));
+    const after = await evaluate(IDB_STATE);
+    check('every per-dataset copy survives the sweep',
+        Object.keys(before.datasets).every(id =>
+            after.datasets[id] && after.datasets[id].rawLength === before.datasets[id].rawLength),
+        `datasets: ${Object.keys(after.datasets).join(', ') || 'none'}`);
 
     await setOffline(true);
     await navigate(APP);
-    ms = await waitFor(INDEX_READY, 60000, 'index ready from per-dataset copies');
-    check('the migrated copies work offline', true, `${ms} ms`);
+    ms = await waitFor(INDEX_READY, 60000, 'index ready offline after the sweep');
+    check('the per-dataset copies still work offline', true, `${ms} ms`);
 
 } catch (e) {
     console.error('\nFATAL:', e.message);
