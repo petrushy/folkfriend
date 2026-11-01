@@ -894,14 +894,49 @@ lives in IndexedDB on the device and is never pushed to Firestore. The Firestore
 SDK handles its own offline queue, so writes made offline are replayed when
 connectivity returns. Security rules are in `app/firestore.rules`.
 
-**One document holding the whole array:**
+**One document per record**, for everything: favourites since November 2026
+(`users/{uid}/favourites/{settingID}`), and `users/{uid}/{places,sightings,liveSessions}/{id}`
+since September 2026 — see "Syncing the play log" below.
 
-- **favourites** — `users/{uid}/data/favourites`. Small, always rewritten
-  wholesale, arbitrated by a document-level `clientUpdatedAt`.
+#### Favourites: why the single document went (November 2026)
 
-**One document per record** (`users/{uid}/{places,sightings,liveSessions}/{id}`),
-added September 2026 — see "Syncing the play log" below for why the favourites
-shape could not be reused and what the merge rules are.
+Reported as "different favourites on iPad and iPhone, both signed in, both
+green". Favourites were ONE document holding the whole array, and every item
+carries its setting's full ABC, contour and a mirrored AI note of up to 1200
+chars — a few hundred favourites reach Firestore's **1 MiB document limit**,
+after which every write is refused. `pushFavourites` ended in
+`.catch(console.error)`, so nothing on screen said so: each device kept its own
+edits locally while the account copy froze. Separately, whole-list
+last-writer-wins meant any device that pushed replaced every other device's
+list.
+
+Now (`sync.js` `subscribeFavourites`, store `_applyRemoteFavourites` /
+`_seedFavourites` / `_applyLegacyFavourites`):
+
+- **One document per favourite**, `{ id, updatedAt, item }`. An unstar is a
+  **tombstone** `{ id, updatedAt, deleted: true }`, never an absence or a
+  document delete — a removed document is ignored, because reading it as an
+  unstar is the one interpretation that can lose data.
+- **`item.updatedAt` is per favourite** and monotone (`nextUpdatedAt`).
+  `_updateFavourites` snapshots every item before `mutate`, then stamps and
+  pushes exactly what changed plus a tombstone per removal — so every existing
+  mutation path is covered without touching it.
+- **A snapshot is merged, never a replacement**: newer stamp wins per
+  favourite, ties go to the remote, unmentioned favourites are untouched.
+- **Seeding is a union** after the first server snapshot: push what the
+  account lacks or holds older.
+- **The old `data/favourites` document is read, never written**, and merged
+  ADDITIVELY after seeding (add only what this device lacks and the collection
+  has no record of, tombstones included). That is both the migration and the
+  recovery for devices that already drifted: each adds what it lacks, nobody
+  deletes. An unstar made only under the old layout can therefore come back
+  once — the price of never losing a star.
+- **A refused push is reported** (`syncError` snackbar).
+- A restored backup stamps its favourites as new edits and pushes them, but
+  never tombstones favourites the backup lacks.
+
+⚠️ Needs `cd app && firebase deploy --only firestore:rules` — without the new
+`favourites/{settingID}` rule every push is refused (and now reported).
 
 ## CI/CD — GitHub Actions (July 2026)
 
@@ -991,6 +1026,7 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 
 **How it works:**
 
+- ⚠️ The bullets below describe the pre-November-2026 single-document favourites sync; see "Favourites: why the single document went" for the current design.
 - On sign-in: `sync.subscribe()` sets up an `onSnapshot` listener on `users/{uid}/data/favourites` only — **history is intentionally not synced**, it stays per-device in IndexedDB
 - First snapshot: if Firestore has no data (first device ever), seeds from local IndexedDB; otherwise replaces local with Firestore data
 - Subsequent snapshots: fire in real-time when any device writes favourites, update IndexedDB and emit `syncComplete` on `eventBus`

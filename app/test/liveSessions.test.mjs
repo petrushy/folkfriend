@@ -84,8 +84,8 @@ export default { $emit: (name, payload) => __events.push({ name, payload }), $on
     'fake-sync.mjs': `
 export const __records = [];
 export const __subs = [];
-export function pushFavourites() {}
-export function subscribe() { return () => {}; }
+export function pushFavouriteRecords() {}
+export function subscribeFavourites() { return () => {}; }
 export function subscribeCollection(uid, name, handlers) {
     __subs.push({ uid, name, handlers });
     return () => {};

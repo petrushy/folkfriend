@@ -66,8 +66,8 @@ export default { $emit: (name, payload) => __events.push({ name, payload }), $on
 export const __pushes = [];
 export const __records = [];
 export const __subs = [];
-export function pushFavourites(uid, items) { __pushes.push(items); }
-export function subscribe() { return () => {}; }
+export function pushFavouriteRecords(uid, docs) { __pushes.push(docs); }
+export function subscribeFavourites() { return () => {}; }
 export function subscribeCollection(uid, name, handlers) {
     __subs.push({ uid, name, handlers });
     return () => {};
