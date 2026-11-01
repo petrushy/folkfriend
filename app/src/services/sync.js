@@ -150,7 +150,12 @@ export function subscribeFavourites(uid, { applyRemote, seed, applyLegacy, retry
     favSync.serverSeen = false;
     emitFavSync();
 
-    const unsubCollection = onSnapshot(collectionRef(uid, FAVOURITES_COLLECTION), snap => enqueue(async () => {
+    // includeMetadataChanges is REQUIRED. With the offline cache warm, the
+    // server's answer usually changes no document — it only flips
+    // metadata.fromCache — and without this option the SDK never delivers it.
+    // The device then never sees a server snapshot: the status reads
+    // "Checking…" for ever and seeding never runs.
+    const unsubCollection = onSnapshot(collectionRef(uid, FAVOURITES_COLLECTION), { includeMetadataChanges: true }, snap => enqueue(async () => {
         const changed = [];
         const fromServer = !(snap.metadata && snap.metadata.fromCache);
         let confirmed = false;
@@ -335,7 +340,9 @@ function recordRef(uid, name, id) {
 export function subscribeCollection(uid, name, { applyRemote, getLocal }) {
     let seeded = false;
 
-    return onSnapshot(collectionRef(uid, name), async snap => {
+    // includeMetadataChanges: see subscribeFavourites — without it a warm
+    // cache means the server snapshot is never delivered and the seed never runs.
+    return onSnapshot(collectionRef(uid, name), { includeMetadataChanges: true }, async snap => {
         const upserts = [];
         const removals = [];
         for (const change of snap.docChanges()) {

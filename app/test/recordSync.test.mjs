@@ -92,8 +92,23 @@ export function writeBatch() {
 }
 let __commitError = null;
 export function __failCommits(code) { __commitError = code ? Object.assign(new Error(code), { code }) : null; }
-export function onSnapshot(ref, onNext, onError) {
-    const listener = { path: ref.path, onNext, onError, active: true };
+// Models the real SDK's one behaviour that matters here: after the first
+// snapshot, one that changes no document — e.g. the server confirming that the
+// offline cache was already complete, which flips only metadata.fromCache — is
+// NOT delivered unless the listener asked for { includeMetadataChanges: true }.
+// A fake that delivered everything hid exactly that bug.
+export function onSnapshot(ref, ...args) {
+    const options = typeof args[0] === 'object' && args[0] ? args.shift() : {};
+    const [deliver, onError] = args;
+    let delivered = 0;
+    const onNext = snap => {
+        if (delivered > 0 && !options.includeMetadataChanges && snap.docChanges().length === 0) {
+            return undefined;
+        }
+        delivered++;
+        return deliver(snap);
+    };
+    const listener = { path: ref.path, options, onNext, onError, active: true };
     __listeners.push(listener);
     return () => { listener.active = false; };
 }
@@ -218,6 +233,19 @@ async function run() {
         assert.deepEqual(firestore.__writes, [], 'and the server snapshot has it after all');
     });
 
+    await test('a warm cache confirmed by the server with no changes still seeds', async () => {
+        // Every launch after the first: the cache already holds every record,
+        // so the server's answer changes no document and only flips fromCache.
+        const { sync, firestore } = await loadSync();
+        sync.subscribeCollection('u1', 'sightings', {
+            applyRemote: () => {},
+            getLocal: async () => [{ id: 'a', timestamp: 1 }, { id: 'offline-only', timestamp: 2 }],
+        });
+        await firestore.__listeners[0].onNext(snapshot([{ id: 'a', timestamp: 1 }], { fromCache: true }));
+        await firestore.__listeners[0].onNext(snapshot([{ id: 'a', timestamp: 1 }], { changes: [] }));
+        assert.deepEqual(firestore.__writes.map(w => w.path), ['users/u1/sightings/offline-only']);
+    });
+
     await test('seeding runs once, not on every later snapshot', async () => {
         const { sync, firestore } = await loadSync();
         let localReads = 0;
@@ -331,6 +359,19 @@ async function run() {
         assert.equal(legacy.length, 1);
         assert.ok(legacy[0].remote.get('3').deleted, 'tombstones are passed along');
         assert.ok(!firestore.__writes.some(w => w.path === legacyPath), 'the old document is left alone');
+    });
+
+    await test('a warm cache confirmed by the server with no changes is not "Checking…" for ever', async () => {
+        const { sync, firestore } = await loadSync();
+        const seeds = [];
+        sync.subscribeFavourites('u1', { applyRemote: async () => {}, seed: async r => { seeds.push(r.size); } });
+        await listenerFor(firestore, favPath).onNext(snapshot([{ id: '1', updatedAt: 5 }], { fromCache: true }));
+        await settle();
+        assert.equal(sync.getFavouritesSyncState().serverSeen, false, 'the cache alone is not confirmation');
+        await listenerFor(firestore, favPath).onNext(snapshot([{ id: '1', updatedAt: 5 }], { changes: [] }));
+        await settle();
+        assert.equal(sync.getFavouritesSyncState().serverSeen, true, 'the server answered');
+        assert.deepEqual(seeds, [1], 'and seeding ran');
     });
 
     console.log('\nsync.js — counting favourites the account has not confirmed');
