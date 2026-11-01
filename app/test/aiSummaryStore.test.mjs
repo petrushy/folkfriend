@@ -67,6 +67,9 @@ export function pushFavouriteRecords(uid, docs) {
 // as a remote document newer than anything local — the case the whole-list
 // replace used to model.
 let __remoteStamp = 1e15;
+export function pendingFavourites() { return new Map(); }
+export function forgetPendingFavourite() {}
+export function getFavouritesSyncState() { return { pending: 0 }; }
 export function subscribeFavourites(uid, handlers) {
     __onChange = (type, items) => handlers.applyRemote(items.map(item => ({
         id: String(item.result.settingID), updatedAt: ++__remoteStamp, item,

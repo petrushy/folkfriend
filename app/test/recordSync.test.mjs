@@ -116,7 +116,7 @@ async function writeSharedFakes() {
 
 // --- half 1: sync.js, against the fake Firestore ---------------------------
 
-async function loadSync() {
+async function loadSync({ storage = {} } = {}) {
     await writeSharedFakes();
 
     let source = await readFile(path.join(srcDir, 'services', 'sync.js'), 'utf8');
@@ -137,6 +137,7 @@ async function loadSync() {
         setItem(k, v) { this._m.set(k, String(v)); },
         removeItem(k) { this._m.delete(k); },
     };
+    for (const [k, v] of Object.entries(storage)) globalThis.localStorage.setItem(k, v);
 
     const firestore = await import(path.join(tmpDir, 'fake-firestore.mjs'));
     firestore.__reset();
@@ -146,8 +147,8 @@ async function loadSync() {
 
 // Builds a snapshot in the shape onSnapshot delivers. `changes` defaults to
 // every doc arriving as 'added', which is what a first snapshot looks like.
-function snapshot(records, { fromCache = false, changes = null } = {}) {
-    const docs = records.map(r => ({ id: String(r.id), data: () => r }));
+function snapshot(records, { fromCache = false, changes = null, pendingWrites = false } = {}) {
+    const docs = records.map(r => ({ id: String(r.id), data: () => r, metadata: { hasPendingWrites: pendingWrites } }));
     return {
         docs,
         metadata: { fromCache },
@@ -330,6 +331,70 @@ async function run() {
         assert.equal(legacy.length, 1);
         assert.ok(legacy[0].remote.get('3').deleted, 'tombstones are passed along');
         assert.ok(!firestore.__writes.some(w => w.path === legacyPath), 'the old document is left alone');
+    });
+
+    console.log('\nsync.js — counting favourites the account has not confirmed');
+
+    const favDoc = (id, updatedAt) => ({ id, updatedAt, item: { result: { settingID: id } } });
+
+    await test('a pushed favourite is pending until the write is acknowledged', async () => {
+        const { sync } = await loadSync();
+        await sync.pushFavouriteRecords('u1', [favDoc('1', 5)]);
+        assert.equal(sync.getFavouritesSyncState().pending, 0, 'acknowledged: synced');
+        assert.ok(sync.getFavouritesSyncState().confirmedAt > 0);
+    });
+
+    await test('a refused write stays counted, with the reason', async () => {
+        const { sync, firestore } = await loadSync();
+        firestore.__failCommits('invalid-argument');
+        await sync.pushFavouriteRecords('u1', [favDoc('1', 5), favDoc('2', 6), { id: '3', updatedAt: 7, deleted: true }]);
+        const state = sync.getFavouritesSyncState();
+        assert.equal(state.pending, 3);
+        assert.equal(state.pendingRemovals, 1);
+        assert.equal(state.lastError, 'invalid-argument');
+
+        firestore.__failCommits(null);
+        await sync.pushFavouriteRecords('u1', [favDoc('1', 5), favDoc('2', 6), { id: '3', updatedAt: 7, deleted: true }]);
+        assert.equal(sync.getFavouritesSyncState().pending, 0);
+        assert.equal(sync.getFavouritesSyncState().lastError, null, 'and the error clears with it');
+    });
+
+    await test('the count survives a relaunch, so an offline start does not claim all is well', async () => {
+        const { sync, firestore } = await loadSync();
+        firestore.__failCommits('unavailable');
+        await sync.pushFavouriteRecords('u1', [favDoc('1', 5), favDoc('2', 6)]);
+        const persisted = globalThis.localStorage.getItem('favouritesUnsynced');
+
+        const relaunched = await loadSync({ storage: { favouritesUnsynced: persisted } });
+        assert.equal(relaunched.sync.getFavouritesSyncState().pending, 2);
+    });
+
+    await test('only the server copy confirms a favourite — not the cache, not our echo', async () => {
+        const { sync, firestore } = await loadSync();
+        firestore.__failCommits('unavailable');
+        await sync.pushFavouriteRecords('u1', [favDoc('1', 5)]);
+        sync.subscribeFavourites('u1', { applyRemote: async () => {}, seed: async () => {}, applyLegacy: async () => {} });
+
+        await listenerFor(firestore, favPath).onNext(snapshot([favDoc('1', 5)], { fromCache: true }));
+        await settle();
+        assert.equal(sync.getFavouritesSyncState().pending, 1, 'cache');
+        await listenerFor(firestore, favPath).onNext(snapshot([favDoc('1', 5)], { pendingWrites: true }));
+        await settle();
+        assert.equal(sync.getFavouritesSyncState().pending, 1, 'latency-compensated echo');
+        await listenerFor(firestore, favPath).onNext(snapshot([favDoc('1', 4)]));
+        await settle();
+        assert.equal(sync.getFavouritesSyncState().pending, 1, 'an older server copy');
+        await listenerFor(firestore, favPath).onNext(snapshot([favDoc('1', 5)]));
+        await settle();
+        assert.equal(sync.getFavouritesSyncState().pending, 0, 'the server holds it');
+        assert.equal(sync.getFavouritesSyncState().serverSeen, true);
+    });
+
+    await test('a dead listener is reported as not connected', async () => {
+        const { sync, firestore } = await loadSync();
+        sync.subscribeFavourites('u1', { applyRemote: async () => {}, seed: async () => {}, applyLegacy: async () => {} });
+        listenerFor(firestore, favPath).onError({ code: 'permission-denied', message: 'no' });
+        assert.equal(sync.getFavouritesSyncState().listenerError, 'permission-denied');
     });
 
     await test('each favourite is its own document', async () => {
@@ -848,6 +913,31 @@ async function run() {
         assert.deepEqual(sync.__pushes.flat().map(d => d.id), ['4'], 'and 4 is carried into the collection');
     });
 
+    await test('Retry re-sends each pending favourite as it is now, and pending unstars as tombstones', async () => {
+        const { store, idb, sync } = await signedInStore();
+        idb.__db.set('favouriteItems', [fav('1', '10', { tags: ['latest'], updatedAt: 40 })]);
+        sync.__pending.set('1', { updatedAt: 30, deleted: false });
+        sync.__pending.set('2', { updatedAt: 35, deleted: true });
+        sync.__pending.set('3', { updatedAt: 20, deleted: false });
+        const sent = await store.retryFavouritesSync();
+        const docs = sync.__pushes.flat();
+        assert.equal(sent, 2);
+        assert.deepEqual(docs.find(d => d.id === '1').item.tags, ['latest']);
+        assert.equal(docs.find(d => d.id === '1').updatedAt, 40);
+        assert.deepEqual(docs.find(d => d.id === '2'), { id: '2', updatedAt: 35, deleted: true });
+        assert.deepEqual(sync.__forgotten, ['3'], 'a pending star with nothing behind it cannot block the count for ever');
+    });
+
+    await test('Retry pushes nothing when the local read fails', async () => {
+        const { store, idb, sync } = await signedInStore();
+        sync.__pending.set('2', { updatedAt: 35, deleted: true });
+        idb.__failReadsOf('favouriteItems');
+        try {
+            await assert.rejects(store.retryFavouritesSync());
+        } finally { idb.__allowAll(); }
+        assert.deepEqual(sync.__pushes, []);
+    });
+
     await test('the star cache never answers from before a write it raced', async () => {
         // A cache load reading just before a write commits, and assigning just
         // after it is invalidated, would cache the old list until the next edit.
@@ -967,6 +1057,11 @@ export const __records = [];
 export const __subs = [];
 export function pushFavouriteRecords(uid, docs) { __pushes.push(docs); }
 export let __favHandlers = null;
+export const __pending = new Map();
+export const __forgotten = [];
+export function pendingFavourites() { return new Map(__pending); }
+export function forgetPendingFavourite(id) { __forgotten.push(id); __pending.delete(id); }
+export function getFavouritesSyncState() { return { pending: __pending.size }; }
 export function subscribeFavourites(uid, handlers) { __favHandlers = handlers; return () => { __favHandlers = null; }; }
 export function subscribeCollection(uid, name, handlers) {
     const sub = { uid, name, handlers, active: true };
@@ -981,7 +1076,7 @@ export function deleteRecord(uid, name, id) { __records.push({ op: 'delete', nam
 export function deleteRecords(uid, name, ids) {
     for (const id of ids) __records.push({ op: 'delete', name, id });
 }
-export function __reset() { __pushes.length = 0; __records.length = 0; }
+export function __reset() { __pushes.length = 0; __records.length = 0; __pending.clear(); __forgotten.length = 0; }
 `;
 
 const STORE_FAKES = {

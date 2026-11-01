@@ -934,6 +934,25 @@ Now (`sync.js` `subscribeFavourites`, store `_applyRemoteFavourites` /
 - **A refused push is reported** (`syncError` snackbar).
 - A restored backup stamps its favourites as new edits and pushes them, but
   never tombstones favourites the backup lacks.
+- **Settings → Sync shows what the account has CONFIRMED, not just that you
+  are signed in** (`js/favouriteSyncStatus.mjs`, tested by
+  `favouriteSyncStatus.test.mjs`): "All 312 favourites synced · confirmed 5 min
+  ago", "10 favourites not synced — your account refused the change (…)", "…
+  not synced yet — this device is offline", or "not connected". A favourite is
+  pending from push until the write is acknowledged OR a server snapshot (not
+  cached, no `hasPendingWrites`) carries its stamp or newer — the cached echo
+  of our own write must not count. The pending set is persisted
+  (`localStorage.favouritesUnsynced`) so an offline relaunch does not claim all
+  is well, and zero pending before any server snapshot reads as "checking",
+  never "synced". Retry (and the browser's `online` event) re-pushes each
+  pending favourite as it is NOW.
+
+Known trade-offs of the per-favourite layout: two devices editing the SAME
+favourite at once keep only the newer edit (tags are not merged); an unstar
+made while signed out does not propagate; tombstones are kept for ever (a few
+dozen bytes each); a device still on an older build writes only the old
+document, which new builds merge additively but which never receives their
+changes until it updates.
 
 ⚠️ Needs `cd app && firebase deploy --only firestore:rules` — without the new
 `favourites/{settingID}` rule every push is refused (and now reported).

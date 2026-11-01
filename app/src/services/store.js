@@ -9,7 +9,7 @@ import {matchPlace, sightingsToAdopt, isValidFix, DEFAULT_PLACE_RADIUS_M} from '
 import {deleteSessionAudio, reclaimAudioForMissingSessions} from './sessionAudioStore.js';
 import { GoogleAuthProvider, signInWithPopup, browserPopupRedirectResolver, signOut as firebaseSignOut } from 'firebase/auth';
 import {
-    subscribeFavourites, pushFavouriteRecords,
+    subscribeFavourites, pushFavouriteRecords, pendingFavourites, forgetPendingFavourite, getFavouritesSyncState,
     subscribeCollection, pushRecord, pushRecords, deleteRecord, deleteRecords,
 } from './sync.js';
 import {
@@ -613,6 +613,35 @@ class Store {
             if (docs.length && this.currentUser) pushFavouriteRecords(this.currentUser.uid, docs);
             return null;
         });
+    }
+
+    // For Settings: how many favourites the account has not confirmed, and why.
+    getFavouritesSyncState() {
+        return getFavouritesSyncState();
+    }
+
+    // Pushes every pending favourite again, from what this device holds NOW:
+    // a pending favourite still here goes up as it currently is, a pending
+    // unstar goes up as its tombstone. Read strictly — a failed read must not
+    // turn into a list of tombstones.
+    async retryFavouritesSync() {
+        if (!this.currentUser) return 0;
+        const pending = pendingFavourites();
+        if (!pending.size) return 0;
+        const items = await this.getFavouritesStrict();
+        const byID = new Map(items.map(f => [this._favouriteID(f), f]));
+        const docs = [];
+        for (const [id, entry] of pending) {
+            const item = byID.get(id);
+            if (item) docs.push({ id, updatedAt: Number(item.updatedAt) || 0, item });
+            else if (entry.deleted) docs.push({ id, updatedAt: entry.updatedAt, deleted: true });
+            // Pending as a star but gone here with no unstar to push: nothing
+            // true can be sent, and a count that can never clear is worse
+            // than useless.
+            else forgetPendingFavourite(id);
+        }
+        await pushFavouriteRecords(this.currentUser.uid, docs);
+        return docs.length;
     }
 
     // The pre-November-2026 single favourites document. ADDITIVE ONLY: a
@@ -1981,6 +2010,7 @@ class Store {
             applyRemote: docs => this._applyRemoteFavourites(docs),
             seed: remoteByID => this._seedFavourites(remoteByID),
             applyLegacy: (items, remoteByID) => this._applyLegacyFavourites(items, remoteByID),
+            retry: () => this.retryFavouritesSync().catch(e => console.error('[folkfriend sync] retry failed', e)),
         });
     }
 
