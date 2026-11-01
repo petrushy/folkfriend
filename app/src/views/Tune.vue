@@ -366,7 +366,7 @@ export default {
             return !!detection && String(detection.tuneId) === String(this.tuneID);
         },
         // Which dataset this tune came from, as labelled by the worker. Falls
-        // back to the ID range only for tunes loaded from a legacy merged blob.
+        // back to the ID range only for a tune with no label (an old favourite).
         dataset() {
             const selectedSetting = this.currentSettingForSource;
             return (selectedSetting && selectedSetting.dataset) || '';

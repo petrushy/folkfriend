@@ -140,29 +140,13 @@ Before this setting existed the app fetched both files unconditionally, so
 *present*, empty array included, is an answer and is honoured; only an
 unanswered question may be revised.
 
-**The evidence is the offline copy on disk, not `localStorage`.** The first
-version of this used "has a saved `userSettings` blob but no `tuneDatasets`
-key", and that is wrong: `userSettings` is written only when a setting is
-*changed*, so a long-standing install whose owner never opened Settings has no
-stored blob at all and is indistinguishable from a fresh one by localStorage
-alone. `store.resolveDatasetSelection()` therefore checks IndexedDB for a
-pre-multi-dataset copy (`tuneIndex`, schema 1, or `ffIndexRaw`, schema 2) — those
-cover thesession and folkwiki by construction, so what they hold *is* what this
-install was searching. It is awaited in `backend.setupTuneIndex()` before
-`setSelectedDatasets`, because the worker reads disk immediately after, and the
-answer is persisted so Settings shows what is actually being searched.
-
-⚠️ **Getting that signal wrong costs twice over, and permanently.** The user
-silently stops finding Swedish tunes, AND
-`clearSupersededMergedCopies` never reclaims the ~42 MB blob — it will not drop
-a copy until *every* dataset it covers has a committed per-dataset replacement,
-and folkwiki now never gets one. So the install sits on the merged blob plus a
-per-dataset thesession copy for ever. **The offline e2e caught this**
-(`offline-index.mjs` step 5, "migration to schema 2" timing out after 300 s);
-no unit test did, because the whole failure lives in the interaction between a
-default, a localStorage heuristic and a reclamation rule in three different
-files. The `_datasetsFor` localStorage heuristic is kept as a second, weaker
-signal — it can only err toward *more* datasets, which is the old behaviour.
+**How "already searching folkwiki" is detected.** `_datasetsFor` (store.js):
+a stored `userSettings` blob with no `tuneDatasets` key predates the setting
+and gets both. It is NOT persisted on its own, so it must stay for as long as a
+device might never have saved settings since — removing it would silently
+switch folkwiki off there. (Until November 2026 `resolveDatasetSelection()`
+also treated a pre-multi-dataset offline copy on disk as evidence; that went
+with the migration, see "Retired: migration from the merged blob".)
 
 **Pushing the selection at startup must not act on it.**
 `backend.setupTuneIndex()` seeds the worker with the user's selection before
@@ -193,7 +177,7 @@ defaulting it off — must not make `folkwiki` an available name to import under
 so `_isPublishedDataset` reads the second.
 
 Everything in "Offline architecture" below still holds; it is now applied **per
-dataset**. The three invariants the tests pin:
+dataset**. The invariants the tests pin:
 
 > **P1 — per dataset.** If a usable offline copy of dataset D existed before an
 > operation, one exists after it, wherever the operation died and whatever the
@@ -201,10 +185,8 @@ dataset**. The three invariants the tests pin:
 >
 > **P2 — coverage.** `indexUsable` is false only when *every* selected dataset
 > genuinely has no usable copy, or the selection is empty.
->
-> **P3 — migration.** The pre-multi-dataset merged blob is present until every
-> dataset it covers has a committed per-dataset copy that has loaded into WASM,
-> and absent afterwards. There is no state in which both are missing.
+
+(P3, the migration invariant, retired with the migration in November 2026.)
 
 **The unscoped delete is the bug class this introduces.** A corrupt folkwiki
 must never cost the user their thesession copy. Every delete in
@@ -296,17 +278,9 @@ Three things this needs that a published dataset does not:
   it, so its IDs are still spoken for. That is what turns a silent
   refuses-to-load-later into an error at the moment of import.
 
-  **The candidate is vetted by `collisionsForPart`, not by the merge's own
-  counts.** `mergeIndexParts` exempts the legacy migration base from its
-  totals, because the base holds older copies of the very datasets being
-  migrated and overlap there is expected. That exemption is right for a
-  published dataset replacing itself and wrong for an import — and since the
-  base is processed *last*, a candidate processed before it never saw the
-  overlap either. So an import made while migration is deferred (auto-update
-  off, or a migration that failed) could shadow thesession or folkwiki IDs that
-  currently live only inside the merged blob. `collisionsForPart` compares the
-  candidate against every other part, base included, independently of merge
-  order.
+  **The candidate is vetted by `collisionsForPart`** against every other
+  stored part, independently of merge order, before anything is merged or
+  loaded.
 - **Both checks run on EVERY fetch, not just the first.** The remembered URL is
   not under our control, so a payload that was clean when it was added can start
   colliding later; the refresh path used to merely log it and persist anyway.
@@ -367,11 +341,8 @@ every network blip re-runs a setup that cannot succeed.
 
 ### Rules the tests pin, each verified by reinstating the bug
 
-1. **A per-dataset write does NOT reclaim the merged blob.** This *inverts* the
-   old schema-2 rule. The merged blob covers two datasets and one write covers
-   one; dropping it on the first write deletes data nothing has replaced.
-   `clearSupersededMergedCopies` does it, and only once re-reading disk confirms
-   every covered dataset is committed and loaded.
+1. *(Retired November 2026 with the migration: "a per-dataset write does not
+   reclaim the merged blob".)*
 2. **A toggle never deletes a payload.** Worse than deleting on failure: the
    user may flip it back in thirty seconds and now needs 35 MB of signal they
    may not have. Deselected copies are kept and shown as "saved but not in use";
@@ -380,15 +351,9 @@ every network blip re-runs a setup that cannot succeed.
 4. **Turning off the last one unloads** rather than loading an empty index —
    `indexPayloadProblem` would reject one anyway, and Rust would happily return
    nothing with no explanation.
-5. **A half-finished migration never reduces what is searchable.** The merged
-   blob is passed to `mergeIndexParts` as a **base part** (`id: null`) that
-   fills gaps and never overwrites a dataset file. Without it, the first
-   per-dataset load during a migration replaced WASM with only that dataset,
-   so a later failure silently dropped every un-migrated source from search for
-   the rest of the session — while `_afterInstall` still reported them loaded,
-   having inherited their `source: 'merged'` entries. Nothing was lost on disk;
-   the app just quietly stopped finding half its tunes and said it was fine.
-   `loadedDatasets` now reports only what is genuinely in WASM.
+5. **`loadedDatasets` reports only what is genuinely in WASM.** (This rule
+   came from the migration's gap-filling "base part", retired November 2026;
+   the reporting rule outlived it.)
 6. **Only datasets known to load are merged back in.** `_partsToKeep` reads
    `loadedDatasets` ∪ just-installed, **not** everything on disk. Merging back a
    cached copy the Rust side refuses (a real schema change) poisons every
@@ -412,25 +377,25 @@ every network blip re-runs a setup that cannot succeed.
    JSON, so `Content-Length` was the compressed length and the bar always
    overshot, saved only by `Math.min`.
 
-### Migration from the merged blob
+### Retired: migration from the merged blob (November 2026)
 
-An upgrading install loads the schema-2 blob at startup, so the app is READY
-immediately and nothing changes for the user, then installs the per-dataset
-files in the background (largest first, to keep the window where it searches
-fewer tunes short), and deletes the blob only once disk confirms full coverage.
+Upgrading installs used to load the schema-2 merged blob (or the schema-1
+`tuneIndex` object) at startup and migrate to per-dataset files in the
+background, with the blob as a gap-filling "base part" until every dataset it
+covered was committed. Once every device had migrated, all of it was removed:
+the readers, the base part in `mergeIndexParts`, `_migrationBase`,
+`migrationPending`, `clearSupersededMergedCopies` and `resolveDatasetSelection`.
 
-**Gated on `autoUpdateTuneData`.** A user who turned that off has explicitly
-asked not to be given downloads they did not request, and this is ~42 MB for
-zero new content. They keep the merged blob and migrate on their next explicit
-tap in Settings.
+What remains is `deleteRetiredIndexCopies()` (`tuneIndexStore.js`): it deletes
+the four retired keys **by name** (never `get()` — that would load 42 MB to
+learn it exists), in the background, and **only once a per-dataset index is
+working** (`indexUsable`). A retired copy is never deleted while it might be
+all a device has, because an older build rolled back to could still read it.
+Pinned by `tune-index-install.test.mjs` and `offline-index.mjs` step 4.
 
-> ⚠️ **Transient quota doubling.** Holding both copies means ~84 MB during
-> migration — the exact condition the plane incident is blamed on. On a device
-> near quota this fails with `QuotaExceededError` *forever*, and the user sits
-> on the merged blob indefinitely. **A "replace the combined copy" action that
-> deletes the blob first — offered only after repeated failures and only while
-> online — is not built yet.** Without it, "never leave a user with nothing"
-> quietly becomes "never let some users migrate".
+A device that somehow still held only the merged blob now starts with no index
+and downloads the per-dataset files — which is why this waited until every
+device was confirmed migrated (Settings → Offline Tune Database).
 
 ### Source labelling replaced the ID-range hack
 
@@ -443,9 +408,9 @@ The worker now labels every tune with the dataset file it came from
 merge, never incrementally** — the same hazard class as `abcStringBySetting`).
 Every `source.mjs` function takes an optional explicit `dataset` and prefers it.
 
-The ID-range rule survives as the fallback for **any tune with no label** — a
-legacy merged blob, or a favourite saved before labelling existed. It covers all
-three sources.
+The ID-range rule survives as the fallback for **any tune with no label** — in
+practice a favourite saved before labelling existed. It covers all three
+sources.
 
 It originally excluded Norbeck, on the argument that a merged blob contains
 nothing else by construction so a third range would be a place to keep in sync
@@ -656,10 +621,7 @@ must be treated as sacred:
   no manifest is garbage-collected on the next read.
 - Reads never throw. Every failure resolves to `null`.
 - **Legacy (`tuneIndex` / `tuneIndexMetadata`)** — the pre-3.6 single-object
-  layout is still read, so upgrading users are never forced into a 40 MB
-  re-download they might not be able to do. It is deleted the moment a
-  schema-2 write succeeds (i.e. on the next data version bump, or when the user
-  taps "Update offline copy").
+  layout. No longer read (November 2026); swept by `deleteRetiredIndexCopies`.
 
 ### Network policy
 
@@ -796,7 +758,7 @@ first. A new test file needs no registration. Files run concurrently, so each
 must write its scratch copies to a directory of its own (`--serial` rules a race
 in or out). `node test/run.mjs mic sessionAudio` runs a subset.
 
-- `app/test/tune-index-cache.test.mjs` (30 cases) — the store and network layers
+- `app/test/tune-index-cache.test.mjs` (29 cases) — the store and network layers
   with in-memory fakes. Quota failure, partial writes, corrupt payloads, legacy
   reads, stall aborts, the datasets manifest, filename validation, and the
   interruption walk described in rule 5 — which now seeds all three datasets and
@@ -807,7 +769,7 @@ in or out). `node test/run.mjs mic sessionAudio` runs a subset.
   (`failOnHits`). Fault injection here targets keys by name and the keys are
   namespaced per dataset now, so a test naming a key that no longer exists would
   inject nothing and then pass while testing nothing — worse than failing.
-- `app/test/tune-index-install.test.mjs` (56 cases) — the *install* path, i.e.
+- `app/test/tune-index-install.test.mjs` (81 cases) — the *install* path, i.e.
   rules 7–10. It drives the real `worker.js` with its imports rewritten to fakes
   (in-memory IndexedDB, a scriptable network, a WASM stand-in that can refuse a
   payload), deliberately rather than a reimplementation: the bug was entirely in
@@ -824,8 +786,8 @@ in or out). `node test/run.mjs mic sessionAudio` runs a subset.
 
   It also covers the multi-dataset rules above: partial success, the duplicate
   -content guard, disjoint installs being serialised rather than joined,
-  migration from the merged blob (including a migration that dies part-way and
-  one deferred because auto-update is off), toggling a dataset off and back on,
+  the retired merged blob being ignored and swept only once a per-dataset
+  index works, toggling a dataset off and back on,
   and aggregated download progress. **Three of those tests found real bugs
   during development** — the `_partsToKeep` poisoning, the unclamped progress
   bar, and a fake that could not inject a mid-transfer failure.
@@ -868,9 +830,9 @@ in or out). `node test/run.mjs mic sessionAudio` runs a subset.
 - `'historyItems'` — array of `HistoryItem` objects (capped at 100)
 - `'ffIndexRaw:<id>'` / `'ffIndexManifest:<id>'` — one tune dataset and its
   commit marker, per dataset (`thesession` / `folkwiki` / `norbeck`). Schema 3.
-- `'ffIndexRaw'` / `'ffIndexManifest'` — the pre-multi-dataset merged blob
-  (schema 2, read-only, migrated away)
-- `'tuneIndex'` / `'tuneIndexMetadata'` — schema-1 tune index (read-only, migrated away)
+- `'ffIndexRaw'` / `'ffIndexManifest'` (merged blob, schema 2) and
+  `'tuneIndex'` / `'tuneIndexMetadata'` (schema 1) — RETIRED, not read; deleted
+  by `deleteRetiredIndexCopies` once a per-dataset index is working
 - `'aiTuneSummaries'` — AI background notes, `{ tuneID: { text, model, generatedAt, sourceUrl } }`
 - `'tuneSightings'` — where tunes were heard, append-only, capped at 5000. Synced
 - `'places'` — user-named locations, `{ id, name, lat, lon, radiusM, createdAt }`. Synced
@@ -3112,10 +3074,9 @@ fails 1, opening the score on a refused microphone fails 2, and leaving the
 pending flag set on destroy fails 1.
 
 The folkwiki default change above is covered in `aiSummaryStore.test.mjs`
-(the file that already owns the `userSettings` load path), 11 cases: reverting
-the default fails 1, dropping the legacy preservation fails 2, neutering
-`resolveDatasetSelection` fails 3, letting it override an explicit selection
-fails 2, and not persisting its answer fails 1.
+(the file that already owns the `userSettings` load path): reverting the
+default fails 1 and dropping the legacy preservation (`_datasetsFor`) fails 2.
+The `resolveDatasetSelection` cases went with the migration (November 2026).
 
 ### Favourites view took seconds to populate (August 2026)
 

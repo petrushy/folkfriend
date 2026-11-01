@@ -1,15 +1,13 @@
 import * as Comlink from '@/js/comlink';
 import ffConfig from '@/ffConfig';
 import {
-    readDataset,
     readDatasets,
     listStoredDatasetIds,
     readDatasetManifest,
     readOfflineInventory,
-    readMergedLegacyIndex,
     writeDataset,
     clearDataset,
-    clearSupersededMergedCopies,
+    deleteRetiredIndexCopies,
     splitIndexPayload,
     indexPayloadProblem,
 } from '@/services/tuneIndexStore';
@@ -73,29 +71,10 @@ export const PUBLISHED_DATASETS = ['thesession', 'folkwiki'];
 // datasetByTune is REBUILT WHOLESALE on every merge and never updated
 // incrementally. That is what keeps it from drifting out of agreement with
 // what is actually loaded in WASM — the same hazard class as abcStringBySetting.
-// A part with `id === null` is a BASE: the pre-multi-dataset merged blob, used
-// to fill gaps for datasets that have not been migrated to their own file yet.
-// It never overwrites a real dataset file, and it is processed last so the
-// dataset files always win. Without it, the first per-dataset load during a
-// migration would replace WASM with only that dataset and silently drop every
-// source still living in the blob.
-function isBasePart(part) {
-    return part.id === null || part.id === undefined;
-}
 
 // Collisions between ONE candidate part and everything it would be merged
-// with — including the legacy migration base.
-//
-// mergeIndexParts deliberately exempts the base from its collision counts: it
-// holds older copies of the very datasets being migrated, so overlap there is
-// expected. That exemption is right for a published dataset replacing itself
-// and WRONG for an import, which has no business overlapping anything. And
-// because the base is processed last, a candidate processed before it never
-// sees the overlap either — so an import made while migration is deferred
-// (auto-update off, or a migration that failed) could shadow thesession or
-// folkwiki IDs that currently live only in the merged blob.
-//
-// This is deliberately independent of merge order.
+// with, independently of merge order. Used to vet an import BEFORE anything is
+// merged or loaded, so a refused payload never reaches WASM.
 export function collisionsForPart(candidate, otherParts) {
     const settingIDs = new Set();
     const tuneIDs = new Set();
@@ -183,10 +162,8 @@ export function mergeIndexParts(parts) {
         // Overwhelmingly the common case; skip copying 62k keys.
         const part = parts[0];
         const datasetByTune = {};
-        if (!isBasePart(part)) {
-            for (const tuneID of part.index.tuneIDs || []) {
-                datasetByTune[tuneID] = part.id;
-            }
+        for (const tuneID of part.index.tuneIDs || []) {
+            datasetByTune[tuneID] = part.id;
         }
         return { ...part.index, datasetByTune, collisions: 0,
             tuneCollisions: 0, empty: [] };
@@ -207,21 +184,12 @@ export function mergeIndexParts(parts) {
     let tuneCollisions = 0;
     const empty = [];
 
-    // Dataset files first, the merged base last — it only fills what they left.
-    const ordered = [...parts.filter(p => !isBasePart(p)),
-                     ...parts.filter(isBasePart)];
-    const hasBase = ordered.length !== parts.filter(p => !isBasePart(p)).length;
-
-    for (const part of ordered) {
-        const base = isBasePart(part);
+    for (const part of parts) {
         const partSettings = (part.index.indexData && part.index.indexData.settings) || {};
         let added = 0;
         for (const settingID in partSettings) {
             if (settings[settingID] !== undefined) {
-                // The base is EXPECTED to overlap — it holds older copies of
-                // the very datasets being migrated. Only a collision between
-                // two dataset files is a data bug worth counting.
-                if (!base) collisions++;
+                collisions++;
                 continue;
             }
             added++;
@@ -231,37 +199,29 @@ export function mergeIndexParts(parts) {
         // something already merged — which happens if datasets.json points two
         // entries at the same file. Both documents pass indexPayloadProblem
         // perfectly, and without this the failure presents as "folkwiki is
-        // missing" with no error reported anywhere. The check is meaningless
-        // once a base is present, since the base already holds everything.
-        if (added === 0 && !base && !hasBase) empty.push(part.id);
+        // missing" with no error reported anywhere.
+        if (added === 0) empty.push(part.id);
 
         // Counted through a set: the same tune arrives twice, once via its
         // alias entry and once via tuneIDs, and counting both reported double
         // the real number.
         const clashedTunes = new Set();
         const partAliases = (part.index.indexData && part.index.indexData.aliases) || {};
-        if (!base) {
-            for (const tuneID in partAliases) {
-                if (aliases[tuneID] !== undefined) clashedTunes.add(tuneID);
-            }
+        for (const tuneID in partAliases) {
+            if (aliases[tuneID] !== undefined) clashedTunes.add(tuneID);
         }
-        assignMissing(aliases, partAliases, base);
-        assignMissing(abcStrings, part.index.abcStrings || {}, base);
-        assignMissing(sourceUrls, part.index.sourceUrls || {}, base);
+        Object.assign(aliases, partAliases);
+        Object.assign(abcStrings, part.index.abcStrings || {});
+        Object.assign(sourceUrls, part.index.sourceUrls || {});
 
-        // Base tunes are deliberately left UNLABELLED: the merged blob cannot
-        // say which source a tune came from, so source.mjs falls back to the ID
-        // range, which is exactly what that fallback is for.
-        if (!base) {
-            for (const tuneID of part.index.tuneIDs || []) {
-                if (datasetByTune[tuneID] !== undefined
-                    && datasetByTune[tuneID] !== part.id) {
-                    clashedTunes.add(tuneID);
-                }
-                datasetByTune[tuneID] = part.id;
+        for (const tuneID of part.index.tuneIDs || []) {
+            if (datasetByTune[tuneID] !== undefined
+                && datasetByTune[tuneID] !== part.id) {
+                clashedTunes.add(tuneID);
             }
-            tuneCollisions += clashedTunes.size;
+            datasetByTune[tuneID] = part.id;
         }
+        tuneCollisions += clashedTunes.size;
     }
 
     return {
@@ -273,16 +233,6 @@ export function mergeIndexParts(parts) {
         tuneCollisions,
         empty,
     };
-}
-
-function assignMissing(target, source, gapFillOnly) {
-    if (!gapFillOnly) {
-        Object.assign(target, source);
-        return;
-    }
-    for (const key in source) {
-        if (target[key] === undefined) target[key] = source[key];
-    }
 }
 
 
@@ -345,9 +295,6 @@ class FolkFriendWASMWrapper {
         this.selectedDatasets = [...DEFAULT_DATASETS];
         // id -> { v, date, source } for what is currently loaded in WASM.
         this.loadedDatasets = {};
-        // Set while the merged blob is loaded and per-dataset copies have not
-        // replaced it yet.
-        this._migrationPending = false;
         // What is actually loaded in WASM right now. Kept apart from
         // indexDetail because indexDetail describes the PIPELINE: mid-update it
         // reads 'downloading' and carries no version, so a snapshot taken then
@@ -438,8 +385,6 @@ class FolkFriendWASMWrapper {
                 source: info.source || 'cache',
                 v: info.v,
                 date: info.date,
-                legacy: !!info.legacy,
-                merged: !!info.merged,
                 datasetsLoaded: Object.keys(snapshot.datasets || {}),
                 datasetsMissing: this.selectedDatasets.filter(
                     id => !(snapshot.datasets || {})[id]),
@@ -558,55 +503,6 @@ class FolkFriendWASMWrapper {
                 }
             }
 
-            // No per-dataset copies. Before touching the network, look for the
-            // pre-multi-dataset merged blob: an upgrading user has 42 MB of
-            // perfectly good tunes on disk and must not be stranded while the
-            // per-dataset files download.
-            const merged = await readMergedLegacyIndex();
-            if (merged && !cachedLoadError) {
-                try {
-                    await this.loadMergedIndex([{
-                        id: null, index: merged.index,
-                    }], merged.datasets);
-                    this._migrationPending = true;
-                    this.loadedDatasets = {};
-                    for (const id of merged.datasets) {
-                        this.loadedDatasets[id] = {
-                            v: merged.manifest.v,
-                            date: merged.manifest.date,
-                            source: 'merged',
-                        };
-                    }
-                    this._loadedIndexInfo = {
-                        source: 'cache',
-                        merged: true,
-                        legacy: !!merged.manifest.legacy,
-                        v: merged.manifest.v,
-                        date: merged.manifest.date,
-                        datasets: { ...this.loadedDatasets },
-                    };
-                    this._setIndexStatus(INDEX_STATUS.READY, {
-                        ...this._loadedIndexInfo,
-                        migrationPending: true,
-                        datasetsLoaded: [...merged.datasets],
-                        datasetsMissing: selected.filter(
-                            id => !merged.datasets.includes(id)),
-                    });
-                    analyticsData['tune_index_metadata_version'] = merged.manifest.v;
-                    analyticsData['tune_index_metadata_date'] = merged.manifest.date || null;
-                    analyticsData['migration_pending'] = true;
-
-                    this._migrateFromMerged(selected).catch(e =>
-                        console.warn('Migration from the merged copy failed', e));
-
-                    return this._finishSetup(analyticsData, t0);
-                } catch (e) {
-                    cachedLoadError = (e && e.message) || String(e);
-                    console.warn('Merged tune index failed to load into WASM; '
-                        + 'keeping it and trying the network', e);
-                }
-            }
-
             // Nothing usable on disk. This is the path that must fail FAST when
             // there is no network — the user gets favourites-only mode
             // immediately instead of after a multi-minute hang.
@@ -653,6 +549,11 @@ class FolkFriendWASMWrapper {
 
     _finishSetup(analyticsData, t0) {
         console.timeEnd('tune-index-setup');
+        // Background housekeeping, never awaited: readiness must not wait on
+        // it. Only once a per-dataset index is actually working — this build
+        // cannot read a retired copy, but an older build rolled back to could,
+        // so it is not deleted while it might be all this device has.
+        if (this.indexUsable) deleteRetiredIndexCopies().catch(() => {});
         analyticsData['wall_time'] = performance.now() - t0;
         analyticsData['index_status'] = this.indexStatus;
         return analyticsData;
@@ -685,7 +586,6 @@ class FolkFriendWASMWrapper {
                 source,
             };
         }
-        this._migrationPending = false;
         this._loadedIndexInfo = {
             source,
             datasets: { ...this.loadedDatasets },
@@ -799,10 +699,7 @@ class FolkFriendWASMWrapper {
             console.warn(`Dataset ${id} is not in datasets.json; skipping`);
         }
 
-        // Largest first. During a migration the first successful load replaces
-        // the merged blob in WASM with a partial per-dataset set, so the window
-        // in which the app can search fewer tunes than a minute ago should be
-        // as short and as small as possible.
+        // Largest first, so the dataset most searches need is usable soonest.
         work.sort((a, b) => (b.size || 0) - (a.size || 0));
 
         const plannedTotal = work.reduce((sum, e) => sum + (e.size || 0), 0);
@@ -905,14 +802,6 @@ class FolkFriendWASMWrapper {
                 const others = await this._partsToKeep(
                     entry.id, [...Object.keys(installed)]);
 
-                // Mid-migration, the datasets that have not moved to their own
-                // file yet exist ONLY in the merged blob, so `others` cannot
-                // include them. Loading without a base would replace WASM with
-                // just this dataset and silently drop the rest from search for
-                // the whole session — while still reporting them loaded.
-                const base = await this._migrationBase(
-                    [entry.id, ...others.map(p => p.id)]);
-
                 // The final proof, and the only one that covers a payload the
                 // Rust side rejects: if this throws, the previous index is still
                 // the one loaded in WASM (use_tune_index runs only after serde
@@ -920,15 +809,12 @@ class FolkFriendWASMWrapper {
                 // still on disk.
                 // An imported dataset is untrusted on every fetch, not only
                 // the first: the URL is remembered and its contents can change.
-                // Vetted BEFORE anything is merged or loaded, and against every
-                // other part INCLUDING the legacy migration base — see
+                // Vetted BEFORE anything is merged or loaded — see
                 // collisionsForPart.
                 if (entry.origin === 'user') {
-                    this._assertNoCollisions(
-                        collisionsForPart(part, [...base, ...others]));
+                    this._assertNoCollisions(collisionsForPart(part, others));
                 }
-                const merged = await this.loadMergedIndex(
-                    [...base, ...others, part]);
+                const merged = await this.loadMergedIndex([...others, part]);
                 loadedThisEntry = true;
                 Object.assign(rejected, rejectionReasons(merged.rejected));
                 if (merged.empty.includes(entry.id)) {
@@ -1035,18 +921,6 @@ class FolkFriendWASMWrapper {
         return parts;
     }
 
-    // The merged blob, as a gap-filling base, when some selected dataset is not
-    // yet covered by a per-dataset file. Returns [] once migration is complete,
-    // which is the steady state — this costs nothing outside a migration.
-    async _migrationBase(coveredIds) {
-        if (!this._migrationPending) return [];
-        const covered = new Set(coveredIds.filter(Boolean));
-        if (this.selectedDatasets.every(id => covered.has(id))) return [];
-        const merged = await readMergedLegacyIndex();
-        if (!merged) return [];
-        return [{ id: null, index: merged.index }];
-    }
-
     async _afterInstall(installed, failed, persistErrors, rejected = {}) {
         const loaded = { ...this.loadedDatasets };
         for (const [id, info] of Object.entries(installed)) {
@@ -1056,20 +930,10 @@ class FolkFriendWASMWrapper {
         for (const id of Object.keys(rejected)) {
             delete loaded[id];
         }
-        // Report only what is genuinely searchable. A dataset inherited from
-        // the merged blob stays loaded ONLY while that blob is still the base
-        // of what is in WASM; once migration completes it must have its own
-        // file or it is missing. Claiming otherwise is how a half-finished
-        // migration used to look perfectly healthy while half the tunes had
-        // quietly stopped being findable.
+        // Report only what is genuinely searchable: the selected datasets.
         this.loadedDatasets = {};
         for (const id of Object.keys(loaded)) {
             if (!this.selectedDatasets.includes(id)) continue;
-            if (loaded[id].source === 'merged') {
-                const stillBacked = this._migrationPending
-                    && !!(await readMergedLegacyIndex());
-                if (!stillBacked) continue;
-            }
             this.loadedDatasets[id] = loaded[id];
         }
 
@@ -1087,24 +951,6 @@ class FolkFriendWASMWrapper {
             ...this._scalarVersion(),
         };
 
-        // The merged blob is only redundant once every dataset it covers has a
-        // committed per-dataset copy AND that set is loaded. Re-read from disk
-        // rather than trusting what this install thinks it wrote.
-        if (this._migrationPending || datasetsLoaded.length) {
-            try {
-                const covered = [];
-                for (const id of ['thesession', 'folkwiki']) {
-                    if (await readDataset(id)) covered.push(id);
-                }
-                if (await clearSupersededMergedCopies(covered)) {
-                    this._migrationPending = false;
-                }
-            } catch (e) {
-                // Wasted quota, never data loss.
-                console.warn('Could not reclaim the merged tune index copy', e);
-            }
-        }
-
         const firstPersistError = Object.values(persistErrors)[0] || null;
         this._setIndexStatus(INDEX_STATUS.READY, {
             ...this._loadedIndexInfo,
@@ -1112,7 +958,6 @@ class FolkFriendWASMWrapper {
             datasetsMissing,
             datasetErrors: { ...failed, ...rejected },
             persistError: firstPersistError,
-            migrationPending: this._migrationPending,
         });
     }
 
@@ -1196,34 +1041,6 @@ class FolkFriendWASMWrapper {
             // failed update changed nothing on disk. Restore READY so a failed
             // background update can't leave the app looking broken.
             console.warn('Tune index update failed; keeping cached version', e);
-            this._restoreAfterFailedInstall(snapshot, e);
-        }
-    }
-
-    // Migrate an upgrading install from the merged blob to per-dataset copies.
-    //
-    // The merged blob is already loaded and the app is READY, so this is pure
-    // background work and a failure changes nothing: the blob stays on disk and
-    // the next launch tries again.
-    //
-    // Gated on autoUpdateEnabled. A user who turned that off has explicitly
-    // asked not to be given downloads they did not request, and this is ~42 MB
-    // for zero new content. They keep the merged blob and migrate on their next
-    // explicit tap in Settings.
-    async _migrateFromMerged(selected) {
-        if (!this.autoUpdateEnabled) {
-            console.debug('Migration to per-dataset storage deferred: '
-                + 'automatic updates are off');
-            return;
-        }
-        if (isDefinitelyOffline()) return;
-
-        const snapshot = this._snapshotIndexState();
-        try {
-            await this._installExclusively({ ids: selected });
-        } catch (e) {
-            console.warn('Migration to per-dataset storage failed; '
-                + 'keeping the merged copy', e);
             this._restoreAfterFailedInstall(snapshot, e);
         }
     }
@@ -1458,12 +1275,9 @@ class FolkFriendWASMWrapper {
             // re-enable thesession — and the conflict only surfaces later, as
             // a dataset that silently refuses to load. Better to say so now.
             const others = await this._allStoredParts(id);
-            const base = await this._migrationBase(
-                [id, ...others.map(p => p.id)]);
-            this._assertNoCollisions(
-                collisionsForPart(part, [...base, ...others]));
+            this._assertNoCollisions(collisionsForPart(part, others));
             const merged = await this.loadMergedIndex(
-                [...base, ...this._selectedOf(others), part]);
+                [...this._selectedOf(others), part]);
 
             // IDs are global. A dataset reusing another's setting or tune ids
             // does not fail loudly — one record shadows the other, and because
@@ -1581,7 +1395,7 @@ class FolkFriendWASMWrapper {
     // much room there is. Read straight from IndexedDB so it reflects reality
     // rather than in-memory state.
     async getOfflineStatus(cb) {
-        let inventory = { datasets: {}, merged: null, legacy: null, storage: null };
+        let inventory = { datasets: {}, storage: null };
         try {
             inventory = await readOfflineInventory(this.selectedDatasets);
         } catch (e) {
@@ -1602,7 +1416,7 @@ class FolkFriendWASMWrapper {
         try {
             cb(await readOfflineInventory(ids));
         } catch (e) {
-            cb({ datasets: {}, merged: null, legacy: null, storage: null });
+            cb({ datasets: {}, storage: null });
         }
     }
 
@@ -1613,16 +1427,12 @@ class FolkFriendWASMWrapper {
     // Merging JS-side keeps that to a single wasm-bindgen call and needs no new
     // Rust surface.
     //
-    // `mergedDatasets` labels a part whose id is null — the pre-multi-dataset
-    // merged blob, which contains thesession and folkwiki but cannot say which
-    // tune came from which. Those tunes fall back to the ID-range rule in
-    // source.mjs, which is exactly what that fallback exists for.
     // Merge and load. Anything that could REFUSE a part is checked by the
     // caller before getting here (collisionsForPart), so a rejected payload is
     // never merged or loaded at all — rather than being loaded and then undone,
     // which left a window where the app was searching data it had just refused
     // to save, and depended on the undo itself not failing.
-    async loadMergedIndex(parts, mergedDatasets = null) {
+    async loadMergedIndex(parts) {
         await this.loadedWASM;
 
         // Enforced on EVERY merge, whatever triggered it — see vetUserParts.
@@ -1656,10 +1466,6 @@ class FolkFriendWASMWrapper {
             this.abcStringBySetting = merged.abcStrings || {};
             this.sourceUrlBySetting = merged.sourceUrls || {};
             this.datasetByTune = merged.datasetByTune || {};
-            if (mergedDatasets) {
-                // Nothing to label per tune; source.mjs falls back to the range.
-                this.datasetByTune = {};
-            }
             // From here queries work, regardless of what the pipeline does next.
             this.indexUsable = true;
         } finally {
