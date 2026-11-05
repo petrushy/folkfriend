@@ -1581,14 +1581,25 @@ class FolkFriendWASMWrapper {
         await this.loadedWASM;
         if (!(await this._indexIsUsable())) { cb([]); return; }
         const response = await this.folkfriendWASM.run_transcription_query(query);
-        cb(this._reattachSidebandData(JSON.parse(response)));
+        cb(this._reattachSidebandData(this._resultsArray(response, 'transcription')));
     }
 
     async runNameQuery(query, cb) {
         await this.loadedWASM;
         if (!(await this._indexIsUsable())) { cb([]); return; }
         const response = await this.folkfriendWASM.run_name_query(query);
-        cb(this._reattachSidebandData(JSON.parse(response)));
+        cb(this._reattachSidebandData(this._resultsArray(response, 'name')));
+    }
+
+    // The Rust side reports a failed query as `{"error": "..."}` rather than
+    // an array. Handing that to _reattachSidebandData threw ("not iterable"),
+    // so the callback never fired and the caller waited for ever. A failed
+    // query is an empty result, the same as an unavailable index.
+    _resultsArray(response, kind) {
+        const parsed = JSON.parse(response);
+        if (Array.isArray(parsed)) return parsed;
+        console.warn(`${kind} query failed:`, parsed && parsed.error);
+        return [];
     }
 
     async contourToAbc(contour, cb) {

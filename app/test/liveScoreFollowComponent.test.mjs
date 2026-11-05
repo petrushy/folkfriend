@@ -46,11 +46,16 @@ async function test(name, fn) {
 // does not refetch a score — the observable cost of the freeze leaking.
 const FAKE_BACKEND = `
 export const __calls = [];
-export function __reset() { __calls.length = 0; }
+// When set, settingsFromTuneID parks its answer here instead of resolving, so
+// a test can play the part of a worker that is busy or stuck.
+export const __held = { on: false, pending: [] };
+export function __reset() { __calls.length = 0; __held.on = false; __held.pending.length = 0; }
 export default {
     async settingsFromTuneID(tuneId) {
         __calls.push(tuneId);
-        return [{ tune_id: tuneId, setting_id: Number(String(tuneId)) * 10, abc: 'X:1\\n' }];
+        const answer = [{ tune_id: tuneId, setting_id: Number(String(tuneId)) * 10, abc: 'X:1\\n' }];
+        if (__held.on) return new Promise(resolve => __held.pending.push(() => resolve(answer)));
+        return answer;
     },
     indexUnavailableMessage: () => 'index unavailable',
 };
@@ -368,6 +373,58 @@ async function loadOverlayInto(vm) {
     component.created.call(vm);
     return { component };
 }
+
+console.log('\na score that is slow to load');
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const settle = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+
+await test('a stuck score load stops spinning and says so', async () => {
+    const { vm, push, backend } = await loadOverlay();
+    vm._scoreLoadTimeoutMs = 20;
+    backend.__held.on = true;
+
+    await push([det(1, 10, 'The Kesh', 0.71)]);
+    assert.equal(vm.loading, true);
+    await sleep(40);
+    assert.equal(vm.loading, false, 'the spinner must not run for ever');
+    assert.match(vm.loadError, /unusually long/);
+});
+
+await test('a late answer after the deadline is still shown', async () => {
+    const { vm, push, backend } = await loadOverlay();
+    vm._scoreLoadTimeoutMs = 20;
+    backend.__held.on = true;
+
+    await push([det(1, 10, 'The Kesh', 0.71)]);
+    await sleep(40);
+    backend.__held.pending.shift()();
+    await settle();
+    assert.equal(vm.abcSetting.setting_id, 10);
+    assert.equal(vm.loadError, '', 'the slow-load warning comes down once the score is there');
+});
+
+await test('after the deadline the next tick retries rather than waiting on the stuck call', async () => {
+    const { vm, push, backend } = await loadOverlay();
+    vm._scoreLoadTimeoutMs = 20;
+    backend.__held.on = true;
+
+    await push([det(1, 10, 'The Kesh', 0.71)]);
+    await push([det(1, 10, 'The Kesh', 0.72)]);
+    assert.equal(backend.__calls.length, 1, 'inside the deadline, ticks join the call in flight');
+    await sleep(40);
+    await push([det(1, 10, 'The Kesh', 0.73)]);
+    assert.equal(backend.__calls.length, 2, 'past it, a tick may try again');
+});
+
+await test('a load that answers in time leaves no timer to fire later', async () => {
+    const { vm, push } = await loadOverlay();
+    vm._scoreLoadTimeoutMs = 20;
+    await push([det(1, 10, 'The Kesh', 0.71)]);
+    await sleep(40);
+    assert.equal(vm.loadError, '');
+    assert.equal(vm.loading, false);
+});
 
 await test('the LED keeps moving while frozen — it is about the room, not the tune', async () => {
     // A deliberate exception to "the freeze is total". Everything else in this

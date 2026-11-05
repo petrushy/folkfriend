@@ -295,11 +295,23 @@ class FFBackend {
 
     async transcribePCMBuffer() {
         console.time('transcribe-pcm-buffer');
+        // Every callback-style call below must also settle when the worker
+        // call itself REJECTS (a WASM trap, an out-of-memory on iOS, a throw
+        // in the worker wrapper). Without that the callback never fires and
+        // the promise hangs for ever — and for these two that means the
+        // _withPCMBufferLock chain is never released, so every later live
+        // analysis cycle queues behind it and times out silently: detection
+        // dies for the rest of the session while the app says it is
+        // listening. They resolve with the same shapes the worker uses for
+        // its own failures, so no caller needs a new error path.
         return new Promise(resolve => {
             this.folkfriendWorker.transcribePCMBuffer(Comlink.proxy(contour => {
                 console.timeEnd('transcribe-pcm-buffer');
                 resolve(contour);
-            }));
+            })).catch(e => {
+                console.error('transcribePCMBuffer failed in the worker', e);
+                resolve(JSON.stringify({ error: 'An error ocurred whilst transcribing audio.' }));
+            });
         });
     }
 
@@ -309,7 +321,10 @@ class FFBackend {
             this.folkfriendWorker.runTranscriptionQuery(query, Comlink.proxy(response => {
                 console.timeEnd('run-transcription-query');
                 resolve(response);
-            }));
+            })).catch(e => {
+                console.error('runTranscriptionQuery failed in the worker', e);
+                resolve([]);
+            });
         });
     }
 
@@ -405,15 +420,18 @@ class FFBackend {
         return new Promise(resolve => {
             this.folkfriendWorker.runNameQuery(query, Comlink.proxy(response => {
                 resolve(response);
-            }));
+            })).catch(e => {
+                console.error('runNameQuery failed in the worker', e);
+                resolve([]);
+            });
         });
     }
 
     async contourToAbc(contour) {
-        return new Promise(resolve => {
+        return new Promise((resolve, reject) => {
             this.folkfriendWorker.contourToAbc(contour, Comlink.proxy(abc => {
                 resolve(abc);
-            }));
+            })).catch(reject);
         });
     }
 

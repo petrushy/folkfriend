@@ -143,6 +143,12 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
 import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
 
+const SCORE_LOAD_TIMEOUT_MS = 12_000;
+const SCORE_LOAD_SLOW_MESSAGE =
+    'The score is taking unusually long to load — the tune engine is busy or stuck. '
+    + 'It will appear here as soon as it arrives. If it never does, reload the app: '
+    + 'the session and its tune list are kept.';
+
 export default {
     name: 'LiveScoreFollow',
     components: { AbcDisplay, TuneBackgroundButton },
@@ -206,6 +212,14 @@ export default {
         // setting — a slow isFavourite() for a tune we've since moved on from
         // must not overwrite the star for the tune now on screen.
         this._favouriteToken = 0;
+        // How long the spinner may run before the overlay says something.
+        // settingsFromTuneID normally answers in well under a second, but it
+        // shares the worker with live transcription, and nothing bounded it:
+        // a busy or stuck worker left "Loading score…" spinning for the rest
+        // of the evening with no hint of why. On an instance so a test can
+        // shorten it.
+        this._scoreLoadTimeoutMs = SCORE_LOAD_TIMEOUT_MS;
+        this._scoreLoadTimer = null;
     },
     mounted() {
         this._onKeyDown = (e) => {
@@ -235,6 +249,7 @@ export default {
         document.removeEventListener('visibilitychange', this._onVisibilityChange);
         eventBus.$off('liveAnalysisTimerTick', this._onTimerTick);
         this._releaseWakeLock();
+        clearTimeout(this._scoreLoadTimer);
         setLastShown({
             target: this.target,
             abcSetting: this.abcSetting,
@@ -376,6 +391,18 @@ export default {
 
             this.loading = true;
             this.loadError = '';
+            clearTimeout(this._scoreLoadTimer);
+            // A deadline, not a cancellation: the request keeps its token, so
+            // if the answer does turn up late it is still shown. What the
+            // deadline does is stop the spinner, say what is happening, and
+            // release _loadingTargetKey so the next detections tick may try
+            // again (which supersedes this one via the token).
+            this._scoreLoadTimer = setTimeout(() => {
+                if (token !== this._loadToken) return;
+                this.loading = false;
+                this.loadError = SCORE_LOAD_SLOW_MESSAGE;
+                if (this._loadingTargetKey === key) this._loadingTargetKey = null;
+            }, this._scoreLoadTimeoutMs);
             try {
                 // The previous score deliberately stays on screen until the new
                 // one is ready, so a tune change doesn't flash an empty page.
@@ -398,6 +425,8 @@ export default {
                 ) || settings[0];
                 this.abcSetting = chosen;
                 this._abcTargetKey = key;
+                // Arrived after the deadline: take the slow-load warning down.
+                this.loadError = '';
             } catch (e) {
                 // A rejection (rather than the [] settingsFromTuneID normally
                 // resolves with) must still clear loading/_loadingTargetKey —
@@ -409,6 +438,7 @@ export default {
                 this.loadError = ffBackend.indexUnavailableMessage();
             } finally {
                 if (token === this._loadToken) {
+                    clearTimeout(this._scoreLoadTimer);
                     this.loading = false;
                     if (this._loadingTargetKey === key) this._loadingTargetKey = null;
                 }
