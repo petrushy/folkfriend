@@ -150,7 +150,7 @@ export async function fetchDatasetText(filename, bypassCacheVersion = null, onPr
 // splitIndexPayload before this sees them, so the fixture tag has to ride on a
 // field the Rust side keeps.
 const FAKE_WASM = `
-export const __wasm = { rejectLoad: null, rejectDance: null, loaded: null, loadCalls: 0 };
+export const __wasm = { rejectLoad: null, rejectDance: null, loaded: null, loadCalls: 0, queryError: false };
 export class FolkFriendWASM {
     version() { return 'test'; }
     async load_index_from_json_obj(indexData) {
@@ -172,6 +172,8 @@ export class FolkFriendWASM {
             .slice(0, 3).map(id => ({ tune_id: id })));
     }
     async run_transcription_query() {
+        // What lib.rs returns for a failed query: an object, not an array.
+        if (__wasm.queryError) return JSON.stringify({ error: 'Transcription query error' });
         const settings = (__wasm.loaded || {}).settings || {};
         return JSON.stringify(Object.entries(settings).slice(0, 3)
             .map(([setting_id, setting]) => ({ setting_id, setting })));
@@ -349,7 +351,7 @@ function resetFakes() {
     });
     serve({ thesession: RAW.thesession.v1, folkwiki: RAW.folkwiki.v1, norbeck: RAW.norbeck.v1 });
     Object.assign(wasmMod.__wasm,
-        { rejectLoad: null, rejectDance: null, loaded: null, loadCalls: 0 });
+        { rejectLoad: null, rejectDance: null, loaded: null, loadCalls: 0, queryError: false });
 }
 
 async function seedGoodCopies(ids = ALL, tag = 'v1', v = 1) {
@@ -1177,6 +1179,26 @@ async function run() {
         for (const result of results) {
             assert.ok(['thesession', 'folkwiki', 'norbeck'].includes(result.setting.dataset),
                 `result carries no dataset label: ${JSON.stringify(result.setting.dataset)}`);
+        }
+    });
+
+    // lib.rs reports a failed query as {"error": ...}. The wrapper used to hand
+    // that straight to _reattachSidebandData, which threw "not iterable", so
+    // the callback never fired and the live loop's call hung for ever —
+    // holding the PCM lock, so every later cycle hung behind it.
+    await test('a failed transcription query answers [] rather than never answering', async () => {
+        resetFakes();
+        const wrapper = await newWorker();
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        wasmMod.__wasm.queryError = true;
+        try {
+            const results = await Promise.race([
+                new Promise(r => wrapper.runTranscriptionQuery('vtvtvtvt', r)),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('no answer')), 2000)),
+            ]);
+            assert.deepEqual(results, []);
+        } finally {
+            wasmMod.__wasm.queryError = false;
         }
     });
 
