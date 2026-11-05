@@ -168,6 +168,28 @@ export default {
         // See needsScoreLoad() in liveScoreFollow.mjs.
         this._abcTargetKey = lastShown.abcTargetKey || null;
         this._loadingTargetKey = null;
+        // Everything loadScore()/_syncFavourited() read is set up HERE, not
+        // in created(). Vue 2 runs an `immediate` watcher during initState —
+        // after data(), BEFORE created() — so opening the overlay while a tune
+        // was already detected started a load with `++undefined`, i.e. token
+        // NaN. created() then reset the counter to 0, the answer arrived,
+        // `NaN !== 0` discarded it as stale, `loading` was never cleared, and
+        // _loadingTargetKey stayed set so no later tick retried: the tune's
+        // name on screen and "Loading score…" spinning until the tune changed.
+        //
+        // Loads are guarded by a token so a slow settingsFromTuneID for an old
+        // tune cannot land after a newer one and put the wrong score on screen.
+        this._loadToken = 0;
+        // Same idea for the favourited flag, keyed off the currently displayed
+        // setting — a slow isFavourite() for a tune we've since moved on from
+        // must not overwrite the star for the tune now on screen.
+        this._favouriteToken = 0;
+        // How long the spinner may run before the overlay says something.
+        // settingsFromTuneID normally answers in well under a second, but it
+        // shares the worker with live transcription, and nothing bounded it.
+        // On an instance so a test can shorten it.
+        this._scoreLoadTimeoutMs = SCORE_LOAD_TIMEOUT_MS;
+        this._scoreLoadTimer = null;
         return {
             target: lastShown.target,
             abcSetting: lastShown.abcSetting,
@@ -203,23 +225,6 @@ export default {
                 this._resolveFromDetections(detections);
             },
         },
-    },
-    created() {
-        // Loads are guarded by a token so a slow settingsFromTuneID for an old
-        // tune cannot land after a newer one and put the wrong score on screen.
-        this._loadToken = 0;
-        // Same idea for the favourited flag, keyed off the currently displayed
-        // setting — a slow isFavourite() for a tune we've since moved on from
-        // must not overwrite the star for the tune now on screen.
-        this._favouriteToken = 0;
-        // How long the spinner may run before the overlay says something.
-        // settingsFromTuneID normally answers in well under a second, but it
-        // shares the worker with live transcription, and nothing bounded it:
-        // a busy or stuck worker left "Loading score…" spinning for the rest
-        // of the evening with no hint of why. On an instance so a test can
-        // shorten it.
-        this._scoreLoadTimeoutMs = SCORE_LOAD_TIMEOUT_MS;
-        this._scoreLoadTimer = null;
     },
     mounted() {
         this._onKeyDown = (e) => {
