@@ -81,6 +81,42 @@ const AUDIO_RESUME_GRACE_MS = 750;
 // revoked microphone doesn't spin getUserMedia every couple of seconds.
 const RECOVERY_BACKOFF_MS = [2000, 4000, 8000, 15000, 30000];
 
+// Neither of the two awaits a health check depends on is bounded by the
+// platform. On iOS an AudioContext.resume() asked for outside a user gesture
+// can stay pending, and a getUserMedia made while another app holds the
+// microphone can hang rather than reject. Every live-analysis cycle awaits the
+// health check, and concurrent callers JOIN the one in flight, so a single
+// promise that never settles froze the loop and the watchdog together — the
+// session bar still reading Listening while nothing was analysed again.
+const RESUME_DEADLINE_MS = 2000;
+// Only the RECOVERY path gets this one. The first open of a session can be
+// sitting behind a permission prompt the user is still reading, and a deadline
+// there would refuse a microphone they were about to allow.
+const REACQUIRE_DEADLINE_MS = 10_000;
+
+class DeadlineError extends Error {}
+
+// Resolves or rejects with `promise`, or rejects with a DeadlineError after
+// `ms`. `onLate` receives the value if the promise resolves after the deadline
+// — the caller's chance to release what it no longer wants (an open stream).
+function withDeadline(promise, ms, label, onLate) {
+    let timer;
+    let expired = false;
+    const deadline = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+            expired = true;
+            reject(new DeadlineError(`${label} did not answer within ${ms} ms`));
+        }, ms);
+    });
+    return Promise.race([
+        promise.then(
+            value => { if (expired && onLate) onLate(value); return value; },
+            error => { throw error; },
+        ),
+        deadline,
+    ]).finally(() => clearTimeout(timer));
+}
+
 class MicService {
     constructor() {
         this.micProcessor = null;
@@ -127,6 +163,8 @@ class MicService {
         this._recordingMuted = false;
         this._recovering = null;
         this._healthCheck = null;
+        this._resumeDeadlineMs = RESUME_DEADLINE_MS;
+        this._reacquireDeadlineMs = REACQUIRE_DEADLINE_MS;
         this._healthInterval = null;
         this._recoveryFailures = 0;
         this._nextRecoveryAt = 0;
@@ -297,11 +335,16 @@ class MicService {
     }
 
     async resumeIfSuspended() {
-        if (this.audioCtx && this.audioCtx.state === 'suspended') {
+        // 'interrupted' is WebKit's state after a call, Siri or the lock
+        // screen; it needs a resume just as 'suspended' does.
+        const state = this.audioCtx && this.audioCtx.state;
+        if (state === 'suspended' || state === 'interrupted') {
             try {
-                await this.audioCtx.resume();
+                await withDeadline(this.audioCtx.resume(), this._resumeDeadlineMs, 'AudioContext.resume()');
             } catch (e) {
-                // Nothing to do — will retry on the next check.
+                // Refused, or still pending. Either way the check carries on:
+                // the stall test below decides whether audio is flowing, and
+                // the next check asks again.
             }
         }
     }
@@ -484,7 +527,7 @@ class MicService {
                 await this._teardownPipeline();
                 if (this._captureGeneration !== generation) return false;
 
-                await this._openPipeline(mode, durationSecs);
+                await this._openPipeline(mode, durationSecs, { deadlineMs: this._reacquireDeadlineMs });
                 if (this._captureGeneration !== generation) {
                     // Stopped while we were re-opening — throw the new pipeline
                     // away rather than leaving an orphaned microphone open.
@@ -598,14 +641,23 @@ class MicService {
         track.addEventListener('unmute', () => console.debug('Microphone track unmuted'));
     }
 
-    async _openPipeline(mode, durationSecs) {
+    async _openPipeline(mode, durationSecs, { deadlineMs = 0 } = {}) {
         // This is the case on ios/chrome, when clicking links from within ios/slack (sometimes), etc.
         if (!navigator || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             alert('Missing support for navigator.mediaDevices.getUserMedia');
             throw new Error('Missing support for navigator.mediaDevices.getUserMedia');
         }
 
-        this.micStream = await navigator.mediaDevices.getUserMedia(audioConstraints());
+        const request = navigator.mediaDevices.getUserMedia(audioConstraints());
+        // A timed-out request that answers later hands back a live microphone
+        // nobody is using: stop it, or the OS recording light stays on and
+        // the next reacquire competes with it.
+        const stopLate = stream => {
+            try { stream.getTracks().forEach(track => track.stop()); } catch (_) { /* gone */ }
+        };
+        this.micStream = deadlineMs > 0
+            ? await withDeadline(request, deadlineMs, 'getUserMedia', stopLate)
+            : await request;
         this._streamGeneration++;
         this._recordAppliedSettings();
         this._watchMicTrack();

@@ -190,6 +190,15 @@ function installGlobals() {
             mediaDevices: {
                 async getUserMedia(constraints) {
                     env.gumConstraints.push(constraints);
+                    // A request that does not answer until the test says so.
+                    if (env.gumHold) {
+                        return new Promise(resolve => env.gumHeld.push(() => {
+                            const stream = new FakeStream();
+                            env.streams.push(stream);
+                            resolve(stream);
+                            return stream;
+                        }));
+                    }
                     if (env.gumDelayMs) await new Promise(r => setTimeout(r, env.gumDelayMs));
                     if (env.gumFailure) throw env.gumFailure;
                     const stream = new FakeStream();
@@ -213,6 +222,8 @@ function resetEnv() {
     env.contexts = [];
     env.gumFailure = null;
     env.gumDelayMs = 0;
+    env.gumHold = false;
+    env.gumHeld = [];
     env.visibility = 'visible';
     env.appliedSettings = { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 48000 };
     env.gumConstraints = [];
@@ -590,6 +601,69 @@ await test('a merely suspended context is resumed, not re-acquired', async () =>
     assert.equal(ctx.state, 'running');
     assert.equal(env.streams.length, 1, 'resuming was enough — must not re-acquire');
 
+    await mic.stopContinuous();
+});
+
+await test('a resume that never answers does not freeze the health check', async () => {
+    const { mic } = await loadMic();
+    mic._resumeDeadlineMs = 20;
+    await mic.startContinuous(10);
+    const ctx = env.contexts[0];
+    ctx.deliver(2);
+
+    // iOS can leave a resume asked for outside a gesture pending for ever.
+    ctx.state = 'suspended';
+    ctx.resume = () => new Promise(() => {});
+
+    const answer = await Promise.race([
+        mic.ensureMicHealthy().then(() => 'answered'),
+        new Promise(r => setTimeout(() => r('hung'), 2000)),
+    ]);
+    assert.equal(answer, 'answered', 'every live cycle awaits this; it must settle');
+    await mic.stopContinuous();
+});
+
+await test('an interrupted context is resumed like a suspended one', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    const ctx = env.contexts[0];
+    ctx.deliver(2);
+    ctx.state = 'interrupted';
+    assert.equal(await mic.ensureMicHealthy(), true);
+    assert.equal(ctx.state, 'running');
+    assert.equal(env.streams.length, 1, 'resuming was enough');
+    await mic.stopContinuous();
+});
+
+await test('a reacquire that hangs gives up, backs off, and says so', async () => {
+    const { mic, bus } = await loadMic();
+    mic._reacquireDeadlineMs = 30;
+    await mic.startContinuous(10);
+    env.contexts[0].deliver(2);
+    env.streams[0].track.readyState = 'ended';
+    env.gumHold = true;
+
+    const answer = await Promise.race([
+        mic.ensureMicHealthy(),
+        new Promise(r => setTimeout(() => r('hung'), 2000)),
+    ]);
+    assert.equal(answer, false, 'a hung getUserMedia must count as a failed recovery');
+    assert.ok(emittedNames(bus).includes('micLost'));
+    assert.ok(mic._nextRecoveryAt > Date.now(), 'and back off like any other failure');
+
+    // The OS answers after all. Nobody wants that stream any more.
+    const late = env.gumHeld.shift()();
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(late.track.readyState, 'ended', 'a late microphone must be released, not left open');
+    await mic.stopContinuous();
+});
+
+await test('the first open has no deadline — a permission prompt may be on screen', async () => {
+    const { mic } = await loadMic();
+    mic._reacquireDeadlineMs = 10;
+    env.gumDelayMs = 60;
+    await mic.startContinuous(10);
+    assert.equal(liveStreams().length, 1, 'a slow first answer is the user reading the prompt');
     await mic.stopContinuous();
 });
 
