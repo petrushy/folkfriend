@@ -17,16 +17,6 @@
                     <TuneBackgroundButton v-if="target" class="backgroundBtn" :tuneID="target.tuneId" :displayName="target.title" :sourceUrl="abcSetting ? abcSetting.source_url || '' : ''" />
                     <button
                         v-if="target"
-                        class="rejectBtn"
-                        title="Not this tune — drop it and go back to the previous detection"
-                        @click="rejectTune"
-                    >
-                        <v-icon color="grey lighten-1">
-                            {{ rejectIcon }}
-                        </v-icon>
-                    </button>
-                    <button
-                        v-if="target"
                         class="freezeBtn"
                         :title="frozen ? 'Unfreeze — follow the tune being played' : 'Freeze on this tune'"
                         :aria-pressed="String(frozen)"
@@ -34,6 +24,19 @@
                     >
                         <v-icon :color="frozen ? 'blue darken-2' : 'grey lighten-1'">
                             {{ frozen ? frozenIcon : unfrozenIcon }}
+                        </v-icon>
+                    </button>
+                    <!-- Last, and set apart from (i) and the pin: it is the one
+                         destructive button in this row, and sitting between the
+                         two most-tapped ones made it easy to hit by mistake. -->
+                    <button
+                        v-if="target"
+                        class="rejectBtn"
+                        title="Not this tune — drop it and go back to the previous detection"
+                        @click="rejectTune"
+                    >
+                        <v-icon color="grey lighten-1">
+                            {{ rejectIcon }}
                         </v-icon>
                     </button>
                 </h2>
@@ -527,6 +530,22 @@ export default {
     vertical-align: middle;
     line-height: 1;
     -webkit-tap-highlight-color: transparent;
+}
+
+/* A clear gap plus a thin divider, so a slightly-off tap on the pin lands
+   on nothing rather than on the thumbs-down. The 44px target is unchanged. */
+.rejectBtn {
+    position: relative;
+    margin-left: 28px;
+}
+
+.rejectBtn::before {
+    content: '';
+    position: absolute;
+    left: -15px;
+    top: 25%;
+    height: 50%;
+    border-left: 1px solid rgba(0, 0, 0, 0.15);
 }
 
 .tuneMeta {
