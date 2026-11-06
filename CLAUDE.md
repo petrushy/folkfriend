@@ -839,7 +839,7 @@ in or out). `node test/run.mjs mic sessionAudio` runs a subset.
 - `'liveSessions'` — saved Past Sessions, capped at 300,
   `{ id, startedAt, endedAt, tunes: [...], lat, lon, accuracy }`. Synced
 - `'sessionAudio:<id>'` / `'sessionAudioSeg:<id>:<n>'` — one session's audio
-  recording: the manifest (the commit marker) and its 180 s segments.
+  recording: the manifest (the commit marker) and its 60 s segments (180 s before November 2026).
   **Local-only, never synced, never exported in a backup**
 
 Not IndexedDB, but worth listing alongside — localStorage keys: `'userSettings'`,
@@ -1147,8 +1147,8 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 ### Session recording: keep only the audio around tunes (November 2026)
 
 Optional, off by default (`userSettings.sessionAudioTunesOnly`, Settings →
-Session Recording). During a recorded session, a stored 180 s segment is
-deleted once the analysis shows nothing in it — or within 30 s either side —
+Session Recording). During a recorded session, a stored 60 s segment is
+deleted once the analysis shows nothing in it — or within 20 s either side —
 sounded like a tune, so long breaks between sets stop costing storage. Full
 design in `docs/session-audio.md` ("Keeping only the audio around tunes"); the
 rule is `js/audioKeep.mjs`.
@@ -1166,6 +1166,10 @@ Four things that are not obvious:
   a manifest gap, export and Dropbox whole-recording files are per contiguous
   part (`recordingParts`), and `backupSession` accepts a cloud segment matching
   `manifest.pruned` exactly instead of calling it a conflict.
+- **`SEGMENT_SECONDS` went from 180 to 60** for this: a segment is the smallest
+  thing that can be deleted, and at three minutes a break had to last about
+  six. Only the recorder reads the constant; old 180 s recordings still play,
+  and clipWindow() keeps playback from reloading every minute.
 - **The timeline does not move**: `totalSeconds` and `clockFloor` are left
   alone, so a pruned break is a hole that later audio cannot reuse.
 

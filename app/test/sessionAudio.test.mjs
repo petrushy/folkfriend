@@ -1085,7 +1085,7 @@ await test('Settings bulk deletion preserves the open recorder and its next segm
     const recorder = await freshRecorder();
     await recorder.begin('s1'); mic.__setStream(); await recorder.ensureRecording();
     const media = recorders[recorders.length - 1];
-    feed(media, 180); await recorder._writeChain;
+    feed(media, store.SEGMENT_SECONDS); await recorder._writeChain;
     await seedManifest('closed');
     const settings = await readFile(path.join(srcDir, 'views/Settings.vue'), 'utf8');
     const start = settings.indexOf('async deleteAllSessionAudio() {');
@@ -1097,7 +1097,7 @@ await test('Settings bulk deletion preserves the open recorder and its next segm
     await action.call(view);
     assert.equal(await store.readManifest('closed'), null);
     assert.ok(await store.readManifest('s1'));
-    feed(media, 180); await recorder._writeChain;
+    feed(media, store.SEGMENT_SECONDS); await recorder._writeChain;
     assert.equal(recorder.isRecording, true);
     assert.equal((await store.readManifest('s1')).segments.length, 2);
     await recorder.stop();
@@ -1632,14 +1632,14 @@ await test('the recording keeps running while muted, so the timeline stays intac
     await recorder.begin('s1');
     mic.__setStream();
     await recorder.ensureRecording();
-    feed(recorders[recorders.length - 1], 60);
+    feed(recorders[recorders.length - 1], 30);
     recorder.setMuted(true);
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await recorder._writeChain;
 
     assert.equal(recorder.isRecording, true);
     assert.equal((await store.readManifest('s1')).segments.length, 1);
-    assert.equal(Math.round(recorder.audioSeconds), 240, 'the clock ran through the mute');
+    assert.equal(Math.round(recorder.audioSeconds), 30 + store.SEGMENT_SECONDS, 'the clock ran through the mute');
 });
 
 await test('muted stretches are recorded, so the player can explain the silence', async () => {
@@ -2745,7 +2745,7 @@ function recordAnalysed(recorder, media, seconds, music, analysed = () => true) 
 // Tune 0–150 s, conversation until 1000 s, a tune from 1000 s to the end.
 const setsWithABreak = t => t <= 150 || t >= 1000;
 
-async function recordTunesOnly({ on = true, seconds = 7 * store.SEGMENT_SECONDS, analysed } = {}) {
+async function recordTunesOnly({ on = true, seconds = 1260, analysed } = {}) {
     await resetAll();
     const recorder = await freshRecorder();
     await recorder.begin('s1');
@@ -2760,14 +2760,17 @@ async function recordTunesOnly({ on = true, seconds = 7 * store.SEGMENT_SECONDS,
 await test('a break is deleted DURING the evening, not only at the end', async () => {
     const recorder = await recordTunesOnly();
     const manifest = await store.readManifest('s1');
-    // Segments are 180 s: 0 holds the first tune, 5 the second tune's lead-in.
-    assert.deepEqual(manifest.pruned.map(p => p.index), [1, 2, 3, 4]);
-    assert.deepEqual(manifest.segments.map(s => s.index), [0, 5, 6]);
-    for (const index of [1, 2, 3, 4]) {
+    // 60 s segments: 0–2 hold the first tune and its tail, 16 the second
+    // tune's lead-in, 16–20 the second tune.
+    const breakSegments = Array.from({ length: 13 }, (_, i) => i + 3);
+    assert.equal(store.SEGMENT_SECONDS, 60);
+    assert.deepEqual(manifest.pruned.map(p => p.index), breakSegments);
+    assert.deepEqual(manifest.segments.map(s => s.index), [0, 1, 2, 16, 17, 18, 19, 20]);
+    for (const index of breakSegments) {
         assert.equal(idb.__db.has(store.segmentKey('s1', index)), false, `segment ${index} payload deleted`);
     }
     assert.equal(manifest.bytes, manifest.segments.reduce((n, s) => n + s.bytes, 0));
-    assert.ok(recorder.prunedBytes > 0 && recorder.prunedSeconds >= 4 * 179);
+    assert.ok(recorder.prunedBytes > 0 && recorder.prunedSeconds >= 13 * 59);
     await recorder.end();
 });
 
@@ -2787,7 +2790,7 @@ await test('with the option off nothing is deleted, but the evidence is kept', a
     const recorder = await recordTunesOnly({ on: false });
     await recorder.end();
     const manifest = await store.readManifest('s1');
-    assert.equal(manifest.segments.length, 7);
+    assert.equal(manifest.segments.length, 21);
     assert.equal(manifest.pruned, undefined);
     assert.ok(manifest.keepRanges.length === 2, 'both sets are recorded as music');
 });
@@ -2797,7 +2800,12 @@ await test('a stretch the analysis never looked at is kept, however long', async
     const recorder = await recordTunesOnly({ analysed: t => t < 300 || t > 900 });
     await recorder.end();
     const pruned = (await store.readManifest('s1')).pruned || [];
-    assert.deepEqual(pruned.map(p => p.index), [], 'segments 1–4 each overlap the unanalysed stretch');
+    assert.ok(pruned.length > 0, 'the analysed parts of the break still go');
+    for (const p of pruned) {
+        const end = p.startSeconds + p.durationSeconds;
+        assert.ok(end <= 300 || p.startSeconds >= 895,
+            `segment ${p.index} (${p.startSeconds}–${end}) overlaps the unanalysed stretch`);
+    }
 });
 
 await test('end() settles the tail, keeping what was recorded after the last window', async () => {
@@ -2814,8 +2822,8 @@ await test('end() settles the tail, keeping what was recorded after the last win
     for (let i = 0; i < 10; i++) media.emit(`tail${i}`);
     await recorder.end();
     const manifest = await store.readManifest('s1');
-    assert.deepEqual(manifest.pruned.map(p => p.index), [1, 2]);
-    assert.deepEqual(manifest.segments.map(s => s.index), [0, 3], 'the unanalysed tail is kept');
+    assert.deepEqual(manifest.pruned.map(p => p.index), [2]);
+    assert.deepEqual(manifest.segments.map(s => s.index), [0, 1, 3], 'the unanalysed tail is kept');
 });
 
 await test('the evidence survives a reload, so a resumed session judges by it', async () => {

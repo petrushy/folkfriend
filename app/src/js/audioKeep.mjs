@@ -28,20 +28,21 @@
 //     lead-in. The decision waits until the analysis has passed far enough
 //     beyond the segment that no later window's margin can reach back into it.
 //
-// The granularity is a whole stored segment (SEGMENT_SECONDS, three minutes).
-// That is coarser than the margins, so in practice a break shorter than about
-// six minutes keeps all its audio — which costs little, and is never wrong.
+// The granularity is a whole stored segment (SEGMENT_SECONDS, one minute).
+// A segment only goes when all of it lies outside the margins, so a break
+// needs to run about two minutes before anything is deleted, and is trimmed
+// to the nearest minute either side — which costs little, and is never wrong.
 //
 // Pure: no Vue, no storage, no clock. Tested by test/audioKeep.test.mjs.
 
 // Kept before the start of the first window that sounded like a tune. The
 // window itself already reaches back windowSeconds before its stamp, and a
 // tune's opening bars are the part most often played before anything matches.
-export const KEEP_BEFORE_SECONDS = 30;
+export const KEEP_BEFORE_SECONDS = 20;
 
 // Kept after the end of the last window that sounded like a tune: the last
 // notes, the applause, and whoever names the tune afterwards.
-export const KEEP_AFTER_SECONDS = 30;
+export const KEEP_AFTER_SECONDS = 20;
 
 // The bar for "this window sounded like a tune". The listed-detection bar
 // (SESSION_ANALYSIS_DEFAULTS.minTopScore) is 0.45. Lower is the safe

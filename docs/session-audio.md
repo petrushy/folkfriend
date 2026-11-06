@@ -134,7 +134,7 @@ MediaRecorder output carries no seek index (WebM has no Cues, Safari's
 fragmented MP4 has no top-level index), so a three-hour file you cannot scrub
 defeats the point.
 
-So the recording is written in `SEGMENT_SECONDS` (180 s) pieces as they close.
+So the recording is written in `SEGMENT_SECONDS` (60 s; 180 s before November 2026) pieces as they close.
 `TIMESLICE_MS` (1000 ms) chunks are the smallest independently-appendable unit,
 and each stored segment carries its own chunk offset table.
 
@@ -426,7 +426,7 @@ Optional, off by default (Settings → Session Recording → *Keep only the audi
 around tunes*, `userSettings.sessionAudioTunesOnly`). A three-hour evening is
 often an hour or more of talk between sets, and at 64 kbps every hour is ~29 MB.
 With the option on, a stored segment is deleted during the evening once the
-analysis has shown that nothing in it — or within 30 s either side of it —
+analysis has shown that nothing in it — or within 20 s either side of it —
 sounded like a tune. `js/audioKeep.mjs` is the rule, pure and tested by
 `test/audioKeep.test.mjs`.
 
@@ -446,8 +446,11 @@ Every rule is "could not tell means keep":
   lead-in. `end()` settles everything analysed; anything recorded after the
   last window is not covered and is kept.
 
-Granularity is a whole segment (180 s), so a break shorter than about six
-minutes is kept whole.
+Granularity is a whole segment, which is why `SEGMENT_SECONDS` went from 180 s
+to 60 s with this change: at three minutes a break had to run about six before
+anything was deleted. At one minute it needs about two, and is trimmed to the
+nearest minute either side. Recordings made at 180 s still play — every reader
+works from the manifest's own segment spans.
 
 **The timeline is untouched.** `pruneSegments()` drops the segments from the
 manifest first, then deletes the payloads (an interruption leaves orphans for

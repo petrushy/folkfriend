@@ -39,10 +39,20 @@ const SEGMENT_PREFIX = 'sessionAudioSeg:';
 // on a crash and — the reason this number is as low as it is — a bigger
 // worst-case landing error when a browser refuses to seek inside a segment at
 // all. MediaRecorder output carries no seek index (WebM has no Cues, Safari's
-// fragmented MP4 has no top-level index), so seeking is best-effort. Three
-// minutes bounds the damage if it fails: the ▶ on a tune lands at most that
+// fragmented MP4 has no top-level index), so seeking is best-effort. One
+// minute bounds the damage if it fails: the ▶ on a tune lands at most that
 // early rather than anywhere in a three-hour file.
-export const SEGMENT_SECONDS = 180;
+//
+// One minute rather than the original three (November 2026), for the "tunes
+// only" option: a segment is the smallest unit it can delete, so three minutes
+// meant a break had to run about six before anything was saved. The costs are
+// small — ~180 records and ~180 Dropbox uploads of ~0.5 MB for a three-hour
+// evening at 64 kbps instead of ~60 — and two things improve: a crash loses at
+// most a minute, and a tune's ▶ appears a minute after it is heard rather than
+// up to three. Playback is unaffected, because clipWindow() joins contiguous
+// segments into one clip. Only the recorder reads this: every reader works from
+// the manifest's own segment spans, so recordings made at 180 s still play.
+export const SEGMENT_SECONDS = 60;
 
 // How often MediaRecorder hands us a chunk. This is the granularity at which a
 // clip can be cut, since a chunk is the smallest independently-appendable unit
