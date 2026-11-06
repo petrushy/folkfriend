@@ -146,6 +146,8 @@ async function loadModules() {
     let storeSource = await readFile(path.join(srcDir, 'services', 'sessionAudioStore.js'), 'utf8');
     assert.ok(storeSource.includes("from 'idb-keyval'"));
     storeSource = storeSource.split("from 'idb-keyval'").join("from './fake-idb.mjs'");
+    storeSource = storeSource.split("from '@/js/clipWindow.mjs'")
+        .join(`from '${path.join(srcDir, 'js', 'clipWindow.mjs')}'`);
     await writeFile(path.join(tmpDir, 'sessionAudioStore.mjs'), storeSource);
 
     let recorderSource = await readFile(path.join(srcDir, 'services', 'sessionRecorder.js'), 'utf8');
@@ -153,6 +155,7 @@ async function loadModules() {
         ["from './mic.js'", "from './fake-mic.mjs'"],
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from './sessionAudioStore.js'", "from './sessionAudioStore.mjs'"],
+        ["from '@/js/audioKeep.mjs'", `from '${path.join(srcDir, 'js', 'audioKeep.mjs')}'`],
     ]) {
         assert.ok(recorderSource.includes(from), `expected ${from} in sessionRecorder.js`);
         recorderSource = recorderSource.split(from).join(to);
@@ -1082,7 +1085,7 @@ await test('Settings bulk deletion preserves the open recorder and its next segm
     const recorder = await freshRecorder();
     await recorder.begin('s1'); mic.__setStream(); await recorder.ensureRecording();
     const media = recorders[recorders.length - 1];
-    feed(media, 180); await recorder._writeChain;
+    feed(media, store.SEGMENT_SECONDS); await recorder._writeChain;
     await seedManifest('closed');
     const settings = await readFile(path.join(srcDir, 'views/Settings.vue'), 'utf8');
     const start = settings.indexOf('async deleteAllSessionAudio() {');
@@ -1094,7 +1097,7 @@ await test('Settings bulk deletion preserves the open recorder and its next segm
     await action.call(view);
     assert.equal(await store.readManifest('closed'), null);
     assert.ok(await store.readManifest('s1'));
-    feed(media, 180); await recorder._writeChain;
+    feed(media, store.SEGMENT_SECONDS); await recorder._writeChain;
     assert.equal(recorder.isRecording, true);
     assert.equal((await store.readManifest('s1')).segments.length, 2);
     await recorder.stop();
@@ -1572,6 +1575,7 @@ async function loadLiveAnalysis() {
         ["from '@/js/sessionAnalysis.js'", `from '${path.join(sessionAnalysisTmpDir, 'sessionAnalysis.mjs')}'`],
         ["from '@/js/biasResults.mjs'", `from '${path.join(srcDir, 'js', 'biasResults.mjs')}'`],
         ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
+        ["from '@/js/audioKeep.mjs'", `from '${path.join(srcDir, 'js', 'audioKeep.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected ${from} in liveAnalysis.js`);
@@ -1628,14 +1632,14 @@ await test('the recording keeps running while muted, so the timeline stays intac
     await recorder.begin('s1');
     mic.__setStream();
     await recorder.ensureRecording();
-    feed(recorders[recorders.length - 1], 60);
+    feed(recorders[recorders.length - 1], 30);
     recorder.setMuted(true);
     feed(recorders[recorders.length - 1], store.SEGMENT_SECONDS);
     await recorder._writeChain;
 
     assert.equal(recorder.isRecording, true);
     assert.equal((await store.readManifest('s1')).segments.length, 1);
-    assert.equal(Math.round(recorder.audioSeconds), 240, 'the clock ran through the mute');
+    assert.equal(Math.round(recorder.audioSeconds), 30 + store.SEGMENT_SECONDS, 'the clock ran through the mute');
 });
 
 await test('muted stretches are recorded, so the player can explain the silence', async () => {
@@ -2720,6 +2724,161 @@ await test('imported types are canonical, and name the right export extension', 
     assert.equal(store.fileExtensionFor('audio/x-m4a'), 'm4a');
     // Still no claim for the impossible label a browser once reported.
     assert.equal(store.fileExtensionFor('audio/mp3;codecs=mp4a.40.2'), 'bin');
+});
+
+console.log('\n"tunes only" — deleting the breaks between sets');
+
+// Records `seconds` of audio one chunk a second, reporting an analysed window
+// every 5 s the way liveAnalysis does — stamped with the recorder's own clock,
+// 10 s long, and "music" when `music(stamp)` says so. `analysed(stamp)` can
+// switch the analysis off for a stretch.
+function recordAnalysed(recorder, media, seconds, music, analysed = () => true) {
+    for (let i = 0; i < seconds; i++) {
+        media.emit(`x${i}`);
+        const stamp = recorder.audioSeconds;
+        if (Math.round(stamp) % 5 === 0 && analysed(stamp)) {
+            recorder.noteAnalysed(stamp, { music: music(stamp), windowSeconds: 10 });
+        }
+    }
+}
+
+// Tune 0–150 s, conversation until 1000 s, a tune from 1000 s to the end.
+const setsWithABreak = t => t <= 150 || t >= 1000;
+
+async function recordTunesOnly({ on = true, seconds = 1260, analysed } = {}) {
+    await resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    recorder.keepTunesOnly = on;
+    mic.__setStream();
+    await recorder.ensureRecording();
+    recordAnalysed(recorder, recorders[recorders.length - 1], seconds, setsWithABreak, analysed);
+    await recorder._writeChain;
+    return recorder;
+}
+
+await test('a break is deleted DURING the evening, not only at the end', async () => {
+    const recorder = await recordTunesOnly();
+    const manifest = await store.readManifest('s1');
+    // 60 s segments: 0–2 hold the first tune and its tail, 16 the second
+    // tune's lead-in, 16–20 the second tune.
+    const breakSegments = Array.from({ length: 13 }, (_, i) => i + 3);
+    assert.equal(store.SEGMENT_SECONDS, 60);
+    assert.deepEqual(manifest.pruned.map(p => p.index), breakSegments);
+    assert.deepEqual(manifest.segments.map(s => s.index), [0, 1, 2, 16, 17, 18, 19, 20]);
+    for (const index of breakSegments) {
+        assert.equal(idb.__db.has(store.segmentKey('s1', index)), false, `segment ${index} payload deleted`);
+    }
+    assert.equal(manifest.bytes, manifest.segments.reduce((n, s) => n + s.bytes, 0));
+    assert.ok(recorder.prunedBytes > 0 && recorder.prunedSeconds >= 13 * 59);
+    await recorder.end();
+});
+
+await test('the timeline is untouched: a pruned break is a hole, not a shift', async () => {
+    const recorder = await recordTunesOnly();
+    const before = (await store.readManifest('s1')).totalSeconds;
+    await recorder.end();
+    const manifest = await store.readManifest('s1');
+    assert.ok(manifest.totalSeconds >= before);
+    const second = await freshRecorder();
+    await second.resume('s1');
+    assert.ok(second.audioSeconds >= manifest.totalSeconds - 0.001,
+        'new audio starts after the hole, never inside it');
+});
+
+await test('with the option off nothing is deleted, but the evidence is kept', async () => {
+    const recorder = await recordTunesOnly({ on: false });
+    await recorder.end();
+    const manifest = await store.readManifest('s1');
+    assert.equal(manifest.segments.length, 21);
+    assert.equal(manifest.pruned, undefined);
+    assert.ok(manifest.keepRanges.length === 2, 'both sets are recorded as music');
+});
+
+await test('a stretch the analysis never looked at is kept, however long', async () => {
+    // Analysis down from 300 s to 900 s — the index reloading, say.
+    const recorder = await recordTunesOnly({ analysed: t => t < 300 || t > 900 });
+    await recorder.end();
+    const pruned = (await store.readManifest('s1')).pruned || [];
+    assert.ok(pruned.length > 0, 'the analysed parts of the break still go');
+    for (const p of pruned) {
+        const end = p.startSeconds + p.durationSeconds;
+        assert.ok(end <= 300 || p.startSeconds >= 895,
+            `segment ${p.index} (${p.startSeconds}–${end}) overlaps the unanalysed stretch`);
+    }
+});
+
+await test('end() settles the tail, keeping what was recorded after the last window', async () => {
+    // A break to the end: everything analysed after the first tune goes, at end().
+    await resetAll();
+    const recorder = await freshRecorder();
+    await recorder.begin('s1');
+    recorder.keepTunesOnly = true;
+    mic.__setStream();
+    await recorder.ensureRecording();
+    const media = recorders[recorders.length - 1];
+    recordAnalysed(recorder, media, 3 * store.SEGMENT_SECONDS, t => t <= 100);
+    // Ten seconds no window has looked at yet.
+    for (let i = 0; i < 10; i++) media.emit(`tail${i}`);
+    await recorder.end();
+    const manifest = await store.readManifest('s1');
+    assert.deepEqual(manifest.pruned.map(p => p.index), [2]);
+    assert.deepEqual(manifest.segments.map(s => s.index), [0, 1, 3], 'the unanalysed tail is kept');
+});
+
+await test('the evidence survives a reload, so a resumed session judges by it', async () => {
+    const first = await recordTunesOnly({ seconds: 2 * store.SEGMENT_SECONDS });
+    await first.stop();
+    await first._writeChain;
+    const ranges = first.keepRanges;
+    const second = await freshRecorder();
+    await second.resume('s1');
+    assert.deepEqual(second.keepRanges, ranges);
+    assert.ok(second.analysedRanges.length >= 1);
+});
+
+console.log('\nsessionAudioStore — a hole inside a track');
+
+async function seedThreeContiguous() {
+    await resetAll();
+    await seedManifest();
+    const header = { index: 0, startSeconds: 0, durationSeconds: 9, init: new Blob(['H0']) };
+    await store.appendSegment('s1', segment(0, 0, 0, ['H0', 'a1', 'a2'], { firstIsInit: true }), header);
+    await store.appendSegment('s1', segment(1, 0, 3, ['b3', 'b4', 'b5']), header);
+    await store.appendSegment('s1', segment(2, 0, 6, ['c6', 'c7', 'c8']), header);
+}
+
+await test('pruning drops the segment from the manifest before deleting its payload', async () => {
+    await seedThreeContiguous();
+    idb.__failDeletes.add(store.segmentKey('s1', 1));
+    const next = await store.pruneSegments('s1', [1]);
+    assert.deepEqual(next.segments.map(s => s.index), [0, 2]);
+    assert.deepEqual(next.pruned.map(p => p.index), [1]);
+    assert.equal(next.totalSeconds, 9, 'the timeline keeps its length');
+    // The delete failed: an orphan, and the sweep takes it.
+    idb.__failDeletes.clear();
+    assert.equal(await store.reclaimOrphans(), 1);
+});
+
+await test('a clip never splices across a pruned hole inside a track', async () => {
+    await seedThreeContiguous();
+    await store.pruneSegments('s1', [1]);
+    const clip = await store.buildClip('s1', 0, 9);
+    assert.equal(await clip.blob.text(), 'H0a1a2');
+    assert.equal(clip.endSeconds, 3);
+    const after = await store.buildClip('s1', 6, 9);
+    assert.equal(await after.blob.text(), 'H0c6c7c8', 'the later part still plays, with its header');
+});
+
+await test('each side of a pruned hole exports as a complete file', async () => {
+    await seedThreeContiguous();
+    await store.pruneSegments('s1', [1]);
+    const parts = store.recordingParts(await store.readManifest('s1'));
+    assert.equal(parts.length, 2);
+    for (const part of parts) {
+        const clip = await store.buildClip('s1', part.startSeconds, part.endSeconds, null, { requireComplete: true });
+        assert.ok(clip && clip.blob.size > 0);
+    }
 });
 
 await rm(sessionAnalysisTmpDir, { recursive: true, force: true });

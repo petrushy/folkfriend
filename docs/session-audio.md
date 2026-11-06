@@ -134,7 +134,7 @@ MediaRecorder output carries no seek index (WebM has no Cues, Safari's
 fragmented MP4 has no top-level index), so a three-hour file you cannot scrub
 defeats the point.
 
-So the recording is written in `SEGMENT_SECONDS` (180 s) pieces as they close.
+So the recording is written in `SEGMENT_SECONDS` (60 s; 180 s before November 2026) pieces as they close.
 `TIMESLICE_MS` (1000 ms) chunks are the smallest independently-appendable unit,
 and each stored segment carries its own chunk offset table.
 
@@ -419,6 +419,76 @@ Muted stretches are stored in the manifest as `mutedRanges` and drawn as hatched
 bands on the player's timeline, because seeking to a tune and getting
 unexplained silence is indistinguishable from a bug. An open range is closed at
 `end()`, or it would grey out everything after it for ever.
+
+## Keeping only the audio around tunes
+
+Optional, off by default (Settings → Session Recording → *Keep only the audio
+around tunes*, `userSettings.sessionAudioTunesOnly`). A three-hour evening is
+often an hour or more of talk between sets, and at 64 kbps every hour is ~29 MB.
+With the option on, a stored segment is deleted during the evening once the
+analysis has shown that nothing in it — or within 20 s either side of it —
+sounded like a tune. `js/audioKeep.mjs` is the rule, pure and tested by
+`test/audioKeep.test.mjs`.
+
+Every rule is "could not tell means keep":
+
+- **Evidence is the analysis, not the tune list.** A window counts as music
+  when its raw best score is ≥ `MUSIC_EVIDENCE_MIN_SCORE` (0.3, against 0.45 to
+  be listed), before rejections and corrections — "that was not tune X" still
+  means a tune was playing. Uncalibrated against recorded speech; lower is the
+  safe direction.
+- **Only analysed audio can be judged.** A segment is deleted only when the
+  analysed windows cover all of it. An analysis error, an index that is not
+  loaded (every query answers `[]`), or a dead microphone reports nothing, so
+  the audio recorded meanwhile is kept.
+- **A segment is judged only once no later window can reach back into it**
+  (`settledBefore`), so the tail of the segment before a tune survives as its
+  lead-in. `end()` settles everything analysed; anything recorded after the
+  last window is not covered and is kept.
+
+Granularity is a whole segment, which is why `SEGMENT_SECONDS` went from 180 s
+to 60 s with this change: at three minutes a break had to run about six before
+anything was deleted. At one minute it needs about two, and is trimmed to the
+nearest minute either side. Recordings made at 180 s still play — every reader
+works from the manifest's own segment spans.
+
+**The timeline is untouched.** `pruneSegments()` drops the segments from the
+manifest first, then deletes the payloads (an interruption leaves orphans for
+`reclaimOrphans()`), and leaves `totalSeconds` and `clockFloor` alone — so a
+pruned break is a hole, never a shift, and later audio cannot take timestamps
+detections already hold. Deleted segments are listed in `manifest.pruned`; the
+player uses that to say "a break between tunes, not kept" instead of
+"missing".
+
+**This is the first thing that puts a hole INSIDE a track.** Until now a track
+was continuous by construction, and three readers assumed it:
+
+- `buildClip` stops at a manifest-level gap, rather than handing the element
+  one file whose timeline jumps.
+- Export is per **part** (`recordingParts()`, in `js/clipWindow.mjs`): one per
+  contiguous run within a track. For an ordinary recording that is exactly one
+  per track, as before.
+- Dropbox whole-recording files are per part too. A whole track keeps its
+  `[id-track-N]` identity, so nothing already uploaded is renamed; a part of a
+  split track is `[id-track-<1000000 + first segment index>]` — still a number,
+  which older builds' inventory check requires.
+
+**Dropbox.** A segment uploaded before it was pruned is in the cloud and not
+on the device, which `backupSession` treats as "audio absent from this device"
+— a conflict. A segment matching a `pruned` record exactly is the explanation,
+not a conflict; it is dropped from the cloud manifest and its file deleted
+after the manifest is published. Anything else missing is still refused.
+
+The evidence (`keepRanges`, `analysedRanges`) is persisted in the manifest:
+with every segment append, in the prune write itself, and whenever music
+extends it — so coverage on disk is never ahead of the music that covered it,
+and a resumed session after a reload judges by the same evidence. It is
+gathered whether or not the option is on, so switching it on mid-session also
+clears breaks already recorded.
+
+⚠️ Not yet tried on a device: the rule rests on the detector's scores during
+real conversation, which have never been measured. The audio this records
+with the option OFF is the corpus to calibrate it on.
 
 ## Privacy
 

@@ -8,6 +8,7 @@ import {
 } from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import { detectionFreshness } from '@/js/detectionFreshness.mjs';
+import { MUSIC_EVIDENCE_MIN_SCORE } from '@/js/audioKeep.mjs';
 import eventBus from '@/eventBus.js';
 
 // How long a tune the user has rejected stays suppressed. Without a cooldown
@@ -683,6 +684,8 @@ class LiveAnalysisService {
                 // pause is most likely to land inside.
                 if (!current()) break;
 
+                this._reportAnalysedWindow(audioSeconds, response, options);
+
                 if (this.isRunning && !this.isPaused && !response.error && usableResults.length > 0) {
                     const previousTuneId = this.detections.length > 0
                         ? this.detections[this.detections.length - 1].tuneId
@@ -729,6 +732,27 @@ class LiveAnalysisService {
             const remainingMs = Math.max(0, options.stepSeconds * 1000 - analysisMs);
             await this._sleepCancellable(remainingMs);
         }
+    }
+
+    // Tells the recorder what this window sounded like, for a "tunes only"
+    // recording (js/audioKeep.mjs).
+    //
+    // Only a window that was genuinely analysed counts. An error, or an index
+    // that is not loaded — where every query answers [] — says nothing about
+    // whether a tune was playing, and reporting it as "no music" would delete
+    // audio that was never judged. The RAW results, before rejections: a tune
+    // the user said was misidentified was still a tune being played.
+    _reportAnalysedWindow(audioSeconds, response, options) {
+        sessionRecorder.keepTunesOnly = !!store.userSettings.sessionAudioTunesOnly;
+        if (audioSeconds === null || audioSeconds === undefined) return;
+        if (!response || response.error || !(store.state && store.state.indexLoaded)) return;
+        const best = Array.isArray(response.results) ? response.results[0] : null;
+        const music = !!(best && typeof best.score === 'number' &&
+            best.score >= MUSIC_EVIDENCE_MIN_SCORE);
+        sessionRecorder.noteAnalysed(audioSeconds, {
+            music,
+            windowSeconds: options.windowSeconds,
+        });
     }
 
     // Brings the recorder into line with `recordSessionAudio`, in both

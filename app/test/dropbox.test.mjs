@@ -28,7 +28,11 @@ class FakeDropbox {
         if (old) { assert.equal(old.content_hash, await contentHash(blob)); return old; }
         return this.upload(path, blob);
     }
-    async request(_, { path }) { return { blob: this.files.get(path).blob }; }
+    deletes = [];
+    async request(endpoint, { path }) {
+        if (endpoint === 'files/delete_v2') { this.deletes.push(path); this.files.delete(path); return {}; }
+        return { blob: this.files.get(path).blob };
+    }
 }
 const root = sessionPath(session.id);
 await test('audio and full session precede manifest; headers, chunk offsets and mute ranges survive JSON', async () => {
@@ -68,6 +72,19 @@ await test('a stale local snapshot cannot truncate a cloud recording', async () 
     const c = new FakeDropbox(); await backupSession(c, session, local, async () => segment, extension); c.writes = [];
     await assert.rejects(backupSession(c, session, { ...local, segments: [] }, async () => segment, extension), e => e.code === 'conflict');
     assert.equal(c.writes.length, 0);
+});
+await test('a segment pruned as a break is not a conflict, and leaves Dropbox after the manifest', async () => {
+    const c = new FakeDropbox(); await backupSession(c, session, local, async () => segment, extension); c.writes = [];
+    const pruned = { ...local, segments: [], bytes: 0, pruned: [{ ...local.segments[0] }] };
+    const manifest = await backupSession(c, session, pruned, async () => segment, extension);
+    assert.deepEqual(manifest.segments, []);
+    assert.ok(c.writes.includes(`${root}/audio-manifest.json`));
+    assert.deepEqual(c.deletes, [`${root}/segments/000000.m4a`], 'deleted only once nothing names it');
+    // A pruned record that does not match what Dropbox holds is not an
+    // explanation: that is still audio this device lost.
+    const c2 = new FakeDropbox(); await backupSession(c2, session, local, async () => segment, extension);
+    const mismatched = { ...pruned, pruned: [{ ...local.segments[0], bytes: 1 }] };
+    await assert.rejects(backupSession(c2, session, mismatched, async () => segment, extension), e => e.code === 'conflict');
 });
 await test('a concurrent session edit between preflight and upload is rejected', async () => {
     const c = new FakeDropbox(); await backupSession(c, session, local, async () => segment, extension); c.writes = [];
@@ -205,6 +222,25 @@ await test('whole recordings use unique identities and reject same-size corrupti
     await assert.rejects(backupWholeRecordings(c, finished, local, async () => ({ blob: new Blob(['OTHER']) }), extension), e => e.code === 'conflict');
     assert.equal(await c.files.get(path).blob.text(), 'FIRST');
     assert.notEqual(recordingFileName(finished, 0, 1, 'm4a'), recordingFileName(finished, 1, 1, 'm4a'));
+});
+
+await test('a track split by a pruned break backs up as one whole file per side', async () => {
+    const c = new FakeDropbox(); c.uploadLarge = c.upload.bind(c);
+    const finished = { ...session, endedAt: 100 };
+    const split = { ...local, totalSeconds: 9,
+        segments: [{ index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 3, bytes: 5 },
+            { index: 2, trackIndex: 0, startSeconds: 6, durationSeconds: 3, bytes: 5 }],
+        pruned: [{ index: 1, trackIndex: 0, startSeconds: 3, durationSeconds: 3, bytes: 5 }] };
+    const asked = [];
+    const paths = await backupWholeRecordings(c, finished, split, async (id, from, to) => {
+        asked.push([from, to]); return { blob: new Blob([`${from}-${to}`]), mimeType: 'audio/mp4' };
+    }, extension);
+    assert.deepEqual(asked, [[0, 3], [6, 9]], 'no file spans the hole');
+    assert.equal(paths.length, 2);
+    assert.notEqual(paths[0], paths[1]);
+    assert.ok(paths.every(p => / \(part [12]\) /.test(p)));
+    // An unsplit recording keeps the identity it always had.
+    assert.ok(recordingFileName(finished, 0, 1, 'm4a').endsWith(`[${session.id}-track-0].m4a`));
 });
 
 await test('whole-recording backup refuses an incomplete export before publishing inventory or bytes', async () => {

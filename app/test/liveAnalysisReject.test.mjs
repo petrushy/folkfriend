@@ -47,14 +47,16 @@ const FAKE_GEO = `export default { beginSession() {}, async getFix() { return nu
 const FAKE_RECORDER = `
 // Session audio is a separate concern from what these tests cover; the real
 // recorder needs a MediaRecorder and a quota API that node has neither of.
+export const __notes = [];
 export default {
-    isRecording: false, isActive: false, audioSeconds: null,
+    isRecording: false, isActive: false, audioSeconds: null, keepTunesOnly: false,
+    noteAnalysed(stamp, info) { __notes.push({ stamp, ...info }); },
     async begin() { return false; }, async resume() { return false; },
     async stop() {}, async end() {}, async discard() {},
     ensureRecording() { return Promise.resolve(false); },
 };`;
 
-const FAKE_STORE = `export default { userSettings: {}, async addSighting() {} };`;
+const FAKE_STORE = `export default { userSettings: {}, state: { indexLoaded: true }, async addSighting() {} };`;
 const FAKE_EVENTBUS = `
 export const __emits = [];
 export default { $emit(name, payload) { __emits.push({ name, payload }); }, $on() {}, $off() {} };
@@ -88,6 +90,7 @@ async function loadService() {
         ["from '@/js/sessionAnalysis.js'", `from '${sessionAnalysisCopy}'`],
         ["from '@/js/biasResults.mjs'", `from '${biasModule}'`],
         ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
+        ["from '@/js/audioKeep.mjs'", `from '${path.join(srcDir, 'js', 'audioKeep.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in liveAnalysis.js`);
@@ -336,6 +339,39 @@ await test('a paused session shows the LED off rather than red', async () => {
     service.elapsedSeconds = 30 + 20 * 60;
 
     assert.equal(service.detectionFreshness().level, 'off');
+});
+
+console.log('\nliveAnalysis — evidence for a "tunes only" recording');
+
+await test('every analysed window is reported, judged on the RAW best score', async () => {
+    const { service } = await loadService();
+    const recorder = await import(path.join(tmpDir, 'fake-recorder.mjs'));
+    const store = (await import(path.join(tmpDir, 'fake-store.mjs'))).default;
+    recorder.__notes.length = 0;
+    store.userSettings.sessionAudioTunesOnly = true;
+    const result = (tuneId, score) => ({ score, setting: { tune_id: tuneId } });
+    // A rejected tune is still a tune being played: the evidence ignores
+    // rejections, which only decide what is LISTED.
+    service._rejectedTunes.set('7', 0);
+    service._reportAnalysedWindow(100, { results: [result(7, 0.5)] }, service.options);
+    service._reportAnalysedWindow(105, { results: [result(8, 0.2)] }, service.options);
+    service._reportAnalysedWindow(110, { results: [] }, service.options);
+    assert.deepEqual(recorder.__notes.map(n => [n.stamp, n.music, n.windowSeconds]),
+        [[100, true, 10], [105, false, 10], [110, false, 10]]);
+    assert.equal(recorder.default.keepTunesOnly, true, 'the setting reaches the recorder');
+});
+
+await test('a window that was not really analysed is never reported as a break', async () => {
+    const { service } = await loadService();
+    const recorder = await import(path.join(tmpDir, 'fake-recorder.mjs'));
+    const store = (await import(path.join(tmpDir, 'fake-store.mjs'))).default;
+    recorder.__notes.length = 0;
+    service._reportAnalysedWindow(100, { error: 'analysis timeout', results: [] }, service.options);
+    service._reportAnalysedWindow(null, { results: [] }, service.options);
+    store.state.indexLoaded = false;
+    service._reportAnalysedWindow(105, { results: [] }, service.options);
+    store.state.indexLoaded = true;
+    assert.deepEqual(recorder.__notes, []);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

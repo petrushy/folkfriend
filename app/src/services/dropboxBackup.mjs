@@ -1,4 +1,5 @@
 import { DropboxError, contentHash } from './dropboxClient.mjs';
+import { recordingParts } from '../js/clipWindow.mjs';
 export const sessionPath = id => {
     if (typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,200}$/.test(id)) throw new DropboxError('Unsupported session identifier.', 'unsupported');
     return `/sessions/${id}`;
@@ -57,14 +58,21 @@ function safeName(text) {
 //
 // The time is in the name to keep two sessions on one day from colliding: an
 // overwrite here would destroy a recording rather than merely confuse a list.
-export function recordingFileName(session, trackIndex, trackCount, extension) {
+// Identities for parts of a split track start here — far above any real track
+// index, so the two can never collide. See backupWholeRecordings().
+export const SPLIT_PART_ID_BASE = 1000000;
+
+// `trackIndex` is the part's POSITION, which is what the "(part N)" label
+// shows; `identity` is the number in brackets that ties the file to its audio,
+// and is the track index unless told otherwise.
+export function recordingFileName(session, trackIndex, trackCount, extension, identity = trackIndex) {
     sessionPath(session.id); // Validate before including the identifier in a path.
     const at = new Date(session.startedAt || 0);
     const pad = n => String(n).padStart(2, '0');
     const stamp = `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())} ` +
         `${pad(at.getHours())}${pad(at.getMinutes())}`;
     const part = trackCount > 1 ? ` (part ${trackIndex + 1})` : '';
-    return `${RECORDINGS_FOLDER}/${safeName(`${stamp} ${session.name || ''}`)}${part} [${session.id}-track-${trackIndex}].${extension}`;
+    return `${RECORDINGS_FOLDER}/${safeName(`${stamp} ${session.name || ''}`)}${part} [${session.id}-track-${identity}].${extension}`;
 }
 // Every extension fileExtensionFor() can produce. The last four only ever come
 // from an imported recording, which is stored as the file it arrived as.
@@ -161,7 +169,14 @@ export async function backupSession(client, session, local, readSegment, extensi
     if (expectedSessionRev !== undefined && (previousSession?.rev || null) !== expectedSessionRev) throw new DropboxError('Dropbox session changed during backup. Retry after reviewing it.', 'conflict');
     if (remote) validateManifest(remote.value, session.id);
     if (previousSession) validateSession(previousSession.value, session.id);
-    if (remote && remote.value.segments.some(old => !local.segments.some(s => s.index === old.index && s.bytes === old.bytes && s.startSeconds === old.startSeconds && s.durationSeconds === old.durationSeconds && s.trackIndex === old.trackIndex))) {
+    const same = (a, b) => a.index === b.index && a.bytes === b.bytes && a.startSeconds === b.startSeconds && a.durationSeconds === b.durationSeconds && a.trackIndex === b.trackIndex;
+    // A segment this device deleted ON PURPOSE — a break between sets, in a
+    // "tunes only" recording — is absent here and still in Dropbox, and is not
+    // a conflict. It must match the pruned record exactly: anything else
+    // absent is audio this device has lost, which is what the guard is for.
+    const pruned = Array.isArray(local.pruned) ? local.pruned : [];
+    const prunedRemote = remote ? remote.value.segments.filter(old => pruned.some(p => same(p, old))) : [];
+    if (remote && remote.value.segments.some(old => !local.segments.some(s => same(s, old)) && !prunedRemote.includes(old))) {
         throw new DropboxError('Dropbox contains audio absent from this device. No files were overwritten.', 'conflict');
     }
     const manifest = { ...local, cloudSchema: 1, tracks: [], segments: [] };
@@ -181,6 +196,13 @@ export async function backupSession(client, session, local, readSegment, extensi
     // simultaneous updates by another tab/device between the read and write.
     await client.upload(`${root}/session.json`, jsonBlob({ schema: 1, session }), previousSession);
     await client.upload(`${root}/audio-manifest.json`, jsonBlob(manifest), remote);
+    // Only now, once the manifest no longer names them: the same
+    // commit-marker-first order as every delete here. Best effort — a file
+    // left behind is unreferenced, and costs the user space, not audio.
+    for (const old of prunedRemote) {
+        try { await client.request('files/delete_v2', { path: `${root}/${old.file}` }); }
+        catch (e) { if (e && e.code !== 'missing') console.warn('Could not delete a pruned segment from Dropbox:', e && e.message); }
+    }
     return manifest;
 }
 // Uploads one playable file per continuous recording stretch, for anything that
@@ -201,18 +223,28 @@ export async function backupWholeRecordings(client, session, manifest, buildClip
     const inventoryPath = `${sessionPath(session.id)}/whole-recordings.json`;
     let inventory = await client.json(inventoryPath);
     let known = inventory ? validateWholeRecordings(inventory.value, session.id) : [];
-    const tracks = [...new Set(manifest.segments.map(s => s.trackIndex))].sort((a, b) => a - b);
+    // One file per continuous stretch: per track, and split again where a
+    // "tunes only" recording deleted a break from the middle of one.
+    const parts = recordingParts(manifest);
     const uploaded = [];
-    for (let i = 0; i < tracks.length; i++) {
-        const trackIndex = tracks[i];
-        const spans = manifest.segments.filter(s => s.trackIndex === trackIndex);
-        const from = Math.min(...spans.map(s => s.startSeconds));
-        const to = Math.max(...spans.map(s => s.startSeconds + s.durationSeconds));
+    for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        // The identity in the file name. A whole track keeps its track index,
+        // so every recording made before parts existed keeps its name; a part
+        // of a split track is named by its first segment, offset clear of any
+        // track index, so it stays the same however many breaks follow it.
+        // (A number either way, which older builds' inventory check requires.)
+        const trackIndex = part.wholeTrack ? part.trackIndex : SPLIT_PART_ID_BASE + part.firstSegmentIndex;
+        const from = part.startSeconds;
+        const to = part.endSeconds;
 
         const clip = await buildClip(session.id, from, to, null, { requireComplete: true });
         if (!clip || !clip.blob.size) throw new DropboxError('The complete recording could not be read.', 'local');
 
-        const path = recordingFileName(session, trackIndex, tracks.length, extension(clip.mimeType));
+        // The "(part N)" label: by track, as it always was, unless breaks were
+        // removed — then tracks no longer say which file is which.
+        const label = Array.isArray(manifest.pruned) && manifest.pruned.length ? i : part.trackIndex;
+        const path = recordingFileName(session, label, parts.length, extension(clip.mimeType), trackIndex);
         const previous = existing[i];
         const ownedPrevious = previous && previous.includes(`[${session.id}-track-${trackIndex}]`) ? previous : null;
         const paths = [...new Set([...known, ...(ownedPrevious ? [ownedPrevious] : []), path])];

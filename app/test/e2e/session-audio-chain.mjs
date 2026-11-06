@@ -30,9 +30,14 @@ let player = sfc.split('<script>')[1].split('</script>')[0]
 player += `\ncomponent.template = ${JSON.stringify(template)}; export default component;`;
 const store = read('src/services/sessionAudioStore.js')
     .replace("from 'idb-keyval'", "from '/idb.js'")
-    .replace('SEGMENT_SECONDS = 180', 'SEGMENT_SECONDS = 3');
+    .replace("from '@/js/clipWindow.mjs'", "from '/clipWindow.js'")
+    .replace(/SEGMENT_SECONDS = \d+;/, 'SEGMENT_SECONDS = 3;');
+// A replace that matches nothing would silently run the test at full segment
+// length — check it took.
+assert.ok(store.includes('SEGMENT_SECONDS = 3;'), 'the segment interval was not shortened');
 const recorder = read('src/services/sessionRecorder.js')
     .replace("from './sessionAudioStore.js'", "from '/store.js'")
+    .replace("from '@/js/audioKeep.mjs'", "from '/audioKeep.js'")
     .replace("import eventBus from '@/eventBus.js';", 'const eventBus = window.testBus;')
     .replace("import micService from './mic.js';", `const micService = {
         get recordingStream() { return window.testStream; }, streamGeneration: 1,
@@ -45,6 +50,7 @@ const routes = new Map([
     ['/mediaSession.js', read('src/js/mediaSession.mjs')],
     ['/playbackLevel.js', read('src/js/playbackLevel.mjs')],
     ['/clipWindow.js', read('src/js/clipWindow.mjs')],
+    ['/audioKeep.js', read('src/js/audioKeep.mjs')],
     ['/vue.js', read('node_modules/vue/dist/vue.js')],
     ['/idb.js', read('node_modules/idb-keyval/dist/index.js')],
 ]);

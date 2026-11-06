@@ -61,6 +61,11 @@ export async function buildClip(sessionId, from, to, manifest, options) {
 export let __tracks = [];
 export function __setTracks(t) { __tracks = t; }
 export function trackRanges() { return __tracks; }
+// The parts are the tracks unless a test says otherwise: an ordinary recording
+// has one exportable part per track.
+export function recordingParts() {
+    return __tracks.map((t, i) => ({ ...t, trackIndex: t.index, firstSegmentIndex: i, index: i, wholeTrack: true }));
+}
 export function formatBytes(n) { return String(n); }
 export function fileExtensionFor() { return 'm4a'; }
 export function playsWhole(track) {

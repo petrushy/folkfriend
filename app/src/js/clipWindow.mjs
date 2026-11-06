@@ -70,3 +70,50 @@ export function clipWindow(segments, first, {
     }
     return { fromSeconds: first.startSeconds, toSeconds: end(last), count };
 }
+
+// The stretches that can be exported as one file each: one per run of
+// segments that are in the same track AND contiguous. For an ordinary
+// recording that is exactly one per track; a "tunes only" recording has holes
+// inside a track, and a part cannot span one.
+//
+// `index` numbers the parts in order and is what the export button shows;
+// `trackIndex` is the track the part was cut from. `firstSegmentIndex` is a
+// stable identity for the part, since a part's position in the list can change
+// as later segments are pruned.
+export function recordingParts(manifest) {
+    if (!manifest) return [];
+    const tracks = new Map((manifest.tracks || []).map(t => [t.index, t]));
+    const sorted = (manifest.segments || []).slice().sort((a, b) => a.index - b.index);
+    const parts = [];
+    for (const segment of sorted) {
+        const end = segment.startSeconds + segment.durationSeconds;
+        const last = parts[parts.length - 1];
+        if (last && last.trackIndex === segment.trackIndex &&
+            Math.abs(segment.startSeconds - last.endSeconds) <= JOIN_TOLERANCE_SECONDS) {
+            last.endSeconds = Math.max(last.endSeconds, end);
+            last.segmentCount++;
+            continue;
+        }
+        parts.push({
+            trackIndex: segment.trackIndex,
+            firstSegmentIndex: segment.index,
+            startSeconds: segment.startSeconds,
+            endSeconds: end,
+            segmentCount: 1,
+            wholeFile: !!(tracks.get(segment.trackIndex) || {}).wholeFile,
+        });
+    }
+    // Whether the part is its track's whole stored audio: an ordinary
+    // recording's parts all are, and keep the track as their identity.
+    const perTrack = new Map();
+    for (const p of parts) perTrack.set(p.trackIndex, (perTrack.get(p.trackIndex) || 0) + 1);
+    return parts
+        .map(p => ({
+            ...p,
+            wholeTrack: perTrack.get(p.trackIndex) === 1,
+            durationSeconds: Math.max(0, p.endSeconds - p.startSeconds),
+        }))
+        .filter(p => p.durationSeconds > 0)
+        .sort((a, b) => a.startSeconds - b.startSeconds)
+        .map((p, index) => ({ ...p, index }));
+}

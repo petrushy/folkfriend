@@ -173,6 +173,24 @@
                     @change="settingsChanged"
                 />
             </v-row>
+            <v-row class="mt-2">
+                <v-switch
+                    v-model="userSettings.sessionAudioTunesOnly"
+                    inset
+                    label="Keep only the audio around tunes"
+                    class="my-0 pl-2"
+                    @change="settingsChanged"
+                />
+            </v-row>
+            <p class="caption text--secondary mb-0 pl-2">
+                Saves storage in long breaks between sets. While a session records, any
+                minute in which nothing sounded like a tune — with 20 seconds kept either
+                side of every tune — is deleted from this device once the app is sure no
+                tune is starting. Breaks shorter than about two minutes are kept whole. Deleted audio cannot be brought back, and a tune the app
+                does not recognise at all may be counted as a break, so leave this off for
+                an evening you want complete. Switching it on during a session also clears
+                breaks already recorded in that session.
+            </p>
             <p class="caption text--secondary mt-3 mb-0">
                 <strong>Stored recordings:</strong>
                 {{ sessionAudioCount }} {{ sessionAudioCount === 1 ? 'session' : 'sessions' }},

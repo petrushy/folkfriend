@@ -44,7 +44,9 @@ import {
     probeManifest,
     deleteSessionAudio,
     headroomBytes,
+    pruneSegments,
 } from './sessionAudioStore.js';
+import { noteWindow, prunableSegments, settledBefore } from '@/js/audioKeep.mjs';
 
 // The earliest position at which new audio may safely begin.
 //
@@ -142,6 +144,120 @@ class SessionRecorder {
         // Stored so the player can show them: seeking to a tune and getting
         // silence with no explanation is indistinguishable from a bug.
         this.mutedRanges = [];
+
+        // ---- "tunes only" ----------------------------------------------
+        //
+        // Set by liveAnalysis from userSettings.sessionAudioTunesOnly every
+        // cycle, so turning it on or off takes effect on the running session.
+        // The EVIDENCE below is gathered either way: turning the option on
+        // part way through an evening can then still clear the break before.
+        this.keepTunesOnly = false;
+        // In audio-clock seconds. See js/audioKeep.mjs for what each means.
+        this.keepRanges = [];
+        this.analysedRanges = [];
+        // The newest analysed window's stamp, and the longest window seen —
+        // together they say how far back a window not yet analysed can reach.
+        this._analysedTo = null;
+        this._windowSeconds = 0;
+        // Whether the ranges above have changed since they were last written.
+        this._rangesDirty = false;
+        // Audio deleted as breaks this session, for the UI.
+        this.prunedBytes = 0;
+        this.prunedSeconds = 0;
+    }
+
+    // ---- "tunes only" --------------------------------------------------------
+
+    // One analysed window, reported by liveAnalysis after each cycle with the
+    // stamp it read when the window's PCM was taken. `music` is whether its
+    // best match sounded like a tune — see MUSIC_EVIDENCE_MIN_SCORE.
+    //
+    // Never deletes anything itself. Pruning only runs in the write chain,
+    // after a segment is committed, so it is serialised with the appends whose
+    // manifest it rewrites.
+    noteAnalysed(stampSeconds, { music = false, windowSeconds = 0 } = {}) {
+        if (!this.sessionId || typeof stampSeconds !== 'number' || !Number.isFinite(stampSeconds)) return;
+        const before = this.keepRanges;
+        const next = noteWindow(
+            { keepRanges: this.keepRanges, analysedRanges: this.analysedRanges },
+            stampSeconds, { music, windowSeconds });
+        this.keepRanges = next.keepRanges;
+        this.analysedRanges = next.analysedRanges;
+        this._analysedTo = Math.max(this._analysedTo ?? -Infinity, stampSeconds);
+        this._windowSeconds = Math.max(this._windowSeconds, windowSeconds || 0);
+        this._rangesDirty = true;
+        // Evidence of music is written straight away rather than waiting for
+        // the next segment. After a reload, coverage on disk with the music
+        // that covered it missing would read as a break and delete a tune's
+        // lead-in; coverage on disk WITHOUT its keep is the one state that
+        // must never exist. Coverage that runs ahead of the stored keep is
+        // only ever followed by silence, which is the truth.
+        if (music && JSON.stringify(before) !== JSON.stringify(this.keepRanges)) {
+            this._persistRanges();
+        }
+    }
+
+    _rangesPatch() {
+        return {
+            keepRanges: this.keepRanges.map(r => ({ ...r })),
+            analysedRanges: this.analysedRanges.map(r => ({ ...r })),
+        };
+    }
+
+    _persistRanges() {
+        if (!this.sessionId) return;
+        this._rangesDirty = false;
+        patchManifest(this.sessionId, this._rangesPatch())
+            .catch(e => console.warn('Could not record which audio to keep:', e && e.message));
+    }
+
+    // Deletes the stored segments the evidence says were a break. Queued on
+    // the write chain; `final` is the end of the session, where no later
+    // window can claim anything.
+    _queuePrune({ final = false } = {}) {
+        const sessionId = this.sessionId;
+        if (!sessionId) return this._writeChain;
+        this._writeChain = this._writeChain.then(() => this._prune(sessionId, final))
+            .catch(e => console.warn('Could not remove the break from the recording:', e && e.message));
+        return this._writeChain;
+    }
+
+    async _prune(sessionId, final) {
+        if (this.sessionId !== sessionId || !this.keepTunesOnly) return;
+        const manifest = await readManifest(sessionId);
+        if (!manifest) return;
+        const indices = prunableSegments(manifest.segments, {
+            keepRanges: this.keepRanges,
+            analysedRanges: this.analysedRanges,
+            settledBeforeSeconds: final
+                ? Infinity
+                : settledBefore(this._analysedTo, this._windowSeconds),
+        });
+        if (!indices.length) return;
+        // The ranges ride the same write: the decision and its grounds land
+        // together or not at all.
+        this._rangesDirty = false;
+        const next = await pruneSegments(sessionId, indices, this._rangesPatch());
+        if (!next) return;
+        const removed = manifest.segments.filter(s => indices.includes(s.index));
+        this.prunedBytes += removed.reduce((n, seg) => n + (seg.bytes || 0), 0);
+        this.prunedSeconds += removed.reduce((n, seg) => n + (seg.durationSeconds || 0), 0);
+        this.bytes = next.bytes;
+        this._emit();
+    }
+
+    _resetKeepState(manifest = null) {
+        this.keepRanges = manifest && Array.isArray(manifest.keepRanges)
+            ? manifest.keepRanges.map(r => ({ ...r })) : [];
+        this.analysedRanges = manifest && Array.isArray(manifest.analysedRanges)
+            ? manifest.analysedRanges.map(r => ({ ...r })) : [];
+        // Not restored: the newest stamp only matters for windows still to
+        // come, and those are later than anything stored.
+        this._analysedTo = null;
+        this._windowSeconds = 0;
+        this._rangesDirty = false;
+        this.prunedBytes = 0;
+        this.prunedSeconds = 0;
     }
 
     // ---- mute --------------------------------------------------------------
@@ -235,6 +351,9 @@ class SessionRecorder {
             muteSupported: this.muteSupported,
             mutedSeconds: this.mutedSeconds,
             channels: this.channels,
+            tunesOnly: this.keepTunesOnly,
+            prunedBytes: this.prunedBytes,
+            prunedSeconds: this.prunedSeconds,
         });
     }
 
@@ -280,6 +399,7 @@ class SessionRecorder {
         this._segmentIndex = 0;
         this.bytes = 0;
         this.mutedRanges = [];
+        this._resetKeepState();
         // A NEW session starts recording. Carrying a mute over from the
         // previous one would silently lose an evening's audio to a button
         // pressed hours earlier — and unlike the resume case below, nothing on
@@ -400,6 +520,7 @@ class SessionRecorder {
         this.mutedRanges = Array.isArray(manifest.mutedRanges)
             ? manifest.mutedRanges.map(r => ({ ...r }))
             : [];
+        this._resetKeepState(manifest);
         this._resetPending();
 
         // A session that was muted when the app was closed comes back MUTED.
@@ -452,7 +573,15 @@ class SessionRecorder {
         if (!this.sessionId) return;
         await this._stopTrack();
         this._closeOpenMuteRange();
+        // Last, after the final segment is queued: nothing analysed later can
+        // claim anything now. Audio after the last analysed window is not
+        // covered and so is kept — it was not judged.
+        this._queuePrune({ final: true });
         await this._writeChain.catch(() => {});
+        if (this._rangesDirty) {
+            await patchManifest(this.sessionId, this._rangesPatch())
+                .catch(e => console.warn('Could not record which audio to keep:', e && e.message));
+        }
         await patchManifest(this.sessionId, { finalizedAt: Date.now() });
         this.sessionId = null;
         this.mimeType = null;
@@ -461,6 +590,7 @@ class SessionRecorder {
         this.error = '';
         this.bytes = 0;
         this.mutedRanges = [];
+        this._resetKeepState();
         micService.setRecordingMuted(false);
         this._emit();
     }
@@ -749,9 +879,15 @@ class SessionRecorder {
                     mimeType: trackMimeType,
                     bitsPerSecond: trackBitsPerSecond,
                     channels: trackChannels,
-                });
+                }, this._rangesPatch());
+                this._rangesDirty = false;
                 this.bytes = manifest.bytes;
                 this._emit();
+                // Inside the same chain step, so the next append waits for it.
+                // Caught here: a prune that fails costs disk space, and must
+                // never be reported as the recording failing.
+                await this._prune(sessionId, false).catch(e =>
+                    console.warn('Could not remove the break from the recording:', e && e.message));
             } catch (e) {
                 const message = (e && e.message) || String(e);
                 const quota = /quota/i.test(message) || (e && e.name === 'QuotaExceededError');
