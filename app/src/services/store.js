@@ -52,6 +52,11 @@ const USER_SETTING_DEFAULTS = {
     // but it costs: the same bitrate is split between two channels, so 64 kbps
     // stereo sounds worse than 64 kbps mono.
     sessionAudioStereo: false,
+    // Keep only the audio around tunes, deleting the breaks between sets as
+    // the evening goes. Off by default: what it deletes is gone, and its
+    // judgement of "a tune was playing" rests on the detector, which can miss
+    // a tune it does not know. See js/audioKeep.mjs.
+    sessionAudioTunesOnly: false,
     // Which tune databases are downloaded, stored offline and searched.
     //
     // A FRESH install gets thesession only. folkwiki's detections are still

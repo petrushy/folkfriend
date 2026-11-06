@@ -1144,6 +1144,41 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Session recording: keep only the audio around tunes (November 2026)
+
+Optional, off by default (`userSettings.sessionAudioTunesOnly`, Settings →
+Session Recording). During a recorded session, a stored 180 s segment is
+deleted once the analysis shows nothing in it — or within 30 s either side —
+sounded like a tune, so long breaks between sets stop costing storage. Full
+design in `docs/session-audio.md` ("Keeping only the audio around tunes"); the
+rule is `js/audioKeep.mjs`.
+
+Four things that are not obvious:
+
+- **Evidence is the raw analysis, not the tune list** — every window whose best
+  score is ≥ 0.3, before rejections. The note above about an automatic
+  music/speech classifier ("must not gate on the tune MATCH") applies here and
+  is why the bar is well below the listing bar; a tune the detector cannot
+  score at all can still be counted as a break, and the Settings text says so.
+- **Unanalysed audio is never judged**, and a segment is only judged once no
+  later window's lead-in margin can reach back into it.
+- **It is the first source of a hole inside a TRACK.** `buildClip` now stops at
+  a manifest gap, export and Dropbox whole-recording files are per contiguous
+  part (`recordingParts`), and `backupSession` accepts a cloud segment matching
+  `manifest.pruned` exactly instead of calling it a conflict.
+- **The timeline does not move**: `totalSeconds` and `clockFloor` are left
+  alone, so a pruned break is a hole that later audio cannot reuse.
+
+Tests: `audioKeep.test.mjs` (12), 9 cases in `sessionAudio.test.mjs`, 2 in
+`dropbox.test.mjs`, 2 in `liveAnalysisReject.test.mjs`. Verified by reinstating
+each bug: dropping the coverage check fails tests in both files, dropping the
+settle check fails 1, splicing across a hole fails 1, treating a pruned cloud
+segment as a conflict fails 1, not settling at `end()` fails 1, and not
+restoring the evidence on reload fails 1.
+
+⚠️ The 0.3 evidence threshold is uncalibrated against conversation in a real
+room; nothing here has run on a device yet.
+
 ### Session player: volume and Normalize (September 2026)
 
 Beside the speed slider: **Volume 0–200 %** and a **Normalize** toggle, for

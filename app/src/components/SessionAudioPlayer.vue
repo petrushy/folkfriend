@@ -207,17 +207,17 @@
 
             <div class="d-flex flex-wrap mt-2" style="gap: 8px;">
                 <v-btn
-                    v-for="track in tracks"
-                    :key="track.index"
+                    v-for="part in exportParts"
+                    :key="part.firstSegmentIndex"
                     text
                     small
                     color="primary"
-                    :loading="exportingIndex === track.index"
+                    :loading="exportingIndex === part.index"
                     :disabled="exportingIndex !== null"
-                    @click="exportTrack(track)"
+                    @click="exportTrack(part)"
                 >
-                    {{ tracks.length > 1 ? `Export part ${track.index + 1}` : 'Export audio' }}
-                    ({{ formatSecondsAsDuration(track.durationSeconds) }})
+                    {{ exportParts.length > 1 ? `Export part ${part.index + 1}` : 'Export audio' }}
+                    ({{ formatSecondsAsDuration(part.durationSeconds) }})
                 </v-btn>
                 <v-btn text small :loading="checking" @click="runCheck">
                     Check recording
@@ -235,10 +235,16 @@
                     <v-btn small text @click="readyExport = null">Cancel</v-btn>
                 </div>
             </v-alert>
-            <p v-if="tracks.length > 1" class="caption text--secondary mb-0 mt-1">
-                The session was paused (or the microphone was reacquired) {{ tracks.length - 1 }}
-                {{ tracks.length === 2 ? 'time' : 'times' }}, so the recording exports as
-                {{ tracks.length }} separate files.
+            <p v-if="prunedSeconds > 0" class="caption text--secondary mb-0 mt-1">
+                Recorded keeping only the audio around tunes:
+                {{ formatSecondsAsDuration(prunedSeconds) }} of breaks between sets were not
+                kept, so the recording exports as {{ exportParts.length }}
+                {{ exportParts.length === 1 ? 'file' : 'separate files' }}.
+            </p>
+            <p v-else-if="exportParts.length > 1" class="caption text--secondary mb-0 mt-1">
+                The session was paused (or the microphone was reacquired) {{ exportParts.length - 1 }}
+                {{ exportParts.length === 2 ? 'time' : 'times' }}, so the recording exports as
+                {{ exportParts.length }} separate files.
             </p>
 
             <!-- A recording whose second channel is silent plays out of one
@@ -354,7 +360,7 @@ import {
 } from '@/js/playbackLevel.mjs';
 import { clipWindow, segmentAfter, PREFETCH_LEAD_SECONDS } from '@/js/clipWindow.mjs';
 import {
-    playbackReadManifest as readManifest, buildClip, trackRanges, formatBytes, fileExtensionFor, playsWhole,
+    playbackReadManifest as readManifest, buildClip, trackRanges, recordingParts, formatBytes, fileExtensionFor, playsWhole,
     inspectRecording,
 } from '@/services/sessionAudioStore.js';
 import { summariseCheck, formatCheckReport } from '@/js/recordingCheck.mjs';
@@ -673,6 +679,18 @@ export default {
         // running for ever — but it claims nothing.
         channelProbe() { return this.channelProbes[this.currentTrackIndex] || null; },
         tracks() { return trackRanges(this.manifest); },
+        // What can be exported as one file each: a track, split again at any
+        // break a "tunes only" recording deleted from the middle of it.
+        exportParts() { return recordingParts(this.manifest); },
+        // Stretches deleted as breaks between sets, so a tap there can say so
+        // rather than calling deliberate removal "missing".
+        prunedRanges() {
+            const pruned = (this.manifest && this.manifest.pruned) || [];
+            return pruned.map(p => ({ from: p.startSeconds, to: p.startSeconds + p.durationSeconds }));
+        },
+        prunedSeconds() {
+            return this.prunedRanges.reduce((n, r) => n + Math.max(0, r.to - r.from), 0);
+        },
         bitrateLabel() {
             const bps = this.manifest && this.manifest.bitsPerSecond;
             return bps ? `${Math.round(bps / 1000)} kbps` : '';
@@ -1035,9 +1053,12 @@ export default {
             }
             const segment = this._segmentFor(target);
             if (!segment) {
+                const pruned = this.prunedRanges.some(r => target >= r.from && target < r.to);
                 this.error = target >= this.totalSeconds
                     ? 'That part of the session has not been saved yet — it is written every few minutes.'
-                    : 'That part of the recording is missing.';
+                    : pruned
+                        ? 'That was a break between tunes, and its audio was not kept.'
+                        : 'That part of the recording is missing.';
                 return;
             }
             this.error = '';
@@ -1946,7 +1967,7 @@ export default {
         _exportHint() {
             const audio = this.$refs.audio;
             const code = audio && audio.error && audio.error.code;
-            if (code !== 4 || !this.tracks.length) return '';
+            if (code !== 4 || !this.exportParts.length) return '';
             return ' You can still export this part and play it in another app.';
         },
 
@@ -2299,7 +2320,7 @@ export default {
                 if (!clip) throw new Error('nothing recorded for this part');
                 const extension = fileExtensionFor(clip.mimeType);
                 const name = `folkfriend-session-${this.sessionId}` +
-                    `${this.tracks.length > 1 ? `-part${track.index + 1}` : ''}.${extension}`;
+                    `${this.exportParts.length > 1 ? `-part${track.index + 1}` : ''}.${extension}`;
                 // NOT 'audio/mpeg' as the fallback. That is MP3, which no
                 // MediaRecorder produces — declaring it over MP4 or WebM bytes
                 // is the same mislabelling that made a clip unplayable here,

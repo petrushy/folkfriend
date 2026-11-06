@@ -26,6 +26,7 @@
 // cost is an orphan segment, which reclaimOrphans() sweeps up.
 
 import { get, set, del, keys } from 'idb-keyval';
+import { recordingParts } from '@/js/clipWindow.mjs';
 
 export const AUDIO_SCHEMA_VERSION = 1;
 
@@ -500,7 +501,12 @@ export function createManifest({ sessionId, mimeType, bitsPerSecond, channels = 
 // is an orphan — wasted space, reclaimed later — whereas the reverse ordering
 // leaves a manifest pointing at audio that does not exist, which presents to
 // the user as a player that breaks partway through.
-export async function appendSegment(sessionId, segment, trackPatch = null) {
+//
+// `manifestPatch` rides the same manifest write, for bookkeeping that has to be
+// committed together with the segment it describes — the "tunes only" keep
+// and analysed ranges (see js/audioKeep.mjs), which must never be newer on disk
+// than the audio they make claims about.
+export async function appendSegment(sessionId, segment, trackPatch = null, manifestPatch = null) {
     // Outside the chain: reading a few hundred kB out of a fresh Blob need not
     // hold up a delete or a sweep. See storableBytes() for why bytes at all.
     const data = await storableBytes(segment.blob);
@@ -525,6 +531,7 @@ export async function appendSegment(sessionId, segment, trackPatch = null) {
 
         const next = {
             ...manifest,
+            ...(manifestPatch || {}),
             updatedAt: Date.now(),
             finalizedAt: null,
             tracks: patch ? mergeTrack(manifest.tracks, patch) : manifest.tracks,
@@ -732,6 +739,51 @@ export async function deleteSessionAudio(sessionId) {
             try { await del(segmentKey(sessionId, index)); } catch (e) { /* best effort */ }
         }
         chains.delete(sessionId);
+    });
+}
+
+// Deletes stored segments a "tunes only" recording has judged to be a break
+// between sets (js/audioKeep.mjs decides which).
+//
+// Same ordering as deleteSessionAudio, for the same reason: the manifest stops
+// naming the segments FIRST, so an interruption leaves orphans that
+// reclaimOrphans() sweeps, never a manifest pointing at audio that is gone.
+//
+// The timeline is untouched. totalSeconds and clockFloor stay where they are —
+// shrinking either would let later audio take timestamps detections already
+// hold — so a pruned stretch is a hole, which every reader already handles.
+// It is recorded as `pruned`, so the player can say "a break between tunes,
+// not kept" instead of "missing", and so a Dropbox backup can tell a segment
+// deleted on purpose from one this device has lost.
+export async function pruneSegments(sessionId, indices, manifestPatch = null) {
+    const wanted = new Set(indices || []);
+    if (!sessionId || !wanted.size) return readManifest(sessionId);
+    return withSession(sessionId, async () => {
+        const manifest = (await get(manifestKey(sessionId))) || null;
+        if (!manifest || manifest.schema !== AUDIO_SCHEMA_VERSION ||
+            !Array.isArray(manifest.segments)) return null;
+        const removed = manifest.segments.filter(s => wanted.has(s.index));
+        const next = {
+            ...manifest,
+            ...(manifestPatch || {}),
+            updatedAt: Date.now(),
+            segments: manifest.segments.filter(s => !wanted.has(s.index)),
+            bytes: Math.max(0, (manifest.bytes || 0) -
+                removed.reduce((n, s) => n + (s.bytes || 0), 0)),
+            pruned: [...(Array.isArray(manifest.pruned) ? manifest.pruned : []),
+                ...removed.map(s => ({
+                    index: s.index,
+                    trackIndex: s.trackIndex,
+                    startSeconds: s.startSeconds,
+                    durationSeconds: s.durationSeconds,
+                    bytes: s.bytes || 0,
+                }))],
+        };
+        await set(manifestKey(sessionId), next);
+        for (const segment of removed) {
+            try { await del(segmentKey(sessionId, segment.index)); } catch (e) { /* an orphan; swept later */ }
+        }
+        return withInitBlobs(next);
     });
 }
 
@@ -1110,6 +1162,11 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
     for (const meta of overlapping) {
         if (meta.trackIndex !== trackIndex) break;   // never cross a track
         if (requireComplete && meta.startSeconds > coveredTo + 0.001) throw incomplete();
+        // Nor a hole inside one. A track used to be continuous by
+        // construction; a "tunes only" recording deletes segments from the
+        // middle of one, and the next segment's timestamps then jump. Joining
+        // the two would hand the element one file with a gap in its timeline.
+        if (parts.length && meta.startSeconds > coveredTo + JOIN_TOLERANCE_SECONDS) break;
         const local = await readSegment(sessionId, meta.index);
         const wantedOf = seg => chunkSpans(seg)
             .filter(s => s.endSeconds > fromSeconds && s.startSeconds < toSeconds);
@@ -1244,6 +1301,13 @@ export async function buildClip(sessionId, fromSeconds, toSeconds, manifestIn = 
         trackStartSeconds: track.wholeFile && !playsWhole(track) ? clipStart : (track.startSeconds || 0),
     };
 }
+
+// Segment ends are wall-clock measurements that meet within microseconds, not
+// exactly — the tolerance recordedRanges() and clipWindow() use as well.
+const JOIN_TOLERANCE_SECONDS = 0.25;
+
+// One exportable file per contiguous run within a track — see clipWindow.mjs.
+export { recordingParts };
 
 // The whole of one continuous recording stretch, as a single file. Whole-session
 // export is one file per track for the reason given on buildClip().
