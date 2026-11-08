@@ -41,6 +41,7 @@ const FAKE_MIC = `export default {
     async stopContinuous() {},
     async ensureMicHealthy() {},
     getContinuousAudio() { return new Float32Array(0); },
+    currentLevel: 0,
 };`;
 const FAKE_BACKEND = `export default { async transcribeAndQueryPCMSignal() { return { results: [] }; } };`;
 const FAKE_GEO = `export default { beginSession() {}, async getFix() { return null; } };`;
@@ -487,6 +488,27 @@ await test("the session page's switch supersedes a capture", async () => {
     await service.syncAudioRecording();
     assert.equal(service.tuneCapture, null);
     assert.equal(recorder.isActive, false, 'switch OFF stops it, captured tune included');
+});
+
+await test('the record button shows the level being RECORDED: none when muted or not recording', async () => {
+    const { service, recorder } = await loadCaptureService();
+    const mic = (await import(path.join(tmpDir, 'fake-mic.mjs'))).default;
+    play(service, 1, 0, 6);
+    await service.captureTune();
+    recorder.isRecording = true;
+    recorder.muted = false;
+    mic.currentLevel = Math.pow(10, -5 / 20);
+    assert.equal(service.tuneCaptureLevel(), 1, 'loud');
+    mic.currentLevel = Math.pow(10, -27.5 / 20);
+    assert.ok(Math.abs(service.tuneCaptureLevel() - 0.5) < 1e-9, 'mid-scale on the meter\'s dB range');
+    mic.currentLevel = 0;
+    assert.equal(service.tuneCaptureLevel(), 0, 'no sound arriving');
+    mic.currentLevel = 0.3;
+    recorder.muted = true;
+    assert.equal(service.tuneCaptureLevel(), 0, 'a muted recording keeps silence');
+    recorder.muted = false;
+    recorder.isRecording = false;
+    assert.equal(service.tuneCaptureLevel(), 0, 'the recorder is not running');
 });
 
 await rm(tmpDir, { recursive: true, force: true });

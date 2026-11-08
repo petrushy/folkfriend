@@ -929,6 +929,16 @@ await test('a browser that cannot clone loses the CONTROL, not the recording', a
     }
 });
 
+await test('currentLevel can be read alongside the volume meter, and goes to 0 when audio stops', async () => {
+    const { mic } = await loadMic();
+    mic._accumulateRms(new Float32Array(1024).fill(0.1));
+    assert.ok(Math.abs(mic.currentLevel - 0.1) < 1e-6);
+    assert.ok(Math.abs(mic.currentLevel - 0.1) < 1e-6, 'reading it does not reset it');
+    assert.ok(mic.getRmsLevel() > 0, 'and it does not steal the meter\'s reading');
+    mic._lastChunkAt = Date.now() - 1500;
+    assert.equal(mic.currentLevel, 0, 'a capture that has stopped delivering must not show its last level');
+});
+
 await rm(tmpDir, { recursive: true, force: true });
 
 console.log(`\n${passed} passed, ${failed} failed\n`);

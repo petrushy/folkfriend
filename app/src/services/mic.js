@@ -199,6 +199,12 @@ class MicService {
         // the meter says it is fine. Accumulated here rather than measured
         // separately because the loop over the buffer is already running.
         this._peakSquared = 0;
+        // RMS of the most recent chunk and when it arrived. Unlike the two
+        // accumulators above this is NOT reset on read, so any number of
+        // displays can look at it without stealing readings from the volume
+        // meter — see currentLevel.
+        this._lastChunkRms = 0;
+        this._lastChunkAt = 0;
 
         this._ringBuffer = [];
         this._ringBufferMaxChunks = 0;
@@ -773,7 +779,21 @@ class MicService {
         this._rmsSquaredSum += sum;
         this._rmsSampleCount += samples.length;
         if (loudest > this._peakSquared) this._peakSquared = loudest;
+        if (samples.length) {
+            this._lastChunkRms = Math.sqrt(sum / samples.length);
+            this._lastChunkAt = Date.now();
+        }
         return sum;
+    }
+
+    // The level of the most recent audio (linear RMS, 0..1), for displays
+    // that only want "is sound arriving, and how loud". Non-destructive, so
+    // it can be read alongside the volume meter. Reads 0 once nothing has
+    // arrived for a second: a frozen capture must not keep showing its last
+    // level, which is the one thing this reading exists to reveal.
+    get currentLevel() {
+        if (!this._lastChunkAt || Date.now() - this._lastChunkAt > 1000) return 0;
+        return this._lastChunkRms;
     }
 
     // Returns the integrated RMS level since the last call (linear amplitude,

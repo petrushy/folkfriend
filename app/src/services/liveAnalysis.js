@@ -20,6 +20,11 @@ import eventBus from '@/eventBus.js';
 // rule stays "two minutes", which is something a user can predict.
 const REJECT_COOLDOWN_SECONDS = 120;
 
+// The record button's level display: silence to a loud tune, in dBFS RMS.
+// Same span the volume meter uses for its LEDs, so the two agree.
+const CAPTURE_LEVEL_FLOOR_DB = -50;
+const CAPTURE_LEVEL_CEIL_DB = -5;
+
 // How long an edit or a still-playing tune waits before the session is written
 // again. Long enough that a burst of corrections costs one write, short enough
 // that closing the tab loses at most a few seconds of the list.
@@ -871,6 +876,18 @@ class LiveAnalysisService {
         if (this.tuneCapture) return 'capturing';
         if (store.userSettings.recordSessionAudio || sessionRecorder.isActive) return 'recording';
         return 'available';
+    }
+
+    // How loud the audio going into the one-tune recording is, 0..1 on a
+    // dB scale, for the record button to show that sound really is being
+    // kept. 0 when nothing is being recorded or the recording is muted —
+    // a muted recording is keeping silence, whatever the microphone hears.
+    tuneCaptureLevel() {
+        if (!this.tuneCapture || !sessionRecorder.isRecording || sessionRecorder.muted) return 0;
+        const rms = micService.currentLevel || 0;
+        if (rms <= 0) return 0;
+        const db = 20 * Math.log10(rms);
+        return Math.max(0, Math.min(1, (db - CAPTURE_LEVEL_FLOOR_DB) / (CAPTURE_LEVEL_CEIL_DB - CAPTURE_LEVEL_FLOOR_DB)));
     }
 
     // The button tapped again: stop now.
