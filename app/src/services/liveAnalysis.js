@@ -878,12 +878,15 @@ class LiveAnalysisService {
         return 'available';
     }
 
-    // How loud the audio going into the one-tune recording is, 0..1 on a
-    // dB scale, for the record button to show that sound really is being
-    // kept. 0 when nothing is being recorded or the recording is muted —
-    // a muted recording is keeping silence, whatever the microphone hears.
-    tuneCaptureLevel() {
-        if (!this.tuneCapture || !sessionRecorder.isRecording || sessionRecorder.muted) return 0;
+    // How loud the audio being RECORDED is, 0..1 on a dB scale, for the
+    // record button — whether the recording is a one-tune capture or the
+    // whole session (the switch on the session page). Null when nothing is
+    // being recorded, so the button can tell "not recording" from
+    // "recording silence"; 0 when recording but muted or no sound is
+    // arriving — a muted recording keeps silence, whatever the mic hears.
+    recordingLevel() {
+        if (!sessionRecorder.isRecording) return null;
+        if (sessionRecorder.muted) return 0;
         const rms = micService.currentLevel || 0;
         if (rms <= 0) return 0;
         const db = 20 * Math.log10(rms);

@@ -490,25 +490,25 @@ await test("the session page's switch supersedes a capture", async () => {
     assert.equal(recorder.isActive, false, 'switch OFF stops it, captured tune included');
 });
 
-await test('the record button shows the level being RECORDED: none when muted or not recording', async () => {
+await test('the record button shows the level being RECORDED, a whole-session recording included', async () => {
     const { service, recorder } = await loadCaptureService();
     const mic = (await import(path.join(tmpDir, 'fake-mic.mjs'))).default;
-    play(service, 1, 0, 6);
-    await service.captureTune();
+    recorder.isRecording = false;
+    mic.currentLevel = 0.3;
+    assert.equal(service.recordingLevel(), null, 'nothing recorded: no meter at all, not a silent one');
+
+    // No one-tune capture: the session page's switch is recording.
     recorder.isRecording = true;
     recorder.muted = false;
     mic.currentLevel = Math.pow(10, -5 / 20);
-    assert.equal(service.tuneCaptureLevel(), 1, 'loud');
+    assert.equal(service.recordingLevel(), 1, 'loud');
     mic.currentLevel = Math.pow(10, -27.5 / 20);
-    assert.ok(Math.abs(service.tuneCaptureLevel() - 0.5) < 1e-9, 'mid-scale on the meter\'s dB range');
+    assert.ok(Math.abs(service.recordingLevel() - 0.5) < 1e-9, 'mid-scale on the meter\'s dB range');
     mic.currentLevel = 0;
-    assert.equal(service.tuneCaptureLevel(), 0, 'no sound arriving');
+    assert.equal(service.recordingLevel(), 0, 'recording, but no sound arriving');
     mic.currentLevel = 0.3;
     recorder.muted = true;
-    assert.equal(service.tuneCaptureLevel(), 0, 'a muted recording keeps silence');
-    recorder.muted = false;
-    recorder.isRecording = false;
-    assert.equal(service.tuneCaptureLevel(), 0, 'the recorder is not running');
+    assert.equal(service.recordingLevel(), 0, 'a muted recording keeps silence');
 });
 
 await rm(tmpDir, { recursive: true, force: true });
