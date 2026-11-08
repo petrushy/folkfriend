@@ -65,6 +65,19 @@ const AUDIO_STALL_MS = 1500;
 // dead capture is exact zeroes.
 const SILENT_RMS = 1e-6;
 
+// The same failure in a second costume, reported from the field (November
+// 2026): the volume meter frozen at two or three bars, nothing recognised,
+// nothing on screen, and only a restart bringing the microphone back. A frozen
+// meter means chunks are still arriving and they are not silent — so the check
+// above passes — but their level never moves. The likeliest reading is a
+// capture replaying one stale buffer after an interruption.
+//
+// A live microphone cannot do that: two consecutive buffers of real input
+// never have bit-identical energy, noise floor included. So a chunk whose sum
+// of squares exactly equals the previous chunk's is not counted as sound, and
+// a capture producing nothing else ages into the silence fault below and is
+// rebuilt by exactly the same path, escalation included.
+
 // How long that has to persist before the capture is rebuilt, escalating each
 // time a rebuild fails to bring the sound back. Without the escalation, a
 // genuinely silent input (a muted external interface, an aggressive noise gate
@@ -179,6 +192,11 @@ class MicService {
         this._lastSoundAt = 0;
         this._silenceStrikes = 0;
         this._silenceReported = false;
+        // Energy of the previous chunk, and whether the latest run of
+        // soundless chunks is a REPEAT rather than zeroes — only for saying
+        // which it was. See the note above SILENT_RMS's neighbour.
+        this._prevSumSquares = -1;
+        this._repeating = false;
 
         // What the device ACTUALLY applied, from the track itself — asking for
         // a constraint and getting it are different things, and on an iPhone
@@ -199,6 +217,12 @@ class MicService {
         // the meter says it is fine. Accumulated here rather than measured
         // separately because the loop over the buffer is already running.
         this._peakSquared = 0;
+        // RMS of the most recent chunk and when it arrived. Unlike the two
+        // accumulators above this is NOT reset on read, so any number of
+        // displays can look at it without stealing readings from the volume
+        // meter — see currentLevel.
+        this._lastChunkRms = 0;
+        this._lastLevelAt = 0;
 
         this._ringBuffer = [];
         this._ringBufferMaxChunks = 0;
@@ -490,7 +514,7 @@ class MicService {
             // Count the attempt before making it, so a rebuild that does not
             // restore the sound waits longer before the next one.
             this._silenceStrikes++;
-            fault = 'no signal';
+            fault = this._repeating ? 'audio frozen (the same buffer repeating)' : 'no signal';
 
             // Rebuilding usually fixes this and the user never needs to know.
             // Once a rebuild has already failed to bring the sound back, it is
@@ -499,7 +523,11 @@ class MicService {
             // exists to end — so say so.
             if (this._silenceStrikes > 1 && !this._silenceReported) {
                 this._silenceReported = true;
-                eventBus.$emit('micLost', { reason: 'no signal from the microphone' });
+                eventBus.$emit('micLost', {
+                    reason: this._repeating
+                        ? 'the microphone is stuck repeating the same sound'
+                        : 'no signal from the microphone',
+                });
             }
         }
 
@@ -601,9 +629,16 @@ class MicService {
         this._lastChunkAt = Date.now();
         const sumSquares = this._accumulateRms(channelData);
 
+        // A buffer bit-identical in energy to the one before is a capture
+        // replaying itself, not a microphone — see the note by SILENT_RMS.
+        const repeat = sumSquares === this._prevSumSquares;
+        this._prevSumSquares = sumSquares;
+        const audible = sumSquares > channelData.length * SILENT_RMS * SILENT_RMS;
+        if (audible) this._repeating = repeat;
+
         // Real audio: the capture is alive, and any escalated silence window is
         // forgotten.
-        if (sumSquares > channelData.length * SILENT_RMS * SILENT_RMS) {
+        if (audible && !repeat) {
             this._lastSoundAt = Date.now();
             this._silenceStrikes = 0;
             if (this._silenceReported) {
@@ -773,7 +808,21 @@ class MicService {
         this._rmsSquaredSum += sum;
         this._rmsSampleCount += samples.length;
         if (loudest > this._peakSquared) this._peakSquared = loudest;
+        if (samples.length) {
+            this._lastChunkRms = Math.sqrt(sum / samples.length);
+            this._lastLevelAt = Date.now();
+        }
         return sum;
+    }
+
+    // The level of the most recent audio (linear RMS, 0..1), for displays
+    // that only want "is sound arriving, and how loud". Non-destructive, so
+    // it can be read alongside the volume meter. Reads 0 once nothing has
+    // arrived for a second: a frozen capture must not keep showing its last
+    // level, which is the one thing this reading exists to reveal.
+    get currentLevel() {
+        if (!this._lastLevelAt || Date.now() - this._lastLevelAt > 1000) return 0;
+        return this._lastChunkRms;
     }
 
     // Returns the integrated RMS level since the last call (linear amplitude,

@@ -157,7 +157,21 @@ class FakeAudioContext {
         // things" passes against code that silenced the wrong branch.
         const captureTrack = this.sourceTrack;
         const level = (captureTrack && captureTrack.enabled === false) ? 0 : value;
-        const data = new Float32Array(this.processor.bufferSize).fill(level);
+        for (let i = 0; i < count; i++) {
+            // Real input never repeats bit-for-bit, and mic.js now treats a
+            // repeat as a frozen capture — so a non-silent fake buffer varies
+            // a hair from one chunk to the next, as a real noise floor does.
+            this._jitter = (this._jitter || 0) + 1;
+            const sample = level === 0 ? 0 : level + (this._jitter % 997) * 1e-7;
+            const data = new Float32Array(this.processor.bufferSize).fill(sample);
+            this.processor.onaudioprocess({ inputBuffer: { getChannelData: () => data } });
+        }
+        return count;
+    }
+    // One stale buffer handed back again and again: the frozen-meter failure.
+    deliverFrozen(count = 1, value = 0.05) {
+        if (!this.processor || !this.processor.onaudioprocess) return 0;
+        const data = new Float32Array(this.processor.bufferSize).fill(value);
         for (let i = 0; i < count; i++) {
             this.processor.onaudioprocess({ inputBuffer: { getChannelData: () => data } });
         }
@@ -478,6 +492,35 @@ await test('clipping shows in the peak while the average still reads comfortable
     // Both readings reset, so one clip is never reported over and over — and
     // in particular not again on the next tick that carries no audio at all.
     assert.equal(mic.getPeakLevel(), 0);
+    await mic.stopContinuous();
+});
+
+await test('a capture replaying one stale buffer is rebuilt, though it is not silent', async () => {
+    // From the field: the meter frozen at two or three bars, nothing
+    // recognised, nothing on screen, a restart the only fix. Chunks arrive and
+    // are not silent, so every older check passes.
+    const { mic, bus } = await loadMic();
+    await mic.startContinuous(10);
+    env.contexts[0].deliver(3, 0.05);
+
+    env.contexts[0].deliverFrozen(200, 0.05);
+    assert.ok(mic.currentLevel > 0, 'the meter still shows a level — that is the trap');
+    assert.equal(await mic.ensureMicHealthy(), true);
+    assert.equal(env.streams.length, 1, 'not condemned straight away');
+
+    mic._lastSoundAt = Date.now() - 11_000;
+    env.contexts[0].deliverFrozen(5, 0.05);
+    assert.equal(await mic.ensureMicHealthy(), true);
+    assert.equal(env.streams.length, 2, 'the frozen capture is rebuilt');
+
+    // A rebuild that brings the same thing back is reported, naming it.
+    openContexts()[0].deliverFrozen(5, 0.05);
+    mic._lastSoundAt = Date.now() - 31_000;
+    openContexts()[0].deliverFrozen(5, 0.05);
+    await mic.ensureMicHealthy();
+    const lost = bus.emitted.filter(e => e[0] === 'micLost').pop();
+    assert.ok(lost && /repeating/.test(lost[1].reason), 'the user is told, and told what');
+
     await mic.stopContinuous();
 });
 
@@ -927,6 +970,16 @@ await test('a browser that cannot clone loses the CONTROL, not the recording', a
         FakeTrack.prototype.clone = saved;
         await mic.stopContinuous();
     }
+});
+
+await test('currentLevel can be read alongside the volume meter, and goes to 0 when audio stops', async () => {
+    const { mic } = await loadMic();
+    mic._accumulateRms(new Float32Array(1024).fill(0.1));
+    assert.ok(Math.abs(mic.currentLevel - 0.1) < 1e-6);
+    assert.ok(Math.abs(mic.currentLevel - 0.1) < 1e-6, 'reading it does not reset it');
+    assert.ok(mic.getRmsLevel() > 0, 'and it does not steal the meter\'s reading');
+    mic._lastLevelAt = Date.now() - 1500;
+    assert.equal(mic.currentLevel, 0, 'a capture that has stopped delivering must not show its last level');
 });
 
 await rm(tmpDir, { recursive: true, force: true });

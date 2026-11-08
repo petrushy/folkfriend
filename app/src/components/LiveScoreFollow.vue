@@ -35,13 +35,19 @@
                     <button
                         v-if="captureState !== 'not-listening'"
                         class="captureBtn"
-                        :class="{ 'captureBtn--on': capturing }"
+                        :class="{ 'captureBtn--on': capturing, 'captureBtn--silent': capturing && captureLevel === 0 }"
+                        :style="capturing ? captureLevelStyle : null"
                         :title="captureTitle"
                         :aria-pressed="String(capturing)"
                         :disabled="captureBusy || captureState === 'recording'"
                         @click="toggleCapture"
                     >
-                        <v-icon :color="capturing ? 'red darken-2' : (captureState === 'recording' ? 'grey lighten-2' : 'grey darken-1')">
+                        <!-- While recording, the button IS the level meter:
+                             the icon brightens and a ring glows with the sound
+                             being kept, and it goes grey when none is arriving
+                             — so "recording" and "recording something" can be
+                             told apart at a glance, in no extra space. -->
+                        <v-icon :color="capturing ? (captureLevel === 0 ? 'grey' : 'red darken-2') : (captureState === 'recording' ? 'grey lighten-2' : 'grey darken-1')">
                             {{ capturing ? captureOnIcon : captureOffIcon }}
                         </v-icon>
                     </button>
@@ -245,12 +251,24 @@ export default {
             capturing: !!liveAnalysisService.tuneCapture,
             captureState: liveAnalysisService.tuneCaptureAvailability(),
             captureBusy: false,
+            // 0..1, how loud the audio being recorded is. Polled while
+            // capturing; see _syncCaptureLevelPolling().
+            captureLevel: 0,
             // What a capture that has just ended did, or why one could not
             // start. Cleared after a few seconds.
             captureNote: '',
         };
     },
     computed: {
+        captureLevelStyle() {
+            const level = this.captureLevel;
+            return {
+                // Box-shadow, not size: the ring grows outwards without
+                // moving anything else in the header.
+                boxShadow: `0 0 ${2 + 10 * level}px ${1 + 4 * level}px rgba(211, 47, 47, ${0.15 + 0.6 * level})`,
+                '--capture-icon-opacity': String(0.5 + 0.5 * level),
+            };
+        },
         captureTitle() {
             if (this.capturing) return 'Recording this tune — tap to stop now';
             if (this.captureState === 'recording') return 'Audio is already being recorded';
@@ -288,11 +306,13 @@ export default {
 
         this._onCaptureState = (state = {}) => {
             this.capturing = !!state.capturing;
+            this._syncCaptureLevelPolling();
             // A capture that ends or starts changes whether the recorder runs.
             this.captureState = liveAnalysisService.tuneCaptureAvailability();
             if (state.message) this._showCaptureNote(state.message);
         };
         eventBus.$on('liveAnalysisCaptureState', this._onCaptureState);
+        this._syncCaptureLevelPolling();
 
         this._wakeLock = null;
         this._onVisibilityChange = () => {
@@ -309,6 +329,8 @@ export default {
         eventBus.$off('liveAnalysisTimerTick', this._onTimerTick);
         eventBus.$off('liveAnalysisCaptureState', this._onCaptureState);
         clearTimeout(this._captureNoteTimer);
+        clearInterval(this._captureLevelTimer);
+        this._captureLevelTimer = null;
         this._releaseWakeLock();
         clearTimeout(this._scoreLoadTimer);
         setLastShown({
@@ -359,6 +381,19 @@ export default {
             this.frozen = false;
             this._resolveFromDetections(liveAnalysisService.detections);
         },
+        // ~8 times a second, only while a capture runs: fast enough to move
+        // with the music, and nothing at all the rest of the time.
+        _syncCaptureLevelPolling() {
+            if (this.capturing && !this._captureLevelTimer) {
+                this._captureLevelTimer = setInterval(() => {
+                    this.captureLevel = liveAnalysisService.tuneCaptureLevel();
+                }, 125);
+            } else if (!this.capturing && this._captureLevelTimer) {
+                clearInterval(this._captureLevelTimer);
+                this._captureLevelTimer = null;
+                this.captureLevel = 0;
+            }
+        },
         _showCaptureNote(text) {
             this.captureNote = text;
             clearTimeout(this._captureNoteTimer);
@@ -377,6 +412,7 @@ export default {
             } finally {
                 // Read back rather than trusting the tap.
                 this.capturing = !!liveAnalysisService.tuneCapture;
+                this._syncCaptureLevelPolling();
                 this.captureState = liveAnalysisService.tuneCaptureAvailability();
                 this.captureBusy = false;
             }
@@ -668,17 +704,30 @@ export default {
     cursor: pointer;
 }
 
-.captureBtn--on .v-icon {
-    animation: capturePulse 1.4s ease-in-out infinite;
+.captureBtn--on {
+    border-radius: 50%;
+    transition: box-shadow 0.12s linear;
 }
 
-@keyframes capturePulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.45; }
+.captureBtn--on .v-icon {
+    opacity: var(--capture-icon-opacity, 1);
+    transition: opacity 0.12s linear;
+}
+
+/* Recording, but no sound is reaching it: a slow pulse, so it reads as
+   "waiting" rather than as a button that has simply gone dark. */
+.captureBtn--silent .v-icon {
+    animation: captureSilent 1.6s ease-in-out infinite;
+}
+
+@keyframes captureSilent {
+    0%, 100% { opacity: 0.9; }
+    50% { opacity: 0.35; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .captureBtn--on .v-icon { animation: none; }
+    .captureBtn--on, .captureBtn--on .v-icon { transition: none; }
+    .captureBtn--silent .v-icon { animation: none; }
 }
 
 .captureFlag {

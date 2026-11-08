@@ -98,6 +98,7 @@ const service = {
         return this.__captureResult;
     },
     async cancelTuneCapture() { this.tuneCapture = null; },
+    tuneCaptureLevel() { return 0; },
     // The detection LED, scriptable so the overlay's wiring can be checked
     // without the real service. Its levels are pinned in
     // detectionFreshness.test.mjs.
