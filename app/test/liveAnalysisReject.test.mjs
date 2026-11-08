@@ -90,6 +90,7 @@ async function loadService() {
         ["from '@/js/sessionAnalysis.js'", `from '${sessionAnalysisCopy}'`],
         ["from '@/js/biasResults.mjs'", `from '${biasModule}'`],
         ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
+        ["from '@/js/tuneCapture.mjs'", `from '${path.join(srcDir, 'js', 'tuneCapture.mjs')}'`],
         ["from '@/js/audioKeep.mjs'", `from '${path.join(srcDir, 'js', 'audioKeep.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
@@ -372,6 +373,120 @@ await test('a window that was not really analysed is never reported as a break',
     service._reportAnalysedWindow(105, { results: [] }, service.options);
     store.state.indexLoaded = true;
     assert.deepEqual(recorder.__notes, []);
+});
+
+console.log('\nrecord this tune');
+
+// A recorder fake that really turns on and off, so the reconcile path is the
+// real one and only the MediaRecorder underneath is pretend.
+async function loadCaptureService() {
+    const { service, bus } = await loadService();
+    const recorder = (await import(path.join(tmpDir, 'fake-recorder.mjs'))).default;
+    const store = (await import(path.join(tmpDir, 'fake-store.mjs'))).default;
+    store.userSettings = {};
+    recorder.isActive = false;
+    recorder.error = '';
+    recorder.__fail = false;
+    recorder.resume = async function () { if (!this.__fail) this.isActive = true; return !this.__fail; };
+    recorder.end = async function () { this.isActive = false; };
+    recorder.stop = async function () {};
+    service.sessionId = 'sess-1';
+    service.isRunning = true;
+    service.tuneCapture = null;
+    return { service, bus, recorder, store };
+}
+
+await test('capturing starts the recorder and binds to the tune being played', async () => {
+    const { service, recorder } = await loadCaptureService();
+    play(service, 1, 0, 6);
+    const result = await service.captureTune();
+    assert.deepEqual(result, { ok: true });
+    assert.equal(recorder.isActive, true);
+    assert.equal(service.tuneCapture.tuneId, '1');
+});
+
+await test('the recording stops by itself once the next tune is confirmed', async () => {
+    const { service, recorder, bus } = await loadCaptureService();
+    play(service, 1, 0, 6);
+    await service.captureTune();
+    play(service, 2, 40, 1);
+    service._checkTuneCapture();
+    await service._recorderSync;
+    assert.equal(recorder.isActive, true, 'a single stray window does not end it');
+    play(service, 2, 40, 3);
+    service._checkTuneCapture();
+    await service._recorderSync;
+    assert.equal(service.tuneCapture, null);
+    assert.equal(recorder.isActive, false, 'off again without anyone touching it');
+    const ended = bus.__emits.filter(e => e.name === 'liveAnalysisCaptureState').pop();
+    assert.equal(ended.payload.endedReason, 'next-tune');
+});
+
+await test('not clickable while audio is already being recorded', async () => {
+    const { service, recorder, store } = await loadCaptureService();
+    recorder.isActive = true;
+    assert.equal(service.tuneCaptureAvailability(), 'recording');
+    assert.equal((await service.captureTune()).ok, false);
+    assert.equal(service.tuneCapture, null);
+    recorder.isActive = false;
+    store.userSettings = { recordSessionAudio: true };
+    assert.equal(service.tuneCaptureAvailability(), 'recording');
+});
+
+await test('a recorder that cannot start leaves no capture behind', async () => {
+    const { service, recorder } = await loadCaptureService();
+    recorder.__fail = true;
+    recorder.error = 'Not enough free storage to record audio.';
+    const result = await service.captureTune();
+    assert.equal(result.ok, false);
+    assert.match(result.error, /storage/);
+    assert.equal(service.tuneCapture, null);
+});
+
+await test('a Pause ends the capture, so Resume does not record again', async () => {
+    const { service, recorder } = await loadCaptureService();
+    play(service, 1, 0, 6);
+    await service.captureTune();
+    await service.stop();
+    assert.equal(service.tuneCapture, null);
+    service.isRunning = true;
+    await service._syncRecorderToSetting({ resuming: true });
+    assert.equal(recorder.isActive, false);
+});
+
+await test('rejecting the captured tune re-binds rather than stopping the recording', async () => {
+    const { service, recorder } = await loadCaptureService();
+    play(service, 1, 0, 6);
+    play(service, 2, 40, 6);
+    await service.captureTune();
+    assert.equal(service.tuneCapture.tuneId, '2');
+    service.rejectTune(2);
+    assert.equal(service.tuneCapture.tuneId, null, 'unbound, to adopt the right tune next');
+    service._checkTuneCapture();
+    await service._recorderSync;
+    assert.equal(recorder.isActive, true, 'the tune tail reverting to 1 must not end it');
+});
+
+await test('correcting the captured tune renames it rather than ending it', async () => {
+    const { service, recorder } = await loadCaptureService();
+    play(service, 1, 0, 6);
+    await service.captureTune();
+    const tail = service.detections[service.detections.length - 1];
+    service.applyCorrection(tail.id, { tuneId: 9, settingId: '90', title: 'tune-9' });
+    assert.equal(service.tuneCapture.tuneId, '9');
+    service._checkTuneCapture();
+    await service._recorderSync;
+    assert.equal(recorder.isActive, true);
+});
+
+await test("the session page's switch supersedes a capture", async () => {
+    const { service, recorder, store } = await loadCaptureService();
+    play(service, 1, 0, 6);
+    await service.captureTune();
+    store.userSettings.recordSessionAudio = false;
+    await service.syncAudioRecording();
+    assert.equal(service.tuneCapture, null);
+    assert.equal(recorder.isActive, false, 'switch OFF stops it, captured tune included');
 });
 
 await rm(tmpDir, { recursive: true, force: true });
