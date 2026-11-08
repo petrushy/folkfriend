@@ -1144,6 +1144,40 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Record this tune (November 2026)
+
+A record button in the `LiveScoreFollow` header (between the pin and the
+thumbs-down) records **one tune** and turns itself off when that tune is over —
+for the evening that is not worth recording except for that one great tune.
+The rule is pure, in `js/tuneCapture.mjs`; `liveAnalysisService.tuneCapture`
+holds the running capture and is simply a second reason in
+`_reconcileRecorder`'s `wanted()`, so every start and stop still goes through
+the one serialised reconcile.
+
+- **Only clickable when audio is not already being recorded.**
+  `tuneCaptureAvailability()` reads the RECORDER (`sessionRecorder.isActive`)
+  as well as `recordSessionAudio`, like the session page's switch: disabled
+  while recording, hidden while not listening.
+- **It binds to the tune on screen only if that tune is current** (matched
+  within the LED's green limit). Pressed in the first bars of a new tune, while
+  the screen still shows the last one, it stays unbound and adopts the first
+  tune heard after the tap — otherwise it would stop the moment the wanted
+  tune was recognised.
+- **It ends on** another tune confirming itself (a tail detection spanning ≥
+  15 s, the same bar as the short-detection filter, so one stray window does
+  not cut it), on the LED's red limit with no match for the captured tune, or
+  at 20 min as a safety net. Errs towards keeping audio.
+- **Pause ends it**; Resume never records again on a tap made before the break.
+  **Rejecting** the captured tune unbinds it (the name was wrong, the music has
+  not stopped); **correcting** it renames it. The session page's switch
+  supersedes it both ways.
+- Audio from before the tap is not captured (the ring buffer is PCM, not the
+  recorder's container).
+
+Tests: `tuneCapture.test.mjs` (9), 8 cases in `liveAnalysisReject.test.mjs`, 3
+in `liveScoreFollowComponent.test.mjs`. Verified by mutation: dropping the 15 s
+confirmation fails 2, not ending on Pause fails 1. ⚠️ Not yet tried on a device.
+
 ### Session recording: keep only the audio around tunes (November 2026)
 
 Optional, off by default (`userSettings.sessionAudioTunesOnly`, Settings →

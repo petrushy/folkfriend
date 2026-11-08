@@ -9,6 +9,7 @@ import {
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import { detectionFreshness } from '@/js/detectionFreshness.mjs';
 import { MUSIC_EVIDENCE_MIN_SCORE } from '@/js/audioKeep.mjs';
+import { beginCapture, captureVerdict, captureEndMessage } from '@/js/tuneCapture.mjs';
 import eventBus from '@/eventBus.js';
 
 // How long a tune the user has rejected stays suppressed. Without a cooldown
@@ -98,6 +99,13 @@ class LiveAnalysisService {
         // rapid ON→OFF cannot finish with recording on. See
         // _syncRecorderToSetting().
         this._recorderSync = Promise.resolve();
+        // "Record this tune": a recording that is on for one tune only and
+        // ends itself when that tune is over — see js/tuneCapture.mjs. Null
+        // when none is running. While set it is a second reason to record,
+        // beside recordSessionAudio, and nothing else: every start and stop
+        // still goes through _reconcileRecorder(), so a capture cannot
+        // disagree with the session page's switch about what is happening.
+        this.tuneCapture = null;
         // Serialises session writes. Two saves racing (a checkpoint and a
         // finish, say) can otherwise land out of order and leave the older
         // snapshot as the stored one.
@@ -333,6 +341,7 @@ class LiveAnalysisService {
         this.elapsedSeconds = 0;
         this._lastSightingTuneId = null;
         this._rejectedTunes.clear();
+        this.tuneCapture = null;
         this.saveState = 'idle';
         this.saveError = null;
     }
@@ -406,6 +415,15 @@ class LiveAnalysisService {
         const target = this.detections.find(d => d.id === id);
         if (!target || !selection || selection.tuneId == null) return;
 
+        // A correction of the captured tune renames it; it does not end it.
+        // Without this the tail's tuneId changes under the capture and the next
+        // check reads it as the next tune having started.
+        const capture = this.tuneCapture;
+        const tail = this.detections[this.detections.length - 1];
+        if (capture && tail === target && capture.tuneId === String(target.tuneId)) {
+            this.tuneCapture = { ...capture, tuneId: String(selection.tuneId) };
+        }
+
         const epsilon = 1e-6;
         for (const match of this._windowMatches) {
             const withinRow = match.tuneId === target.tuneId &&
@@ -455,6 +473,15 @@ class LiveAnalysisService {
         if (tuneId == null) return;
         const key = String(tuneId);
         this._rejectedTunes.set(key, this.elapsedSeconds);
+        // The user is saying the NAME was wrong, not that the music stopped:
+        // the room is still playing whatever made them press record. Unbind
+        // the capture so it adopts the next tune recognised, with a fresh
+        // allowance — ending it here would stop recording the tune they asked
+        // for, because the detector got its name wrong.
+        if (this.tuneCapture && this.tuneCapture.tuneId === key) {
+            this.tuneCapture = { ...this.tuneCapture, tuneId: null, sinceSeconds: this.elapsedSeconds };
+            this._emitCaptureState();
+        }
 
         // Keep going while the tail is still this tune. One removal normally
         // clears the whole row, since a merged row spans every cluster in it,
@@ -546,6 +573,12 @@ class LiveAnalysisService {
         this.isPaused = false;
         this._stopTimer();
         this._cancelCheckpoint();
+        // A Pause ends a capture. Resuming must never silently start recording
+        // again on the strength of a tap made before the break: the tune it was
+        // for is over, and whatever is played after the break is the user's to
+        // decide about. The recorder itself is paused below as usual and is
+        // closed by the reconcile that Resume runs.
+        if (this.tuneCapture) this._clearTuneCapture('paused');
         // Ends the run: any transcription still in flight resolves into a loop
         // that no longer owns the microphone and must not touch anything.
         this._generation++;
@@ -638,6 +671,9 @@ class LiveAnalysisService {
             // while the user is on it — so the toggle has to take effect
             // without needing a Pause. Not awaited: a slow encoder start must
             // not delay detection.
+            // Before the recorder sync, so a capture that has just ended is
+            // stopped by that same reconcile.
+            this._checkTuneCapture();
             if (healthy) this._syncRecorderToSetting();
 
             // A capture that could not be reacquired leaves the ring buffer
@@ -771,7 +807,126 @@ class LiveAnalysisService {
     // wanted is a per-session decision — some evenings you want the audio, most
     // you do not — so the control lives beside the session rather than in
     // Settings, and takes effect on the session that is running.
-    syncAudioRecording() { return this._syncRecorderToSetting(); }
+    //
+    // The switch is the explicit, whole-session decision, so it supersedes a
+    // one-tune capture in both directions: ON records the rest of the session
+    // anyway, and OFF means stop — including the tune being captured.
+    syncAudioRecording() {
+        if (this.tuneCapture) this._clearTuneCapture('switch');
+        return this._syncRecorderToSetting();
+    }
+
+    // ---- Record this tune -------------------------------------------------
+
+    // Starts recording for the tune being played, to stop by itself when it
+    // is over. Returns { ok, error }, read back from the recorder rather than
+    // assumed: the button must not claim to be recording a tune it is not.
+    //
+    // Only while listening: there is no tune to follow otherwise. And not
+    // while the whole session is being recorded already — there is nothing to
+    // add, and ending the capture would then look as though it should stop a
+    // recording the user asked for separately.
+    async captureTune() {
+        if (!this.sessionId || !this.isRunning) {
+            return { ok: false, error: 'Start listening first.' };
+        }
+        if (this.tuneCaptureAvailability() === 'recording') {
+            return { ok: false, error: 'Audio is already being recorded.' };
+        }
+        if (!this.tuneCapture) {
+            const tail = this.detections[this.detections.length - 1] || null;
+            const last = this.lastWindowMatch();
+            this.tuneCapture = beginCapture({
+                tailTuneId: tail ? tail.tuneId : null,
+                lastMatchSeconds: last && tail && String(last.tuneId) === String(tail.tuneId)
+                    ? last.startSeconds : null,
+                elapsedSeconds: this.elapsedSeconds,
+                options: this.options,
+            });
+            this._emitCaptureState();
+        }
+        // `resuming`: a deliberate tap, so it goes through resume() — which is
+        // also what gives an earlier storage stop its retry.
+        await this._syncRecorderToSetting({ resuming: true });
+        if (!this.tuneCapture) return { ok: false, error: '' };
+        if (!sessionRecorder.isActive) {
+            const error = sessionRecorder.error || 'Recording could not start.';
+            this._clearTuneCapture('failed');
+            return { ok: false, error };
+        }
+        return { ok: true };
+    }
+
+    // Whether the follow view's record button can do anything:
+    //   'not-listening' — no tune to follow;
+    //   'recording'     — audio is already being recorded (the session switch
+    //                     is on, or the recorder is running for any other
+    //                     reason), so the button would add nothing;
+    //   'available'     — tap to record this tune;
+    //   'capturing'     — a capture is running and a tap stops it.
+    // Reads the RECORDER, not only the setting, for the same reason the session
+    // page's switch does: what matters is whether audio is being kept now.
+    tuneCaptureAvailability() {
+        if (!this.sessionId || !this.isRunning) return 'not-listening';
+        if (this.tuneCapture) return 'capturing';
+        if (store.userSettings.recordSessionAudio || sessionRecorder.isActive) return 'recording';
+        return 'available';
+    }
+
+    // The button tapped again: stop now.
+    async cancelTuneCapture() {
+        if (!this.tuneCapture) return;
+        this._clearTuneCapture('cancelled');
+        await this._syncRecorderToSetting();
+    }
+
+    // Applies the rule in js/tuneCapture.mjs. Runs once per analysis cycle,
+    // which is often enough: the rule's own margins are several cycles long.
+    _checkTuneCapture() {
+        const capture = this.tuneCapture;
+        if (!capture) return;
+        const tail = this.detections[this.detections.length - 1] || null;
+        let lastCapturedMatchSeconds = null;
+        if (capture.tuneId != null) {
+            for (let i = this._windowMatches.length - 1; i >= 0; i--) {
+                if (String(this._windowMatches[i].tuneId) === capture.tuneId) {
+                    lastCapturedMatchSeconds = this._windowMatches[i].startSeconds;
+                    break;
+                }
+            }
+        }
+        const verdict = captureVerdict({
+            capture,
+            tail,
+            lastCapturedMatchSeconds,
+            lastMatch: this.lastWindowMatch(),
+            elapsedSeconds: this.elapsedSeconds,
+            options: this.options,
+        });
+        if (verdict.action === 'adopt') {
+            this.tuneCapture = { ...capture, tuneId: verdict.tuneId };
+            this._emitCaptureState();
+        } else if (verdict.action === 'end') {
+            this._clearTuneCapture(verdict.reason);
+            this._syncRecorderToSetting();
+        }
+    }
+
+    _clearTuneCapture(reason) {
+        this.tuneCapture = null;
+        this._emitCaptureState(reason);
+    }
+
+    _emitCaptureState(endedReason = null) {
+        const capture = this.tuneCapture;
+        eventBus.$emit('liveAnalysisCaptureState', {
+            capturing: !!capture,
+            tuneId: capture ? capture.tuneId : null,
+            endedReason,
+            message: endedReason && !['paused', 'switch', 'failed'].includes(endedReason)
+                ? captureEndMessage(endedReason) : '',
+        });
+    }
 
     // `resuming` marks an actual lifecycle transition — start() or Resume — as
     // opposed to the loop's periodic check. Only a transition goes through
@@ -807,7 +962,7 @@ class LiveAnalysisService {
 
     async _reconcileRecorder(resuming) {
         if (!this.sessionId) return;
-        const wanted = () => !!store.userSettings.recordSessionAudio;
+        const wanted = () => !!store.userSettings.recordSessionAudio || !!this.tuneCapture;
 
         if (!wanted()) {
             // end() rather than stop(): stop() is a Pause, and leaves the

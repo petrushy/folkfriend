@@ -26,6 +26,25 @@
                             {{ frozen ? frozenIcon : unfrozenIcon }}
                         </v-icon>
                     </button>
+                    <!-- "This is a great tune, let us capture it!" Records
+                         this tune only and stops by itself when it is over —
+                         see js/tuneCapture.mjs. Shown even before a tune is
+                         recognised, since the moment to press it is usually
+                         the first bars. Disabled while audio is already being
+                         recorded: it is on, so there is nothing to add. -->
+                    <button
+                        v-if="captureState !== 'not-listening'"
+                        class="captureBtn"
+                        :class="{ 'captureBtn--on': capturing }"
+                        :title="captureTitle"
+                        :aria-pressed="String(capturing)"
+                        :disabled="captureBusy || captureState === 'recording'"
+                        @click="toggleCapture"
+                    >
+                        <v-icon :color="capturing ? 'red darken-2' : (captureState === 'recording' ? 'grey lighten-2' : 'grey darken-1')">
+                            {{ capturing ? captureOnIcon : captureOffIcon }}
+                        </v-icon>
+                    </button>
                     <!-- Last, and set apart from (i) and the pin: it is the one
                          destructive button in this row, and sitting between the
                          two most-tapped ones made it easy to hit by mistake. -->
@@ -57,6 +76,12 @@
                     <span class="freshnessLabel">{{ freshness.label }}</span>
                     <span v-if="target" class="scoreReadout">
                         match {{ target.score.toFixed(2) }}
+                    </span>
+                    <span v-if="capturing" class="captureFlag">
+                        ● REC this tune
+                    </span>
+                    <span v-else-if="captureNote" class="captureNote">
+                        {{ captureNote }}
                     </span>
                     <span v-if="target && frozen" class="frozenFlag">
                         frozen
@@ -136,7 +161,7 @@
 </template>
 
 <script>
-import { mdiStar, mdiStarOutline, mdiPin, mdiPinOutline, mdiThumbDownOutline } from '@mdi/js';
+import { mdiStar, mdiStarOutline, mdiPin, mdiPinOutline, mdiThumbDownOutline, mdiRecordCircleOutline, mdiRecordRec } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
@@ -213,9 +238,24 @@ export default {
             frozenIcon: mdiPin,
             unfrozenIcon: mdiPinOutline,
             rejectIcon: mdiThumbDownOutline,
+            captureOnIcon: mdiRecordRec,
+            captureOffIcon: mdiRecordCircleOutline,
+            // Read from the service, which owns the capture — the overlay
+            // only asks for one and reports what is happening.
+            capturing: !!liveAnalysisService.tuneCapture,
+            captureState: liveAnalysisService.tuneCaptureAvailability(),
+            captureBusy: false,
+            // What a capture that has just ended did, or why one could not
+            // start. Cleared after a few seconds.
+            captureNote: '',
         };
     },
     computed: {
+        captureTitle() {
+            if (this.capturing) return 'Recording this tune — tap to stop now';
+            if (this.captureState === 'recording') return 'Audio is already being recorded';
+            return 'Record this tune (stops by itself when the tune is over)';
+        },
         hasValidSettingID() {
             return !!this.target && store._isValidSettingID(this.target.settingId);
         },
@@ -240,8 +280,19 @@ export default {
             // Driven by the clock, not by detections: its job is to change
             // while nothing is being recognised.
             this.freshness = liveAnalysisService.detectionFreshness();
+            // store.userSettings is not reactive, and the session page's
+            // switch can change between ticks.
+            this.captureState = liveAnalysisService.tuneCaptureAvailability();
         };
         eventBus.$on('liveAnalysisTimerTick', this._onTimerTick);
+
+        this._onCaptureState = (state = {}) => {
+            this.capturing = !!state.capturing;
+            // A capture that ends or starts changes whether the recorder runs.
+            this.captureState = liveAnalysisService.tuneCaptureAvailability();
+            if (state.message) this._showCaptureNote(state.message);
+        };
+        eventBus.$on('liveAnalysisCaptureState', this._onCaptureState);
 
         this._wakeLock = null;
         this._onVisibilityChange = () => {
@@ -256,6 +307,8 @@ export default {
         document.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('visibilitychange', this._onVisibilityChange);
         eventBus.$off('liveAnalysisTimerTick', this._onTimerTick);
+        eventBus.$off('liveAnalysisCaptureState', this._onCaptureState);
+        clearTimeout(this._captureNoteTimer);
         this._releaseWakeLock();
         clearTimeout(this._scoreLoadTimer);
         setLastShown({
@@ -305,6 +358,28 @@ export default {
             // the service's own list directly and resolve from that.
             this.frozen = false;
             this._resolveFromDetections(liveAnalysisService.detections);
+        },
+        _showCaptureNote(text) {
+            this.captureNote = text;
+            clearTimeout(this._captureNoteTimer);
+            this._captureNoteTimer = setTimeout(() => { this.captureNote = ''; }, 8000);
+        },
+        async toggleCapture() {
+            if (this.captureBusy) return;
+            this.captureBusy = true;
+            try {
+                if (this.capturing) {
+                    await liveAnalysisService.cancelTuneCapture();
+                } else {
+                    const result = await liveAnalysisService.captureTune();
+                    if (!result.ok && result.error) this._showCaptureNote(`Could not record: ${result.error}`);
+                }
+            } finally {
+                // Read back rather than trusting the tap.
+                this.capturing = !!liveAnalysisService.tuneCapture;
+                this.captureState = liveAnalysisService.tuneCaptureAvailability();
+                this.captureBusy = false;
+            }
         },
         toggleFrozen() {
             this.frozen = !this.frozen;
@@ -580,6 +655,40 @@ export default {
 .freshnessLed--red { background: #c62828; box-shadow: 0 0 6px rgba(198, 40, 40, 0.9); }
 .freshnessLed--idle { background: #9e9e9e; }
 .freshnessLed--off { background: #616161; }
+
+.captureBtn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: none;
+    padding: 10px;
+    margin: -10px 0 -10px 2px;
+    vertical-align: middle;
+    cursor: pointer;
+}
+
+.captureBtn--on .v-icon {
+    animation: capturePulse 1.4s ease-in-out infinite;
+}
+
+@keyframes capturePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .captureBtn--on .v-icon { animation: none; }
+}
+
+.captureFlag {
+    color: #c62828;
+    font-weight: 500;
+}
+
+.captureNote {
+    color: #455a64;
+}
 
 .freshnessLabel {
     margin-left: -4px;

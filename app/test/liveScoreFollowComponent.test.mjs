@@ -67,6 +67,7 @@ export default {
     isFavourite: async () => false,
     addFavourite: async () => {},
     removeFavourite: async () => {},
+    userSettings: {},
 };
 `;
 
@@ -80,6 +81,23 @@ const service = {
     elapsedSeconds: 0,
     detections: [],
     rejectTune(tuneId) { __rejected.push(tuneId); },
+    // "Record this tune". __captureResult scripts what captureTune() answers.
+    isRunning: true,
+    tuneCapture: null,
+    __recording: false,
+    tuneCaptureAvailability() {
+        if (!this.isRunning) return 'not-listening';
+        if (this.tuneCapture) return 'capturing';
+        return this.__recording ? 'recording' : 'available';
+    },
+    __captureResult: { ok: true },
+    __captureCalls: 0,
+    async captureTune() {
+        this.__captureCalls++;
+        if (this.__captureResult.ok) this.tuneCapture = { tuneId: '1' };
+        return this.__captureResult;
+    },
+    async cancelTuneCapture() { this.tuneCapture = null; },
     // The detection LED, scriptable so the overlay's wiring can be checked
     // without the real service. Its levels are pinned in
     // detectionFreshness.test.mjs.
@@ -94,6 +112,8 @@ export const mdiStarOutline = 'star-outline';
 export const mdiPin = 'pin';
 export const mdiPinOutline = 'pin-outline';
 export const mdiThumbDownOutline = 'thumb-down-outline';
+export const mdiRecordCircleOutline = 'record-outline';
+export const mdiRecordRec = 'record-rec';
 `;
 const FAKE_SESSION_ANALYSIS = `export function formatSecondsAsClock(s) { return String(s); }`;
 // The overlay renders these; nothing here touches them.
@@ -143,6 +163,12 @@ async function loadOverlay({ initialDetections = null } = {}) {
     backend.__reset();
     live.__rejected.length = 0;
     live.default.detections = [];
+    live.default.isRunning = true;
+    live.default.tuneCapture = null;
+    live.default.__recording = false;
+    live.default.__captureResult = { ok: true };
+    live.default.__captureCalls = 0;
+    (await import(path.join(tmpDir, 'fake-store.mjs'))).default.userSettings = {};
     follow.clearLastShown();
 
     const mod = await import(`${path.join(tmpDir, 'overlay.mjs')}?v=${Math.random()}`);
@@ -460,6 +486,43 @@ await test('the LED keeps moving while frozen — it is about the room, not the 
 
     assert.equal(vm.target.tuneId, 1, 'the frozen tune must not move');
     assert.equal(vm.freshness.level, 'red');
+});
+
+console.log('\nrecord this tune');
+
+await test('the record button starts a capture and reads the result back', async () => {
+    const { vm, live } = await loadOverlay();
+    assert.equal(vm.captureState, 'available', 'offered while listening');
+    assert.equal(vm.capturing, false);
+    await vm.toggleCapture();
+    assert.equal(live.default.__captureCalls, 1);
+    assert.equal(vm.capturing, true);
+    await vm.toggleCapture();
+    assert.equal(vm.capturing, false, 'a second tap stops it');
+});
+
+await test('a capture that could not start says why and does not claim to record', async () => {
+    const { vm, live } = await loadOverlay();
+    live.default.__captureResult = { ok: false, error: 'Not enough free storage to record audio.' };
+    await vm.toggleCapture();
+    assert.equal(vm.capturing, false);
+    assert.match(vm.captureNote, /Not enough free storage/);
+});
+
+await test('not clickable while audio is already recorded; not shown while nothing is listening', async () => {
+    const { live, component } = await loadOverlay();
+    // A second instance over the same, now re-scripted, fakes.
+    const fresh = () => {
+        const vm = { detections: [], $emit() {} };
+        for (const [name, fn] of Object.entries(component.methods)) vm[name] = fn.bind(vm);
+        Object.assign(vm, component.data.call(vm));
+        return vm;
+    };
+    live.default.__recording = true;
+    assert.equal(fresh().captureState, 'recording', 'already on — the button is disabled');
+    live.default.__recording = false;
+    live.default.isRunning = false;
+    assert.equal(fresh().captureState, 'not-listening', 'no tune to follow while not listening');
 });
 
 await rm(tmpDir, { recursive: true, force: true });

@@ -1575,6 +1575,7 @@ async function loadLiveAnalysis() {
         ["from '@/js/sessionAnalysis.js'", `from '${path.join(sessionAnalysisTmpDir, 'sessionAnalysis.mjs')}'`],
         ["from '@/js/biasResults.mjs'", `from '${path.join(srcDir, 'js', 'biasResults.mjs')}'`],
         ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
+        ["from '@/js/tuneCapture.mjs'", `from '${path.join(srcDir, 'js', 'tuneCapture.mjs')}'`],
         ["from '@/js/audioKeep.mjs'", `from '${path.join(srcDir, 'js', 'audioKeep.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
