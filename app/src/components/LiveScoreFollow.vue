@@ -35,20 +35,22 @@
                     <button
                         v-if="captureState !== 'not-listening'"
                         class="captureBtn"
-                        :class="{ 'captureBtn--on': capturing, 'captureBtn--silent': capturing && captureLevel === 0 }"
-                        :style="capturing ? captureLevelStyle : null"
+                        :class="{ 'captureBtn--on': recordingNow, 'captureBtn--silent': captureLevel === 0 }"
+                        :style="recordingNow ? captureLevelStyle : null"
                         :title="captureTitle"
                         :aria-pressed="String(capturing)"
                         :disabled="captureBusy || captureState === 'recording'"
                         @click="toggleCapture"
                     >
-                        <!-- While recording, the button IS the level meter:
-                             the icon brightens and a ring glows with the sound
-                             being kept, and it goes grey when none is arriving
-                             — so "recording" and "recording something" can be
-                             told apart at a glance, in no extra space. -->
-                        <v-icon :color="capturing ? (captureLevel === 0 ? 'grey' : 'red darken-2') : (captureState === 'recording' ? 'grey lighten-2' : 'grey darken-1')">
-                            {{ capturing ? captureOnIcon : captureOffIcon }}
+                        <!-- Whenever audio is being recorded — this tune, or the
+                             whole session — the button IS the level meter: the
+                             icon brightens and a ring glows with the sound being
+                             kept, and it goes grey and pulses when none is
+                             arriving. So "recording" and "recording something"
+                             can be told apart at a glance, in no extra space.
+                             Still not clickable for a whole-session recording. -->
+                        <v-icon :color="recordingNow ? (captureLevel === 0 ? 'grey' : 'red darken-2') : (captureState === 'recording' ? 'grey lighten-2' : 'grey darken-1')">
+                            {{ (recordingNow || capturing) ? captureOnIcon : captureOffIcon }}
                         </v-icon>
                     </button>
                     <!-- Last, and set apart from (i) and the pin: it is the one
@@ -251,17 +253,21 @@ export default {
             capturing: !!liveAnalysisService.tuneCapture,
             captureState: liveAnalysisService.tuneCaptureAvailability(),
             captureBusy: false,
-            // 0..1, how loud the audio being recorded is. Polled while
-            // capturing; see _syncCaptureLevelPolling().
-            captureLevel: 0,
+            // 0..1, how loud the audio being recorded is, or null when
+            // nothing is being recorded. Polled while the overlay is open;
+            // see _syncCaptureLevelPolling().
+            captureLevel: liveAnalysisService.recordingLevel ? liveAnalysisService.recordingLevel() : null,
             // What a capture that has just ended did, or why one could not
             // start. Cleared after a few seconds.
             captureNote: '',
         };
     },
     computed: {
+        recordingNow() {
+            return this.captureLevel !== null && this.captureLevel !== undefined;
+        },
         captureLevelStyle() {
-            const level = this.captureLevel;
+            const level = this.captureLevel || 0;
             return {
                 // Box-shadow, not size: the ring grows outwards without
                 // moving anything else in the header.
@@ -271,7 +277,11 @@ export default {
         },
         captureTitle() {
             if (this.capturing) return 'Recording this tune — tap to stop now';
-            if (this.captureState === 'recording') return 'Audio is already being recorded';
+            if (this.captureState === 'recording') {
+                return this.recordingNow
+                    ? 'Recording the whole session — the ring shows the level being recorded'
+                    : 'Audio is already being recorded';
+            }
             return 'Record this tune (stops by itself when the tune is over)';
         },
         hasValidSettingID() {
@@ -301,6 +311,7 @@ export default {
             // store.userSettings is not reactive, and the session page's
             // switch can change between ticks.
             this.captureState = liveAnalysisService.tuneCaptureAvailability();
+            this._syncCaptureLevelPolling();
         };
         eventBus.$on('liveAnalysisTimerTick', this._onTimerTick);
 
@@ -381,17 +392,21 @@ export default {
             this.frozen = false;
             this._resolveFromDetections(liveAnalysisService.detections);
         },
-        // ~8 times a second, only while a capture runs: fast enough to move
-        // with the music, and nothing at all the rest of the time.
+        // ~8 times a second while listening: fast enough to move with the
+        // music. It has to run whenever the session is listening, not only
+        // during a one-tune capture — a whole-session recording is started
+        // from another page, and the button must show it too. The read is
+        // two property lookups, so this costs nothing measurable.
         _syncCaptureLevelPolling() {
-            if (this.capturing && !this._captureLevelTimer) {
+            const listening = this.captureState !== 'not-listening';
+            if (listening && !this._captureLevelTimer) {
                 this._captureLevelTimer = setInterval(() => {
-                    this.captureLevel = liveAnalysisService.tuneCaptureLevel();
+                    this.captureLevel = liveAnalysisService.recordingLevel();
                 }, 125);
-            } else if (!this.capturing && this._captureLevelTimer) {
+            } else if (!listening && this._captureLevelTimer) {
                 clearInterval(this._captureLevelTimer);
                 this._captureLevelTimer = null;
-                this.captureLevel = 0;
+                this.captureLevel = null;
             }
         },
         _showCaptureNote(text) {
@@ -702,6 +717,10 @@ export default {
     margin: -10px 0 -10px 2px;
     vertical-align: middle;
     cursor: pointer;
+}
+
+.captureBtn:disabled {
+    cursor: default;
 }
 
 .captureBtn--on {

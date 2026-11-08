@@ -98,7 +98,8 @@ const service = {
         return this.__captureResult;
     },
     async cancelTuneCapture() { this.tuneCapture = null; },
-    tuneCaptureLevel() { return 0; },
+    __level: null,
+    recordingLevel() { return this.__level; },
     // The detection LED, scriptable so the overlay's wiring can be checked
     // without the real service. Its levels are pinned in
     // detectionFreshness.test.mjs.
@@ -167,6 +168,7 @@ async function loadOverlay({ initialDetections = null } = {}) {
     live.default.isRunning = true;
     live.default.tuneCapture = null;
     live.default.__recording = false;
+    live.default.__level = null;
     live.default.__captureResult = { ok: true };
     live.default.__captureCalls = 0;
     (await import(path.join(tmpDir, 'fake-store.mjs'))).default.userSettings = {};
@@ -526,7 +528,28 @@ await test('not clickable while audio is already recorded; not shown while nothi
     assert.equal(fresh().captureState, 'not-listening', 'no tune to follow while not listening');
 });
 
+await test('a whole-session recording lights the button although it cannot be pressed', async () => {
+    // From the field: the switch on the session page was recording, and the
+    // button sat pale grey with no sign of it.
+    const { live, component } = await loadOverlay();
+    live.default.__recording = true;
+    live.default.__level = 0.6;
+    const vm = { detections: [], $emit() {} };
+    for (const [name, fn] of Object.entries(component.methods)) vm[name] = fn.bind(vm);
+    Object.assign(vm, component.data.call(vm));
+    for (const [name, fn] of Object.entries(component.computed || {})) {
+        Object.defineProperty(vm, name, { get: fn.bind(vm), configurable: true });
+    }
+    assert.equal(vm.captureState, 'recording', 'still not clickable');
+    assert.equal(vm.recordingNow, true, 'but shown as recording');
+    assert.match(vm.captureLevelStyle.boxShadow, /rgba/);
+    live.default.__level = null;
+    assert.equal(component.data.call(vm).captureLevel, null, 'and dark when nothing is recorded');
+});
+
 await rm(tmpDir, { recursive: true, force: true });
 
 console.log(`\n${passed} passed, ${failed} failed`);
-if (failed) process.exit(1);
+// Explicit: the overlay's level poll is a live interval on each instance
+// built here, and no test runs its beforeDestroy().
+process.exit(failed ? 1 : 0);
