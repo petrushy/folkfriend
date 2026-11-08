@@ -4064,6 +4064,19 @@ getting them wrong is tearing down a working microphone in a quiet room:
   does it emit `micLost`, because by then it is not going to fix itself and an
   app claiming to listen while hearing nothing is the whole problem.
 
+**A FOURTH: the buffers keep arriving, are not silent, and never change**
+(November 2026). Reported as the volume meter frozen at two or three bars,
+nothing recognised, nothing on screen, only a restart helping — so chunks were
+arriving (a stall drops the meter to zero) and were not digital silence (that
+check passes). The likeliest reading is a capture replaying one stale buffer
+after an interruption. Real input never has bit-identical energy in two
+consecutive buffers, so `_onAudioChunk` does not count an exact repeat as
+sound; a frozen capture then ages into the existing silence fault and is
+rebuilt by the same path and escalation, and `micLost` names it ("stuck
+repeating the same sound"). ⚠️ The diagnosis is inferred from the frozen meter,
+not measured on the device. The test fake's `deliver()` now varies each buffer
+by a hair for this reason; `deliverFrozen()` models the failure.
+
 **`noiseSuppression: false` is now requested explicitly**, alongside
 `echoCancellation: false`. All three of these constraints are the browser's
 VOICE processing chain, tuned for speech on a call, and this app feeds music to
