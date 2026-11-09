@@ -2158,5 +2158,113 @@ await test('a handover that fails shows the player stopped', async () => {
     assert.equal(vm.playing, false);
 });
 
+console.log('\nSessionAudioPlayer — an interrupted start, and a processing graph that goes silent');
+
+// A one-sided recording whose correction graph has been built and is "playing".
+async function mountGraphPlaying({ peak }) {
+    const vm = await mountProbed([LOUD, DEAD], { manifestChannels: 2 });
+    audioEnv.withMeter = true;
+    const element = { paused: false, currentTime: 10, play: () => Promise.resolve(), pause() {}, removeAttribute() {} };
+    vm.$refs.audio = element;
+    vm._play();
+    assert.ok(vm._analyserNode, 'the graph carries an analyser');
+    vm._analyserNode.rms = peak;
+    vm.playing = true;
+    vm.currentSeconds = 10;
+    return { vm, element };
+}
+
+await test('an interrupted play() is retried once, not reported (iOS "The operation was aborted.")', async () => {
+    const vm = await mountProbed([LOUD, LOUD], { manifestChannels: 2 });
+    let calls = 0;
+    vm.$refs.audio = {
+        play() {
+            calls++;
+            if (calls === 1) {
+                const e = new Error('The operation was aborted.');
+                e.name = 'AbortError';
+                return Promise.reject(e);
+            }
+            return Promise.resolve();
+        },
+        pause() {},
+    };
+    vm._play();
+    await settle(); await settle(); await settle();
+    assert.equal(calls, 2, 'tried again');
+    assert.equal(vm.error, '', 'and nothing red on screen');
+});
+
+await test('a play() the user paused before it started is not an error', async () => {
+    const vm = await mountProbed([LOUD, LOUD], { manifestChannels: 2 });
+    let calls = 0;
+    let reject;
+    vm.$refs.audio = {
+        play() { calls++; return new Promise((_, r) => { reject = r; }); },
+        pause() { const e = new Error('aborted'); e.name = 'AbortError'; reject(e); },
+    };
+    vm._play();
+    vm.playing = true;
+    vm.togglePlay();
+    await settle(); await settle();
+    assert.equal(calls, 1, 'no retry against the user\'s pause');
+    assert.equal(vm.error, '');
+});
+
+await test('an abort that repeats is reported, not retried for ever', async () => {
+    const vm = await mountProbed([LOUD, LOUD], { manifestChannels: 2 });
+    let calls = 0;
+    vm.$refs.audio = {
+        play() { calls++; const e = new Error('The operation was aborted.'); e.name = 'AbortError'; return Promise.reject(e); },
+        pause() {},
+    };
+    vm._play();
+    await settle(); await settle(); await settle();
+    assert.equal(calls, 2);
+    assert.match(vm.error, /Could not play/);
+});
+
+await test('a graph delivering silence while the media advances falls back to plain playback', async () => {
+    const { vm, element } = await mountGraphPlaying({ peak: 0 });
+    vm.$nextTick = undefined;
+    const key = vm.audioKey;
+    vm._checkGraphSilence();                // starts the clock
+    element.currentTime = 11.5;
+    vm._checkGraphSilence();
+    assert.equal(vm.processingFellBack, false, 'not on a moment of silence');
+    element.currentTime = 13;
+    vm._checkGraphSilence();
+    await settle();
+    assert.equal(vm.processingFellBack, true);
+    assert.equal(vm.channelRepairOff, true, 'remembered on this device');
+    assert.equal(vm.audioKey, key + 1, 'a fresh element: the old one is bound to the dead graph');
+    assert.deepEqual(vm.playRequests, [10], 'and it carries on from the same place');
+    vm._stopGraphSilenceWatch();
+});
+
+await test('a graph carrying sound is left alone', async () => {
+    const { vm, element } = await mountGraphPlaying({ peak: 0.01 });
+    vm._checkGraphSilence();
+    element.currentTime = 20;
+    vm._checkGraphSilence();
+    assert.equal(vm.processingFellBack, false);
+    assert.equal(vm.channelRepairOff, false);
+});
+
+await test('silence inside a stretch the user muted is not a dead graph', async () => {
+    const { vm, element } = await mountGraphPlaying({ peak: 0 });
+    vm.manifest = { ...vm.manifest, mutedRanges: [{ from: 5, to: 60 }] };
+    vm._checkGraphSilence();
+    element.currentTime = 20;
+    vm._checkGraphSilence();
+    assert.equal(vm.processingFellBack, false);
+});
+
+await test('silence while the element is stalled (media time not moving) is not judged', async () => {
+    const { vm } = await mountGraphPlaying({ peak: 0 });
+    for (let i = 0; i < 20; i++) vm._checkGraphSilence();
+    assert.equal(vm.processingFellBack, false);
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed ? 1 : 0);

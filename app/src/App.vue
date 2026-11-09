@@ -409,7 +409,7 @@ export default {
         },
         closeSessionPlayer() {
             const player = this.$refs.sessionPlayer;
-            if (player && player.playing && player.$refs.audio) player.$refs.audio.pause();
+            if (player && player.playing) player.pause();
             this.miniPlayerOpen = false;
         },
         openSessionPlayer() {

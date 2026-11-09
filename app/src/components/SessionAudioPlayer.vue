@@ -292,6 +292,15 @@
                 normalizing or the one-channel correction) cannot be heard. Tap play again,
                 or reload the page.
             </v-alert>
+            <!-- Said once the player has switched itself to plain playback
+             because the processed sound was silence: otherwise the user hears
+             the recording come back from one speaker and has no idea why. -->
+            <v-alert v-if="processingFellBack" type="info" dense text class="mt-2 mb-0">
+                Playback through this device's audio processing was silent, so it has
+                switched to plain playback{{ channelProbe && channelProbe.oneSided
+                    ? ' — this recording has sound on one channel, so with headphones it is in one ear'
+                    : '' }}. Volume and Normalize are off.
+            </v-alert>
 
         </template>
         <!-- The recording check. Reads every stored piece on THIS device and
@@ -458,6 +467,15 @@ const NORMALIZE_KEY = 'sessionAudioNormalize';
 // How often the level is read while normalizing. Ten a second is plenty for a
 // level that settles over tenths of a second at the fastest.
 const LEVEL_SAMPLE_MS = 100;
+// The graph-silence watch (see _checkGraphSilence). A recording outside a
+// muted stretch is never this quiet — even a silent room encodes a noise floor
+// far above it — so a peak below this is the processing chain producing
+// nothing, not quiet music.
+const GRAPH_SILENT_PEAK = 1e-5;
+// Seconds of MEDIA time, i.e. the element really advanced this far while the
+// graph delivered nothing.
+const GRAPH_SILENCE_SECONDS = 2.5;
+const GRAPH_SILENCE_CHECK_MS = 250;
 
 function readNormalize() {
     try { return typeof localStorage !== 'undefined' && localStorage.getItem(NORMALIZE_KEY) === '1'; }
@@ -606,6 +624,7 @@ export default {
             // the graph permanently, so a suspended context is SILENCE, not a
             // missing correction.
             channelRepairStalled: false,
+            processingFellBack: false,
             // The user turned the one-channel correction off on this device
             // (it went silent here). Per-device, remembered in localStorage.
             channelRepairOff: readRepairOff(),
@@ -879,6 +898,7 @@ export default {
             if (playing) this._mediaSessionActive = true;
             if (this._mediaSessionActive) this._syncMediaSession();
             this._syncLevelMeter();
+            this._syncGraphSilenceWatch();
         },
         playbackState: {
             handler(state) { this.$emit('playback', state); },
@@ -921,6 +941,7 @@ export default {
         if (this._mediaSessionActive) clearMediaSession(browserNavigator());
         this.teardown();
         this._stopLevelMeter();
+        this._stopGraphSilenceWatch();
         if (this._audioCtx && this._audioCtx.close) {
             this._audioCtx.close().catch(() => {});
         }
@@ -1691,6 +1712,7 @@ export default {
             this.channelRepairOff = !!off;
             writeRepairOff(this.channelRepairOff);
             if (!off) {
+                this.processingFellBack = false;
                 // Turning it back ON needs nothing now: the next play is a
                 // gesture and builds the graph.
                 if (wasPlaying) this._prepareAudioGraph();
@@ -1915,7 +1937,100 @@ export default {
             }
         },
 
-        _play() {
+        // A pause the USER asked for. Marked so the play() it interrupts —
+        // which rejects with AbortError when it had not started yet — is not
+        // reported as a failure or retried against their wishes.
+        pause() {
+            const audio = this.$refs.audio;
+            this._pauseRequested = true;
+            if (audio) audio.pause();
+        },
+
+        // Watches what the processing graph actually delivers, because on
+        // iOS it can deliver NOTHING while every readout says it is playing.
+        //
+        // Reported from the field: the first tune of a session played, and
+        // then everything — that tune included — was silent. The first play
+        // went straight through the element; by the second, the channel probe
+        // had found "one channel only" and the correction had routed the
+        // element through Web Audio, which is permanent for that element. The
+        // context was running, the element was playing, the clock moved, and
+        // no sound came out. Several WebKit causes fit (the silent switch,
+        // MediaElementSource and blob sources, an audio session change), and
+        // none can be told apart from here — so rather than guess which, the
+        // player measures the outcome: media time advancing while the graph
+        // delivers digital silence, outside a stretch the user muted, means
+        // the graph is dead, and it falls back to plain playback.
+        _syncGraphSilenceWatch() {
+            if (this.playing && this._analyserNode) this._startGraphSilenceWatch();
+            else this._stopGraphSilenceWatch();
+        },
+
+        _startGraphSilenceWatch() {
+            if (this._silenceTimer || typeof setInterval !== 'function') return;
+            this._silentSince = null;
+            this._silenceTimer = setInterval(() => this._checkGraphSilence(), GRAPH_SILENCE_CHECK_MS);
+        },
+
+        _stopGraphSilenceWatch() {
+            if (this._silenceTimer) clearInterval(this._silenceTimer);
+            this._silenceTimer = null;
+            this._silentSince = null;
+        },
+
+        _graphPeak() {
+            const analyser = this._analyserNode;
+            if (!analyser || !analyser.getFloatTimeDomainData) return null;
+            const buf = this._silenceBuffer && this._silenceBuffer.length === analyser.fftSize
+                ? this._silenceBuffer : (this._silenceBuffer = new Float32Array(analyser.fftSize));
+            analyser.getFloatTimeDomainData(buf);
+            let peak = 0;
+            for (let i = 0; i < buf.length; i++) {
+                const v = Math.abs(buf[i]);
+                if (v > peak) peak = v;
+            }
+            return peak;
+        },
+
+        _inMutedStretch(seconds) {
+            const ranges = (this.manifest && this.manifest.mutedRanges) || [];
+            return ranges.some(r => seconds >= r.from - 1 && (r.to == null || seconds <= r.to + 1));
+        },
+
+        _checkGraphSilence() {
+            const audio = this.$refs.audio;
+            if (!audio || !this.playing || audio.paused || !this._analyserNode) {
+                this._silentSince = null;
+                return;
+            }
+            const peak = this._graphPeak();
+            if (peak === null || peak > GRAPH_SILENT_PEAK || this._inMutedStretch(this.currentSeconds)) {
+                this._silentSince = null;
+                return;
+            }
+            const now = audio.currentTime;
+            if (this._silentSince == null || now < this._silentSince) {
+                this._silentSince = now;
+                return;
+            }
+            if (now - this._silentSince >= GRAPH_SILENCE_SECONDS) this._fallBackToPlainPlayback();
+        },
+
+        // Remembered on this device, through the same switch as the manual
+        // "No sound?" escape — a graph that went silent once will again, and
+        // the link to turn the correction back on is still offered.
+        async _fallBackToPlainPlayback() {
+            this._stopGraphSilenceWatch();
+            this.processingFellBack = true;
+            this.volume = 1;
+            this.normalize = false;
+            writeNormalize(false);
+            this.channelRepairOff = true;
+            writeRepairOff(true);
+            await this._replaceElement(this.currentSeconds, true);
+        },
+
+        _play({ retry = false } = {}) {
             const audio = this.$refs.audio;
             if (!audio) return;
             // Here rather than at load, because building the graph needs an
@@ -1923,13 +2038,47 @@ export default {
             // route here is one — onLoadedMetadata reaches it several awaits
             // after the tap, and onEnded reaches it with no tap at all — which
             // is why playFrom() and togglePlay() prime it synchronously too.
-            this._prepareAudioGraph();
+            //
+            // A retry is never a gesture, so it only resumes what exists.
+            if (retry) this._resumeGraph();
+            else this._prepareAudioGraph();
             this._applyPlaybackRate();
+            this._pauseRequested = false;
+            const generation = this._loadGeneration || 0;
             const started = audio.play();
             if (started && started.catch) {
                 started.catch(e => {
                     if (audio.error && audio.error.code === 4 &&
                         this._retryFromTrackStart(true)) return;
+                    // AbortError — "The operation was aborted." on iOS — is
+                    // not a failure of the recording: the start was
+                    // INTERRUPTED before sound began, by a pause, a newer load
+                    // or the system. Reported from the field as a red error
+                    // over a perfectly healthy clip (ftyp+moov+moof+mdat, from
+                    // the track's start). When something newer superseded it,
+                    // that newer thing is the answer; when nothing did, try
+                    // once more before saying anything.
+                    if (e && e.name === 'AbortError') {
+                        if (this._pauseRequested || audio !== this.$refs.audio ||
+                            generation !== (this._loadGeneration || 0)) return;
+                        if (!retry) {
+                            setTimeout(() => {
+                                if (audio === this.$refs.audio && !this._pauseRequested &&
+                                    generation === (this._loadGeneration || 0)) {
+                                    this._play({ retry: true });
+                                }
+                            }, 0);
+                            return;
+                        }
+                    }
+                    // A retry (or the switch to plain playback) has no user
+                    // gesture behind it, and iOS may refuse it for that alone.
+                    // That needs a tap, not an error.
+                    if (e && e.name === 'NotAllowedError') {
+                        this.playing = false;
+                        this.error = 'Tap ▶ to carry on playing.';
+                        return;
+                    }
                     // No 'pause' follows a play() that never started, and a
                     // handover holds the button on ⏸ (see onPause).
                     this.playing = false;
@@ -2058,7 +2207,7 @@ export default {
         async togglePlay() {
             const audio = this.$refs.audio;
             if (!audio) return;
-            if (this.playing) { audio.pause(); return; }
+            if (this.playing) { this.pause(); return; }
             // Synchronously, while the tap is still current — see playFrom().
             this._prepareAudioGraph();
             if (this.segmentIndex === null) {
