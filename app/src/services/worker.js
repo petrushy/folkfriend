@@ -157,6 +157,16 @@ function rejectionReasons(rejected) {
     return reasons;
 }
 
+// The part's `sets` entries for tunes the merge attributes to that part.
+function ownSetPartners(part, datasetByTune) {
+    const own = {};
+    const partSets = part.index.setPartners || {};
+    for (const tuneID in partSets) {
+        if (datasetByTune[tuneID] === part.id) own[tuneID] = partSets[tuneID];
+    }
+    return own;
+}
+
 export function mergeIndexParts(parts) {
     if (parts.length === 1) {
         // Overwhelmingly the common case; skip copying 62k keys.
@@ -165,7 +175,12 @@ export function mergeIndexParts(parts) {
         for (const tuneID of part.index.tuneIDs || []) {
             datasetByTune[tuneID] = part.id;
         }
-        return { ...part.index, datasetByTune, collisions: 0,
+        // Same ownership rule as the multi-part branch below: a dataset may
+        // only describe the sets of its OWN tunes. Skipping it here let an
+        // import, selected alone, supply suggestions for a thesession tune
+        // opened from a saved favourite.
+        const setPartners = ownSetPartners(part, datasetByTune);
+        return { ...part.index, setPartners, datasetByTune, collisions: 0,
             tuneCollisions: 0, empty: [] };
     }
 
@@ -228,10 +243,7 @@ export function mergeIndexParts(parts) {
 
         // A dataset may only describe the sets of its OWN tunes, so an
         // imported file cannot rewrite thesession's suggestions.
-        const partSets = part.index.setPartners || {};
-        for (const tuneID in partSets) {
-            if (datasetByTune[tuneID] === part.id) setPartners[tuneID] = partSets[tuneID];
-        }
+        Object.assign(setPartners, ownSetPartners(part, datasetByTune));
     }
 
     return {
@@ -1656,8 +1668,14 @@ class FolkFriendWASMWrapper {
     // member sets and recording tracks (see the data repo's
     // thesession_sets.py). Each partner is resolved against the LOADED index
     // and dropped if it is not there — a suggestion the app cannot open is no
-    // use — and named from its primary alias. `precededBy` is read from the
-    // partner's own entry, which is the reverse direction.
+    // use — and named from its primary alias.
+    //
+    // Both directions come from THIS pair's entry ([partner, in_sets,
+    // on_recordings, followed_by, preceded_by]). They are never read from the
+    // partner's own list: that list is cut to its own top 12 and often lacks
+    // this tune, and treating "absent" as zero invented a direction for
+    // thousands of pairs. An entry with no fifth field (an older file) gives
+    // precededBy null — unknown — and no direction is claimed.
     //
     // Answers [] for a tune with no data (every non-thesession tune) and when
     // the index is unavailable, like every other index call: fail fast.
@@ -1682,8 +1700,6 @@ class FolkFriendWASMWrapper {
                 aliases = [];
             }
             if (!aliases.length) continue;
-            const back = (this.setPartnersByTune[partnerID] || [])
-                .find(e => Array.isArray(e) && String(e[0]) === id);
             partners.push({
                 tuneID: partnerID,
                 name: aliases[0],
@@ -1691,7 +1707,7 @@ class FolkFriendWASMWrapper {
                 inSets: Number(entry[1]) || 0,
                 onRecordings: Number(entry[2]) || 0,
                 followedBy: Number(entry[3]) || 0,
-                precededBy: back ? Number(back[3]) || 0 : 0,
+                precededBy: entry.length >= 5 ? Number(entry[4]) || 0 : null,
             });
         }
         cb(partners);

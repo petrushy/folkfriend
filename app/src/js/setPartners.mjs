@@ -30,8 +30,11 @@ export function commonThreshold(partners) {
 }
 
 // 'after' — the partner usually comes after this tune; 'before' — usually
-// before it; '' — no clear order.
+// before it; '' — no clear order. A `precededBy` of null or undefined means the
+// reverse count is UNKNOWN, not zero, and no direction can be claimed from one
+// side alone.
 export function partnerDirection(p) {
+    if (p.precededBy === null || p.precededBy === undefined) return '';
     const after = Number(p.followedBy) || 0;
     const before = Number(p.precededBy) || 0;
     if (after >= DIRECTION_MIN && after >= DIRECTION_RATIO * before) return 'after';

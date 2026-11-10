@@ -1156,7 +1156,8 @@ First step towards sets as a real abstraction.
 - **The data is thesession's**: member tune sets plus recording tracks,
   counted by the data repo's `thesession_sets.py` and embedded in
   `thesession.json` as a top-level `sets` map (`tune_id → [[partner, in_sets,
-  on_recordings, followed_by], ...]`, top 12). Only thesession tunes have it.
+  on_recordings, followed_by, preceded_by], ...]`, top 12). Only thesession
+  tunes have it.
 - **It never reaches WASM.** `splitIndexPayload` strips it into a
   `setPartners` sideband (with a `danceByTune` one for the tune type), so it
   rides the offline copy, the install path and every invariant above for free.
@@ -1164,8 +1165,24 @@ First step towards sets as a real abstraction.
   import cannot rewrite thesession's suggestions. Rebuilt wholesale on every
   merge, like `datasetByTune`.
 - `worker.setPartnersFromTuneID` resolves each partner against the LOADED
-  index and drops what is not there; `precededBy` is read from the partner's
-  own entry (the reverse direction).
+  index and drops what is not there.
+- **Both directions come from the PAIR's own entry, never from the
+  partner's list.** That list is cut to the partner's own top 12 and often
+  lacks this tune, and reading "absent" as zero invented a direction for
+  ~2,700 pairs (The Cock and the Hen → The Kid on the Mountain read "usually
+  played after it" on 6 transitions each way). An entry without the fifth
+  field gives `precededBy: null` — unknown — and `partnerDirection` claims
+  nothing from one side alone.
+- **Ownership applies to the one-dataset merge too.** `mergeIndexParts`'s
+  fast path for a single part returned its whole partner map, so an import
+  selected alone could supply suggestions for a thesession tune opened from a
+  saved favourite. Both branches go through `ownSetPartners`.
+- **The button re-asks when the index settles** (`indexStatusChanged` →
+  `ready`/`unavailable`), not only on `indexLoaded`, which fires once on the
+  first usable edge. Otherwise a Tune view opened on a cached copy without set
+  data stays buttonless after the background update that brings it. Every
+  check supersedes earlier ones, same tune included; the counter initialises
+  inside the method because the immediate watcher runs before `created()`.
 - **Ordering is `js/setPartners.mjs`**: starred tunes first, but only when
   *commonly* played with this one (≥ 15 % of the strongest partner, floor 3);
   then by `in_sets + on_recordings`, ties by tune id. "Usually played
@@ -1177,10 +1194,14 @@ First step towards sets as a real abstraction.
   loads in `created()`, so jumping from one tune to a partner reused the
   component and left the previous tune on screen.
 
-Tests: `setPartners.test.mjs` (10), `setPartnersDialog.test.mjs` (4, the
-stale-answer race), 3 cases in `tune-index-install.test.mjs`. Verified by
-mutation: dropping the own-tunes guard, leaving `sets` in the WASM payload and
-dropping the dialog's stale-answer check each fail.
+Tests: `setPartners.test.mjs` (11), `setPartnersDialog.test.mjs` (4, the
+stale-answer race), `setPartnersButton.test.mjs` (5), 6 cases in
+`tune-index-install.test.mjs`. Verified by mutation: dropping the own-tunes
+guard (either branch), leaving `sets` in the WASM payload, dropping the
+dialog's stale-answer check, reading the reverse as zero, not guarding an
+unknown reverse, no re-check on a status change, an uninitialised counter and
+no generation guard each fail. The direction and ownership bugs were found by
+an outside review (Codex), not by the original tests.
 
 ⚠️ Needs the data repo's thesession v2505+ deployed to show anything.
 

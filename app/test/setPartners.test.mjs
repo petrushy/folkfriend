@@ -83,6 +83,13 @@ test('direction is claimed only when clear and seen often enough', () => {
     assert.equal(partnerDirection(p('1', 0, 0, 23, 2)), 'after');
     assert.equal(partnerDirection(p('1', 0, 0, 5, 4)), '', 'either order');
     assert.equal(partnerDirection(p('1', 0, 0, 2, 0)), '', 'too few to say');
+    assert.equal(partnerDirection(p('1', 0, 0, 6, 6)), '', 'tied');
+});
+
+test('an unknown reverse count claims no direction, however lopsided', () => {
+    // null is what the worker gives for an entry with no preceded_by field.
+    assert.equal(partnerDirection(p('1', 0, 0, 40, null)), '');
+    assert.equal(partnerDirection({ followedBy: 40 }), '', 'absent field');
 });
 
 test('bad input is an empty list, not a throw', () => {

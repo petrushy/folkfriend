@@ -1766,19 +1766,23 @@ async function run() {
 
     // thesession v1 with a `sets` block: tune 0 is played with 1 (often, and
     // usually after it), with 2, and with 999, which is not in the index.
+    // Entries are [partner, in_sets, on_recordings, followed_by, preceded_by].
+    // Tune 2's own list does NOT include 0 (cut to its own top 12, as in the
+    // real data), yet 0's entry for 2 still knows both directions.
     // Folkwiki tune 1000000 claims sets for thesession tune 0 — a dataset may
     // only describe its own tunes.
     const withSets = (() => {
         const p = JSON.parse(RAW.thesession.v1);
         p.sets = {
-            0: [['1', 20, 2, 9], ['2', 3, 0, 0], ['999', 50, 0, 0]],
-            1: [['0', 20, 2, 1]],
+            0: [['1', 20, 2, 9, 1], ['2', 12, 0, 6, 6], ['999', 50, 0, 0, 0]],
+            1: [['0', 20, 2, 1, 9]],
+            2: [['1', 30, 0, 0, 0]],
         };
         return JSON.stringify(p);
     })();
     const folkwikiClaimingSets = (() => {
         const p = JSON.parse(RAW.folkwiki.v1);
-        p.sets = { 0: [['1000001', 99, 0, 0]], 1000000: [['1000001', 1, 0, 0]] };
+        p.sets = { 0: [['1000001', 99, 0, 0, 0]], 1000000: [['1000001', 1, 0, 0, 0]] };
         return JSON.stringify(p);
     })();
 
@@ -1803,6 +1807,48 @@ async function run() {
             ['1000001'], 'a dataset describing its own tunes is kept');
     });
 
+    await test('the reverse direction comes from the pair, not the partner\'s cut list', async () => {
+        // The Cock and the Hen -> The Kid on the Mountain: 6 transitions each
+        // way, but Kid's own top 12 omits Cock. Reading the reverse from there
+        // gave 0 and the dialog said "usually played after it".
+        resetFakes();
+        await storeMod.writeDataset('thesession', withSets, { v: 1, date: '2026-01-01' });
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        const two = (await new Promise(r => wrapper.setPartnersFromTuneID(0, r)))
+            .find(p => p.tuneID === '2');
+        assert.equal(two.followedBy, 6);
+        assert.equal(two.precededBy, 6, 'reverse count read as 0 from the partner\'s list');
+    });
+
+    await test('an entry with no reverse count claims no direction', async () => {
+        resetFakes();
+        const oldShape = JSON.parse(RAW.thesession.v1);
+        oldShape.sets = { 0: [['1', 20, 0, 9]] };     // four fields: an older file
+        await storeMod.writeDataset('thesession', JSON.stringify(oldShape), { v: 1, date: '2026-01-01' });
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        const [one] = await new Promise(r => wrapper.setPartnersFromTuneID(0, r));
+        assert.equal(one.followedBy, 9);
+        assert.equal(one.precededBy, null, 'unknown must not become zero');
+    });
+
+    await test('a dataset loaded ALONE still describes only its own tunes', async () => {
+        // The one-part merge used to return the part's whole partner map, so
+        // an import selected on its own could supply suggestions for a
+        // thesession tune opened from a saved favourite.
+        resetFakes();
+        await storeMod.writeDataset('thesession', withSets, { v: 1, date: '2026-01-01' });
+        await storeMod.writeDataset('folkwiki', folkwikiClaimingSets, { v: 1, date: '2026-01-01' });
+        const wrapper = await newWorker({ datasets: ['folkwiki'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        assert.deepEqual(await new Promise(r => wrapper.setPartnersFromTuneID(0, r)), [],
+            'folkwiki supplied partners for a thesession tune');
+        assert.deepEqual(
+            (await new Promise(r => wrapper.setPartnersFromTuneID(1000000, r))).map(p => p.tuneID),
+            ['1000001'], 'its own tunes keep theirs');
+    });
+
     await test('no partners for a tune without set data, or with no index', async () => {
         resetFakes();
         await storeMod.writeDataset('thesession', withSets, { v: 1, date: '2026-01-01' });
@@ -1824,6 +1870,7 @@ async function run() {
         const cached = await storeMod.readDataset('thesession');
         assert.equal(cached.index.indexData.sets, undefined);
         assert.equal(cached.index.setPartners[0].length, 3);
+        assert.equal(cached.index.setPartners[0][1][4], 6, 'the reverse count survives the cache');
     });
 
     console.log(`\n${passed} passed, ${failed} failed\n`);

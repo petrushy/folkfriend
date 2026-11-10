@@ -54,12 +54,29 @@ export default {
         // The index may still be loading when the view mounts.
         this._onIndexLoaded = () => this.checkAvailable();
         eventBus.$on('indexLoaded', this._onIndexLoaded);
+        // `indexLoaded` fires only on the first usable edge. A background
+        // update (cached v2489 -> v2505, the release that brought set data),
+        // a dataset toggled off or removed, all change what the index holds
+        // while it stays usable, so re-ask whenever the pipeline settles.
+        this._onIndexStatus = (detail) => {
+            const status = detail && detail.status;
+            if (status === 'ready' || status === 'unavailable') this.checkAvailable();
+        };
+        eventBus.$on('indexStatusChanged', this._onIndexStatus);
     },
     beforeDestroy() {
         eventBus.$off('indexLoaded', this._onIndexLoaded);
+        eventBus.$off('indexStatusChanged', this._onIndexStatus);
     },
     methods: {
         async checkAvailable() {
+            // Every check supersedes the ones before it — including one for
+            // the SAME tune, since the index can change between the two.
+            // Initialised here, not in created(): the immediate tuneID watcher
+            // runs BEFORE created() in Vue 2, and an undefined counter gives
+            // NaN, which never equals itself and would discard the first answer.
+            const generation = (this._checkGeneration || 0) + 1;
+            this._checkGeneration = generation;
             const asked = String(this.tuneID || '');
             if (!asked) { this.available = false; return; }
             let partners = [];
@@ -68,8 +85,7 @@ export default {
             } catch (e) {
                 partners = [];
             }
-            // A slower answer for the previous tune must not decide this one.
-            if (String(this.tuneID || '') !== asked) return;
+            if (generation !== this._checkGeneration) return;
             this.available = Array.isArray(partners) && partners.length > 0;
         },
         openPartners() {
