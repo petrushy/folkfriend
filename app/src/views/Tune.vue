@@ -4,13 +4,15 @@
             {{ name }}
         </h1>
 
-        <v-container class="mt-0 mb-2 py-0">
-            <template v-if="displayableAliases.length">
-                <span class="akaSpan pl-2 pr-1">Also known as</span>
-                <v-chip v-for="alias in displayableAliases" :key="alias" class="ma-1 px-2" small>
-                    {{ alias }}
-                </v-chip>
-            </template>
+        <!-- The alternative names are plain text, not chips: they are not
+             clickable, and as chips they looked exactly like the actions on
+             the row below. Only things you can tap are chips. -->
+        <p v-if="displayableAliases.length" class="akaLine mt-0 mb-1 px-3">
+            <span class="akaLabel">Also known as:</span>
+            {{ displayableAliases.join(', ') }}
+        </p>
+
+        <v-container class="tuneActions mt-0 mb-2 py-0">
             <v-chip small class="sourceChip ma-1 px-2" @click="sourceClicked">
                 {{ sourceName }}&nbsp;<v-icon small>
                     {{ icons.openInNew }}
@@ -888,9 +890,14 @@ h1 {
     cursor: pointer;
 }
 
-.akaSpan {
+.akaLine {
     font-size: smaller;
+    line-height: 1.4;
+}
+
+.akaLabel {
     font-style: italic;
+    opacity: 0.75;
 }
 
 .heardAt {
