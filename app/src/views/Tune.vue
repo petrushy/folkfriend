@@ -4,19 +4,32 @@
             {{ name }}
         </h1>
 
-        <v-container class="mt-0 mb-2 py-0">
-            <template v-if="displayableAliases.length">
-                <span class="akaSpan pl-2 pr-1">Also known as</span>
-                <v-chip v-for="alias in displayableAliases" :key="alias" class="ma-1 px-2" small>
-                    {{ alias }}
-                </v-chip>
-            </template>
+        <!-- The alternative names are OUTLINED chips on a row of their own:
+             filled grey chips are the tappable actions on the row below, and
+             the names are not tappable. As filled chips beside the actions
+             they looked exactly like them; as plain text they were hard to
+             read. -->
+        <v-container v-if="displayableAliases.length" class="mt-0 mb-0 py-0">
+            <span class="akaSpan pl-2 pr-1">Also known as</span>
+            <v-chip
+                v-for="alias in displayableAliases"
+                :key="alias"
+                class="aliasChip ma-1 px-2"
+                small
+                outlined
+            >
+                {{ alias }}
+            </v-chip>
+        </v-container>
+
+        <v-container class="tuneActions mt-0 mb-2 py-0">
             <v-chip small class="sourceChip ma-1 px-2" @click="sourceClicked">
                 {{ sourceName }}&nbsp;<v-icon small>
                     {{ icons.openInNew }}
                 </v-icon>
             </v-chip>
             <TuneBackgroundButton class="ma-1" :tuneID="tuneID" :displayName="name || displayName" :sourceUrl="folkwikiSourceUrl" />
+            <SetPartnersButton class="ma-1" chip :tuneID="tuneID" :title="name || displayName" />
         </v-container>
 
         <v-container v-if="geoTaggingOn" class="heardAt py-1">
@@ -267,6 +280,7 @@ import { dropboxState } from '@/services/dropbox.js';
 import { playSessionTuneLooped, playerHost, sessionPlayer } from '@/services/sessionPlayerHost.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
+import SetPartnersButton from '@/components/SetPartnersButton.vue';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
 // fire: ffBackend.indexReady() resolves as soon as the worker's state machine
@@ -277,7 +291,7 @@ const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
     name: 'TuneView',
-    components: { AbcDisplay, TuneBackgroundButton, TunePlaceDialog },
+    components: { AbcDisplay, TuneBackgroundButton, SetPartnersButton, TunePlaceDialog },
     props: {
         tuneID: {
             type: String,
@@ -889,6 +903,19 @@ h1 {
 .akaSpan {
     font-size: smaller;
     font-style: italic;
+}
+
+/* Not tappable: an outline on a white ground, never the filled grey of the
+   action chips. `outlined` already gives the border; this pins the ground and
+   keeps the hover/press tint from suggesting it does something. */
+.aliasChip.v-chip {
+    background-color: #fff !important;
+    border-color: rgba(0, 0, 0, 0.25) !important;
+    cursor: default;
+}
+
+.aliasChip.v-chip::before {
+    display: none;
 }
 
 .heardAt {

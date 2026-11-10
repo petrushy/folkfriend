@@ -209,7 +209,11 @@
                  away from Session Analysis, so its status and controls have to
                  as well. -->
             <SessionStatusBar />
-            <router-view />
+            <!-- Keyed for the Tune view only: it loads in created(), so a
+                 jump from one tune to another (a set partner) must remount it
+                 rather than leave the previous tune on screen. Every other
+                 view keeps Vue's default reuse. -->
+            <router-view :key="$route.name === 'tune' ? $route.fullPath : undefined" />
             <!-- The session recording keeps playing on other pages (e.g. a
                  tune's score), so it needs a way to be paused from them. -->
             <div v-if="miniPlayerOpen && !playerHost.shown" class="sessionMiniPlayer">
@@ -256,6 +260,8 @@
              event bus. Mounted here so a list of favourites does not create one
              dialog per row. -->
         <TuneBackgroundDialog />
+        <!-- Same pattern: "Played in sets with…", opened from any tune. -->
+        <SetPartnersDialog />
     </v-app>
 </template>
 
@@ -292,13 +298,14 @@ import {
 } from '@mdi/js';
 import utils from '@/js/utils.js';
 import TuneBackgroundDialog from '@/components/TuneBackgroundDialog.vue';
+import SetPartnersDialog from '@/components/SetPartnersDialog.vue';
 import SessionStatusBar from '@/components/SessionStatusBar.vue';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
 import { playerHost, registerPlayer } from '@/services/sessionPlayerHost.js';
 
 export default {
     name: 'App',
-    components: { TuneBackgroundDialog, SessionStatusBar, SessionAudioPlayer },
+    components: { TuneBackgroundDialog, SetPartnersDialog, SessionStatusBar, SessionAudioPlayer },
     data: () => ({
         drawer: null,
         menu: null,

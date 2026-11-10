@@ -157,6 +157,16 @@ function rejectionReasons(rejected) {
     return reasons;
 }
 
+// The part's `sets` entries for tunes the merge attributes to that part.
+function ownSetPartners(part, datasetByTune) {
+    const own = {};
+    const partSets = part.index.setPartners || {};
+    for (const tuneID in partSets) {
+        if (datasetByTune[tuneID] === part.id) own[tuneID] = partSets[tuneID];
+    }
+    return own;
+}
+
 export function mergeIndexParts(parts) {
     if (parts.length === 1) {
         // Overwhelmingly the common case; skip copying 62k keys.
@@ -165,7 +175,12 @@ export function mergeIndexParts(parts) {
         for (const tuneID of part.index.tuneIDs || []) {
             datasetByTune[tuneID] = part.id;
         }
-        return { ...part.index, datasetByTune, collisions: 0,
+        // Same ownership rule as the multi-part branch below: a dataset may
+        // only describe the sets of its OWN tunes. Skipping it here let an
+        // import, selected alone, supply suggestions for a thesession tune
+        // opened from a saved favourite.
+        const setPartners = ownSetPartners(part, datasetByTune);
+        return { ...part.index, setPartners, datasetByTune, collisions: 0,
             tuneCollisions: 0, empty: [] };
     }
 
@@ -173,6 +188,8 @@ export function mergeIndexParts(parts) {
     const aliases = {};
     const abcStrings = {};
     const sourceUrls = {};
+    const danceByTune = {};
+    const setPartners = {};
     const datasetByTune = {};
     // Counted SEPARATELY. A setting-id clash hides one setting; a tune-id
     // clash is worse — the later dataset's aliases overwrite the earlier
@@ -213,6 +230,7 @@ export function mergeIndexParts(parts) {
         Object.assign(aliases, partAliases);
         Object.assign(abcStrings, part.index.abcStrings || {});
         Object.assign(sourceUrls, part.index.sourceUrls || {});
+        Object.assign(danceByTune, part.index.danceByTune || {});
 
         for (const tuneID of part.index.tuneIDs || []) {
             if (datasetByTune[tuneID] !== undefined
@@ -222,12 +240,18 @@ export function mergeIndexParts(parts) {
             datasetByTune[tuneID] = part.id;
         }
         tuneCollisions += clashedTunes.size;
+
+        // A dataset may only describe the sets of its OWN tunes, so an
+        // imported file cannot rewrite thesession's suggestions.
+        Object.assign(setPartners, ownSetPartners(part, datasetByTune));
     }
 
     return {
         indexData: { settings, aliases },
         abcStrings,
         sourceUrls,
+        danceByTune,
+        setPartners,
         datasetByTune,
         collisions,
         tuneCollisions,
@@ -244,6 +268,10 @@ class FolkFriendWASMWrapper {
         // tuneID -> dataset id, for everything that used to infer the source
         // from the numeric ID range. Rebuilt wholesale by every merge.
         this.datasetByTune = {};
+        // Which tunes are played together, and each tune's type — for the
+        // "played in sets with" suggestions. Rebuilt wholesale by every merge.
+        this.setPartnersByTune = {};
+        this.danceByTune = {};
 
         // Reusable per-frame PCM buffer in WASM linear memory. Allocated once
         // (lazily on first feed) and reused forever — previous code allocated
@@ -1153,6 +1181,8 @@ class FolkFriendWASMWrapper {
             this.abcStringBySetting = {};
             this.sourceUrlBySetting = {};
             this.datasetByTune = {};
+            this.setPartnersByTune = {};
+            this.danceByTune = {};
             this.loadedDatasets = {};
             this._loadedIndexInfo = null;
             this._setIndexStatus(INDEX_STATUS.UNAVAILABLE,
@@ -1466,6 +1496,8 @@ class FolkFriendWASMWrapper {
             this.abcStringBySetting = merged.abcStrings || {};
             this.sourceUrlBySetting = merged.sourceUrls || {};
             this.datasetByTune = merged.datasetByTune || {};
+            this.setPartnersByTune = merged.setPartners || {};
+            this.danceByTune = merged.danceByTune || {};
             // From here queries work, regardless of what the pipeline does next.
             this.indexUsable = true;
         } finally {
@@ -1630,6 +1662,55 @@ class FolkFriendWASMWrapper {
         });
 
         cb(settingsIncludingAbc);
+    }
+
+    // The tunes most often played in a set with `tuneID`, from thesession.org
+    // member sets and recording tracks (see the data repo's
+    // thesession_sets.py). Each partner is resolved against the LOADED index
+    // and dropped if it is not there — a suggestion the app cannot open is no
+    // use — and named from its primary alias.
+    //
+    // Both directions come from THIS pair's entry ([partner, in_sets,
+    // on_recordings, followed_by, preceded_by]). They are never read from the
+    // partner's own list: that list is cut to its own top 12 and often lacks
+    // this tune, and treating "absent" as zero invented a direction for
+    // thousands of pairs. An entry with no fifth field (an older file) gives
+    // precededBy null — unknown — and no direction is claimed.
+    //
+    // Answers [] for a tune with no data (every non-thesession tune) and when
+    // the index is unavailable, like every other index call: fail fast.
+    async setPartnersFromTuneID(tuneID, cb) {
+        await this.loadedWASM;
+        if (!(await this._indexIsUsable())) { cb([]); return; }
+        const id = String(tuneID);
+        const entries = this.setPartnersByTune[id];
+        if (!Array.isArray(entries)) { cb([]); return; }
+
+        const partners = [];
+        for (const entry of entries) {
+            if (!Array.isArray(entry) || entry.length < 2) continue;
+            const partnerID = String(entry[0]);
+            if (partnerID === id || this.datasetByTune[partnerID] === undefined) continue;
+            let aliases = [];
+            try {
+                const parsed = JSON.parse(
+                    await this.folkfriendWASM.aliases_from_tune_id(partnerID));
+                if (Array.isArray(parsed)) aliases = parsed;
+            } catch (e) {
+                aliases = [];
+            }
+            if (!aliases.length) continue;
+            partners.push({
+                tuneID: partnerID,
+                name: aliases[0],
+                dance: this.danceByTune[partnerID] || '',
+                inSets: Number(entry[1]) || 0,
+                onRecordings: Number(entry[2]) || 0,
+                followedBy: Number(entry[3]) || 0,
+                precededBy: entry.length >= 5 ? Number(entry[4]) || 0 : null,
+            });
+        }
+        cb(partners);
     }
 
     async aliasesFromTuneID(tuneID, cb) {

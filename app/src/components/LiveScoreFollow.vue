@@ -15,6 +15,9 @@
                         </v-icon>
                     </button>
                     <TuneBackgroundButton v-if="target" class="backgroundBtn" :tuneID="target.tuneId" :displayName="target.title" :sourceUrl="abcSetting ? abcSetting.source_url || '' : ''" />
+                    <!-- What to play next: tunes commonly played in a set
+                         with this one. Hidden for tunes with no set data. -->
+                    <SetPartnersButton v-if="target" class="backgroundBtn" :tuneID="target.tuneId" :title="target.title" />
                     <button
                         v-if="target"
                         class="freezeBtn"
@@ -176,6 +179,7 @@ import store from '@/services/store.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import AbcDisplay from '@/components/AbcDisplay.vue';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
+import SetPartnersButton from '@/components/SetPartnersButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
 import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
 
@@ -187,7 +191,7 @@ const SCORE_LOAD_SLOW_MESSAGE =
 
 export default {
     name: 'LiveScoreFollow',
-    components: { AbcDisplay, TuneBackgroundButton },
+    components: { AbcDisplay, TuneBackgroundButton, SetPartnersButton },
     props: {
         detections: {
             type: Array,
