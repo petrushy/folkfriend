@@ -4,13 +4,23 @@
             {{ name }}
         </h1>
 
-        <!-- The alternative names are plain text, not chips: they are not
-             clickable, and as chips they looked exactly like the actions on
-             the row below. Only things you can tap are chips. -->
-        <p v-if="displayableAliases.length" class="akaLine mt-0 mb-1 px-3">
-            <span class="akaLabel">Also known as:</span>
-            {{ displayableAliases.join(', ') }}
-        </p>
+        <!-- The alternative names are OUTLINED chips on a row of their own:
+             filled grey chips are the tappable actions on the row below, and
+             the names are not tappable. As filled chips beside the actions
+             they looked exactly like them; as plain text they were hard to
+             read. -->
+        <v-container v-if="displayableAliases.length" class="mt-0 mb-0 py-0">
+            <span class="akaSpan pl-2 pr-1">Also known as</span>
+            <v-chip
+                v-for="alias in displayableAliases"
+                :key="alias"
+                class="aliasChip ma-1 px-2"
+                small
+                outlined
+            >
+                {{ alias }}
+            </v-chip>
+        </v-container>
 
         <v-container class="tuneActions mt-0 mb-2 py-0">
             <v-chip small class="sourceChip ma-1 px-2" @click="sourceClicked">
@@ -890,14 +900,22 @@ h1 {
     cursor: pointer;
 }
 
-.akaLine {
+.akaSpan {
     font-size: smaller;
-    line-height: 1.4;
+    font-style: italic;
 }
 
-.akaLabel {
-    font-style: italic;
-    opacity: 0.75;
+/* Not tappable: an outline on a white ground, never the filled grey of the
+   action chips. `outlined` already gives the border; this pins the ground and
+   keeps the hover/press tint from suggesting it does something. */
+.aliasChip.v-chip {
+    background-color: #fff !important;
+    border-color: rgba(0, 0, 0, 0.25) !important;
+    cursor: default;
+}
+
+.aliasChip.v-chip::before {
+    display: none;
 }
 
 .heardAt {

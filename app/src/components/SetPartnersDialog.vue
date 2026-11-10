@@ -45,7 +45,7 @@
                                 <v-list-item-title class="partnerName">
                                     {{ displayName(p.name) }}
                                 </v-list-item-title>
-                                <v-list-item-subtitle>
+                                <v-list-item-subtitle class="partnerDetail">
                                     <span v-if="p.dance" class="partnerDance">{{ p.dance }}</span>
                                     <span v-if="p.direction === 'after'" class="partnerDirection">
                                         · usually played after it
@@ -166,6 +166,14 @@ export default {
 
 .partnerName {
     font-weight: 500;
+}
+
+/* Wraps rather than ellipsising: at phone width "usually played before it"
+   pushed the counts — the actual answer — off the end of the line. */
+.partnerDetail {
+    white-space: normal;
+    -webkit-line-clamp: unset;
+    overflow: visible;
 }
 
 .partnerDance {
