@@ -104,6 +104,7 @@ async function safeDel(key) {
 export function splitIndexPayload(parsed) {
     const abcStrings = {};
     const sourceUrls = {};
+    const danceByTune = {};
     const tuneIDs = new Set();
     const settings = parsed.settings || {};
     for (const settingID in settings) {
@@ -115,8 +116,21 @@ export function splitIndexPayload(parsed) {
             delete setting.source_url;
         }
         tuneIDs.add(setting.tune_id);
+        if (setting.dance && danceByTune[setting.tune_id] === undefined) {
+            danceByTune[setting.tune_id] = setting.dance;
+        }
     }
-    return { indexData: parsed, abcStrings, sourceUrls, tuneIDs };
+    // `sets` (thesession only, November 2026): tune_id -> [[partner, in_sets,
+    // on_recordings, followed_by], ...] — which tunes are played together.
+    // Per TUNE and nothing the query engine reads, so it is kept worker-side
+    // like the ABC rather than handed to WASM. Anything not shaped like a map
+    // is dropped: it is a hint, and a malformed one must not cost the index.
+    let setPartners = {};
+    if (parsed.sets && typeof parsed.sets === 'object' && !Array.isArray(parsed.sets)) {
+        setPartners = parsed.sets;
+    }
+    delete parsed.sets;
+    return { indexData: parsed, abcStrings, sourceUrls, tuneIDs, danceByTune, setPartners };
 }
 
 // Structural sanity check on a freshly parsed index payload.

@@ -1144,6 +1144,46 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Played in sets with — set partners (November 2026)
+
+A **"Played in sets with"** chip on the Tune view, and a playlist icon in the
+`LiveScoreFollow` header, open one shared `SetPartnersDialog` (mounted in
+`App.vue`, opened with `eventBus.$emit('showSetPartners', { tuneID, title })`)
+listing the tunes most often played in a set with the one in focus — for
+choosing what to play next in a session, and for building sets beforehand.
+First step towards sets as a real abstraction.
+
+- **The data is thesession's**: member tune sets plus recording tracks,
+  counted by the data repo's `thesession_sets.py` and embedded in
+  `thesession.json` as a top-level `sets` map (`tune_id → [[partner, in_sets,
+  on_recordings, followed_by], ...]`, top 12). Only thesession tunes have it.
+- **It never reaches WASM.** `splitIndexPayload` strips it into a
+  `setPartners` sideband (with a `danceByTune` one for the tune type), so it
+  rides the offline copy, the install path and every invariant above for free.
+  `mergeIndexParts` takes a dataset's sets **only for its own tunes**, so an
+  import cannot rewrite thesession's suggestions. Rebuilt wholesale on every
+  merge, like `datasetByTune`.
+- `worker.setPartnersFromTuneID` resolves each partner against the LOADED
+  index and drops what is not there; `precededBy` is read from the partner's
+  own entry (the reverse direction).
+- **Ordering is `js/setPartners.mjs`**: starred tunes first, but only when
+  *commonly* played with this one (≥ 15 % of the strongest partner, floor 3);
+  then by `in_sets + on_recordings`, ties by tune id. "Usually played
+  after/before it" is shown only when one direction is ≥ 2× the other and seen
+  ≥ 3 times.
+- The button hides itself for a tune with no partners (every folkwiki tune),
+  rather than opening an empty list.
+- **`<router-view>` is keyed by `fullPath` for the Tune route only**: Tune.vue
+  loads in `created()`, so jumping from one tune to a partner reused the
+  component and left the previous tune on screen.
+
+Tests: `setPartners.test.mjs` (10), `setPartnersDialog.test.mjs` (4, the
+stale-answer race), 3 cases in `tune-index-install.test.mjs`. Verified by
+mutation: dropping the own-tunes guard, leaving `sets` in the WASM payload and
+dropping the dialog's stale-answer check each fail.
+
+⚠️ Needs the data repo's thesession v2505+ deployed to show anything.
+
 ### Record this tune (November 2026)
 
 A record button in the `LiveScoreFollow` header (between the pin and the

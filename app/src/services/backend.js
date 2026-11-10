@@ -496,6 +496,13 @@ class FFBackend {
         });
     }
 
+    async setPartnersFromTuneID(tuneID) {
+        return new Promise((resolve, reject) => {
+            this.folkfriendWorker.setPartnersFromTuneID(tuneID, Comlink.proxy(resolve))
+                .catch(reject);
+        });
+    }
+
     async aliasesFromTuneID(tuneID) {
         return new Promise((resolve, reject) => {
             this.folkfriendWorker.aliasesFromTuneID(tuneID, Comlink.proxy(resolve))

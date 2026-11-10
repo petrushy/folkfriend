@@ -178,6 +178,9 @@ export class FolkFriendWASM {
         return JSON.stringify(Object.entries(settings).slice(0, 3)
             .map(([setting_id, setting]) => ({ setting_id, setting })));
     }
+    async aliases_from_tune_id(tuneID) {
+        return JSON.stringify(((__wasm.loaded || {}).aliases || {})[String(tuneID)] || []);
+    }
     async settings_from_tune_id(tuneID) {
         const settings = (__wasm.loaded || {}).settings || {};
         return JSON.stringify(Object.entries(settings)
@@ -1755,6 +1758,72 @@ async function run() {
         assert.ok(inventory.datasets.norbeck,
             'a deselected imported dataset vanished from the inventory');
         assert.equal(inventory.datasets.norbeck.label, 'Norbeck');
+    });
+
+    // --- set partners ("played in sets with") ------------------------------
+
+    console.log('\nSet partners');
+
+    // thesession v1 with a `sets` block: tune 0 is played with 1 (often, and
+    // usually after it), with 2, and with 999, which is not in the index.
+    // Folkwiki tune 1000000 claims sets for thesession tune 0 — a dataset may
+    // only describe its own tunes.
+    const withSets = (() => {
+        const p = JSON.parse(RAW.thesession.v1);
+        p.sets = {
+            0: [['1', 20, 2, 9], ['2', 3, 0, 0], ['999', 50, 0, 0]],
+            1: [['0', 20, 2, 1]],
+        };
+        return JSON.stringify(p);
+    })();
+    const folkwikiClaimingSets = (() => {
+        const p = JSON.parse(RAW.folkwiki.v1);
+        p.sets = { 0: [['1000001', 99, 0, 0]], 1000000: [['1000001', 1, 0, 0]] };
+        return JSON.stringify(p);
+    })();
+
+    await test('sets never reach WASM, and partners resolve against the index', async () => {
+        resetFakes();
+        await storeMod.writeDataset('thesession', withSets, { v: 1, date: '2026-01-01' });
+        await storeMod.writeDataset('folkwiki', folkwikiClaimingSets, { v: 1, date: '2026-01-01' });
+        const wrapper = await newWorker({ datasets: ['thesession', 'folkwiki'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+
+        assert.equal(wasmMod.__wasm.loaded.sets, undefined,
+            'the sets block was handed to the query engine');
+        const partners = await new Promise(r => wrapper.setPartnersFromTuneID(0, r));
+        assert.deepEqual(partners.map(p => p.tuneID), ['1', '2'],
+            'expected only partners that are in the loaded index, in data order');
+        assert.deepEqual(partners[0], {
+            tuneID: '1', name: 'Tune thesession v1 1', dance: 'v1',
+            inSets: 20, onRecordings: 2, followedBy: 9, precededBy: 1,
+        });
+        assert.deepEqual(
+            (await new Promise(r => wrapper.setPartnersFromTuneID(1000000, r))).map(p => p.tuneID),
+            ['1000001'], 'a dataset describing its own tunes is kept');
+    });
+
+    await test('no partners for a tune without set data, or with no index', async () => {
+        resetFakes();
+        await storeMod.writeDataset('thesession', withSets, { v: 1, date: '2026-01-01' });
+        const wrapper = await newWorker({ datasets: ['thesession'] });
+        await new Promise(r => wrapper.setupTuneIndex(r));
+        // One dataset is the path that hands its own object to WASM.
+        assert.equal(wasmMod.__wasm.loaded.sets, undefined,
+            'the sets block was handed to the query engine');
+        assert.deepEqual(await new Promise(r => wrapper.setPartnersFromTuneID(5, r)), []);
+
+        await new Promise(r => wrapper.setSelectedDatasets([], r));
+        assert.deepEqual(await new Promise(r => wrapper.setPartnersFromTuneID(0, r)), [],
+            'partners outlived the index they came from');
+    });
+
+    await test('a cached copy keeps its sets across a restart', async () => {
+        resetFakes();
+        await storeMod.writeDataset('thesession', withSets, { v: 1, date: '2026-01-01' });
+        const cached = await storeMod.readDataset('thesession');
+        assert.equal(cached.index.indexData.sets, undefined);
+        assert.equal(cached.index.setPartners[0].length, 3);
     });
 
     console.log(`\n${passed} passed, ${failed} failed\n`);

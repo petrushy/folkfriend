@@ -149,6 +149,7 @@ async function loadOverlay({ initialDetections = null } = {}) {
         ["from '@/services/liveAnalysis.js'", "from './fake-live-analysis.mjs'"],
         ["from '@/components/AbcDisplay.vue'", "from './fake-component.mjs'"],
         ["from '@/components/TuneBackgroundButton.vue'", "from './fake-component.mjs'"],
+        ["from '@/components/SetPartnersButton.vue'", "from './fake-component.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
         // Deliberately the real module.
         ["from '@/js/liveScoreFollow.mjs'", `from '${followModule}'`],

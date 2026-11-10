@@ -17,6 +17,7 @@
                 </v-icon>
             </v-chip>
             <TuneBackgroundButton class="ma-1" :tuneID="tuneID" :displayName="name || displayName" :sourceUrl="folkwikiSourceUrl" />
+            <SetPartnersButton class="ma-1" chip :tuneID="tuneID" :title="name || displayName" />
         </v-container>
 
         <v-container v-if="geoTaggingOn" class="heardAt py-1">
@@ -267,6 +268,7 @@ import { dropboxState } from '@/services/dropbox.js';
 import { playSessionTuneLooped, playerHost, sessionPlayer } from '@/services/sessionPlayerHost.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
+import SetPartnersButton from '@/components/SetPartnersButton.vue';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
 // fire: ffBackend.indexReady() resolves as soon as the worker's state machine
@@ -277,7 +279,7 @@ const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
     name: 'TuneView',
-    components: { AbcDisplay, TuneBackgroundButton, TunePlaceDialog },
+    components: { AbcDisplay, TuneBackgroundButton, SetPartnersButton, TunePlaceDialog },
     props: {
         tuneID: {
             type: String,
