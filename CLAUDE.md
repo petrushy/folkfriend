@@ -1144,6 +1144,54 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Live view: follow the position in the tune (November 2026)
+
+A toggle in the `LiveScoreFollow` header (crosshairs, right of the pin; off by
+default, remembered as `userSettings.liveAutoCenter`) keeps the staff LINE
+being played centred and marks it with a teal band. A readout beside the match
+score says what it thinks (`line 3/8 · 41%`, `which part?`, `position
+unclear`) — the only way to judge it on a device.
+
+- **The position comes from the alignment that already ranks the tune.**
+  `nw.rs` is semi-global, so it finds the best-matching stretch of the stored
+  contour and used to throw the location away. `nw::match_spans` runs the same
+  recurrence with a start pointer per cell and returns up to 4
+  NON-OVERLAPPING spans, best first; a test pins that the best span's score
+  equals `needleman_wunsch` exactly over 500 random pairs. Filled for the first
+  `QUERY_SPAN_RESULTS` (20, what the app is handed) as
+  `TranscriptionQueryRecord.match_spans`. Ranking is untouched.
+- **Runners-up are reported, not judged in Rust**, because a tie means
+  different things: the two A parts of an AABB tune are an exact tie and the
+  SAME written bars (harmless), while an A and a B part sharing a phrase are
+  different lines. Only the view knows where each lands, so `decideLine`
+  (`js/scorePosition.mjs`) holds (`ambiguous`) unless every span within 0.05
+  of the best maps to one line.
+- **Contour → score goes through a FRACTION and ABCJS's own timeline.** The
+  stored contour has repeats played out; so does `ABCJS.TimingCallbacks`
+  (verified in Chromium: repeats and 1st/2nd endings expanded, each event
+  carrying `line`/`top`/`height`). `end / contour.length` is mapped onto that
+  timeline's total length, which spreads the contour's drift (grace notes
+  stripped, sub-quaver notes rounded/dropped) along the tune rather than
+  piling it up at the end. `AbcDisplay.followTimeline()` /
+  `lineClientRect()`.
+- **Projected forward** from the moment the window's PCM was read, at the pace
+  the span itself was played (span length ÷ window length), capped at 8 s.
+- **Hysteresis**: forward moves at once; BACK needs two consecutive windows
+  agreeing (the per-second re-projection is not a second opinion).
+- **Only against the setting on screen** — `abcSetting.setting_id`, not the
+  detected one, which can differ after a fallback to `settings[0]`.
+- **Holds while Frozen** (the freeze is total) and for 8 s after the user
+  touches or scrolls the score; the band keeps following meanwhile.
+- `liveAnalysis.scorePosition` / `liveScorePosition` event, built from the
+  results AFTER rejections. Display-only, never persisted, cleared on Pause.
+
+Tests: 5 Rust unit tests in `nw.rs`, `match_spans_locate_a_slice_of_a_real_tune`
+(integration, needs the index), `scorePosition.test.mjs` (10), 5 cases in
+`liveScoreFollowComponent.test.mjs`, 1 in `liveSessions.test.mjs`. VERSION
+1.5.0. ⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.6 score
+floor and the 0.05 tie margin are guesses, and nothing here has run on a
+device.
+
 ### Live detection: an early first query and an adaptive step (November 2026)
 
 Reported as "it takes too long until a tune is detected". At 10 s window / 5 s

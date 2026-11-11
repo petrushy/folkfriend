@@ -14,6 +14,7 @@ import {
     firstQueryDelaySeconds, updateLatencyEstimate, effectiveStepSeconds,
     isPartialWindow, partialWindowUsable,
 } from '@/js/liveCadence.mjs';
+import { windowPositions } from '@/js/scorePosition.mjs';
 import eventBus from '@/eventBus.js';
 
 // How long a tune the user has rejected stays suppressed. Without a cooldown
@@ -58,6 +59,10 @@ class LiveAnalysisService {
         this.elapsedSeconds = 0;
         this.options = null;
         this._windowMatches = [];
+        // Where in each tune the latest window matched, for the follow view's
+        // auto-centre (js/scorePosition.mjs). Display-only and never persisted:
+        // it is about the last few seconds, and goes stale within a minute.
+        this.scorePosition = null;
         this._cancelSleep = null;
         this._timerInterval = null;
         this._sampleRate = 48000;
@@ -364,6 +369,7 @@ class LiveAnalysisService {
     async clearTunes() {
         this._generation++;
         this._windowMatches = [];
+        this.scorePosition = null;
         this.detections = [];
         this._lastSavedTuneId = null;
         this._lastSightingTuneId = null;
@@ -582,6 +588,7 @@ class LiveAnalysisService {
         this.isPaused = false;
         this._stopTimer();
         this._cancelCheckpoint();
+        this.scorePosition = null;
         // A Pause ends a capture. Resuming must never silently start recording
         // again on the strength of a tap made before the break: the tune it was
         // for is over, and whatever is played after the break is the user's to
@@ -703,6 +710,9 @@ class LiveAnalysisService {
             // stamp taken afterwards would place every tune that much late in
             // the recording.
             const audioSeconds = sessionRecorder.isRecording ? sessionRecorder.audioSeconds : null;
+            // Same moment, on the wall clock: the follow view projects the
+            // position forward from where this window ENDED.
+            const readAt = Date.now();
 
             if (pcm.length > 0) {
                 const sampleRate = micService.sampleRate || this._sampleRate;
@@ -748,6 +758,9 @@ class LiveAnalysisService {
                 if (!current()) break;
 
                 this._reportAnalysedWindow(audioSeconds, response, options);
+                if (!response.error && usableResults.length > 0) {
+                    this._publishScorePosition(usableResults, readAt, pcm.length / sampleRate);
+                }
 
                 if (this.isRunning && !this.isPaused && !response.error && usableResults.length > 0) {
                     const previousTuneId = this.detections.length > 0
@@ -798,6 +811,15 @@ class LiveAnalysisService {
             const remainingMs = Math.max(0, stepMs - analysisMs);
             await this._sleepCancellable(remainingMs);
         }
+    }
+
+    // Hands the follow view where in each candidate tune this window matched.
+    // From the results after rejections, so a tune the user has turned down
+    // cannot steer the score; before the previous-tune bias, which reorders
+    // results but does not change where each one matched.
+    _publishScorePosition(results, readAt, windowSeconds) {
+        this.scorePosition = windowPositions(results, { readAt, windowSeconds });
+        eventBus.$emit('liveScorePosition', this.scorePosition);
     }
 
     // Tells the recorder what this window sounded like, for a "tunes only"

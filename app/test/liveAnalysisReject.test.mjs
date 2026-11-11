@@ -93,6 +93,7 @@ async function loadService() {
         ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
         ["from '@/js/tuneCapture.mjs'", `from '${path.join(srcDir, 'js', 'tuneCapture.mjs')}'`],
         ["from '@/js/liveCadence.mjs'", `from '${path.join(srcDir, 'js', 'liveCadence.mjs')}'`],
+        ["from '@/js/scorePosition.mjs'", `from '${path.join(srcDir, 'js', 'scorePosition.mjs')}'`],
         ["from '@/js/audioKeep.mjs'", `from '${path.join(srcDir, 'js', 'audioKeep.mjs')}'`],
     ];
     for (const [from, to] of replacements) {

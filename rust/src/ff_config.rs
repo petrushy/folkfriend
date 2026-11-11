@@ -1,6 +1,6 @@
 // Stores important global parameters that are re-used across FolkFriend.
 // MAKE SURE THIS MATCHES CARGO.TOML
-pub const VERSION: &str = "1.4.1-ml";
+pub const VERSION: &str = "1.5.0-ml";
 
 // ====================================
 // === Signal Processing Paramaters ===
@@ -89,3 +89,9 @@ pub const QUERY_REPASS_SIZE: usize = 2000;
 // (so we can include a whole boundary tie group without splitting it — see
 // query/heuristic.rs — without an unbounded NW pass on pathological contours).
 pub const QUERY_REPASS_MAX: usize = 6000;
+// How many transcription results carry `match_spans` (where in the tune the
+// query matched), and how many candidate places each reports. 20 is what the
+// app is handed (lib.rs truncates to it); 4 is enough for AABB plus a
+// competing part.
+pub const QUERY_SPAN_RESULTS: usize = 20;
+pub const QUERY_SPANS_PER_RESULT: usize = 4;

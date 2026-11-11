@@ -563,3 +563,39 @@ fn datasets_have_disjoint_ids() {
         loaded, owner_of_setting.len(), owner_of_tune.len()
     );
 }
+
+// The live view's "where in the tune are we" rests on match_spans pointing at
+// the place the query really came from. Cut slices out of a real stored
+// contour and check the span lands where each was cut — or, for a slice that
+// also occurs earlier (a played-out repeat), that both places are reported,
+// earliest first.
+#[test]
+fn match_spans_locate_a_slice_of_a_real_tune() {
+    let ff = load_tune_index();
+    let setting_id = "974588901";
+    // This setting's own stored contour (the same fixture
+    // heuristic_self_match_ranks_first uses).
+    let stored = "vvxvvtstsqosvAEEEFFFFECCCEEFECAAAvvxvtstsqosvAEEEFFFFECFECAAAAAvvxvtstsqosvAEEEFFFFECCCEEFECAAAvvxvtstsqosvAEEEFFFFECFECAAAAAvvEECAssttvtsqqqqqFFCzzzvvvECAAAvvECAAsstvtsqqqqqqFCzvxzAAAAAAAAvvECAAsstvtsqqqqqqFCzzzzvvECAAAAvvECAAsstvtsqqqqqqFCzvxzAAAAAAAA";
+
+    // 70 repeats 8..48 (the A part played twice); 120 and 180 are unique.
+    for start in [70usize, 120, 180] {
+        let end = (start + 40).min(stored.len());
+        let slice = stored[start..end].to_string();
+        let results = ff.run_transcription_query(&slice).unwrap();
+        let record = match results.iter().find(|r| r.setting_id == setting_id) {
+            Some(r) => r,
+            // Another setting of the same tune can outrank this one on a short
+            // slice, and results are one per tune — not what is under test.
+            None => { eprintln!("SKIP slice at {}: setting not returned", start); continue; }
+        };
+        let first = stored.find(&slice).unwrap();
+        let spans = &record.match_spans;
+        assert!(!spans.is_empty(), "no spans for slice at {}", start);
+        assert_eq!(spans[0].start, first, "slice at {} (first occurrence {})", start, first);
+        assert_eq!(spans[0].end, first + slice.len());
+        if first != start {
+            assert!(spans.iter().any(|s| s.start == start),
+                "repeat at {} not reported: {:?}", start, spans);
+        }
+    }
+}

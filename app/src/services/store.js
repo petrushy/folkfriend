@@ -32,6 +32,10 @@ const USER_SETTING_DEFAULTS = {
     // only; global because it describes the player, not the tune.
     instrumentShift: 0,
     geoTagDetections: false, // record where each tune was heard; needs location permission
+    // Follow view: keep the line being played centred (js/scorePosition.mjs).
+    // Off by default — it moves the page on its own, and its estimate of the
+    // position is unmeasured against real sessions.
+    liveAutoCenter: false,
     // Keep the audio of a live session so it can be listened back to and
     // exported. Off by default and deliberately so: three hours of a pub
     // records the conversations of everyone in it, and it is the largest thing
