@@ -1190,6 +1190,9 @@ score says what it thinks (`line 3/8 · 41%`, `which part?`, `position unclear
 
 Tests: `scorePosition.test.mjs` (13), 7 cases in
 `liveScoreFollowComponent.test.mjs`, 1 in `liveSessions.test.mjs`.
+Detection is untouched: no Rust change, and the loop only reads the window's
+contour after its result is taken. The alignment costs ~0.7 ms per window on
+desktop, on the main thread, only with the toggle on.
 ⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.6 floor and
 the 0.05 tie margin are guesses.
 
@@ -1214,10 +1217,52 @@ both in `js/liveCadence.mjs` (pure) and wired in `liveAnalysis._runLoop`:
   real step only brings windows closer than they assume, the safe direction.
   Side effect: up to ~2.5× more window matches in `openLiveSession`.
 
-Tests: `liveCadence.test.mjs` (8) and two loop cases in `liveSessions.test.mjs`;
+- **A faster step needs a new tune CONFIRMED by time, not by window count**
+  (added the same day, after measuring). Windows 2 s apart share 8 of their
+  10 s of audio, so one misleading passage yields two or three matching
+  windows for the same wrong tune, and "matched twice" stopped meaning what it
+  did at a 5 s step: on synthetic sessions the time spent showing a tune
+  nobody played rose from 4.8 % to 6.6 %. `buildSessionDetections` now takes
+  `confirmSpanSeconds` and holds a NEW tail tune back (the previous one stays
+  current) until its windows span that long, unless one scored ≥ 0.7.
+  `confirmSpanSeconds(configured, actual)` (`liveCadence.mjs`) is the
+  configured step minus the measured one: **0 on a slow device, so it behaves
+  exactly as before**, 3 s at a 2 s step. `_liveStepSeconds` is null until the
+  first analysis has been timed, i.e. nothing is held back before then. Not
+  applied when `final`.
+
+Tests: `liveCadence.test.mjs` (9) and two loop cases in `liveSessions.test.mjs`;
 reinstating the full-window wait, the fixed step or the ungated partial window
-each fails 1. ⚠️ Not yet timed on a device, and the early-window accuracy is
-unmeasured — the WAV corpus is gone (see Known issues).
+each fails 1. The confirmation: cases in `sessionAnalysis.test.mjs` and
+`liveAnalysisReject.test.mjs`; dropping the hold fails 2 files, never recording
+the measured step fails 1. ⚠️ Not yet timed on a device.
+
+#### Measuring live detection without recordings
+
+With the WAV corpus gone, `rust/examples/detect_sim.rs` is the only measurement
+of detection quality. It synthesises sessions of three real thesession tunes
+back to back (harmonic tone with vibrato, per-quaver onsets, 5 % wrong notes,
+tempo drift, room noise at 6–14 dB SNR; `DETECT_SIM_HARD=1` for 12 % and
+0–6 dB), runs the real DSP transcriber and query on the 10 s window ending at
+every second, and `app/test/bench/replayLiveCadence.mjs` replays those results
+through the live loop's decision functions under each cadence. Needs the
+thesession dataset in `app/public/res/` (`download_tune_data.sh`); 60 sessions
+take ~10 minutes on 4 cores.
+
+November 2026, 60 sessions × 3 tunes, normal / hard:
+
+| | shown after (median) | right tune | WRONG tune | saved list: found, spurious |
+|---|---|---|---|---|
+| before #110 (10 s first, 5 s step) | 9.3 / 10.0 s | 82.9 / 81.9 % | 4.8 / 5.0 % | 179, 8 / 176, 9 |
+| #110, fast device, no confirmation | 5.8 / 6.3 s | 86.5 / 85.7 % | 6.6 / 6.4 % | 179, 7 / 177, 7 |
+| current, fast device (2 s step) | 8.4 / 9.2 s | 87.1 / 85.7 % | 0.8 / 1.4 % | 179, 2 / 178, 5 |
+| current, slow device (5 s step) | 6.8 / 7.4 s | 85.9 / 84.9 % | 4.9 / 5.1 % | 179, 8 / 176, 9 |
+
+The one cost against the old cadence: on the hard set the 90th-percentile time
+to show a new tune is ~0.5 s longer on a fast device (11.1 vs 10.6 s).
+⚠️ Synthetic audio is cleaner and more regular than a pub; it compares
+cadences fairly but says nothing absolute about accuracy, and only DSP was
+measured, not ML.
 
 ### Played in sets with — set partners (November 2026)
 

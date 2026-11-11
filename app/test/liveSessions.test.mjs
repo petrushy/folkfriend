@@ -1016,6 +1016,8 @@ async function run() {
         assert.ok(first < 5500, `first query at ${first} ms, not after the full 6 s window`);
         assert.ok(gap < 3000, `a near-instant backend steps at the 2 s floor, not the configured 6 s (gap ${gap} ms)`);
         assert.ok(gap >= 1900, `the step never drops below the floor (gap ${gap} ms)`);
+        assert.equal(service._liveStepSeconds, 2,
+            'the measured step is what decides how much a run of matches is worth');
     });
 
     await test('a partial window counts only with a real contour; a full window is judged as before', async () => {

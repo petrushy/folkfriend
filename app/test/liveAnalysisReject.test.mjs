@@ -179,6 +179,30 @@ await test('a blip in the middle of a tune lets the two halves merge', async () 
         'the filter runs before the collapse, so tune 1 is one row, not two');
 });
 
+await test('a fast step holds a new tune back until its windows span enough audio', async () => {
+    const { service } = await loadService();
+    // Tune 1 established at the configured cadence.
+    play(service, 1, 0, 4);
+    // The loop has measured a 2 s step: windows now share most of their audio.
+    service._liveStepSeconds = 2;
+    // Below the strong-single score, which would rightly need no confirmation.
+    service._windowMatches.push(match(2, 20, 0.6), match(2, 22, 0.6));
+    service._recluster();
+    assert.deepEqual(service.detections.map(d => d.tuneId), [1],
+        'two overlapping windows of a new tune are not yet a tune change');
+    service._windowMatches.push(match(2, 24, 0.6));
+    service._recluster();
+    assert.deepEqual(service.detections.map(d => d.tuneId), [1, 2], 'spanning 4 s: it is');
+
+    // Before the step has been measured, nothing is held back — exactly the
+    // old behaviour.
+    service._liveStepSeconds = null;
+    service._windowMatches = service._windowMatches.slice(0, 4);
+    service._windowMatches.push(match(3, 20, 0.6));
+    service._recluster();
+    assert.deepEqual(service.detections.map(d => d.tuneId), [1, 3]);
+});
+
 console.log('\nrejecting the tune on screen');
 
 await test('rejecting drops the tune from the list and reverts to the previous one', async () => {

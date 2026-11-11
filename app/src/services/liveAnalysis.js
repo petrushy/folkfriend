@@ -12,7 +12,7 @@ import { MUSIC_EVIDENCE_MIN_SCORE } from '@/js/audioKeep.mjs';
 import { beginCapture, captureVerdict, captureEndMessage } from '@/js/tuneCapture.mjs';
 import {
     firstQueryDelaySeconds, updateLatencyEstimate, effectiveStepSeconds,
-    isPartialWindow, partialWindowUsable,
+    isPartialWindow, partialWindowUsable, confirmSpanSeconds,
 } from '@/js/liveCadence.mjs';
 import { windowPosition } from '@/js/scorePosition.mjs';
 import eventBus from '@/eventBus.js';
@@ -64,6 +64,10 @@ class LiveAnalysisService {
         // against the setting on screen. Display-only and never persisted: it
         // is about the last few seconds, and goes stale within a minute.
         this.scorePosition = null;
+        // The step the loop is actually using, once it knows (null until the
+        // first analysis has been timed). Shorter than the configured step on
+        // a fast device; see _recluster().
+        this._liveStepSeconds = null;
         this._cancelSleep = null;
         this._timerInterval = null;
         this._sampleRate = 48000;
@@ -547,7 +551,13 @@ class LiveAnalysisService {
     // set only when the session is being finished: until then the last entry
     // is the tune playing now and must stay, however short.
     _recluster({ final = false } = {}) {
-        this.detections = buildSessionDetections(this._windowMatches, this.options, { final });
+        const confirm = this._liveStepSeconds === null || !this.options
+            ? 0
+            : confirmSpanSeconds(this.options.stepSeconds, this._liveStepSeconds);
+        this.detections = buildSessionDetections(this._windowMatches, this.options, {
+            final,
+            confirmSpanSeconds: confirm,
+        });
     }
 
     // The last window that actually produced an accepted match, or null.
@@ -669,6 +679,7 @@ class LiveAnalysisService {
         // Measured analysis time, for the adaptive step. Per run, because a
         // resume can follow a long break in which the device's load changed.
         let latencyMs = null;
+        this._liveStepSeconds = null;
 
         while (this.isRunning && !this.isPaused && current()) {
             const cycleStart = Date.now();
@@ -744,6 +755,9 @@ class LiveAnalysisService {
                 // timeout would just pin the step at its configured maximum.
                 if (!response.error) {
                     latencyMs = updateLatencyEstimate(latencyMs, Date.now() - analysisStart);
+                    // What the windows are about to be spaced by, which is
+                    // what decides how much a run of matches is worth.
+                    this._liveStepSeconds = effectiveStepSeconds(options.stepSeconds, latencyMs);
                 }
 
                 // A partial window (the first seconds of a run) must earn its

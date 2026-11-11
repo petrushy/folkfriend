@@ -70,6 +70,20 @@ export function effectiveStepSeconds(configuredStepSeconds, latencyMs) {
     return Math.min(configured, adaptive);
 }
 
+/**
+ * How long a new tune's matching windows must span before live listening
+ * treats it as the tune being played, given the step actually in use. Zero at
+ * the configured step, so a slow device behaves exactly as before; more as
+ * the step shortens and neighbouring windows share more of the same audio.
+ * See buildSessionDetections() in sessionAnalysis.js.
+ */
+export function confirmSpanSeconds(configuredStepSeconds, actualStepSeconds) {
+    const configured = Number(configuredStepSeconds);
+    const actual = Number(actualStepSeconds);
+    if (!(configured > 0) || !(actual > 0)) return 0;
+    return Math.max(0, configured - actual);
+}
+
 /** Whether `sampleCount` samples are clearly less than a full window. */
 export function isPartialWindow(sampleCount, sampleRate, windowSeconds) {
     if (!(sampleRate > 0) || !(windowSeconds > 0)) return false;
