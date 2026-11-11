@@ -215,16 +215,20 @@ export function __holdNext() {
     __pending = { promise: new Promise(r => { release = r; }), release };
     return __pending;
 }
-export function __reset() { __calls.length = 0; __pending = null; }
+// What every un-held call answers. A test of the cadence needs a backend that
+// answers quickly and the same way each time.
+export let __response = null;
+export function __respondWith(r) { __response = r; }
+export function __reset() { __calls.length = 0; __pending = null; __response = null; }
 export default {
     async transcribeAndQueryPCMSignal(pcm, sampleRate) {
-        __calls.push({ length: pcm.length, sampleRate });
+        __calls.push({ length: pcm.length, sampleRate, at: Date.now() });
         if (__pending) {
             const held = __pending;
             __pending = null;
             return held.promise;
         }
-        return { results: [] };
+        return __response ? JSON.parse(JSON.stringify(__response)) : { results: [] };
     },
 };`;
 const FAKE_GEO = `
@@ -388,6 +392,7 @@ async function loadService({ keepStore = false } = {}) {
         ["from '@/js/biasResults.mjs'", `from '${biasModule}'`],
         ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
         ["from '@/js/tuneCapture.mjs'", `from '${path.join(srcDir, 'js', 'tuneCapture.mjs')}'`],
+        ["from '@/js/liveCadence.mjs'", `from '${path.join(srcDir, 'js', 'liveCadence.mjs')}'`],
         ["from '@/js/audioKeep.mjs'", `from '${path.join(srcDir, 'js', 'audioKeep.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
@@ -983,6 +988,69 @@ async function run() {
         assert.equal(service._checkpointTimer, null,
             'an overdue checkpoint saves now rather than pushing the deadline out again');
         await service.stop();
+    });
+
+    // --- How fast a tune appears (js/liveCadence.mjs) ---------------------
+
+    const TUNE_RESULT = (contour) => ({
+        contour,
+        results: [{ setting: { tune_id: 7, dataset: 'thesession' }, setting_id: 70, score: 0.9, display_name: 'Early tune' }],
+    });
+
+    await test('the first query runs before a whole window has been heard, and a fast device steps faster than configured', async () => {
+        const { service, mic, backend } = await loadService();
+        mic.__setPcm(4096);
+        backend.__respondWith(TUNE_RESULT('a'.repeat(40)));
+        const startedAt = Date.now();
+        // A 6 s window and a 6 s step: the old loop made its first call at 6 s
+        // and its second at 12 s.
+        await service.start(6, 6);
+        for (let i = 0; i < 1000 && backend.__calls.length < 2; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        await service.stop();
+        assert.ok(backend.__calls.length >= 2, 'two cycles ran');
+        const first = backend.__calls[0].at - startedAt;
+        const gap = backend.__calls[1].at - backend.__calls[0].at;
+        assert.ok(first < 5500, `first query at ${first} ms, not after the full 6 s window`);
+        assert.ok(gap < 3000, `a near-instant backend steps at the 2 s floor, not the configured 6 s (gap ${gap} ms)`);
+        assert.ok(gap >= 1900, `the step never drops below the floor (gap ${gap} ms)`);
+    });
+
+    await test('a partial window counts only with a real contour; a full window is judged as before', async () => {
+        // A 1 s window holds 44100 samples at the fake rate; 4096 is partial.
+        let { service, mic, backend } = await loadService();
+        mic.__setPcm(4096);
+        backend.__respondWith(TUNE_RESULT('abc'));
+        await service.start(1, 0.05);
+        for (let i = 0; i < 200 && backend.__calls.length < 3; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        await service.stop();
+        assert.ok(backend.__calls.length >= 3);
+        assert.deepEqual(service.detections, [],
+            'a three-note contour from a second of audio must not name a tune');
+
+        ({ service, mic, backend } = await loadService());
+        mic.__setPcm(4096);
+        backend.__respondWith(TUNE_RESULT('a'.repeat(12)));
+        await service.start(1, 0.05);
+        for (let i = 0; i < 200 && service.detections.length === 0; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        await service.stop();
+        assert.equal(service.detections.length, 1, 'a partial window with a usable contour shows its tune');
+
+        ({ service, mic, backend } = await loadService());
+        mic.__setPcm(44100);
+        backend.__respondWith(TUNE_RESULT('abc'));
+        await service.start(1, 0.05);
+        for (let i = 0; i < 200 && service.detections.length === 0; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        await service.stop();
+        assert.equal(service.detections.length, 1,
+            'the contour bar is only for partial windows — a full one is unchanged');
     });
 
     await test('a transcription in flight across Pause then Resume is discarded', async () => {

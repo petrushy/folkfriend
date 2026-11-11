@@ -1461,7 +1461,7 @@ export default {
             this.live.starting = true;
 
             const windowSeconds = Number(this.analysisSettings.windowSeconds) || 10;
-            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 10;
+            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 5;
 
             try {
                 await liveAnalysisService.start(windowSeconds, stepSeconds);
@@ -1486,7 +1486,7 @@ export default {
             this.live.starting = true;
 
             const windowSeconds = Number(this.analysisSettings.windowSeconds) || 10;
-            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 10;
+            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 5;
 
             try {
                 const result = await liveAnalysisService.startForFollow(windowSeconds, stepSeconds);
