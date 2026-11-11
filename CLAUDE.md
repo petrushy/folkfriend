@@ -1149,23 +1149,26 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 A toggle in the `LiveScoreFollow` header (crosshairs, right of the pin; off by
 default, remembered as `userSettings.liveAutoCenter`) keeps the staff LINE
 being played centred and marks it with a teal band. A readout beside the match
-score says what it thinks (`line 3/8 · 41%`, `which part?`, `position
-unclear`) — the only way to judge it on a device.
+score says what it thinks (`line 3/8 · 41%`, `which part?`, `position unclear
+(0.52)`) — the only way to judge it on a device.
 
-- **The position comes from the alignment that already ranks the tune.**
-  `nw.rs` is semi-global, so it finds the best-matching stretch of the stored
-  contour and used to throw the location away. `nw::match_spans` runs the same
-  recurrence with a start pointer per cell and returns up to 4
-  NON-OVERLAPPING spans, best first; a test pins that the best span's score
-  equals `needleman_wunsch` exactly over 500 random pairs. Filled for the first
-  `QUERY_SPAN_RESULTS` (20, what the app is handed) as
-  `TranscriptionQueryRecord.match_spans`. Ranking is untouched.
-- **Runners-up are reported, not judged in Rust**, because a tie means
-  different things: the two A parts of an AABB tune are an exact tie and the
-  SAME written bars (harmless), while an A and a B part sharing a phrase are
-  different lines. Only the view knows where each lands, so `decideLine`
-  (`js/scorePosition.mjs`) holds (`ambiguous`) unless every span within 0.05
-  of the best maps to one line.
+- **Each window's contour is aligned against the setting ON SCREEN**, in JS
+  (`matchSpans`, `js/scorePosition.mjs`), with the Rust second pass's exact
+  scoring and boundaries (a test checks its best score against a port of
+  `needleman_wunsch` over 300 pairs). ~60 × 600 cells, well under a
+  millisecond, once per window (cached for the per-second re-projection).
+
+  **The first version took the position from the query's results, and on a
+  device it said "position n/a" almost all the time.** Results are one per
+  tune, carrying that window's BEST-SCORING setting; Drowsy Maggie has dozens,
+  so the one on screen was almost never it. Do not go back to reading spans
+  off the results. The Rust `match_spans` that did this was reverted, so the
+  WASM is unchanged.
+- **Up to 4 non-overlapping spans, and runners-up are judged by LINE.** The two
+  A parts of an AABB tune are an exact tie and the SAME written bars
+  (harmless); an A and a B part sharing a phrase are different lines.
+  `decideLine` holds (`ambiguous`) unless every span within 0.05 of the best
+  lands on one line.
 - **Contour → score goes through a FRACTION and ABCJS's own timeline.** The
   stored contour has repeats played out; so does `ABCJS.TimingCallbacks`
   (verified in Chromium: repeats and 1st/2nd endings expanded, each event
@@ -1178,19 +1181,17 @@ unclear`) — the only way to judge it on a device.
   the span itself was played (span length ÷ window length), capped at 8 s.
 - **Hysteresis**: forward moves at once; BACK needs two consecutive windows
   agreeing (the per-second re-projection is not a second opinion).
-- **Only against the setting on screen** — `abcSetting.setting_id`, not the
-  detected one, which can differ after a fallback to `settings[0]`.
+- Below 0.6 alignment score, or a window under 12 notes, there is no position.
 - **Holds while Frozen** (the freeze is total) and for 8 s after the user
   touches or scrolls the score; the band keeps following meanwhile.
-- `liveAnalysis.scorePosition` / `liveScorePosition` event, built from the
-  results AFTER rejections. Display-only, never persisted, cleared on Pause.
+- `liveAnalysis.scorePosition` / `liveScorePosition` event carry the window's
+  contour, `readAt` and length. Display-only, never persisted, cleared on
+  Pause.
 
-Tests: 5 Rust unit tests in `nw.rs`, `match_spans_locate_a_slice_of_a_real_tune`
-(integration, needs the index), `scorePosition.test.mjs` (10), 5 cases in
-`liveScoreFollowComponent.test.mjs`, 1 in `liveSessions.test.mjs`. VERSION
-1.5.0. ⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.6 score
-floor and the 0.05 tie margin are guesses, and nothing here has run on a
-device.
+Tests: `scorePosition.test.mjs` (13), 7 cases in
+`liveScoreFollowComponent.test.mjs`, 1 in `liveSessions.test.mjs`.
+⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.6 floor and
+the 0.05 tie margin are guesses.
 
 ### Live detection: an early first query and an adaptive step (November 2026)
 

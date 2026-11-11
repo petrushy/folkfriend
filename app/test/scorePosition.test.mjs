@@ -6,8 +6,8 @@
 
 import assert from 'node:assert/strict';
 import {
-    windowPositions, spanFraction, lineAtFraction, decideLine, nextFollowLine,
-    POSITION_MIN_SCORE, MAX_EXTRAPOLATE_SECONDS,
+    windowPosition, matchSpans, spanFraction, lineAtFraction, decideLine, nextFollowLine,
+    MAX_EXTRAPOLATE_SECONDS, MIN_QUERY_LENGTH,
 } from '../src/js/scorePosition.mjs';
 
 let passed = 0;
@@ -29,23 +29,81 @@ function aabbTimeline() {
     return { events, totalMs: 16000, lines: [{}, {}, {}, {}], lineCount: 4 };
 }
 
-function position(spans, { readAt = 1000, windowSeconds = 10, settingId = '10', contourLength = 160 } = {}) {
-    return { readAt, windowSeconds, byTune: { 7: { settingId, contourLength, spans } } };
+// A deterministic pseudo-random contour, so slices of it are unique.
+function contour(length, seed = 1, alphabet = 'opqrstuvwxyz') {
+    let x = seed;
+    let out = '';
+    for (let i = 0; i < length; i++) {
+        x = (x * 1103515245 + 12345) % 2147483648;
+        out += alphabet[x % alphabet.length];
+    }
+    return out;
 }
+
+// The second pass's score as Rust computes it (rust/src/query/nw.rs): the best
+// cell of the same lattice. matchSpans must report exactly this as its best.
+function needlemanWunsch(a, b) {
+    if (!a.length || !b.length) return 0;
+    if (a.length > b.length) [a, b] = [b, a];
+    let best = 0;
+    let prev = new Array(a.length + 1).fill(0);
+    for (let r = 0; r < b.length; r++) {
+        const cur = [0];
+        for (let c = 1; c <= a.length; c++) {
+            cur[c] = Math.max(prev[c - 1] + (a[c - 1] === b[r] ? 2 : -2), cur[c - 1] - 1, prev[c] - 1);
+            best = Math.max(best, cur[c]);
+        }
+        prev = cur;
+    }
+    return 0.5 * best / a.length;
+}
+
+const POS = (contourText, readAt = 1000, windowSeconds = 10) => ({ contour: contourText, readAt, windowSeconds });
 
 console.log('scorePosition');
 
-test('windowPositions keeps the best setting per tune and skips results without spans', () => {
-    const p = windowPositions([
-        { setting_id: 10, setting: { tune_id: 7, contour: 'x'.repeat(160) }, match_spans: [{ start: 1, end: 5, score: 0.8 }] },
-        { setting_id: 11, setting: { tune_id: 7, contour: 'x'.repeat(90) }, match_spans: [{ start: 1, end: 5, score: 0.7 }] },
-        { setting_id: 20, setting: { tune_id: 8, contour: 'xx' }, match_spans: [] },
-        { setting_id: 30, setting: { tune_id: 9, contour: 'xx' } },
-    ], { readAt: 5, windowSeconds: 10 });
-    assert.deepEqual(Object.keys(p.byTune), ['7']);
-    assert.equal(p.byTune[7].settingId, '10');
-    assert.equal(p.byTune[7].contourLength, 160);
-    assert.equal(p.readAt, 5);
+test('matchSpans reports the alignment that produces the match score', () => {
+    // The span is only worth trusting if it is the alignment that scored the
+    // tune — not a different one that happens to be nearby.
+    for (let i = 0; i < 300; i++) {
+        const q = contour(1 + (i % 40), i + 7, 'stuvwx');
+        const s = contour(q.length + (i * 7) % 200, i + 1000, 'stuvwx');
+        const spans = matchSpans(q, s, 3);
+        const best = spans.length ? spans[0].score : 0;
+        assert.ok(Math.abs(best - needlemanWunsch(q, s)) < 1e-9, `q=${q} s=${s}`);
+    }
+});
+
+test('matchSpans finds a slice exactly where it was cut', () => {
+    const stored = contour(400, 42);
+    for (const [start, len] of [[0, 20], [37, 33], [200, 50], [350, 50]]) {
+        const spans = matchSpans(stored.slice(start, start + len), stored, 1);
+        assert.equal(spans[0].start, start);
+        assert.equal(spans[0].end, start + len);
+        assert.equal(spans[0].score, 1);
+    }
+});
+
+test('a repeated part is reported at both places, earliest first, and spans never overlap', () => {
+    const a = 'stuvwxwvutsrstuvwxyx';
+    const b = 'xyzyxwvwxyzyxwvutsrq';
+    const spans = matchSpans(a, a + a + b + b, 4);
+    assert.equal(spans[0].start, 0);
+    assert.equal(spans[1].start, a.length);
+    assert.equal(spans[0].score, spans[1].score);
+    for (let i = 0; i < spans.length; i++) {
+        for (const other of spans.slice(i + 1)) {
+            assert.ok(spans[i].end <= other.start || other.end <= spans[i].start);
+            assert.ok(spans[i].score >= other.score);
+        }
+    }
+});
+
+test('no position from a query longer than the tune, or too short to place', () => {
+    assert.deepEqual(matchSpans('stuvwxyz', 'stu'), []);
+    assert.equal(windowPosition('s'.repeat(MIN_QUERY_LENGTH - 1), { readAt: 0, windowSeconds: 10 }), null);
+    assert.deepEqual(windowPosition('s'.repeat(MIN_QUERY_LENGTH), { readAt: 5, windowSeconds: 10 }),
+        { contour: 's'.repeat(MIN_QUERY_LENGTH), readAt: 5, windowSeconds: 10 });
 });
 
 test('spanFraction projects forward at the pace the span itself was played', () => {
@@ -69,40 +127,50 @@ test('lineAtFraction follows the played-out order, repeats included', () => {
     assert.equal(lineAtFraction({ events: [], totalMs: 0 }, 0.5), null);
 });
 
-test('two tied spans on the SAME written line (an A part and its repeat) give that line', () => {
-    // Ends at 20/160 of the way through (2 s: line 1 of the first A) and at
-    // 60/160 (6 s: line 1 again, in the repeat).
-    const p = position([{ start: 0, end: 20, score: 0.9 }, { start: 40, end: 60, score: 0.9 }]);
-    const d = decideLine(p, { tuneId: 7, settingId: 10, nowMs: 1000, timeline: aabbTimeline() });
+test('the A part and its repeat (same written line) give that line', () => {
+    // An AABB tune of 160 quavers: A = 0..40, repeated 40..80; B 80..160.
+    const A = contour(40, 3);
+    const B = contour(40, 4);
+    const stored = A + A + B + B;
+    // A phrase from A, which therefore ends at 25/160 (2.5 s) and again at
+    // 65/160 (6.5 s): both on written line 1 in aabbTimeline().
+    const query = A.slice(5, 25);
+    const d = decideLine(POS(query), { storedContour: stored, nowMs: 1000, timeline: aabbTimeline() });
     assert.equal(d.reason, 'ok');
     assert.equal(d.line, 1);
 });
 
-test('tied spans on DIFFERENT lines (A and B share a phrase) hold rather than guess', () => {
-    const p = position([{ start: 0, end: 20, score: 0.9 }, { start: 80, end: 100, score: 0.88 }]);
-    const d = decideLine(p, { tuneId: 7, settingId: 10, nowMs: 1000, timeline: aabbTimeline() });
+test('the same phrase in two different parts holds rather than guesses', () => {
+    const shared = contour(20, 9);
+    // The phrase ends at 20/160 (line 1) and at 100/160 (10 s: line 2).
+    const stored = shared + contour(60, 10) + shared + contour(60, 11);
+    const d = decideLine(POS(shared), { storedContour: stored, nowMs: 1000, timeline: aabbTimeline() });
     assert.equal(d.reason, 'ambiguous');
     assert.equal(d.line, null);
 });
 
 test('a clearly weaker runner-up does not make it ambiguous', () => {
-    const p = position([{ start: 0, end: 20, score: 0.9 }, { start: 80, end: 100, score: 0.7 }]);
-    const d = decideLine(p, { tuneId: 7, settingId: 10, nowMs: 1000, timeline: aabbTimeline() });
+    const phrase = contour(20, 9);
+    const altered = phrase.slice(0, 10) + contour(10, 99);
+    const stored = phrase + contour(60, 10) + altered + contour(60, 11);
+    const d = decideLine(POS(phrase), { storedContour: stored, nowMs: 1000, timeline: aabbTimeline() });
     assert.equal(d.reason, 'ok');
     assert.equal(d.line, 1);
 });
 
-test('no position for a weak match, another setting, another tune or a stale window', () => {
+test('no position for audio that does not match, no contour, a stale window or no timeline', () => {
     const t = aabbTimeline();
-    const weak = position([{ start: 0, end: 20, score: POSITION_MIN_SCORE - 0.01 }]);
-    assert.equal(decideLine(weak, { tuneId: 7, settingId: 10, nowMs: 1000, timeline: t }).reason, 'weak');
-    const good = position([{ start: 0, end: 20, score: 0.9 }]);
-    assert.equal(decideLine(good, { tuneId: 7, settingId: 11, nowMs: 1000, timeline: t }).reason, 'other-setting');
-    assert.equal(decideLine(good, { tuneId: 8, settingId: 10, nowMs: 1000, timeline: t }).reason, 'none');
-    assert.equal(decideLine(null, { tuneId: 7, settingId: 10, nowMs: 1000, timeline: t }).reason, 'none');
+    const stored = contour(160, 1);
+    const unrelated = contour(30, 77, 'ABCDEF');
+    const weak = decideLine(POS(unrelated), { storedContour: stored, nowMs: 1000, timeline: t });
+    assert.equal(weak.reason, 'weak');
+    const good = POS(stored.slice(20, 50));
+    assert.equal(decideLine(good, { storedContour: '', nowMs: 1000, timeline: t }).reason, 'no-contour');
+    assert.equal(decideLine(null, { storedContour: stored, nowMs: 1000, timeline: t }).reason, 'none');
     const late = 1000 + (MAX_EXTRAPOLATE_SECONDS + 10 + 1) * 1000;
-    assert.equal(decideLine(good, { tuneId: 7, settingId: 10, nowMs: late, timeline: t }).reason, 'stale');
-    assert.equal(decideLine(good, { tuneId: 7, settingId: 10, nowMs: 1000, timeline: null }).reason, 'no-timeline');
+    assert.equal(decideLine(good, { storedContour: stored, nowMs: late, timeline: t }).reason, 'stale');
+    assert.equal(decideLine(good, { storedContour: stored, nowMs: 1000, timeline: null }).reason, 'no-timeline');
+    assert.equal(decideLine(good, { storedContour: stored, nowMs: 1000, timeline: t }).reason, 'ok');
 });
 
 test('forward moves at once; backward only once two windows agree', () => {

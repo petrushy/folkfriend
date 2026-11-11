@@ -14,7 +14,7 @@ import {
     firstQueryDelaySeconds, updateLatencyEstimate, effectiveStepSeconds,
     isPartialWindow, partialWindowUsable,
 } from '@/js/liveCadence.mjs';
-import { windowPositions } from '@/js/scorePosition.mjs';
+import { windowPosition } from '@/js/scorePosition.mjs';
 import eventBus from '@/eventBus.js';
 
 // How long a tune the user has rejected stays suppressed. Without a cooldown
@@ -59,9 +59,10 @@ class LiveAnalysisService {
         this.elapsedSeconds = 0;
         this.options = null;
         this._windowMatches = [];
-        // Where in each tune the latest window matched, for the follow view's
-        // auto-centre (js/scorePosition.mjs). Display-only and never persisted:
-        // it is about the last few seconds, and goes stale within a minute.
+        // The latest window's transcribed contour and when it ended, for the
+        // follow view's auto-centre (js/scorePosition.mjs), which aligns it
+        // against the setting on screen. Display-only and never persisted: it
+        // is about the last few seconds, and goes stale within a minute.
         this.scorePosition = null;
         this._cancelSleep = null;
         this._timerInterval = null;
@@ -758,8 +759,8 @@ class LiveAnalysisService {
                 if (!current()) break;
 
                 this._reportAnalysedWindow(audioSeconds, response, options);
-                if (!response.error && usableResults.length > 0) {
-                    this._publishScorePosition(usableResults, readAt, pcm.length / sampleRate);
+                if (!response.error) {
+                    this._publishScorePosition(response.contour, readAt, pcm.length / sampleRate);
                 }
 
                 if (this.isRunning && !this.isPaused && !response.error && usableResults.length > 0) {
@@ -813,12 +814,15 @@ class LiveAnalysisService {
         }
     }
 
-    // Hands the follow view where in each candidate tune this window matched.
-    // From the results after rejections, so a tune the user has turned down
-    // cannot steer the score; before the previous-tune bias, which reorders
-    // results but does not change where each one matched.
-    _publishScorePosition(results, readAt, windowSeconds) {
-        this.scorePosition = windowPositions(results, { readAt, windowSeconds });
+    // Hands the follow view what was just heard. Whether it matched anything is
+    // for the view to judge, against the setting it is showing: the query's own
+    // results carry one setting per tune, rarely the one on screen.
+    _publishScorePosition(contour, readAt, windowSeconds) {
+        const position = windowPosition(contour, { readAt, windowSeconds });
+        // A window too short to place keeps the previous one, which ages out
+        // on its own.
+        if (!position) return;
+        this.scorePosition = position;
         eventBus.$emit('liveScorePosition', this.scorePosition);
     }
 

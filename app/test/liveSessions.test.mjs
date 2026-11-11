@@ -1054,32 +1054,18 @@ async function run() {
             'the contour bar is only for partial windows — a full one is unchanged');
     });
 
-    await test('each window publishes where it matched, minus rejected tunes, and Pause clears it', async () => {
+    await test('each window publishes what was heard for the follow view, and Pause clears it', async () => {
         const { service, mic, backend } = await loadService();
         mic.__setPcm(44100);
-        backend.__respondWith({
-            contour: 'a'.repeat(40),
-            results: [
-                { setting: { tune_id: 8, contour: 'x'.repeat(100) }, setting_id: 80, score: 0.95, display_name: 'Rejected',
-                    match_spans: [{ start: 0, end: 30, score: 0.95 }] },
-                { setting: { tune_id: 7, contour: 'x'.repeat(200) }, setting_id: 70, score: 0.9, display_name: 'Early tune',
-                    match_spans: [{ start: 50, end: 90, score: 0.9 }, { start: 130, end: 170, score: 0.9 }] },
-            ],
-        });
+        backend.__respondWith(TUNE_RESULT('stuvwxyzstuvwxyz'));
         const before = Date.now();
         await service.start(1, 0.05);
-        // After start(): a fresh session clears rejections. The first query
-        // waits for the 1 s window, so this lands well before it.
-        service.rejectTune(8);
         for (let i = 0; i < 200 && !service.scorePosition; i++) {
             await new Promise(r => setTimeout(r, 10));
         }
         const position = service.scorePosition;
-        assert.ok(position, 'a window with spans publishes a position');
-        assert.deepEqual(Object.keys(position.byTune), ['7'], 'a rejected tune cannot steer the score');
-        assert.equal(position.byTune[7].settingId, '70');
-        assert.equal(position.byTune[7].contourLength, 200);
-        assert.equal(position.byTune[7].spans.length, 2);
+        assert.ok(position, 'a window with a usable contour publishes it');
+        assert.equal(position.contour, 'stuvwxyzstuvwxyz');
         assert.ok(position.readAt >= before && position.readAt <= Date.now());
         assert.ok(Math.abs(position.windowSeconds - 1) < 0.01, `window length from the PCM (${position.windowSeconds})`);
         await service.stop();

@@ -212,7 +212,7 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
 import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
-import { decideLine, nextFollowLine } from '@/js/scorePosition.mjs';
+import { decideLine, nextFollowLine, matchSpans } from '@/js/scorePosition.mjs';
 
 // After the user touches or scrolls the score, auto-centre keeps its hands off
 // for this long. Someone reading ahead, or looking back at a bar, must not
@@ -271,6 +271,7 @@ export default {
         this._followState = null;
         this._followKey = null;
         this._manualScrollUntil = 0;
+        this._spansCache = null;
         return {
             target: lastShown.target,
             abcSetting: lastShown.abcSetting,
@@ -528,16 +529,28 @@ export default {
                 this._followKey = key;
                 this._followState = null;
                 this.followBand = null;
+                this._spansCache = null;
             }
             const timeline = display.followTimeline();
             const position = liveAnalysisService.scorePosition;
-            // Against the setting actually ON SCREEN, which is not always the
-            // detected one (a fallback to settings[0]).
+            // Against the setting actually ON SCREEN. Aligned once per window
+            // and reused by the per-second re-projection.
+            const storedContour = setting.contour || '';
+            let spans = null;
+            if (position && storedContour) {
+                const cache = this._spansCache;
+                if (cache && cache.position === position && cache.key === key) {
+                    spans = cache.spans;
+                } else {
+                    spans = matchSpans(position.contour, storedContour);
+                    this._spansCache = { position, key, spans };
+                }
+            }
             const decision = decideLine(position, {
-                tuneId: target.tuneId,
-                settingId: setting.setting_id,
+                storedContour,
                 nowMs: Date.now(),
                 timeline,
+                spans,
             });
             this._followState = nextFollowLine(
                 this._followState, decision.line, position ? position.readAt : null);
@@ -558,9 +571,9 @@ export default {
             const held = line !== null ? `line ${line + 1}/${count}, ` : '';
             switch (decision.reason) {
             case 'ambiguous': return `${held}which part?`;
-            case 'weak': return `${held}position unclear`;
+            case 'weak': return `${held}position unclear (${(decision.score || 0).toFixed(2)})`;
             case 'stale': return `${held}no recent match`;
-            case 'other-setting': return 'position n/a for this setting';
+            case 'no-contour':
             case 'no-timeline': return 'position n/a';
             default: return held ? held.replace(/, $/, '') : '';
             }

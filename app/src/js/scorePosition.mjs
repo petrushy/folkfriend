@@ -1,8 +1,15 @@
 // Where in the tune is the room? The rules behind the follow view's
 // auto-centre, kept pure so they can be tested without a score or a clock.
 //
-// The Rust query reports, for each result, where in that setting's stored
-// contour the last window matched (`match_spans`, see rust/src/query/nw.rs).
+// Each analysed window's transcribed contour is aligned against the stored
+// contour of the setting ON SCREEN (`matchSpans`). Not against whatever the
+// query ranked first: results are one per tune, carrying that window's
+// best-scoring setting, which for a tune with many settings (Drowsy Maggie has
+// dozens) is almost never the one being displayed — the first version did
+// that, and on a device it said "position n/a" nearly all the time. Aligning
+// here costs query × stored cells (~60 × 600), well under a millisecond, and
+// works for any setting shown, a manual pick included.
+//
 // A stored contour is one character per quaver with repeats PLAYED OUT, so a
 // span's end divided by the contour's length is how far through the played-out
 // tune the music is. That fraction is mapped onto the rendered score through
@@ -34,26 +41,99 @@ export const MAX_EXTRAPOLATE_SECONDS = 8;
 // misplaced window (not real, and not worth a jump).
 export const BACKWARD_CONFIRMATIONS = 2;
 
-// From one analysed window's query results, everything the follow view needs
-// about position, per tune. Results without spans (older WASM, or beyond the
-// first few results) are simply absent.
-export function windowPositions(results, { readAt, windowSeconds }) {
-    const byTune = {};
-    for (const result of results || []) {
-        const setting = result && result.setting;
-        const spans = result && result.match_spans;
-        if (!setting || !setting.tune_id || !Array.isArray(spans) || spans.length === 0) continue;
-        const contourLength = typeof setting.contour === 'string' ? setting.contour.length : 0;
-        if (!contourLength) continue;
-        const tuneId = String(setting.tune_id);
-        if (byTune[tuneId]) continue; // results are best first
-        byTune[tuneId] = {
-            settingId: result.setting_id != null ? String(result.setting_id) : '',
-            contourLength,
-            spans: spans.map(s => ({ start: s.start, end: s.end, score: s.score })),
-        };
+// Fewer notes than this say nothing about where in a tune they are: a
+// partial window early in a run, or a few notes over conversation.
+export const MIN_QUERY_LENGTH = 12;
+// How many candidate places matchSpans reports: enough for AABB plus a
+// competing part.
+export const MAX_SPANS = 4;
+
+// What the follow view needs from one analysed window: its transcribed
+// contour and when it ended.
+export function windowPosition(contour, { readAt, windowSeconds }) {
+    if (typeof contour !== 'string' || contour.length < MIN_QUERY_LENGTH) return null;
+    return { contour, readAt, windowSeconds };
+}
+
+// Scoring, normalisation and boundaries exactly as the Rust second pass
+// (rust/src/query/nw.rs): match +2, mismatch -2, gap -1, zero top and left
+// boundary, best cell anywhere, score = 0.5 × raw / len(query). So the best
+// span's score is the match score the tune itself would get for this setting.
+const MATCH = 2;
+const MISMATCH = -2;
+const GAP = -1;
+
+// The best few NON-OVERLAPPING places `query` aligns within `stored`, best
+// first: { start, end (exclusive), score }, offsets into `stored`.
+//
+// More than one on purpose. A tune played AABB is stored with its repeats
+// played out, so its two A parts are an exact tie — harmless, they are the same
+// written bars. Two DIFFERENT parts sharing a phrase are also a tie, and are
+// not. Only the caller, which knows where each span lands on the score, can
+// tell the two apart.
+//
+// One previous row is kept, plus the row of `stored` each cell's alignment
+// began on, so memory is O(len(query)). Empty when the query is longer than
+// the tune — a position "in the tune" would mean nothing.
+export function matchSpans(query, stored, maxSpans = MAX_SPANS) {
+    if (!query || !stored || query.length > stored.length || maxSpans <= 0) return [];
+    const n = query.length;
+    let prevH = new Int32Array(n + 1);
+    let prevS = new Int32Array(n + 1);
+    let curH = new Int32Array(n + 1);
+    let curS = new Int32Array(n + 1);
+    const rowBest = new Int32Array(stored.length);
+    const rowStart = new Int32Array(stored.length);
+
+    for (let row = 0; row < stored.length; row++) {
+        const b = stored.charCodeAt(row);
+        curH[0] = 0;
+        curS[0] = row;
+        let best = -Infinity;
+        let bestStart = row;
+        for (let col = 1; col <= n; col++) {
+            // A predecessor on the boundary means the alignment starts on
+            // this row; anything else carries its own start forward.
+            const diag = prevH[col - 1] + (query.charCodeAt(col - 1) === b ? MATCH : MISMATCH);
+            const left = curH[col - 1] + GAP;
+            const up = prevH[col] + GAP;
+            let h;
+            let start;
+            if (diag >= left && diag >= up) {
+                h = diag;
+                start = (row === 0 || col === 1) ? row : prevS[col - 1];
+            } else if (left >= up) {
+                h = left;
+                start = curS[col - 1];
+            } else {
+                h = up;
+                start = row === 0 ? row : prevS[col];
+            }
+            curH[col] = h;
+            curS[col] = start;
+            if (h > best) { best = h; bestStart = start; }
+        }
+        rowBest[row] = best;
+        rowStart[row] = bestStart;
+        [prevH, curH] = [curH, prevH];
+        [prevS, curS] = [curS, prevS];
     }
-    return { readAt, windowSeconds, byTune };
+
+    // Highest-scoring ending row first, earliest on a tie (so the first of two
+    // identical repeats wins, deterministically), skipping overlaps.
+    const order = Array.from(rowBest.keys())
+        .sort((x, y) => (rowBest[y] - rowBest[x]) || (x - y));
+    const spans = [];
+    for (const row of order) {
+        const raw = rowBest[row];
+        if (raw <= 0) break;
+        const start = rowStart[row];
+        const end = row + 1;
+        if (spans.some(s => start < s.end && s.start < end)) continue;
+        spans.push({ start, end, score: (0.5 * raw) / n });
+        if (spans.length >= maxSpans) break;
+    }
+    return spans;
 }
 
 // How far through the played-out tune `span` puts the music, `elapsedSeconds`
@@ -92,36 +172,37 @@ export function lineAtFraction(timeline, fraction) {
 
 // Which line the music is on now, or why that cannot be said.
 //
-//   position  — windowPositions() of the latest window
-//   tuneId / settingId — what the view is SHOWING. A span is a position in one
-//               setting's contour; against another setting it means nothing,
-//               so a manual pick or a fallback to settings[0] gets no position.
-//   nowMs     — the clock, for projecting past the window's end
+//   position       — windowPosition() of the latest window
+//   storedContour  — the contour of the setting ON SCREEN
+//   nowMs          — the clock, for projecting past the window's end
+//   spans          — optional, matchSpans() already computed for this
+//                    position and contour (the view re-decides every second
+//                    and need not re-align each time)
 //
-// Several spans can tie. Two repeats of the A part are the same written bars,
-// so if every near-best span lands on the same LINE the answer is that line.
-// If they land on different lines (an A and a B part sharing a phrase) the
-// answer is "ambiguous" — and the view holds rather than guessing.
-export function decideLine(position, { tuneId, settingId, nowMs, timeline }) {
-    if (!position || !position.byTune) return { line: null, reason: 'none' };
-    const entry = position.byTune[String(tuneId)];
-    if (!entry) return { line: null, reason: 'none' };
-    if (String(entry.settingId) !== String(settingId || '')) return { line: null, reason: 'other-setting' };
-    const best = entry.spans[0];
-    if (!best || best.score < POSITION_MIN_SCORE) return { line: null, reason: 'weak' };
-
+// If every span within the tie margin of the best lands on the same LINE the
+// answer is that line. If they land on different lines (an A and a B part
+// sharing a phrase) the answer is "ambiguous" — and the view holds rather than
+// guessing.
+export function decideLine(position, { storedContour, nowMs, timeline, spans = null }) {
+    if (!position || !position.contour) return { line: null, reason: 'none' };
+    if (!storedContour) return { line: null, reason: 'no-contour' };
     const elapsed = Math.max(0, (nowMs - position.readAt) / 1000);
     if (elapsed > MAX_EXTRAPOLATE_SECONDS + (position.windowSeconds || 0)) {
         return { line: null, reason: 'stale' };
     }
+    const found = spans || matchSpans(position.contour, storedContour);
+    const best = found[0];
+    if (!best || best.score < POSITION_MIN_SCORE) {
+        return { line: null, reason: 'weak', score: best ? best.score : 0 };
+    }
 
-    const candidates = entry.spans.filter(s => s.score >= best.score - POSITION_TIE_MARGIN);
+    const candidates = found.filter(s => s.score >= best.score - POSITION_TIE_MARGIN);
     const fractions = candidates.map(s =>
-        spanFraction(s, entry.contourLength, position.windowSeconds, elapsed));
+        spanFraction(s, storedContour.length, position.windowSeconds, elapsed));
     const lines = fractions.map(f => lineAtFraction(timeline, f));
     if (lines.some(l => l === null)) return { line: null, reason: 'no-timeline' };
-    if (lines.some(l => l !== lines[0])) return { line: null, reason: 'ambiguous' };
-    return { line: lines[0], fraction: fractions[0], reason: 'ok' };
+    if (lines.some(l => l !== lines[0])) return { line: null, reason: 'ambiguous', score: best.score };
+    return { line: lines[0], fraction: fractions[0], score: best.score, reason: 'ok' };
 }
 
 // Hysteresis over decideLine()'s answers, so one stray window does not throw

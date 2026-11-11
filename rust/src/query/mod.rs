@@ -11,7 +11,7 @@
 /// Results are deduplicated by `tune_id` (highest-scoring setting wins) and
 /// capped at 100 entries.
 mod heuristic;
-pub mod nw;
+mod nw;
 
 use crate::decode;
 use crate::ff_config;
@@ -39,11 +39,6 @@ pub struct TranscriptionQueryRecord {
     pub setting: Setting,
     pub display_name: String,
     pub score: f32,
-    /// Where in this setting's stored contour the query matched, best first
-    /// (see `nw::match_spans`). Filled for the first
-    /// `ff_config::QUERY_SPAN_RESULTS` records only — nothing reads it for the
-    /// rest, and each is an extra alignment.
-    pub match_spans: Vec<nw::MatchSpan>,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,17 +168,11 @@ impl QueryEngine {
                     };
 
                     tune_ids_in_results.insert(setting.tune_id.clone());
-                    let match_spans = if results.len() < ff_config::QUERY_SPAN_RESULTS {
-                        nw::match_spans(contour, &setting.contour, ff_config::QUERY_SPANS_PER_RESULT)
-                    } else {
-                        Vec::new()
-                    };
                     results.push(TranscriptionQueryRecord {
                         setting_id: setting_id.clone(),
                         setting: setting.clone(),
                         score: *score,
                         display_name,
-                        match_spans,
                     });
 
                     if results.len() >= self.num_output {
