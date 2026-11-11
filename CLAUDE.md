@@ -1144,6 +1144,32 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Live detection: an early first query and an adaptive step (November 2026)
+
+Reported as "it takes too long until a tune is detected". At 10 s window / 5 s
+step the first tune could not show before ~12–14 s (the loop slept a whole
+window before its first query), and a tune change took ~13–18 s. Two changes,
+both in `js/liveCadence.mjs` (pure) and wired in `liveAnalysis._runLoop`:
+
+- **The first query of a run is at 5 s, not after a full window**, on what
+  the ring buffer holds; the window grows to full length over the next cycles.
+  A **partial** window's result counts only if its contour has
+  `minContourLength` (12) notes, the bar file analysis already applies. Full
+  windows are judged exactly as before. Applies to every run: start, Resume,
+  Clear tune list.
+- **The step adapts to the device**: `2 × smoothed analysis time`, floored at
+  2 s, and **never longer than the configured step**. Factor 2 keeps the worker
+  idle at least half the time on a phone running for hours. `options.stepSeconds`
+  still holds the CONFIGURED step, and the freshness LED limits, the cluster
+  continuity rule and the sparse-scan exception keep reading it — a shorter
+  real step only brings windows closer than they assume, the safe direction.
+  Side effect: up to ~2.5× more window matches in `openLiveSession`.
+
+Tests: `liveCadence.test.mjs` (8) and two loop cases in `liveSessions.test.mjs`;
+reinstating the full-window wait, the fixed step or the ungated partial window
+each fails 1. ⚠️ Not yet timed on a device, and the early-window accuracy is
+unmeasured — the WAV corpus is gone (see Known issues).
+
 ### Played in sets with — set partners (November 2026)
 
 A **"Played in sets with"** chip on the Tune view, and a playlist icon in the

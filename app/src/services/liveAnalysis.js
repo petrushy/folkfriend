@@ -10,6 +10,10 @@ import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import { detectionFreshness } from '@/js/detectionFreshness.mjs';
 import { MUSIC_EVIDENCE_MIN_SCORE } from '@/js/audioKeep.mjs';
 import { beginCapture, captureVerdict, captureEndMessage } from '@/js/tuneCapture.mjs';
+import {
+    firstQueryDelaySeconds, updateLatencyEstimate, effectiveStepSeconds,
+    isPartialWindow, partialWindowUsable,
+} from '@/js/liveCadence.mjs';
 import eventBus from '@/eventBus.js';
 
 // How long a tune the user has rejected stays suppressed. Without a cooldown
@@ -649,8 +653,14 @@ class LiveAnalysisService {
         const current = () => generation === this._generation;
 
         if (!skipInitialWait) {
-            await this._sleepCancellable(options.windowSeconds * 1000);
+            // Not a whole window: the first query runs on the few seconds
+            // already heard, and the window grows to full length over the
+            // next cycles. See js/liveCadence.mjs.
+            await this._sleepCancellable(firstQueryDelaySeconds(options.windowSeconds) * 1000);
         }
+        // Measured analysis time, for the adaptive step. Per run, because a
+        // resume can follow a long break in which the device's load changed.
+        let latencyMs = null;
 
         while (this.isRunning && !this.isPaused && current()) {
             const cycleStart = Date.now();
@@ -695,6 +705,9 @@ class LiveAnalysisService {
             const audioSeconds = sessionRecorder.isRecording ? sessionRecorder.audioSeconds : null;
 
             if (pcm.length > 0) {
+                const sampleRate = micService.sampleRate || this._sampleRate;
+                const partialWindow = isPartialWindow(pcm.length, sampleRate, options.windowSeconds);
+                const analysisStart = Date.now();
                 // Guard against a hung worker — generous ceiling well beyond
                 // any healthy backend latency (~3s), so a real backend never
                 // hits this and a stuck cycle still recovers on the next step.
@@ -705,8 +718,7 @@ class LiveAnalysisService {
                         // Re-read rather than using the rate captured at
                         // start(): a recovery reopens the pipeline and can come
                         // back on a different rate.
-                        ffBackend.transcribeAndQueryPCMSignal(
-                            pcm, micService.sampleRate || this._sampleRate),
+                        ffBackend.transcribeAndQueryPCMSignal(pcm, sampleRate),
                         new Promise((_, reject) => setTimeout(
                             () => reject(new Error('analysis timeout')),
                             analysisCeilingMs,
@@ -717,7 +729,17 @@ class LiveAnalysisService {
                     response = { error: e && e.message, results: [] };
                 }
 
-                const usableResults = response.results
+                // Only a completed analysis says how fast this device is; a
+                // timeout would just pin the step at its configured maximum.
+                if (!response.error) {
+                    latencyMs = updateLatencyEstimate(latencyMs, Date.now() - analysisStart);
+                }
+
+                // A partial window (the first seconds of a run) must earn its
+                // result with a real contour; a full window is judged as it
+                // always was.
+                const usableResults = response.results &&
+                    (!partialWindow || partialWindowUsable(response, options.minContourLength))
                     ? this._withoutRejectedTunes(response.results)
                     : [];
 
@@ -768,9 +790,12 @@ class LiveAnalysisService {
 
             if (!this.isRunning || this.isPaused || !current()) break;
             // Subtract the time already spent analysing so the effective step
-            // stays close to stepSeconds regardless of backend latency.
+            // stays close to its target regardless of backend latency. The
+            // target is the configured step on a slow device and shorter on a
+            // fast one — never longer (js/liveCadence.mjs).
             const analysisMs = Date.now() - cycleStart;
-            const remainingMs = Math.max(0, options.stepSeconds * 1000 - analysisMs);
+            const stepMs = effectiveStepSeconds(options.stepSeconds, latencyMs) * 1000;
+            const remainingMs = Math.max(0, stepMs - analysisMs);
             await this._sleepCancellable(remainingMs);
         }
     }
