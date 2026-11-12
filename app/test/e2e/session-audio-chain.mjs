@@ -25,6 +25,7 @@ let player = sfc.split('<script>')[1].split('</script>')[0]
     .replace("from '@/js/mediaSession.mjs'", "from '/mediaSession.js'")
     .replace("from '@/js/playbackLevel.mjs'", "from '/playbackLevel.js'")
     .replace("from '@/js/clipWindow.mjs'", "from '/clipWindow.js'")
+    .replace("from '@/services/sessionExport.js'", "from '/sessionExport.js'")
     .replace("import ffConfig from '@/ffConfig.js';", "const ffConfig = { FRONTEND_VERSION: 'e2e' };")
     .replace('export default {', 'const component = {');
 player += `\ncomponent.template = ${JSON.stringify(template)}; export default component;`;
@@ -44,7 +45,23 @@ const recorder = read('src/services/sessionRecorder.js')
         recordingChannelCount: 2, recordingMuted: false, recordingMuteSupported: false,
         setRecordingMuted() { return false; },
     };`);
+// The whole-session export, with its real worker as a module worker (the
+// bundler turns `new URL(..., import.meta.url)` into a classic one).
+const sessionExport = read('src/services/sessionExport.js')
+    .replace("from '@/services/sessionAudioStore.js'", "from '/store.js'")
+    .split("'@/js/sessionExport.mjs'").join("'/sessionExportCore.js'")
+    .replace("import('@breezystack/lamejs')", "import('/lame.js')")
+    .replace("import('@/js/mp3Encoder.mjs')", "import('/mp3Encoder.js')")
+    .replace("new Worker(new URL('./mp3Worker.js', import.meta.url))", "new Worker('/mp3Worker.js', { type: 'module' })");
+assert.ok(sessionExport.includes("'/mp3Worker.js', { type: 'module' }"), 'the worker was not rewired');
+const mp3Worker = read('src/services/mp3Worker.js')
+    .replace("from '@breezystack/lamejs'", "from '/lame.js'")
+    .replace("from '@/js/mp3Encoder.mjs'", "from '/mp3Encoder.js'");
 const routes = new Map([
+    ['/sessionExport.js', sessionExport], ['/mp3Worker.js', mp3Worker],
+    ['/sessionExportCore.js', read('src/js/sessionExport.mjs').replace("from './clipWindow.mjs'", "from '/clipWindow.js'")],
+    ['/mp3Encoder.js', read('src/js/mp3Encoder.mjs')],
+    ['/lame.js', read('node_modules/@breezystack/lamejs/dist/lamejs.js')],
     ['/store.js', store], ['/recorder.js', recorder], ['/player.js', player],
     ['/recordingCheck.js', read('src/js/recordingCheck.mjs')],
     ['/mediaSession.js', read('src/js/mediaSession.mjs')],
@@ -146,7 +163,37 @@ try {
             const windowPcm = await decoder.decodeAudioData(await windowClip.blob.arrayBuffer());
             const windowReport = { segments: later.length, seconds: windowPcm.duration,
                 span: windowClip.endSeconds - windowClip.startSeconds };
-            reports.push({ id, segments: manifest.segments.length, finalized: !!manifest.finalizedAt, identical, clipReports, windowReport });
+            // The whole-session MP3, decoded windows of ONE segment so every
+            // window after the first is a mid-track clip, then a copy with
+            // its middle segment pruned so it is two parts joined.
+            const { exportWholeSessionMp3 } = await import('/sessionExport.js');
+            const measure = async (sessionId, m) => {
+                const { file, seconds } = await exportWholeSessionMp3(sessionId, m, { maxWindowSeconds: 1 });
+                const pcm = await decoder.decodeAudioData(await file.arrayBuffer());
+                const data = pcm.getChannelData(0);
+                let sum = 0;
+                for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+                // A 440 Hz sine at full scale moves at most ~0.063 per sample
+                // at 44.1 kHz. A window join that drops or repeats audio is a
+                // phase jump far above that.
+                let jumps = 0;
+                for (let i = 1; i < data.length; i++) if (Math.abs(data[i] - data[i - 1]) > 0.3) jumps++;
+                return { type: file.type, name: file.name, bytes: file.size, encodedSeconds: seconds,
+                    decodedSeconds: pcm.duration, rms: Math.sqrt(sum / data.length), jumps,
+                    expectedSeconds: m.segments.reduce((n, s) => n + s.durationSeconds, 0) };
+            };
+            const whole = await measure(id, manifest);
+            const prunedId = id + '-pruned';
+            await store.putManifest(prunedId, store.createManifest({ sessionId: prunedId, mimeType: manifest.mimeType }));
+            for (const segment of manifest.segments) {
+                await store.appendSegment(prunedId, await store.readSegment(id, segment.index), manifest.tracks[0]);
+            }
+            const middle = manifest.segments[Math.floor(manifest.segments.length / 2)].index;
+            await store.pruneSegments(prunedId, [middle]);
+            const prunedManifest = await store.readManifest(prunedId);
+            const pruned = await measure(prunedId, prunedManifest);
+            pruned.parts = store.recordingParts(prunedManifest).length;
+            reports.push({ id, segments: manifest.segments.length, finalized: !!manifest.finalizedAt, identical, clipReports, windowReport, whole, pruned });
         }
         const component = (await import('/player.js')).default;
         const root = new Vue({ data: { id: reports[0].id }, render(h) {
@@ -197,6 +244,22 @@ try {
         assert.ok(report.segments >= 2, JSON.stringify(report));
         assert.ok(report.finalized && report.identical, JSON.stringify(report));
         assert.ok(report.clipReports.every(c => c.seconds > 0), JSON.stringify(report));
+    }
+    for (const { whole, pruned, id } of results.reports) {
+        for (const e of [whole, pruned]) {
+            assert.equal(e.type, 'audio/mpeg', JSON.stringify(e));
+            assert.match(e.name, /\.mp3$/);
+            // The file is as long as what was kept. Decoded MP3 carries the
+            // encoder's delay and padding, a few frames; manifest seconds are
+            // wall-clock measurements of the recording.
+            assert.ok(Math.abs(e.decodedSeconds - e.encodedSeconds) < 0.15, `${id}: ${JSON.stringify(e)}`);
+            assert.ok(Math.abs(e.encodedSeconds - e.expectedSeconds) < 0.6, `${id}: ${JSON.stringify(e)}`);
+            // The tone is on the LEFT channel only: a mono mix that averaged
+            // in the dead right channel would read ~0.35.
+            assert.ok(e.rms > 0.55, `${id}: one-sided audio exported at full level: ${JSON.stringify(e)}`);
+        }
+        assert.equal(pruned.parts, 2, `${id}: ${JSON.stringify(pruned)}`);
+        assert.ok(pruned.decodedSeconds < whole.decodedSeconds - 1, `${id}: the pruned stretch is left out, not silenced`);
     }
     assert.deepEqual(results.graph, { sameElement: true, attached: true, corrected: true });
     for (const report of results.reports) {

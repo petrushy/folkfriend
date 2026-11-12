@@ -206,22 +206,60 @@
             </v-alert>
 
             <div class="d-flex flex-wrap mt-2" style="gap: 8px;">
+                <!-- One file for the whole evening, whatever pauses, lost
+                 microphones and pruned breaks split the recording into. It is
+                 re-encoded (see js/sessionExport.mjs), so it is the primary
+                 export; the per-part files below are the original bytes. -->
                 <v-btn
-                    v-for="part in exportParts"
-                    :key="part.firstSegmentIndex"
+                    v-if="canExportWhole"
                     text
                     small
                     color="primary"
-                    :loading="exportingIndex === part.index"
-                    :disabled="exportingIndex !== null"
-                    @click="exportTrack(part)"
+                    :loading="!!wholeExport"
+                    :disabled="exportingIndex !== null || !!wholeExport"
+                    @click="exportWholeSession"
                 >
-                    {{ exportParts.length > 1 ? `Export part ${part.index + 1}` : 'Export audio' }}
-                    ({{ formatSecondsAsDuration(part.durationSeconds) }})
+                    Export whole session (MP3, {{ formatSecondsAsDuration(exportedSeconds) }})
+                </v-btn>
+                <template v-if="!canExportWhole || exportParts.length === 1 || showPartExports">
+                    <v-btn
+                        v-for="part in exportParts"
+                        :key="part.firstSegmentIndex"
+                        text
+                        small
+                        color="primary"
+                        :loading="exportingIndex === part.index"
+                        :disabled="exportingIndex !== null || !!wholeExport"
+                        @click="exportTrack(part)"
+                    >
+                        {{ exportParts.length > 1 ? `Export part ${part.index + 1}` :
+                            (canExportWhole ? 'Export original audio' : 'Export audio') }}
+                        ({{ formatSecondsAsDuration(part.durationSeconds) }})
+                    </v-btn>
+                </template>
+                <v-btn
+                    v-if="canExportWhole && exportParts.length > 1"
+                    text
+                    small
+                    @click="showPartExports = !showPartExports"
+                >
+                    {{ showPartExports ? 'Hide separate parts' : `Separate parts (${exportParts.length})…` }}
                 </v-btn>
                 <v-btn text small :loading="checking" @click="runCheck">
                     Check recording
                 </v-btn>
+            </div>
+            <div v-if="wholeExport" class="mt-2">
+                <v-progress-linear :value="wholeExportPercent" height="6" rounded />
+                <div class="d-flex align-center caption text--secondary mt-1" style="gap: 8px;">
+                    <span>
+                        Making one MP3 of the session:
+                        {{ formatSecondsAsDuration(wholeExport.done) }} of
+                        {{ formatSecondsAsDuration(wholeExport.total) }}
+                        ({{ wholeExportPercent }}%). This can take a few minutes; keep this page open.
+                    </span>
+                    <v-btn x-small text @click="cancelWholeExport">Cancel</v-btn>
+                </div>
             </div>
             <!-- The share sheet needs a user gesture, and building the file for a
              long part outlasts the one that asked for it. The file is kept
@@ -235,16 +273,8 @@
                     <v-btn small text @click="readyExport = null">Cancel</v-btn>
                 </div>
             </v-alert>
-            <p v-if="prunedSeconds > 0" class="caption text--secondary mb-0 mt-1">
-                Recorded keeping only the audio around tunes:
-                {{ formatSecondsAsDuration(prunedSeconds) }} of breaks between sets were not
-                kept, so the recording exports as {{ exportParts.length }}
-                {{ exportParts.length === 1 ? 'file' : 'separate files' }}.
-            </p>
-            <p v-else-if="exportParts.length > 1" class="caption text--secondary mb-0 mt-1">
-                The session was paused (or the microphone was reacquired) {{ exportParts.length - 1 }}
-                {{ exportParts.length === 2 ? 'time' : 'times' }}, so the recording exports as
-                {{ exportParts.length }} separate files.
+            <p v-if="exportPartsNote" class="caption text--secondary mb-0 mt-1">
+                {{ exportPartsNote }}
             </p>
 
             <!-- A recording whose second channel is silent plays out of one
@@ -253,7 +283,8 @@
              note that says only the first half would be a false promise. -->
             <p v-if="channelRepair" class="caption text--secondary mb-0 mt-2">
                 This recording has sound on one channel only. Playback here is corrected to
-                both speakers; an exported copy of it keeps the original channels.
+                both speakers, and so is the whole-session MP3; the separate parts keep
+                the original channels.
                 Recordings made from now on are corrected as they are recorded.
                 <!-- The correction is the one part of playback that goes through
                  Web Audio, which iOS treats differently from a plain media
@@ -373,6 +404,7 @@ import {
     inspectRecording,
 } from '@/services/sessionAudioStore.js';
 import { summariseCheck, formatCheckReport } from '@/js/recordingCheck.mjs';
+import { exportWholeSessionMp3, canExportWholeSession, ExportCancelled } from '@/services/sessionExport.js';
 import ffConfig from '@/ffConfig.js';
 import {
     nowPlayingInfo, adjacentTune, applyMetadata, applyPlaybackState, applyPosition,
@@ -567,6 +599,9 @@ export default {
             // { file, name, canShare } — an export whose file is built but
             // whose share could not run in the gesture that started it.
             readyExport: null,
+            // { done, total } seconds while the whole-session MP3 is being made.
+            wholeExport: null,
+            showPartExports: false,
             // Which stored segment the <audio> element currently holds.
             segmentIndex: null,
             // THE ORIGIN OF THE LOADED CLIP'S MEDIA TIMELINE, in session-audio
@@ -701,6 +736,31 @@ export default {
         // What can be exported as one file each: a track, split again at any
         // break a "tunes only" recording deleted from the middle of it.
         exportParts() { return recordingParts(this.manifest); },
+        canExportWhole() { return canExportWholeSession(this.manifest, this.exportParts); },
+        // What the joined file will hold: the parts, without the gaps between.
+        exportedSeconds() { return this.exportParts.reduce((n, p) => n + p.durationSeconds, 0); },
+        // Why there is more than one part, and what the export does about it.
+        exportPartsNote() {
+            const n = this.exportParts.length;
+            const joined = this.canExportWhole && n > 1
+                ? ` The whole-session MP3 joins the ${n} stretches back to back, so it is ` +
+                    'shorter than the session; the separate parts are the original files.'
+                : (n > 1 ? ` The recording exports as ${n} separate files.` : '');
+            if (this.prunedSeconds > 0) {
+                return 'Recorded keeping only the audio around tunes: ' +
+                    `${formatSecondsAsDuration(this.prunedSeconds)} of breaks between sets were not kept.` +
+                    joined;
+            }
+            if (n > 1) {
+                return `The session was paused (or the microphone was reacquired) ${n - 1} ` +
+                    `${n === 2 ? 'time' : 'times'}.${joined}`;
+            }
+            return '';
+        },
+        wholeExportPercent() {
+            const w = this.wholeExport;
+            return w && w.total > 0 ? Math.floor(100 * w.done / w.total) : 0;
+        },
         // Stretches deleted as breaks between sets, so a tap there can say so
         // rather than calling deliberate removal "missing".
         prunedRanges() {
@@ -940,6 +1000,7 @@ export default {
         eventBus.$off('dropboxConnected', this._onDropboxConnected);
         if (this._mediaSessionActive) clearMediaSession(browserNavigator());
         this.teardown();
+        this.cancelWholeExport();
         this._stopLevelMeter();
         this._stopGraphSilenceWatch();
         if (this._audioCtx && this._audioCtx.close) {
@@ -953,6 +1014,7 @@ export default {
 
         async reload() {
             this.teardown();
+            this.cancelWholeExport();
             this.readyExport = null;
             this.manifest = null;
             this.error = '';
@@ -2477,32 +2539,7 @@ export default {
                 // we cannot name is better left unnamed.
                 const file = new File([clip.blob], name,
                                       { type: clip.mimeType || 'application/octet-stream' });
-
-                const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
-                if (!canShare) {
-                    this._downloadFile(file);
-                    return;
-                }
-                // navigator.share() needs TRANSIENT user activation, which
-                // lasts a few seconds from the tap. Building a clip of a long
-                // part (IndexedDB reads, or a Dropbox download) routinely
-                // outlasts it, and the share is then refused with
-                // NotAllowedError. Rather than fail, keep the finished file
-                // and let a fresh tap share or download it.
-                const activation = navigator.userActivation;
-                if (activation && !activation.isActive) {
-                    this.readyExport = { file, name, canShare };
-                    return;
-                }
-                try {
-                    await navigator.share({ files: [file], title: name });
-                } catch (e) {
-                    if (e && e.name === 'NotAllowedError') {
-                        this.readyExport = { file, name, canShare };
-                        return;
-                    }
-                    throw e;
-                }
+                await this._offerFile(file);
             } catch (e) {
                 // A share the user dismissed is not a failure worth reporting.
                 if (e && e.name === 'AbortError') return;
@@ -2510,6 +2547,77 @@ export default {
             } finally {
                 this.exportingIndex = null;
             }
+        },
+
+        // Hands a finished file to the share sheet, or downloads it.
+        async _offerFile(file) {
+            const name = file.name;
+            const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+            if (!canShare) {
+                this._downloadFile(file);
+                return;
+            }
+            // navigator.share() needs TRANSIENT user activation, which
+            // lasts a few seconds from the tap. Building a clip of a long
+            // part (IndexedDB reads, or a Dropbox download) routinely
+            // outlasts it, and the share is then refused with
+            // NotAllowedError. Rather than fail, keep the finished file
+            // and let a fresh tap share or download it.
+            const activation = navigator.userActivation;
+            if (activation && !activation.isActive) {
+                this.readyExport = { file, name, canShare };
+                return;
+            }
+            try {
+                await navigator.share({ files: [file], title: name });
+            } catch (e) {
+                if (e && e.name === 'NotAllowedError') {
+                    this.readyExport = { file, name, canShare };
+                    return;
+                }
+                throw e;
+            }
+        },
+
+        // The whole recording as ONE MP3 — see js/sessionExport.mjs. Minutes
+        // of work for a long evening, so it reports progress, can be
+        // cancelled, and always ends on the "ready" card: no user gesture
+        // survives that long, and share() needs one.
+        async exportWholeSession() {
+            if (this.wholeExport || !this.manifest) return;
+            this.error = '';
+            this.readyExport = null;
+            const token = {};
+            this._wholeExportToken = token;
+            const sessionId = this.sessionId;
+            this.wholeExport = { done: 0, total: this.exportedSeconds };
+            try {
+                const { file } = await exportWholeSessionMp3(sessionId, this.manifest, {
+                    isCancelled: () => this._wholeExportToken !== token,
+                    onProgress: (done, total) => {
+                        if (this._wholeExportToken === token) this.wholeExport = { done, total };
+                    },
+                });
+                if (this._wholeExportToken !== token) return;
+                const canShare = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+                this.readyExport = { file, name: file.name, canShare };
+            } catch (e) {
+                if (e instanceof ExportCancelled || (e && e.name === 'ExportCancelled')) return;
+                if (this._wholeExportToken !== token) return;
+                this.error = `Could not export the session: ${(e && e.message) || e}. ` +
+                    'The separate parts can still be exported one by one.';
+                this.showPartExports = true;
+            } finally {
+                if (this._wholeExportToken === token) {
+                    this._wholeExportToken = null;
+                    this.wholeExport = null;
+                }
+            }
+        },
+
+        cancelWholeExport() {
+            this._wholeExportToken = null;
+            this.wholeExport = null;
         },
 
         // Called straight from a tap, with no await before share(): the whole
