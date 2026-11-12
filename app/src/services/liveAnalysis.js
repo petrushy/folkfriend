@@ -12,8 +12,9 @@ import { MUSIC_EVIDENCE_MIN_SCORE } from '@/js/audioKeep.mjs';
 import { beginCapture, captureVerdict, captureEndMessage } from '@/js/tuneCapture.mjs';
 import {
     firstQueryDelaySeconds, updateLatencyEstimate, effectiveStepSeconds,
-    isPartialWindow, partialWindowUsable,
+    isPartialWindow, partialWindowUsable, confirmSpanSeconds,
 } from '@/js/liveCadence.mjs';
+import { windowPosition } from '@/js/scorePosition.mjs';
 import eventBus from '@/eventBus.js';
 
 // How long a tune the user has rejected stays suppressed. Without a cooldown
@@ -58,6 +59,15 @@ class LiveAnalysisService {
         this.elapsedSeconds = 0;
         this.options = null;
         this._windowMatches = [];
+        // The latest window's transcribed contour and when it ended, for the
+        // follow view's auto-centre (js/scorePosition.mjs), which aligns it
+        // against the setting on screen. Display-only and never persisted: it
+        // is about the last few seconds, and goes stale within a minute.
+        this.scorePosition = null;
+        // The step the loop is actually using, once it knows (null until the
+        // first analysis has been timed). Shorter than the configured step on
+        // a fast device; see _recluster().
+        this._liveStepSeconds = null;
         this._cancelSleep = null;
         this._timerInterval = null;
         this._sampleRate = 48000;
@@ -364,6 +374,7 @@ class LiveAnalysisService {
     async clearTunes() {
         this._generation++;
         this._windowMatches = [];
+        this.scorePosition = null;
         this.detections = [];
         this._lastSavedTuneId = null;
         this._lastSightingTuneId = null;
@@ -540,7 +551,13 @@ class LiveAnalysisService {
     // set only when the session is being finished: until then the last entry
     // is the tune playing now and must stay, however short.
     _recluster({ final = false } = {}) {
-        this.detections = buildSessionDetections(this._windowMatches, this.options, { final });
+        const confirm = this._liveStepSeconds === null || !this.options
+            ? 0
+            : confirmSpanSeconds(this.options.stepSeconds, this._liveStepSeconds);
+        this.detections = buildSessionDetections(this._windowMatches, this.options, {
+            final,
+            confirmSpanSeconds: confirm,
+        });
     }
 
     // The last window that actually produced an accepted match, or null.
@@ -582,6 +599,7 @@ class LiveAnalysisService {
         this.isPaused = false;
         this._stopTimer();
         this._cancelCheckpoint();
+        this.scorePosition = null;
         // A Pause ends a capture. Resuming must never silently start recording
         // again on the strength of a tap made before the break: the tune it was
         // for is over, and whatever is played after the break is the user's to
@@ -661,6 +679,7 @@ class LiveAnalysisService {
         // Measured analysis time, for the adaptive step. Per run, because a
         // resume can follow a long break in which the device's load changed.
         let latencyMs = null;
+        this._liveStepSeconds = null;
 
         while (this.isRunning && !this.isPaused && current()) {
             const cycleStart = Date.now();
@@ -703,6 +722,9 @@ class LiveAnalysisService {
             // stamp taken afterwards would place every tune that much late in
             // the recording.
             const audioSeconds = sessionRecorder.isRecording ? sessionRecorder.audioSeconds : null;
+            // Same moment, on the wall clock: the follow view projects the
+            // position forward from where this window ENDED.
+            const readAt = Date.now();
 
             if (pcm.length > 0) {
                 const sampleRate = micService.sampleRate || this._sampleRate;
@@ -733,6 +755,9 @@ class LiveAnalysisService {
                 // timeout would just pin the step at its configured maximum.
                 if (!response.error) {
                     latencyMs = updateLatencyEstimate(latencyMs, Date.now() - analysisStart);
+                    // What the windows are about to be spaced by, which is
+                    // what decides how much a run of matches is worth.
+                    this._liveStepSeconds = effectiveStepSeconds(options.stepSeconds, latencyMs);
                 }
 
                 // A partial window (the first seconds of a run) must earn its
@@ -748,6 +773,9 @@ class LiveAnalysisService {
                 if (!current()) break;
 
                 this._reportAnalysedWindow(audioSeconds, response, options);
+                if (!response.error) {
+                    this._publishScorePosition(response.contour, readAt, pcm.length / sampleRate);
+                }
 
                 if (this.isRunning && !this.isPaused && !response.error && usableResults.length > 0) {
                     const previousTuneId = this.detections.length > 0
@@ -798,6 +826,18 @@ class LiveAnalysisService {
             const remainingMs = Math.max(0, stepMs - analysisMs);
             await this._sleepCancellable(remainingMs);
         }
+    }
+
+    // Hands the follow view what was just heard. Whether it matched anything is
+    // for the view to judge, against the setting it is showing: the query's own
+    // results carry one setting per tune, rarely the one on screen.
+    _publishScorePosition(contour, readAt, windowSeconds) {
+        const position = windowPosition(contour, { readAt, windowSeconds });
+        // A window too short to place keeps the previous one, which ages out
+        // on its own.
+        if (!position) return;
+        this.scorePosition = position;
+        eventBus.$emit('liveScorePosition', this.scorePosition);
     }
 
     // Tells the recorder what this window sounded like, for a "tunes only"

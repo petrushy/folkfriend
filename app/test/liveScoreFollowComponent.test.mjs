@@ -67,6 +67,8 @@ export default {
     isFavourite: async () => false,
     addFavourite: async () => {},
     removeFavourite: async () => {},
+    __savedSettings: [],
+    async updateUserSettings(settings) { this.__savedSettings.push({ ...settings }); this.userSettings = settings; },
     userSettings: {},
 };
 `;
@@ -80,6 +82,8 @@ export const __rejected = [];
 const service = {
     elapsedSeconds: 0,
     detections: [],
+    // Where the last window matched (js/scorePosition.mjs windowPositions()).
+    scorePosition: null,
     rejectTune(tuneId) { __rejected.push(tuneId); },
     // "Record this tune". __captureResult scripts what captureTune() answers.
     isRunning: true,
@@ -116,6 +120,7 @@ export const mdiPinOutline = 'pin-outline';
 export const mdiThumbDownOutline = 'thumb-down-outline';
 export const mdiRecordCircleOutline = 'record-outline';
 export const mdiRecordRec = 'record-rec';
+export const mdiCrosshairsGps = 'crosshairs';
 `;
 const FAKE_SESSION_ANALYSIS = `export function formatSecondsAsClock(s) { return String(s); }`;
 // The overlay renders these; nothing here touches them.
@@ -153,6 +158,7 @@ async function loadOverlay({ initialDetections = null } = {}) {
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
         // Deliberately the real module.
         ["from '@/js/liveScoreFollow.mjs'", `from '${followModule}'`],
+        ["from '@/js/scorePosition.mjs'", `from '${path.join(srcDir, 'js', 'scorePosition.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in the SFC`);
@@ -166,6 +172,7 @@ async function loadOverlay({ initialDetections = null } = {}) {
     backend.__reset();
     live.__rejected.length = 0;
     live.default.detections = [];
+    live.default.scorePosition = null;
     live.default.isRunning = true;
     live.default.tuneCapture = null;
     live.default.__recording = false;
@@ -546,6 +553,131 @@ await test('a whole-session recording lights the button although it cannot be pr
     assert.match(vm.captureLevelStyle.boxShadow, /rgba/);
     live.default.__level = null;
     assert.equal(component.data.call(vm).captureLevel, null, 'and dark when nothing is recorded');
+});
+
+
+console.log('\nauto-centre on the line being played');
+
+// Four staff lines of four one-second events each; line n sits at 100n px.
+function fakeScoreRefs(vm) {
+    const events = [];
+    for (let i = 0; i < 16; i++) events.push({ milliseconds: i * 1000, line: Math.floor(i / 4) });
+    const timeline = { events, totalMs: 16000, lines: [{}, {}, {}, {}], lineCount: 4 };
+    const scrolls = [];
+    const body = {
+        scrollTop: 0,
+        getBoundingClientRect: () => ({ top: 0, height: 300 }),
+        scrollTo(opts) { scrolls.push(opts.top); this.scrollTop = opts.top; },
+    };
+    vm.$refs = {
+        scoreBody: body,
+        abcDisplay: {
+            followTimeline: () => timeline,
+            lineClientRect: (line) => ({ top: 100 * line - body.scrollTop, bottom: 100 * line + 80 - body.scrollTop }),
+        },
+    };
+    return scrolls;
+}
+
+// A deterministic contour for the setting on screen, 160 quavers, so a slice
+// ending at 90 is 56% through: event 9, line 2 (0-based).
+const STORED = (() => {
+    let x = 5;
+    let out = '';
+    for (let i = 0; i < 160; i++) { x = (x * 1103515245 + 12345) % 2147483648; out += 'opqrstuvwxyz'[x % 12]; }
+    return out;
+})();
+
+// What the service publishes after a window: the transcribed contour. Here,
+// the 20 quavers of the stored setting ending at `end`.
+function positionFor(end = 90, stored = STORED) {
+    return { contour: stored.slice(end - 20, end), readAt: Date.now(), windowSeconds: 10 };
+}
+
+await test('auto-centre is off by default and then moves nothing', async () => {
+    const { vm, push, live } = await loadOverlay();
+    await push([det(1, 10, 'The Kesh', 0.8)]);
+    vm.abcSetting.contour = STORED;
+    const scrolls = fakeScoreRefs(vm);
+    live.default.scorePosition = positionFor();
+    vm._updateFollowPosition();
+    assert.equal(vm.autoCenter, false);
+    assert.deepEqual(scrolls, []);
+    assert.equal(vm.positionReadout, '');
+});
+
+await test('turned on, it is remembered and centres the line being played', async () => {
+    const { vm, push, live } = await loadOverlay();
+    const store = (await import(path.join(tmpDir, 'fake-store.mjs'))).default;
+    await push([det(1, 10, 'The Kesh', 0.8)]);
+    vm.abcSetting.contour = STORED;
+    const scrolls = fakeScoreRefs(vm);
+    live.default.scorePosition = positionFor();
+    vm.toggleAutoCenter();
+    assert.equal(store.userSettings.liveAutoCenter, true, 'saved to settings');
+    // Line 2 is 200..280 px; centred in a 300 px body means scrolling to 90.
+    assert.deepEqual(scrolls, [90]);
+    assert.match(vm.positionReadout, /^line 3\/4/);
+    assert.deepEqual(vm.followBand, { top: 200, height: 80 });
+
+    // The same line again does not scroll again.
+    vm._updateFollowPosition();
+    assert.deepEqual(scrolls, [90]);
+});
+
+await test('frozen, it does not move', async () => {
+    const { vm, push, live } = await loadOverlay();
+    await push([det(1, 10, 'The Kesh', 0.8)]);
+    vm.abcSetting.contour = STORED;
+    const scrolls = fakeScoreRefs(vm);
+    vm.toggleFrozen();
+    live.default.scorePosition = positionFor();
+    vm.toggleAutoCenter();
+    assert.deepEqual(scrolls, []);
+});
+
+await test('a manual scroll holds the page, though the band still follows', async () => {
+    const { vm, push, live } = await loadOverlay();
+    await push([det(1, 10, 'The Kesh', 0.8)]);
+    vm.abcSetting.contour = STORED;
+    const scrolls = fakeScoreRefs(vm);
+    vm.toggleAutoCenter();
+    vm.onManualScroll();
+    live.default.scorePosition = positionFor();
+    vm._updateFollowPosition();
+    assert.deepEqual(scrolls, [], 'the page stays where the user put it');
+    assert.deepEqual(vm.followBand, { top: 200, height: 80 });
+});
+
+await test('the position is found in whichever setting is on screen', async () => {
+    // The device bug: the query's results carry one setting per tune, rarely
+    // the displayed one, so a position taken from them was nearly always
+    // "n/a". The window is aligned against the shown setting instead.
+    const { vm, push, live } = await loadOverlay();
+    await push([det(1, 10, 'The Kesh', 0.8)]);
+    // A different setting's contour (another seed), not periodic: a periodic
+    // one really would contain the phrase everywhere, and holding is right.
+    let other = '';
+    let x = 91;
+    for (let i = 0; i < 160; i++) { x = (x * 1103515245 + 12345) % 2147483648; other += 'opqrstuvwxyz'[x % 12]; }
+    assert.notEqual(other, STORED);
+    vm.abcSetting.contour = other;
+    const scrolls = fakeScoreRefs(vm);
+    live.default.scorePosition = positionFor(90, other);
+    vm.toggleAutoCenter();
+    assert.deepEqual(scrolls, [90]);
+    assert.match(vm.positionReadout, /^line 3\/4/);
+});
+
+await test('audio that does not match the setting on screen moves nothing and says so', async () => {
+    const { vm, push, live } = await loadOverlay();
+    await push([det(1, 10, 'The Kesh', 0.8)]);
+    vm.abcSetting.contour = STORED;
+    const scrolls = fakeScoreRefs(vm);
+    live.default.scorePosition = { contour: 'ABCDEFABCDEFABCDEF', readAt: Date.now(), windowSeconds: 10 };
+    vm.toggleAutoCenter();
+    assert.deepEqual(scrolls, []);
+    assert.match(vm.positionReadout, /^position unclear/);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

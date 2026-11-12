@@ -29,6 +29,20 @@
                             {{ frozen ? frozenIcon : unfrozenIcon }}
                         </v-icon>
                     </button>
+                    <!-- Auto-centre: keep the line being played in the middle
+                         of the screen (js/scorePosition.mjs). Off by default;
+                         remembered per device. -->
+                    <button
+                        v-if="target"
+                        class="autoCenterBtn"
+                        :title="autoCenter ? 'Stop following the position in the tune' : 'Follow the position in the tune — keep the line being played in view'"
+                        :aria-pressed="String(autoCenter)"
+                        @click="toggleAutoCenter"
+                    >
+                        <v-icon :color="autoCenter ? 'teal darken-1' : 'grey lighten-1'">
+                            {{ autoCenterIcon }}
+                        </v-icon>
+                    </button>
                     <!-- "This is a great tune, let us capture it!" Records
                          this tune only and stops by itself when it is over —
                          see js/tuneCapture.mjs. Shown even before a tune is
@@ -88,6 +102,9 @@
                     <span v-if="target" class="scoreReadout">
                         match {{ target.score.toFixed(2) }}
                     </span>
+                    <span v-if="target && autoCenter && positionReadout" class="positionReadout">
+                        {{ positionReadout }}
+                    </span>
                     <span v-if="capturing" class="captureFlag">
                         ● REC this tune
                     </span>
@@ -110,7 +127,19 @@
             </button>
         </div>
 
-        <div class="liveScoreBody">
+        <div
+            ref="scoreBody"
+            class="liveScoreBody"
+            @touchstart.passive="onManualScroll"
+            @wheel.passive="onManualScroll"
+            @pointerdown="onManualScroll"
+        >
+            <div
+                v-if="autoCenter && followBand"
+                class="followBand"
+                :style="{ top: `${followBand.top}px`, height: `${followBand.height}px` }"
+                aria-hidden="true"
+            />
             <v-alert
                 v-if="loadError"
                 type="warning"
@@ -123,6 +152,7 @@
 
             <AbcDisplay
                 v-if="abcSetting"
+                ref="abcDisplay"
                 :key="abcSetting.setting_id"
                 hide-controls
                 :abc="abcSetting.abc"
@@ -172,7 +202,7 @@
 </template>
 
 <script>
-import { mdiStar, mdiStarOutline, mdiPin, mdiPinOutline, mdiThumbDownOutline, mdiRecordCircleOutline, mdiRecordRec } from '@mdi/js';
+import { mdiStar, mdiStarOutline, mdiPin, mdiPinOutline, mdiThumbDownOutline, mdiRecordCircleOutline, mdiRecordRec, mdiCrosshairsGps } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
@@ -182,6 +212,12 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
 import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
+import { decideLine, nextFollowLine, matchSpans } from '@/js/scorePosition.mjs';
+
+// After the user touches or scrolls the score, auto-centre keeps its hands off
+// for this long. Someone reading ahead, or looking back at a bar, must not
+// have the page pulled out from under them.
+const MANUAL_SCROLL_HOLD_MS = 8_000;
 
 const SCORE_LOAD_TIMEOUT_MS = 12_000;
 const SCORE_LOAD_SLOW_MESSAGE =
@@ -230,6 +266,12 @@ export default {
         // On an instance so a test can shorten it.
         this._scoreLoadTimeoutMs = SCORE_LOAD_TIMEOUT_MS;
         this._scoreLoadTimer = null;
+        // Auto-centre bookkeeping, non-reactive: the hysteresis state, which
+        // score it is about, and the hold after a manual scroll.
+        this._followState = null;
+        this._followKey = null;
+        this._manualScrollUntil = 0;
+        this._spansCache = null;
         return {
             target: lastShown.target,
             abcSetting: lastShown.abcSetting,
@@ -264,6 +306,16 @@ export default {
             // What a capture that has just ended did, or why one could not
             // start. Cleared after a few seconds.
             captureNote: '',
+            // store.userSettings is not reactive, so the toggle keeps its own
+            // copy (see the userSettings note in CLAUDE.md).
+            autoCenter: !!(store.userSettings && store.userSettings.liveAutoCenter),
+            autoCenterIcon: mdiCrosshairsGps,
+            // What auto-centre currently thinks, as a few words beside the
+            // match score — the only way to judge it on a device.
+            positionReadout: '',
+            // The highlighted line, in the score body's own scroll
+            // coordinates, or null.
+            followBand: null,
         };
     },
     computed: {
@@ -316,8 +368,14 @@ export default {
             // switch can change between ticks.
             this.captureState = liveAnalysisService.tuneCaptureAvailability();
             this._syncCaptureLevelPolling();
+            // Re-decide every second, not only per window: the position is
+            // projected forward from where the last window ended.
+            this._updateFollowPosition();
         };
         eventBus.$on('liveAnalysisTimerTick', this._onTimerTick);
+
+        this._onScorePosition = () => this._updateFollowPosition();
+        eventBus.$on('liveScorePosition', this._onScorePosition);
 
         this._onCaptureState = (state = {}) => {
             this.capturing = !!state.capturing;
@@ -342,6 +400,7 @@ export default {
         document.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('visibilitychange', this._onVisibilityChange);
         eventBus.$off('liveAnalysisTimerTick', this._onTimerTick);
+        eventBus.$off('liveScorePosition', this._onScorePosition);
         eventBus.$off('liveAnalysisCaptureState', this._onCaptureState);
         clearTimeout(this._captureNoteTimer);
         clearInterval(this._captureLevelTimer);
@@ -434,6 +493,109 @@ export default {
                 this._syncCaptureLevelPolling();
                 this.captureState = liveAnalysisService.tuneCaptureAvailability();
                 this.captureBusy = false;
+            }
+        },
+        toggleAutoCenter() {
+            this.autoCenter = !this.autoCenter;
+            if (store.userSettings) {
+                store.userSettings.liveAutoCenter = this.autoCenter;
+                store.updateUserSettings(store.userSettings);
+            }
+            this._followState = null;
+            this.followBand = null;
+            this.positionReadout = '';
+            // Turning it on is the moment the user wants to be taken there.
+            this._manualScrollUntil = 0;
+            if (this.autoCenter) this._updateFollowPosition();
+        },
+        onManualScroll() {
+            this._manualScrollUntil = Date.now() + MANUAL_SCROLL_HOLD_MS;
+        },
+        // Where in the tune the music is, and — when auto-centre is on and the
+        // view is neither frozen nor being scrolled by hand — move it there.
+        _updateFollowPosition() {
+            if (!this.autoCenter) return;
+            const display = this.$refs && this.$refs.abcDisplay;
+            const target = this.target;
+            const setting = this.abcSetting;
+            if (!target || !setting || !display || typeof display.followTimeline !== 'function') {
+                this.positionReadout = '';
+                this.followBand = null;
+                return;
+            }
+            // A different score means a different tune's lines: start over.
+            const key = `${target.tuneId}::${setting.setting_id}`;
+            if (key !== this._followKey) {
+                this._followKey = key;
+                this._followState = null;
+                this.followBand = null;
+                this._spansCache = null;
+            }
+            const timeline = display.followTimeline();
+            const position = liveAnalysisService.scorePosition;
+            // Against the setting actually ON SCREEN. Aligned once per window
+            // and reused by the per-second re-projection.
+            const storedContour = setting.contour || '';
+            let spans = null;
+            if (position && storedContour) {
+                const cache = this._spansCache;
+                if (cache && cache.position === position && cache.key === key) {
+                    spans = cache.spans;
+                } else {
+                    spans = matchSpans(position.contour, storedContour);
+                    this._spansCache = { position, key, spans };
+                }
+            }
+            const decision = decideLine(position, {
+                storedContour,
+                nowMs: Date.now(),
+                timeline,
+                spans,
+            });
+            this._followState = nextFollowLine(
+                this._followState, decision.line, position ? position.readAt : null);
+            const line = this._followState.line;
+            const count = timeline ? timeline.lineCount : 0;
+            this.positionReadout = this._positionText(decision, line, count);
+            if (line === null) return;
+            // The freeze is total: nothing moves while the user reads.
+            if (this.frozen) return;
+            // While the user is scrolling by hand the band still follows the
+            // music; only the page stays where they put it.
+            this._centreLine(display, line, Date.now() >= this._manualScrollUntil);
+        },
+        _positionText(decision, line, count) {
+            if (decision.reason === 'ok') {
+                return `line ${decision.line + 1}/${count} · ${Math.round(decision.fraction * 100)}%`;
+            }
+            const held = line !== null ? `line ${line + 1}/${count}, ` : '';
+            switch (decision.reason) {
+            case 'ambiguous': return `${held}which part?`;
+            case 'weak': return `${held}position unclear (${(decision.score || 0).toFixed(2)})`;
+            case 'stale': return `${held}no recent match`;
+            case 'no-contour':
+            case 'no-timeline': return 'position n/a';
+            default: return held ? held.replace(/, $/, '') : '';
+            }
+        },
+        _centreLine(display, line, scroll) {
+            const body = this.$refs.scoreBody;
+            const rect = display.lineClientRect(line);
+            if (!body || !rect || typeof body.getBoundingClientRect !== 'function') return;
+            const bodyRect = body.getBoundingClientRect();
+            const top = body.scrollTop + (rect.top - bodyRect.top);
+            const height = Math.max(0, rect.bottom - rect.top);
+            const band = { top, height };
+            const moved = !this.followBand ||
+                Math.abs(this.followBand.top - band.top) > 1 ||
+                Math.abs(this.followBand.height - band.height) > 1;
+            this.followBand = band;
+            if (!moved || !scroll) return;
+            const wanted = Math.max(0, top + height / 2 - bodyRect.height / 2);
+            if (typeof body.scrollTo === 'function') {
+                body.scrollTo({ top: wanted, behavior: 'smooth' });
+            } else {
+                body.scrollTop = wanted;
             }
         },
         toggleFrozen() {
@@ -646,7 +808,8 @@ export default {
 }
 
 .rejectBtn,
-.freezeBtn {
+.freezeBtn,
+.autoCenterBtn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -796,10 +959,26 @@ export default {
 }
 
 .liveScoreBody {
+    position: relative;
     flex: 1;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
     padding: 8px max(8px, env(safe-area-inset-right, 8px)) 8px max(8px, env(safe-area-inset-left, 8px));
+}
+
+.followBand {
+    position: absolute;
+    left: 0;
+    right: 0;
+    background: rgba(0, 150, 136, 0.10);
+    border-left: 4px solid rgba(0, 137, 123, 0.7);
+    pointer-events: none;
+    z-index: 1;
+    transition: top 0.4s ease, height 0.4s ease;
+}
+
+.positionReadout {
+    color: #00796b;
 }
 
 .emptyState {

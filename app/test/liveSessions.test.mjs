@@ -393,6 +393,7 @@ async function loadService({ keepStore = false } = {}) {
         ["from '@/js/detectionFreshness.mjs'", `from '${path.join(srcDir, 'js', 'detectionFreshness.mjs')}'`],
         ["from '@/js/tuneCapture.mjs'", `from '${path.join(srcDir, 'js', 'tuneCapture.mjs')}'`],
         ["from '@/js/liveCadence.mjs'", `from '${path.join(srcDir, 'js', 'liveCadence.mjs')}'`],
+        ["from '@/js/scorePosition.mjs'", `from '${path.join(srcDir, 'js', 'scorePosition.mjs')}'`],
         ["from '@/js/audioKeep.mjs'", `from '${path.join(srcDir, 'js', 'audioKeep.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
@@ -1015,6 +1016,8 @@ async function run() {
         assert.ok(first < 5500, `first query at ${first} ms, not after the full 6 s window`);
         assert.ok(gap < 3000, `a near-instant backend steps at the 2 s floor, not the configured 6 s (gap ${gap} ms)`);
         assert.ok(gap >= 1900, `the step never drops below the floor (gap ${gap} ms)`);
+        assert.equal(service._liveStepSeconds, 2,
+            'the measured step is what decides how much a run of matches is worth');
     });
 
     await test('a partial window counts only with a real contour; a full window is judged as before', async () => {
@@ -1051,6 +1054,24 @@ async function run() {
         await service.stop();
         assert.equal(service.detections.length, 1,
             'the contour bar is only for partial windows — a full one is unchanged');
+    });
+
+    await test('each window publishes what was heard for the follow view, and Pause clears it', async () => {
+        const { service, mic, backend } = await loadService();
+        mic.__setPcm(44100);
+        backend.__respondWith(TUNE_RESULT('stuvwxyzstuvwxyz'));
+        const before = Date.now();
+        await service.start(1, 0.05);
+        for (let i = 0; i < 200 && !service.scorePosition; i++) {
+            await new Promise(r => setTimeout(r, 10));
+        }
+        const position = service.scorePosition;
+        assert.ok(position, 'a window with a usable contour publishes it');
+        assert.equal(position.contour, 'stuvwxyzstuvwxyz');
+        assert.ok(position.readAt >= before && position.readAt <= Date.now());
+        assert.ok(Math.abs(position.windowSeconds - 1) < 0.01, `window length from the PCM (${position.windowSeconds})`);
+        await service.stop();
+        assert.equal(service.scorePosition, null, 'a paused session claims no position');
     });
 
     await test('a transcription in flight across Pause then Resume is discarded', async () => {

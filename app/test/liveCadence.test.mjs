@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import {
     firstQueryDelaySeconds, updateLatencyEstimate, effectiveStepSeconds,
-    isPartialWindow, partialWindowUsable,
+    isPartialWindow, partialWindowUsable, confirmSpanSeconds,
     EARLY_FIRST_QUERY_SECONDS, MIN_ADAPTIVE_STEP_SECONDS,
 } from '../src/js/liveCadence.mjs';
 
@@ -72,6 +72,15 @@ test('a partial window needs a contour of minContourLength notes', () => {
     assert.equal(partialWindowUsable({ contour: 'a'.repeat(11) }, 12), false);
     assert.equal(partialWindowUsable({ results: [] }, 12), false, 'no contour reported is not enough');
     assert.equal(partialWindowUsable(null, 12), false);
+});
+
+test('a new tune needs confirming only as far as the step is shorter than configured', () => {
+    // A slow device steps at the configured 5 s and behaves exactly as before.
+    assert.equal(confirmSpanSeconds(5, 5), 0);
+    assert.equal(confirmSpanSeconds(5, 3), 2);
+    assert.equal(confirmSpanSeconds(5, 2), 3);
+    assert.equal(confirmSpanSeconds(5, 7), 0, 'never negative');
+    assert.equal(confirmSpanSeconds(5, null), 0, 'no step known yet: nothing held back');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

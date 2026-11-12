@@ -469,13 +469,30 @@ export function mergeConsecutiveSameTune(detections) {
 // `final` is true once nothing more is coming — a file fully scanned, a live
 // session finished. The last entry is then no longer "the tune playing now"
 // and is filtered like every other.
-export function buildSessionDetections(windowMatches, options, { final = false } = {}) {
+//
+// `confirmSpanSeconds` holds back a NEW tune at the tail until its matching
+// windows span at least that long (first to last), unless one of them scored
+// STRONG_SINGLE_DETECTION_SCORE. The previous tune stays the current one
+// meanwhile. Live listening sets it when it queries faster than the configured
+// step (js/liveCadence.mjs confirmSpanSeconds): windows two seconds apart share
+// eight of their ten seconds of audio, so one misleading passage produces two
+// or three matching windows for the same wrong tune, and "it matched twice"
+// stops meaning what it did at a five-second step. Measured on synthetic
+// sessions (rust/examples/detect_sim.rs) that was the larger part of a rise in
+// time spent showing a tune nobody played. Not applied when `final`.
+export function buildSessionDetections(windowMatches, options, { final = false, confirmSpanSeconds = 0 } = {}) {
     const filtered = filterShortPastDetections(
         clusterDetections(windowMatches, options),
         MIN_PAST_DETECTION_SECONDS,
         { keepLast: !final, options },
     );
-    return mergeConsecutiveSameTune(filtered);
+    const merged = mergeConsecutiveSameTune(filtered);
+    if (final || !(confirmSpanSeconds > 0) || merged.length < 2) return merged;
+    const tail = merged[merged.length - 1];
+    // endSeconds is the last window's start plus a whole window.
+    const span = tail.endSeconds - options.windowSeconds - tail.startSeconds;
+    if (span >= confirmSpanSeconds || tail.bestScore >= STRONG_SINGLE_DETECTION_SCORE) return merged;
+    return merged.slice(0, -1);
 }
 
 export function normaliseQueryResults(results, options) {

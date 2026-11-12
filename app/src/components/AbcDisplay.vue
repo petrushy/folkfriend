@@ -229,6 +229,7 @@ export default {
             const target = this.$refs.abcTarget;
             if (!target) return;
             this._clearHighlightedNotes();
+            this._followTimeline = null;
             // visualTranspose changes what is drawn; the synth is told
             // separately (see _synthOptions) because abcjs deliberately
             // subtracts the visual transpose out of the sound. The instrument
@@ -240,6 +241,52 @@ export default {
                 // source's own line breaks otherwise. See abcLayout.mjs.
                 ...layoutOptionsFor(this.abcText),
             })[0];
+        },
+        // The score's played-out timeline, for the live view's auto-centre
+        // (js/scorePosition.mjs): every note event in PLAYBACK order — repeats
+        // and endings expanded, exactly as abc2midi expanded them when the
+        // stored contour was built — with the staff line it is drawn on.
+        // Positions are fractions of the whole, so the tempo it is built at
+        // does not matter; it is built once per render and never started.
+        followTimeline() {
+            if (!this.abcVisual) return null;
+            if (this._followTimeline) return this._followTimeline;
+            let timings;
+            try {
+                timings = new ABCJS.TimingCallbacks(this.abcVisual, { qpm: 120 }).noteTimings || [];
+            } catch (e) {
+                return null;
+            }
+            const events = timings.filter(t => t.type === 'event' && typeof t.line === 'number');
+            if (events.length === 0) return null;
+            const last = timings[timings.length - 1];
+            const totalMs = Math.max(
+                last ? last.milliseconds : 0,
+                events[events.length - 1].milliseconds,
+            );
+            // First event of each line carries its geometry (top/height in the
+            // SVG's own units, the whole staff system).
+            const lines = [];
+            for (const event of events) {
+                if (!lines[event.line]) lines[event.line] = { top: event.top, height: event.height };
+            }
+            this._followTimeline = { events, totalMs, lines, lineCount: lines.length };
+            return this._followTimeline;
+        },
+        // Where staff line `line` is on screen, as {top, bottom} client
+        // pixels, or null. `responsive: 'resize'` scales the SVG, so its own
+        // units are converted through the viewBox.
+        lineClientRect(line) {
+            const timeline = this.followTimeline();
+            const geometry = timeline && timeline.lines[line];
+            const target = this.$refs.abcTarget;
+            const svg = target && target.querySelector('svg');
+            if (!geometry || !svg) return null;
+            const rect = svg.getBoundingClientRect();
+            const viewBox = svg.viewBox && svg.viewBox.baseVal;
+            const scale = viewBox && viewBox.height ? rect.height / viewBox.height : 1;
+            const top = rect.top + (geometry.top || 0) * scale;
+            return { top, bottom: top + (geometry.height || 0) * scale };
         },
         _synthOptions(onEnded) {
             return {

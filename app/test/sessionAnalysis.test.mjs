@@ -204,6 +204,24 @@ function d(tuneId, startSeconds, endSeconds) {
         m(1, 0), m(1, 10), m(2, 20, strong - 0.01), m(3, 30), m(3, 40),
     ], sparse, { final: true }).map(x => x.tuneId);
     assert.deepEqual(weak, [1, 3], 'a single window below the strong score is still dropped');
+
+    // Confirmation of a new tune at the tail (live listening faster than the
+    // configured step). Tune 1 established; tune 2 starts matching at 2 s
+    // spacing, as a fast device queries.
+    const established = [m(1, 0), m(1, 5), m(1, 10), m(1, 15)];
+    const run = (extra, confirm) => buildSessionDetections([...established, ...extra], options,
+        { confirmSpanSeconds: confirm }).map(x => x.tuneId);
+    assert.deepEqual(run([m(2, 20)], 0), [1, 2], 'no confirmation asked: as before');
+    assert.deepEqual(run([m(2, 20)], 3), [1], 'one window of a new tune: the previous stays current');
+    assert.deepEqual(run([m(2, 20), m(2, 22)], 3), [1],
+        'two windows 2 s apart share most of their audio: still not enough');
+    assert.deepEqual(run([m(2, 20), m(2, 22), m(2, 24)], 3), [1, 2], 'spanning 4 s: confirmed');
+    assert.deepEqual(run([m(2, 20, strong)], 3), [1, 2], 'a strong window needs no confirmation');
+    assert.deepEqual(buildSessionDetections([m(2, 20)], options, { confirmSpanSeconds: 3 }).map(x => x.tuneId), [2],
+        'the first tune of a session is not held back — there is nothing to fall back to');
+    assert.deepEqual(buildSessionDetections([...established, m(2, 20)], options,
+        { confirmSpanSeconds: 3, final: true }).map(x => x.tuneId), [1],
+        'final: the ordinary short-detection rule applies, not this one');
 }
 
 await rm(sessionAnalysisTmpDir, { recursive: true, force: true });
