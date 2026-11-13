@@ -1198,8 +1198,8 @@ length, full-level one-sided audio, and that the pruned stretch is left out.
 A toggle in the `LiveScoreFollow` header (crosshairs, right of the pin; off by
 default, remembered as `userSettings.liveAutoCenter`) keeps the staff LINE
 being played centred and marks it with a teal band. A readout beside the match
-score says what it thinks (`line 3/8 · 41%`, `which part?`, `position unclear
-(0.52)`) — the only way to judge it on a device.
+score says what it thinks (`line 3/8 · 41%`, `· realigned`, `· keeping time`,
+`which part?`, `position unclear (0.52)`, `lost the place`) — the only way to judge it on a device.
 
 - **Each window's contour is aligned against the setting ON SCREEN**, in JS
   (`matchSpans`, `js/scorePosition.mjs`), with the Rust second pass's exact
@@ -1213,37 +1213,65 @@ score says what it thinks (`line 3/8 · 41%`, `which part?`, `position unclear
   so the one on screen was almost never it. Do not go back to reading spans
   off the results. The Rust `match_spans` that did this was reverted, so the
   WASM is unchanged.
-- **Up to 4 non-overlapping spans, and runners-up are judged by LINE.** The two
-  A parts of an AABB tune are an exact tie and the SAME written bars
-  (harmless); an A and a B part sharing a phrase are different lines.
-  `decideLine` holds (`ambiguous`) unless every span within 0.05 of the best
-  lands on one line.
-- **Contour → score goes through a FRACTION and ABCJS's own timeline.** The
-  stored contour has repeats played out; so does `ABCJS.TimingCallbacks`
-  (verified in Chromium: repeats and 1st/2nd endings expanded, each event
-  carrying `line`/`top`/`height`). `end / contour.length` is mapped onto that
-  timeline's total length, which spreads the contour's drift (grace notes
-  stripped, sub-quaver notes rounded/dropped) along the tune rather than
-  piling it up at the end. `AbcDisplay.followTimeline()` /
-  `lineClientRect()`.
-- **Projected forward** from the moment the window's PCM was read, at the pace
-  the span itself was played (span length ÷ window length), capped at 8 s.
-- **Hysteresis**: forward moves at once; BACK needs two consecutive windows
-  agreeing (the per-second re-projection is not a second opinion).
-- Below 0.6 alignment score, or a window under 12 notes, there is no position.
+- **The position is TRACKED, not re-decided per window** (November 2026,
+  after field testing called the first version flaky). `trackPosition` keeps
+  a main hypothesis (a place in the played-out tune, unwrapped, plus a tempo)
+  and up to 4 alternatives, projected forward between windows; `followPoint`
+  reads where it puts the music now. Rules, each pinned in
+  `scorePosition.test.mjs` and verified by breaking it:
+  - **Expected places need less evidence**: a candidate within tolerance of
+    the projection (6 quavers + 15 % of the distance projected since the last
+    match) is believed from 0.4; anywhere else needs 0.6. Among agreeing
+    candidates the prior wins, which is what settles a phrase shared by an A
+    and a B part.
+  - **Re-aligning when it is wrong** (improvisation, skipped repeats): a
+    strong place nothing explains becomes an alternative; the next window
+    agreeing with it makes it the main one (`realigned`, two windows, never
+    one). An alternative that keeps agreeing better by 0.08 takes over too —
+    that is what corrects "followed the wrong one of two repeats". After 2
+    unmatched windows the place counts as lost and one clear window anywhere
+    re-locks.
+  - **Through improvisation it keeps time** for up to 20 s (`coasting`, "keeping
+    time"), since improvising usually follows the tune's structure; past that
+    it holds ("lost the place").
+  - **The tune wraps.** Candidates are found against the contour looped once,
+    so a window across the end of one time through and the start of the next
+    is placed. The first version could not place those, said "which part?" and
+    sat on the last line for ~8 s at every time through — the biggest single
+    cause of the flakiness. A wrap or a re-alignment moves the line back at
+    once (`nextFollowLine` `force`); only small backward corrections of the
+    projection wait for a second window.
+  - **The alignment ends on the window's last note** (`matchSpans` `fit`), and
+    trailing notes it treats as extra still count as played, so a few wrong
+    last notes do not put the position behind the music. The Rust-equivalent
+    best-cell score is still the default for anything else.
+  - A fresh lock on a tie whose places share a written line (the two A parts
+    of AABB) is taken at once, as before; a tie across lines is `ambiguous`
+    until the next window.
+
+  `test/bench/replayScorePosition.mjs` replays simulated performances of real
+  thesession settings (drifting tempo, wrong/missing/extra notes, optional
+  improvisation and a jump; repeated blocks share a written line) through both
+  rules. 300 sessions, normal / hard damage, share of seconds with the right
+  line shown: old 61.0 / 38.2 %, new 90.9 / 83.4 %; within one line 80.6 /
+  63.1 % → 96.1 / 89.5 %. On clean performances old 68 %, new 96 %. Moves to a
+  line more than one away rose from 0.16 to 0.38 a minute (normal) — the old
+  rule moved less because it was more often stuck. Synthetic: it compares the
+  rules, nothing absolute about a pub, and no transcription is involved.
 - **Holds while Frozen** (the freeze is total) and for 8 s after the user
   touches or scrolls the score; the band keeps following meanwhile.
 - `liveAnalysis.scorePosition` / `liveScorePosition` event carry the window's
   contour, `readAt` and length. Display-only, never persisted, cleared on
   Pause.
 
-Tests: `scorePosition.test.mjs` (13), 7 cases in
+Tests: `scorePosition.test.mjs` (24), 8 cases in
 `liveScoreFollowComponent.test.mjs`, 1 in `liveSessions.test.mjs`.
 Detection is untouched: no Rust change, and the loop only reads the window's
 contour after its result is taken. The alignment costs ~0.7 ms per window on
 desktop, on the main thread, only with the toggle on.
-⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.6 floor and
-the 0.05 tie margin are guesses.
+⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.4 / 0.6
+floors, the tolerance and the 20 s coast are tuned on the synthetic replay
+only.
 
 ### Live detection: an early first query and an adaptive step (November 2026)
 

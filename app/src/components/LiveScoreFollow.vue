@@ -212,7 +212,9 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
 import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
-import { decideLine, nextFollowLine, matchSpans } from '@/js/scorePosition.mjs';
+import {
+    trackPosition, followPoint, positionCandidates, lineAtFraction, nextFollowLine,
+} from '@/js/scorePosition.mjs';
 
 // After the user touches or scrolls the score, auto-centre keeps its hands off
 // for this long. Someone reading ahead, or looking back at a bar, must not
@@ -266,12 +268,14 @@ export default {
         // On an instance so a test can shorten it.
         this._scoreLoadTimeoutMs = SCORE_LOAD_TIMEOUT_MS;
         this._scoreLoadTimer = null;
-        // Auto-centre bookkeeping, non-reactive: the hysteresis state, which
-        // score it is about, and the hold after a manual scroll.
+        // Auto-centre bookkeeping, non-reactive: the position tracker, the
+        // line hysteresis, which score they are about, and the hold after a
+        // manual scroll.
+        this._track = null;
         this._followState = null;
         this._followKey = null;
+        this._followMark = null;
         this._manualScrollUntil = 0;
-        this._spansCache = null;
         return {
             target: lastShown.target,
             abcSetting: lastShown.abcSetting,
@@ -502,6 +506,8 @@ export default {
                 store.updateUserSettings(store.userSettings);
             }
             this._followState = null;
+            this._track = null;
+            this._followMark = null;
             this.followBand = null;
             this.positionReadout = '';
             // Turning it on is the moment the user wants to be taken there.
@@ -527,55 +533,64 @@ export default {
             const key = `${target.tuneId}::${setting.setting_id}`;
             if (key !== this._followKey) {
                 this._followKey = key;
+                this._track = null;
                 this._followState = null;
+                this._followMark = null;
                 this.followBand = null;
-                this._spansCache = null;
             }
             const timeline = display.followTimeline();
             const position = liveAnalysisService.scorePosition;
-            // Against the setting actually ON SCREEN. Aligned once per window
-            // and reused by the per-second re-projection.
+            // Against the setting actually ON SCREEN.
             const storedContour = setting.contour || '';
-            let spans = null;
-            if (position && storedContour) {
-                const cache = this._spansCache;
-                if (cache && cache.position === position && cache.key === key) {
-                    spans = cache.spans;
-                } else {
-                    spans = matchSpans(position.contour, storedContour);
-                    this._spansCache = { position, key, spans };
-                }
+            if (!storedContour || !timeline) {
+                this.positionReadout = 'position n/a';
+                return;
             }
-            const decision = decideLine(position, {
-                storedContour,
-                nowMs: Date.now(),
-                timeline,
-                spans,
-            });
+            const length = storedContour.length;
+            // Each window is folded into the tracker once; the per-second
+            // calls only re-project.
+            if (position && (!this._track || this._track.window !== position.readAt)) {
+                this._track = trackPosition(this._track, position, {
+                    storedContour,
+                    candidates: positionCandidates(position.contour, storedContour),
+                    lineOf: (end) => lineAtFraction(timeline, end / length),
+                });
+            }
+            const point = followPoint(this._track, Date.now(), length);
+            const line = point ? lineAtFraction(timeline, point.fraction) : null;
+            // A re-alignment or the tune coming round to the top moves the
+            // line at once, backwards included; only small corrections of
+            // the projection are held back.
+            const mark = point ? `${point.epoch}:${point.lap}` : null;
+            const force = !!point && this._followMark !== null && mark !== this._followMark;
+            this._followMark = mark;
             this._followState = nextFollowLine(
-                this._followState, decision.line, position ? position.readAt : null);
-            const line = this._followState.line;
-            const count = timeline ? timeline.lineCount : 0;
-            this.positionReadout = this._positionText(decision, line, count);
-            if (line === null) return;
+                this._followState, line, position ? position.readAt : null, { force });
+            const shown = this._followState.line;
+            const count = timeline.lineCount || 0;
+            this.positionReadout = this._positionText(this._track, point, shown, count);
+            if (shown === null) return;
             // The freeze is total: nothing moves while the user reads.
             if (this.frozen) return;
             // While the user is scrolling by hand the band still follows the
             // music; only the page stays where they put it.
-            this._centreLine(display, line, Date.now() >= this._manualScrollUntil);
+            this._centreLine(display, shown, Date.now() >= this._manualScrollUntil);
         },
-        _positionText(decision, line, count) {
-            if (decision.reason === 'ok') {
-                return `line ${decision.line + 1}/${count} · ${Math.round(decision.fraction * 100)}%`;
+        _positionText(track, point, line, count) {
+            if (!track) return '';
+            const here = line !== null ? `line ${line + 1}/${count}` : '';
+            const pct = point ? ` · ${Math.round(point.fraction * 100)}%` : '';
+            if (point && point.held) return `${here}, lost the place`;
+            switch (track.reason) {
+            case 'ok': return here ? `${here}${pct}` : '';
+            case 'realigned': return `${here}${pct} · realigned`;
+            case 'coasting': return `${here} · keeping time`;
+            case 'ambiguous': return here ? `${here}, which part?` : 'which part?';
+            case 'weak': {
+                const unclear = `position unclear (${(track.score || 0).toFixed(2)})`;
+                return here ? `${here}, ${unclear}` : unclear;
             }
-            const held = line !== null ? `line ${line + 1}/${count}, ` : '';
-            switch (decision.reason) {
-            case 'ambiguous': return `${held}which part?`;
-            case 'weak': return `${held}position unclear (${(decision.score || 0).toFixed(2)})`;
-            case 'stale': return `${held}no recent match`;
-            case 'no-contour':
-            case 'no-timeline': return 'position n/a';
-            default: return held ? held.replace(/, $/, '') : '';
+            default: return here;
             }
         },
         _centreLine(display, line, scroll) {

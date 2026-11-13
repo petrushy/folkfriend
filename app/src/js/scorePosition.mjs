@@ -27,18 +27,12 @@
 // is coarse enough to absorb that drift and is what a player actually needs:
 // the music they are playing somewhere near the middle of the screen.
 
-// Below this match score the position is noise; hold where we are. Positions
-// are judged per window, so this is a bar on the window's own match.
+// Below this match score a place the music is not expected to be is noise.
 export const POSITION_MIN_SCORE = 0.6;
 // Spans scoring within this of the best are treated as equally likely.
 export const POSITION_TIE_MARGIN = 0.05;
-// How far past the window's end the position may be projected. Beyond this the
-// estimate is a guess about music nobody has heard; it holds instead.
-export const MAX_EXTRAPOLATE_SECONDS = 8;
-// Moving BACK needs this many consecutive windows agreeing on the same line.
-// Forward is the normal direction of music; backward is either the top of the
-// tune coming round again (real, and confirmed within a window or two) or one
-// misplaced window (not real, and not worth a jump).
+// Moving the shown line BACK without a re-alignment needs this many
+// consecutive windows agreeing on it (see nextFollowLine).
 export const BACKWARD_CONFIRMATIONS = 2;
 
 // Fewer notes than this say nothing about where in a tune they are: a
@@ -75,13 +69,28 @@ const GAP = -1;
 // One previous row is kept, plus the row of `stored` each cell's alignment
 // began on, so memory is O(len(query)). Empty when the query is longer than
 // the tune — a position "in the tune" would mean nothing.
-export function matchSpans(query, stored, maxSpans = MAX_SPANS) {
+//
+// `fit: true` scores each row by the alignment that consumes the WHOLE query,
+// i.e. that ends on the window's last note. The default (best cell anywhere)
+// is what the Rust match score uses, and it is free to drop the last few notes
+// of the window when they fit badly — which reports where the music was a few
+// notes ago, not where it is. For a position, the end is the point. Trailing
+// window notes the alignment treats as extra (gaps against the tune, which
+// are cheaper than wrong notes) still took time to play, so a fit span's end
+// is moved on by that many quavers: a few wrong last notes must not put the
+// position behind the music.
+export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false } = {}) {
     if (!query || !stored || query.length > stored.length || maxSpans <= 0) return [];
     const n = query.length;
     let prevH = new Int32Array(n + 1);
     let prevS = new Int32Array(n + 1);
     let curH = new Int32Array(n + 1);
     let curS = new Int32Array(n + 1);
+    // Fit only: how many query notes at the end of each cell's alignment are
+    // gaps against the tune.
+    let prevT = new Int32Array(n + 1);
+    let curT = new Int32Array(n + 1);
+    const rowTrail = new Int32Array(stored.length);
     const rowBest = new Int32Array(stored.length);
     const rowStart = new Int32Array(stored.length);
 
@@ -99,24 +108,31 @@ export function matchSpans(query, stored, maxSpans = MAX_SPANS) {
             const up = prevH[col] + GAP;
             let h;
             let start;
+            let trail;
             if (diag >= left && diag >= up) {
                 h = diag;
                 start = (row === 0 || col === 1) ? row : prevS[col - 1];
+                trail = 0;
             } else if (left >= up) {
                 h = left;
                 start = curS[col - 1];
+                trail = curT[col - 1] + 1;
             } else {
                 h = up;
                 start = row === 0 ? row : prevS[col];
+                trail = prevT[col];
             }
             curH[col] = h;
             curS[col] = start;
+            curT[col] = trail;
             if (h > best) { best = h; bestStart = start; }
         }
-        rowBest[row] = best;
-        rowStart[row] = bestStart;
+        rowBest[row] = fit ? curH[n] : best;
+        rowStart[row] = fit ? curS[n] : bestStart;
+        rowTrail[row] = fit ? curT[n] : 0;
         [prevH, curH] = [curH, prevH];
         [prevS, curS] = [curS, prevS];
+        [prevT, curT] = [curT, prevT];
     }
 
     // Highest-scoring ending row first, earliest on a tie (so the first of two
@@ -129,24 +145,16 @@ export function matchSpans(query, stored, maxSpans = MAX_SPANS) {
         if (raw <= 0) break;
         const start = rowStart[row];
         const end = row + 1;
-        if (spans.some(s => start < s.end && s.start < end)) continue;
-        spans.push({ start, end, score: (0.5 * raw) / n });
+        if (spans.some(s => start < s.matchedEnd && s.start < end)) continue;
+        spans.push({
+            start,
+            end: Math.min(stored.length, end + rowTrail[row]),
+            matchedEnd: end,
+            score: (0.5 * raw) / n,
+        });
         if (spans.length >= maxSpans) break;
     }
-    return spans;
-}
-
-// How far through the played-out tune `span` puts the music, `elapsedSeconds`
-// after the window ended. The pace comes from the span itself: it covers the
-// window, so its length over the window's length is quavers per second at the
-// tempo actually being played.
-export function spanFraction(span, contourLength, windowSeconds, elapsedSeconds = 0) {
-    if (!contourLength) return 0;
-    const covered = Math.max(0, span.end - span.start);
-    const pace = windowSeconds > 0 ? covered / windowSeconds : 0;
-    const ahead = Math.min(Math.max(0, elapsedSeconds), MAX_EXTRAPOLATE_SECONDS) * pace;
-    const position = Math.min(contourLength, span.end + ahead);
-    return Math.max(0, Math.min(1, position / contourLength));
+    return spans.map(({ matchedEnd, ...span }) => span);
 }
 
 // The played-out timeline of a rendered score: `events` sorted by
@@ -170,49 +178,267 @@ export function lineAtFraction(timeline, fraction) {
     return typeof line === 'number' ? line : null;
 }
 
-// Which line the music is on now, or why that cannot be said.
+// ---------------------------------------------------------------------------
+// Tracking: the music flows in time.
 //
-//   position       — windowPosition() of the latest window
-//   storedContour  — the contour of the setting ON SCREEN
-//   nowMs          — the clock, for projecting past the window's end
-//   spans          — optional, matchSpans() already computed for this
-//                    position and contour (the view re-decides every second
-//                    and need not re-align each time)
+// Judging every window on its own (the first version) threw away the one
+// thing known for certain: where the music was a few seconds ago, and how
+// fast it was going. Fiddle tunes repeat phrases constantly, and an A and a B
+// part often share a bar or two, so a window on its own is regularly
+// ambiguous — and one misplaced window moved the view.
 //
-// If every span within the tie margin of the best lands on the same LINE the
-// answer is that line. If they land on different lines (an A and a B part
-// sharing a phrase) the answer is "ambiguous" — and the view holds rather than
-// guessing.
-export function decideLine(position, { storedContour, nowMs, timeline, spans = null }) {
-    if (!position || !position.contour) return { line: null, reason: 'none' };
-    if (!storedContour) return { line: null, reason: 'no-contour' };
-    const elapsed = Math.max(0, (nowMs - position.readAt) / 1000);
-    if (elapsed > MAX_EXTRAPOLATE_SECONDS + (position.windowSeconds || 0)) {
-        return { line: null, reason: 'stale' };
-    }
-    const found = spans || matchSpans(position.contour, storedContour);
-    const best = found[0];
-    if (!best || best.score < POSITION_MIN_SCORE) {
-        return { line: null, reason: 'weak', score: best ? best.score : 0 };
-    }
+// So the position is a small set of HYPOTHESES, each a place in the
+// played-out tune plus a tempo, projected forward between windows. A new
+// window is first asked "does it agree with where we expect to be?", with a
+// lower bar for that than for a place out of nowhere: a 0.45 match exactly
+// where the music should be is good evidence, the same score elsewhere is
+// noise. The tune wraps — the end of the contour leads to its start, because
+// a tune is played two or three times through.
+//
+// It must also RE-ALIGN when it is wrong or the room went somewhere else
+// (improvisation, a skipped repeat, someone starting the B part again):
+//   - a strong match elsewhere is kept as an alternative hypothesis, and if
+//     the next window agrees with it, it takes over: two windows, not one;
+//   - an alternative that keeps agreeing BETTER than the main one takes over
+//     too, which is what corrects "followed the wrong one of two repeats";
+//   - after a couple of windows matching nothing where expected, the main
+//     hypothesis counts as lost and a single clear match anywhere re-locks.
+// Through a few unmatched windows (variations, a bar of improvisation) the
+// main hypothesis keeps time on its own for up to COAST_SECONDS, since
+// improvisation usually follows the tune's structure; then it holds.
+//
+// Positions are in quavers of the stored contour, UNWRAPPED (they keep
+// growing across laps), so "how far apart" and "how fast" are plain
+// arithmetic; the score position is taken modulo the contour's length.
 
-    const candidates = found.filter(s => s.score >= best.score - POSITION_TIE_MARGIN);
-    const fractions = candidates.map(s =>
-        spanFraction(s, storedContour.length, position.windowSeconds, elapsed));
-    const lines = fractions.map(f => lineAtFraction(timeline, f));
-    if (lines.some(l => l === null)) return { line: null, reason: 'no-timeline' };
-    if (lines.some(l => l !== lines[0])) return { line: null, reason: 'ambiguous', score: best.score };
-    return { line: lines[0], fraction: fractions[0], score: best.score, reason: 'ok' };
+// A candidate where the music is expected needs only this match score.
+export const TRACK_MIN_SCORE = 0.4;
+// A place the music is NOT expected to be needs this, as before.
+export const RELOCK_MIN_SCORE = POSITION_MIN_SCORE;
+// How far from the projection a candidate may land and still agree with it:
+// a fixed slack, plus a share of the distance projected since the last match
+// (tempo error accumulates).
+export const TOLERANCE_QUAVERS = 6;
+export const TOLERANCE_GROWTH = 0.15;
+// How long the main hypothesis keeps time with nothing confirming it.
+export const COAST_SECONDS = 20;
+// Unmatched windows after which a single clear match anywhere re-locks.
+export const MISSES_BEFORE_LOST = 2;
+// An alternative must beat the main hypothesis's running score by this to
+// take over while the main one is still matching.
+export const SWITCH_MARGIN = 0.08;
+export const MAX_HYPOTHESES = 4;
+// How far a new measurement moves the projection (1 = jump to it).
+const BLEND = 0.7;
+// How quickly the tempo follows what successive windows measure.
+const PACE_SMOOTHING = 0.3;
+// Among candidates that agree, a small preference for the nearer one.
+const DISTANCE_PENALTY = 0.1;
+// Candidates closer than this are the same place.
+const SAME_PLACE_QUAVERS = 2;
+
+function circularDistance(a, b, length) {
+    const d = Math.abs(a - b) % length;
+    return Math.min(d, length - d);
 }
 
-// Hysteresis over decideLine()'s answers, so one stray window does not throw
-// the view backwards. `windowKey` identifies the window an answer came from
-// (its readAt): the view re-decides every second to project forward, and only
-// a NEW window counts as a confirmation.
-export function nextFollowLine(state, line, windowKey) {
+// `end` (0..length) as the unwrapped position nearest `near`.
+function unwrapNear(end, near, length) {
+    return end + length * Math.round((near - end) / length);
+}
+
+// Where in the tune the window could END: fit alignments (the whole window,
+// up to its last note) against the stored contour looped once, so a window
+// spanning the end of one time through and the start of the next is found
+// too. Best first, distinct places only: { end, covered, score }.
+export function positionCandidates(query, stored, maxSpans = MAX_SPANS) {
+    if (!query || !stored || query.length < MIN_QUERY_LENGTH || query.length > stored.length) return [];
+    const length = stored.length;
+    const looped = stored + stored.slice(0, query.length);
+    const spans = matchSpans(query, looped, maxSpans * 2, { fit: true });
+    const out = [];
+    for (const s of spans) {
+        const end = s.end > length ? s.end - length : s.end;
+        if (out.some(c => circularDistance(c.end, end, length) <= SAME_PLACE_QUAVERS)) continue;
+        out.push({ end, covered: s.end - s.start, score: s.score });
+        if (out.length >= maxSpans) break;
+    }
+    return out;
+}
+
+function projected(h, t) {
+    return h.pos + Math.max(0, (t - h.at) / 1000) * h.pace;
+}
+
+function tolerance(h, t) {
+    return TOLERANCE_QUAVERS + TOLERANCE_GROWTH * h.pace * Math.max(0, (t - h.lastHit) / 1000);
+}
+
+// The candidate that best agrees with hypothesis `h` at time `t`, or null.
+function agreeing(h, candidates, t, length) {
+    const pred = projected(h, t);
+    const tol = tolerance(h, t);
+    let best = null;
+    for (const c of candidates) {
+        if (c.score < TRACK_MIN_SCORE) continue;
+        const u = unwrapNear(c.end, pred, length);
+        const d = Math.abs(u - pred);
+        if (d > tol) continue;
+        const merit = c.score - DISTANCE_PENALTY * (d / tol);
+        if (!best || merit > best.merit) best = { candidate: c, u, merit };
+    }
+    return best;
+}
+
+function advance(h, match, t) {
+    const pred = projected(h, t);
+    let pace = h.pace;
+    const dt = (t - h.measuredAt) / 1000;
+    if (dt >= 1) {
+        const measured = (match.u - h.measured) / dt;
+        // A measurement far off the running tempo is a misalignment, not a
+        // tempo change; tempo changes are gradual.
+        if (measured > 0.6 * pace && measured < 1.6 * pace) pace += PACE_SMOOTHING * (measured - pace);
+    }
+    return {
+        pos: pred + BLEND * (match.u - pred),
+        at: t,
+        pace,
+        lastHit: t,
+        hits: h.hits + 1,
+        misses: 0,
+        score: 0.6 * h.score + 0.4 * match.candidate.score,
+        measured: match.u,
+        measuredAt: t,
+    };
+}
+
+function seed(candidate, t, windowSeconds, length, near) {
+    // The fit span covers the whole window, so its length over the window's
+    // is the tempo actually being played, in quavers per second.
+    const pace = windowSeconds > 0 && candidate.covered > 0 ? candidate.covered / windowSeconds : 4;
+    const pos = near === null || near === undefined ? candidate.end : unwrapNear(candidate.end, near, length);
+    return { pos, at: t, pace, lastHit: t, hits: 1, misses: 0, score: candidate.score, measured: pos, measuredAt: t };
+}
+
+const EMPTY_TRACK = Object.freeze({ main: null, alts: [], epoch: 0, reason: 'none', score: 0, window: null });
+
+// Fold one analysed window into the tracking state. Call once per window
+// (`position.readAt` identifies it; a repeat is ignored).
+//
+//   position      — windowPosition() of the window
+//   storedContour — the contour of the setting ON SCREEN
+//   candidates    — optional, positionCandidates() already computed
+//   lineOf        — optional (end in quavers) → staff line; lets a fresh lock
+//                   accept a tie between places on the SAME line (the two A
+//                   parts of AABB), as the per-window rule did
+//
+// `reason`: 'ok' (the window agreed), 'realigned' (moved somewhere else),
+// 'coasting' (the window did not agree; keeping time), 'ambiguous',
+// 'weak' (nothing clear enough), 'none'.
+export function trackPosition(state, position, { storedContour, candidates = null, lineOf = null } = {}) {
+    const prev = state || EMPTY_TRACK;
+    if (!position || !storedContour) return prev;
+    const t = position.readAt;
+    if (prev.window === t) return prev;
+    const length = storedContour.length;
+    const found = candidates || positionCandidates(position.contour, storedContour);
+    const bestScore = found.length ? found[0].score : 0;
+    const windowSeconds = position.windowSeconds || 0;
+
+    const claimed = [];
+    const claim = (m) => { if (m) claimed.push(m.candidate); return m; };
+    const mainMatch = prev.main ? claim(agreeing(prev.main, found, t, length)) : null;
+    let main = prev.main
+        ? (mainMatch ? advance(prev.main, mainMatch, t) : { ...prev.main, misses: prev.main.misses + 1 })
+        : null;
+    let alts = [];
+    for (const h of prev.alts) {
+        const m = claim(agreeing(h, found, t, length));
+        if (m) alts.push(advance(h, m, t));
+    }
+    let epoch = prev.epoch;
+    let reason;
+
+    // Strong places this window that no hypothesis accounts for.
+    const isClaimed = (c) => claimed.some(k => circularDistance(k.end, c.end, length) <= SAME_PLACE_QUAVERS);
+    const fresh = found.filter(c => c.score >= RELOCK_MIN_SCORE && !isClaimed(c));
+
+    const confirmed = alts.filter(h => h.hits >= 2).sort((x, y) => y.score - x.score)[0];
+    const lost = !main || main.misses >= MISSES_BEFORE_LOST || (t - main.lastHit) / 1000 > COAST_SECONDS;
+
+    if (confirmed && (!mainMatch || confirmed.score > main.score + SWITCH_MARGIN)) {
+        // Two windows agree on somewhere else, or keep agreeing better.
+        alts = alts.filter(h => h !== confirmed);
+        if (mainMatch) alts.push(main);
+        main = confirmed;
+        epoch++;
+        reason = 'realigned';
+    } else if (mainMatch) {
+        reason = 'ok';
+    } else if (lost) {
+        const strong = fresh.filter(c => c.score >= bestScore - POSITION_TIE_MARGIN);
+        const oneLine = strong.length > 1 && typeof lineOf === 'function' &&
+            strong.every(c => lineOf(c.end) === lineOf(strong[0].end));
+        if (strong.length === 1 || oneLine) {
+            const near = main ? projected(main, t) : null;
+            const hadMain = !!main;
+            main = seed(strong[0], t, windowSeconds, length, near);
+            alts = alts.concat(strong.slice(1).map(c => seed(c, t, windowSeconds, length, near)));
+            fresh.splice(0, fresh.length);
+            if (hadMain) epoch++;
+            reason = hadMain ? 'realigned' : 'ok';
+        } else {
+            reason = strong.length > 1 ? 'ambiguous' : 'weak';
+        }
+    } else {
+        reason = 'coasting';
+    }
+
+    // Anything strong nobody explains becomes an alternative, so the NEXT
+    // window can confirm it.
+    const near = main ? projected(main, t) : null;
+    for (const c of fresh) alts.push(seed(c, t, windowSeconds, length, near));
+    // An alternative that has converged on the main hypothesis is the same.
+    if (main) {
+        const mainNow = projected(main, t);
+        alts = alts.filter(h => circularDistance(projected(h, t), mainNow, length) > TOLERANCE_QUAVERS);
+    }
+    alts.sort((x, y) => y.score - x.score);
+    alts = alts.slice(0, MAX_HYPOTHESES);
+
+    return { main, alts, epoch, reason, score: bestScore, window: t };
+}
+
+// Where the main hypothesis puts the music at `nowMs`: the fraction of the
+// played-out tune, which lap of it, and whether the projection has run out
+// (more than COAST_SECONDS since anything confirmed it), in which case it
+// holds where it got to. Null with no hypothesis.
+export function followPoint(state, nowMs, contourLength) {
+    if (!state || !state.main || !(contourLength > 0)) return null;
+    const h = state.main;
+    const limit = h.lastHit + COAST_SECONDS * 1000;
+    const until = Math.min(nowMs, limit);
+    const pos = h.pos + Math.max(0, (until - h.at) / 1000) * h.pace;
+    const wrapped = ((pos % contourLength) + contourLength) % contourLength;
+    return {
+        fraction: wrapped / contourLength,
+        lap: Math.floor(pos / contourLength),
+        epoch: state.epoch,
+        held: nowMs > limit,
+    };
+}
+
+// Hysteresis on the LINE shown, so a small backward correction of the
+// projection does not flick the band back and forth. `windowKey` identifies
+// the window an answer came from (its readAt): the view re-decides every
+// second to project forward, and only a NEW window counts as a confirmation.
+// `force` moves at once in either direction: the tracker re-aligned, or the
+// tune came round to the top again — both already confirmed upstream.
+export function nextFollowLine(state, line, windowKey, { force = false } = {}) {
     const current = state || { line: null, pendingLine: null, pendingCount: 0, pendingKey: null };
     if (line === null || line === undefined) return current;
-    if (current.line === null || line >= current.line) {
+    if (force || current.line === null || line >= current.line) {
         return { line, pendingLine: null, pendingCount: 0, pendingKey: null };
     }
     // Behind where we are.
