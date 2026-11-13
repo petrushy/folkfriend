@@ -1144,6 +1144,55 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Whole-session export as one MP3 (November 2026)
+
+Reported from the field: one evening exported as **23 files**, because the
+native export can only hand out one file per contiguous part — every Pause,
+lost-and-reacquired microphone and pruned break starts a new container with
+its own header and timestamps. The player now offers **Export whole session
+(MP3)** as the primary export; the per-part buttons (the original bytes) sit
+behind "Separate parts (N)…". `js/sessionExport.mjs` is the pipeline (pure,
+deps injected), `js/mp3Encoder.mjs` the lamejs adaptor,
+`services/sessionExport.js` the browser wiring, `services/mp3Worker.js` the
+encoder worker. Dependency: `@breezystack/lamejs` (the ESM fork; plain
+`lamejs` 1.2.1 breaks under webpack with "MPEGMode is not defined").
+
+- **It re-encodes, deliberately.** Byte-joining containers is not a file, and
+  rewriting fMP4/WebM timestamps per browser is fragile. Decode → one PCM
+  stream → MP3 works for every container a browser records.
+- **Parts are joined back to back, not padded with silence** (a pause can last
+  hours), with a 30 ms fade either side of each join. So a position in the MP3
+  is NOT the session clock; the note under the buttons says the file is
+  shorter than the session.
+- **Decoded in ~5-minute windows**, never a part at once — an unpaused session
+  is one part, and three hours of float PCM is ~2 GB. A window is [track
+  header, ...chunks], the shape playback loads. If a browser refuses a
+  mid-track window, the part is decoded whole and finished from there, but only
+  up to 40 min; beyond that it is an error naming the part, and the separate
+  parts open as the way out. A decoder that pads a window back to the track
+  origin is detected by length and trimmed.
+- **Mono, with a dead channel dropped rather than averaged** — so iOS's
+  one-sided recordings export at full level (the per-part files still do not).
+  Stereo recordings are exported mono too.
+- Bitrate follows the recording, 64–128 kbps (`mp3KbpsFor`). ~80× realtime
+  in node; expect minutes for a long evening on a phone, with progress and
+  Cancel. The result always lands on the existing "ready" card: no gesture
+  survives that long and `share()` needs one. lamejs is only in lazy chunks,
+  and the worker chunk is precached, so it works offline.
+- Hidden for imported files (one part already, and decoding a 300 MB import
+  whole is the memory ceiling above).
+
+Measured: within-part window joins in real Chrome output show 1–3 sample
+discontinuities per join (codec priming at a fresh decode) — a possible faint
+click every ~5 minutes, not a skip. ⚠️ Not yet tried on an iPhone: whether
+WebKit's `decodeAudioData` accepts a mid-track fMP4 window is the open
+question, and the whole-part fallback is what covers it.
+
+Tests: `sessionExport.test.mjs` (15, real lamejs, output duration measured by
+walking MP3 frame headers), 7 cases in `sessionAudioPlayer.test.mjs`, and
+`e2e/session-audio-chain.mjs` now exports real MediaRecorder WebM and MP4
+through the real worker — whole and with a pruned middle segment — and asserts
+length, full-level one-sided audio, and that the pruned stretch is left out.
 ### Live view: follow the position in the tune (November 2026)
 
 A toggle in the `LiveScoreFollow` header (crosshairs, right of the pin; off by

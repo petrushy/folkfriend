@@ -44,6 +44,7 @@ export const mdiRepeat = 'repeat'; export const mdiRepeatOff = 'repeat-off';`;
 const FAKE_SESSION_ANALYSIS = `
 export function formatSecondsAsDuration(s) { return String(Math.round(s)); }`;
 let store;
+let sessionExport;
 const FAKE_AUDIO_STORE = `
 export let __manifest = null;
 export function __setManifest(m) { __manifest = m; }
@@ -78,6 +79,20 @@ export async function inspectRecording(sessionId, { onProgress } = {}) {
 }
 export function __setReport(r) { __report = r; }`;
 const FAKE_FFCONFIG = `export default { FRONTEND_VERSION: '9.9.9-test' };`;
+// The whole-session export: what the player asks for, and an answer the test
+// controls. Its pipeline has tests of its own (sessionExport.test.mjs).
+const FAKE_SESSION_EXPORT = `
+export class ExportCancelled extends Error { constructor() { super('Export cancelled'); this.name = 'ExportCancelled'; } }
+export function canExportWholeSession(manifest, parts) {
+    return !!(manifest && parts && parts.length && (manifest.tracks || []).some(t => !t.wholeFile));
+}
+export const __exports = [];
+export let __exportImpl = null;
+export function __setExportImpl(f) { __exportImpl = f; }
+export async function exportWholeSessionMp3(sessionId, manifest, options) {
+    __exports.push({ sessionId, manifest, options });
+    return __exportImpl(sessionId, manifest, options);
+}`;
 
 async function loadPlayer() {
     await mkdir(tmpDir, { recursive: true });
@@ -86,6 +101,7 @@ async function loadPlayer() {
     await writeFile(path.join(tmpDir, 'fake-session-analysis.mjs'), FAKE_SESSION_ANALYSIS);
     await writeFile(path.join(tmpDir, 'fake-audio-store.mjs'), FAKE_AUDIO_STORE);
     await writeFile(path.join(tmpDir, 'fake-ffconfig.mjs'), FAKE_FFCONFIG);
+    await writeFile(path.join(tmpDir, 'fake-session-export.mjs'), FAKE_SESSION_EXPORT);
     // Real, not faked: it is pure, and it is what turns the report into words.
     await writeFile(path.join(tmpDir, 'recordingCheck.mjs'),
         await readFile(path.join(srcDir, 'js', 'recordingCheck.mjs'), 'utf8'));
@@ -109,6 +125,7 @@ async function loadPlayer() {
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from '@/js/recordingCheck.mjs'", "from './recordingCheck.mjs'"],
         ["from '@/ffConfig.js'", "from './fake-ffconfig.mjs'"],
+        ["from '@/services/sessionExport.js'", "from './fake-session-export.mjs'"],
         ["from '@/js/mediaSession.mjs'", "from './mediaSession.mjs'"],
         ["from '@/js/playbackLevel.mjs'", "from './playbackLevel.mjs'"],
         ["from '@/js/clipWindow.mjs'", "from './clipWindow.mjs'"],
@@ -120,6 +137,7 @@ async function loadPlayer() {
 
     const mod = await import(`${path.join(tmpDir, 'player.mjs')}?v=${Math.random()}`);
     store = await import(`${path.join(tmpDir, 'fake-audio-store.mjs')}`);
+    sessionExport = await import(`${path.join(tmpDir, 'fake-session-export.mjs')}`);
     return mod.default;
 }
 
@@ -1385,6 +1403,103 @@ await test('a share refused for want of a gesture offers the file again rather t
         assert.equal(vm.exportingIndex, null);
     });
     store.__setClipFactory(null);
+});
+
+
+console.log('\nSessionAudioPlayer — whole-session export');
+
+const SPLIT = {
+    totalSeconds: 300, bitsPerSecond: 64000,
+    segments: [
+        { index: 0, trackIndex: 0, startSeconds: 0, durationSeconds: 60, bytes: 10 },
+        { index: 1, trackIndex: 1, startSeconds: 200, durationSeconds: 60, bytes: 10 },
+    ],
+    tracks: [
+        { index: 0, startSeconds: 0, durationSeconds: 60 },
+        { index: 1, startSeconds: 200, durationSeconds: 60 },
+    ],
+};
+
+async function mountSplit() {
+    const vm = await mountPlayer(SPLIT);
+    store.__setTracks([
+        { index: 0, startSeconds: 0, endSeconds: 60, durationSeconds: 60 },
+        { index: 1, startSeconds: 200, endSeconds: 260, durationSeconds: 60 },
+    ]);
+    sessionExport.__exports.length = 0;
+    return vm;
+}
+
+await test('a split recording offers one MP3 of the whole session, sized without the gaps', async () => {
+    const vm = await mountSplit();
+    assert.equal(vm.canExportWhole, true);
+    assert.equal(vm.exportedSeconds, 120);
+});
+
+await test('an imported file keeps its native export only', async () => {
+    const vm = await mountPlayer({ ...SPLIT, tracks: [{ index: 0, startSeconds: 0, durationSeconds: 60, wholeFile: true }] });
+    store.__setTracks([{ index: 0, startSeconds: 0, endSeconds: 60, durationSeconds: 60, wholeFile: true }]);
+    assert.equal(vm.canExportWhole, false);
+});
+
+await test('the finished MP3 waits on the ready card: no gesture survives minutes of encoding', async () => {
+    const vm = await mountSplit();
+    sessionExport.__setExportImpl(async (id, manifest, { onProgress }) => {
+        onProgress(60, 120);
+        assert.deepEqual(vm.wholeExport, { done: 60, total: 120 });
+        assert.equal(vm.wholeExportPercent, 50);
+        return { file: new File(['mp3'], 'folkfriend-session-s1.mp3', { type: 'audio/mpeg' }) };
+    });
+    await withNavigator({ canShare: () => true, share: async () => { throw new Error('must not share'); } }, async () => {
+        await vm.exportWholeSession();
+    });
+    assert.equal(sessionExport.__exports[0].sessionId, 's1');
+    assert.equal(sessionExport.__exports[0].manifest, SPLIT);
+    assert.equal(vm.wholeExport, null);
+    assert.equal(vm.error, '');
+    assert.equal(vm.readyExport.name, 'folkfriend-session-s1.mp3');
+    assert.equal(vm.readyExport.canShare, true);
+});
+
+await test('Cancel stops the export and a late result is not offered', async () => {
+    const vm = await mountSplit();
+    let release;
+    sessionExport.__setExportImpl((id, manifest, { isCancelled }) => new Promise(resolve => {
+        release = () => resolve({ cancelledSeen: isCancelled(), file: new File(['x'], 'late.mp3') });
+    }));
+    const run = vm.exportWholeSession();
+    assert.ok(vm.wholeExport);
+    vm.cancelWholeExport();
+    assert.equal(vm.wholeExport, null);
+    assert.equal(sessionExport.__exports[0].options.isCancelled(), true);
+    release();
+    await run;
+    assert.equal(vm.readyExport, null);
+    assert.equal(vm.error, '');
+});
+
+await test('a failed export says so and opens the separate parts as the way out', async () => {
+    const vm = await mountSplit();
+    sessionExport.__setExportImpl(async () => { throw new Error('part 2 could not be decoded: nope'); });
+    await vm.exportWholeSession();
+    assert.match(vm.error, /Could not export the session: part 2 could not be decoded/);
+    assert.equal(vm.showPartExports, true);
+    assert.equal(vm.wholeExport, null);
+});
+
+await test('a cancellation is not reported as an error', async () => {
+    const vm = await mountSplit();
+    sessionExport.__setExportImpl(async () => { throw new sessionExport.ExportCancelled(); });
+    await vm.exportWholeSession();
+    assert.equal(vm.error, '');
+});
+
+await test('switching session cancels an export in flight', async () => {
+    const vm = await mountSplit();
+    sessionExport.__setExportImpl(() => new Promise(() => {}));
+    vm.exportWholeSession();
+    vm.cancelWholeExport();   // what reload() and beforeDestroy() call
+    assert.equal(sessionExport.__exports[0].options.isCancelled(), true);
 });
 
 console.log('\nSessionAudioPlayer — the recording check');
