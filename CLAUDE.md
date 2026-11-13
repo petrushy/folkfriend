@@ -1198,8 +1198,8 @@ length, full-level one-sided audio, and that the pruned stretch is left out.
 A toggle in the `LiveScoreFollow` header (crosshairs, right of the pin; off by
 default, remembered as `userSettings.liveAutoCenter`) keeps the staff LINE
 being played centred and marks it with a teal band. A readout beside the match
-score says what it thinks (`line 3/8 · 41%`, `which part?`, `position unclear
-(0.52)`) — the only way to judge it on a device.
+score says what it thinks (`line 3/8 · 41%`, `· realigned`, `· keeping time`,
+`which part?`, `position unclear (0.52)`, `lost the place`) — the only way to judge it on a device.
 
 - **Each window's contour is aligned against the setting ON SCREEN**, in JS
   (`matchSpans`, `js/scorePosition.mjs`), with the Rust second pass's exact
@@ -1213,37 +1213,131 @@ score says what it thinks (`line 3/8 · 41%`, `which part?`, `position unclear
   so the one on screen was almost never it. Do not go back to reading spans
   off the results. The Rust `match_spans` that did this was reverted, so the
   WASM is unchanged.
-- **Up to 4 non-overlapping spans, and runners-up are judged by LINE.** The two
-  A parts of an AABB tune are an exact tie and the SAME written bars
-  (harmless); an A and a B part sharing a phrase are different lines.
-  `decideLine` holds (`ambiguous`) unless every span within 0.05 of the best
-  lands on one line.
-- **Contour → score goes through a FRACTION and ABCJS's own timeline.** The
-  stored contour has repeats played out; so does `ABCJS.TimingCallbacks`
-  (verified in Chromium: repeats and 1st/2nd endings expanded, each event
-  carrying `line`/`top`/`height`). `end / contour.length` is mapped onto that
-  timeline's total length, which spreads the contour's drift (grace notes
-  stripped, sub-quaver notes rounded/dropped) along the tune rather than
-  piling it up at the end. `AbcDisplay.followTimeline()` /
-  `lineClientRect()`.
-- **Projected forward** from the moment the window's PCM was read, at the pace
-  the span itself was played (span length ÷ window length), capped at 8 s.
-- **Hysteresis**: forward moves at once; BACK needs two consecutive windows
-  agreeing (the per-second re-projection is not a second opinion).
-- Below 0.6 alignment score, or a window under 12 notes, there is no position.
+- **The position is TRACKED, not re-decided per window** (November 2026,
+  after field testing called the first version flaky). `trackPosition` keeps
+  a main hypothesis (a place in the played-out tune, unwrapped, plus a tempo)
+  and up to 4 alternatives, projected forward between windows; `followPoint`
+  reads where it puts the music now. Rules, each pinned in
+  `scorePosition.test.mjs` and verified by breaking it:
+  - **Expected places need less evidence**: a candidate within tolerance of
+    the projection (6 quavers + 15 % of the distance projected since the last
+    match) is believed from 0.4; anywhere else needs 0.6. Among agreeing
+    candidates the prior wins, which is what settles a phrase shared by an A
+    and a B part.
+  - **Re-aligning when it is wrong** (improvisation, skipped repeats): a
+    strong place nothing explains becomes an alternative; the next window
+    agreeing with it makes it the main one (`realigned`, two windows, never
+    one). An alternative that keeps agreeing better by 0.08 takes over too —
+    that is what corrects "followed the wrong one of two repeats". After 2
+    unmatched windows the place counts as lost and one clear window anywhere
+    re-locks.
+  - **Through improvisation it keeps time** for up to 20 s (`coasting`, "keeping
+    time"), since improvising usually follows the tune's structure; past that
+    it holds ("lost the place").
+  - **The tune wraps.** Candidates are found against the contour looped once,
+    so a window across the end of one time through and the start of the next
+    is placed. The first version could not place those, said "which part?" and
+    sat on the last line for ~8 s at every time through — the biggest single
+    cause of the flakiness. A wrap or a re-alignment moves the line back at
+    once (`nextFollowLine` `force`); only small backward corrections of the
+    projection wait for a second window.
+  - **The alignment ends on the window's last note** (`matchSpans` `fit`), and
+    trailing notes it treats as extra still count as played, so a few wrong
+    last notes do not put the position behind the music. The Rust-equivalent
+    best-cell score is still the default for anything else.
+  - A fresh lock on a tie whose places share a written line (the two A parts
+    of AABB) is taken at once, as before; a tie across lines is `ambiguous`
+    until the next window.
+
+  `test/bench/replayScorePosition.mjs` replays simulated performances of real
+  thesession settings (drifting tempo, wrong/missing/extra notes, optional
+  improvisation and a jump; repeated blocks share a written line) through both
+  rules. 300 sessions, normal / hard damage, share of seconds with the right
+  line shown: old 61.0 / 38.2 %, new 90.9 / 83.4 %; within one line 80.6 /
+  63.1 % → 96.1 / 89.5 %. On clean performances old 68 %, new 96 %. Moves to a
+  line more than one away rose from 0.16 to 0.38 a minute (normal) — the old
+  rule moved less because it was more often stuck. Synthetic: it compares the
+  rules, nothing absolute about a pub, and no transcription is involved.
 - **Holds while Frozen** (the freeze is total) and for 8 s after the user
   touches or scrolls the score; the band keeps following meanwhile.
 - `liveAnalysis.scorePosition` / `liveScorePosition` event carry the window's
   contour, `readAt` and length. Display-only, never persisted, cleared on
   Pause.
 
-Tests: `scorePosition.test.mjs` (13), 7 cases in
+Tests: `scorePosition.test.mjs` (27), 8 cases in
 `liveScoreFollowComponent.test.mjs`, 1 in `liveSessions.test.mjs`.
 Detection is untouched: no Rust change, and the loop only reads the window's
 contour after its result is taken. The alignment costs ~0.7 ms per window on
 desktop, on the main thread, only with the toggle on.
-⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.6 floor and
-the 0.05 tie margin are guesses.
+⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.4 / 0.6
+floors, the tolerance and the 20 s coast are tuned on the synthetic replay
+only.
+
+### Practice follow in the Tune view (November 2026)
+
+A **Follow** button on each setting's score in the Tune view (the page a
+favourite opens) listens while the user plays and marks the staff line they
+are on, scrolling it into view — for practising, with no session.
+
+- **The same follower as the live view.** `js/scoreFollower.mjs` wraps the
+  tracker, the line hysteresis and the readout; `LiveScoreFollow` and
+  `Tune.vue` both drive one, so they cannot drift apart.
+- **Transcription only** (`backend.transcribePCMSignal`): the setting is
+  known, so the search over the index — the expensive half of a live cycle —
+  is skipped, and it works with no index loaded. No session record, history,
+  sightings or recording.
+- **`js/practiceFollow.mjs`** is the loop (dependencies injected, tested in
+  node); `services/practiceFollow.js` wires the real ones. First window at
+  4 s, then every 4 s, sooner on a fast device (`liveCadence`).
+- **It shares the microphone with a live session.** While a session is
+  LISTENING it takes that session's windows and transcribes nothing; a
+  session started while practising finds the microphone open and uses it,
+  and practice then leaves it open; a paused session has released it, so
+  practice reopens it — and closes what it opened when it stops. A microphone
+  practice did not open is never practice's to close.
+- **A transposed setting is listened for in its new key**
+  (`transposeContour`: one contour letter per semitone from MIDI 48, the
+  table in `ff_config.rs`, which a test reads to keep the two in step). The
+  instrument shift is written-pitch only and is ignored, as for the synth.
+- **The band lives in `AbcDisplay`** (`followLine` prop), so it works inline
+  and in full screen. Auto-scroll targets an invisible, un-animated anchor:
+  scrolling to the band itself, which animates `top`, read its position
+  mid-flight, and after the tune wrapped scrolled the page to the LAST line.
+  Held for 8 s after a touch or wheel.
+- Starting stops the synth (the microphone would hear it); leaving the page
+  stops practice.
+
+**Two bugs only a real browser found** (a one-off Playwright check: the app
+built, a synthesized Drowsy Maggie fed in as the microphone with Chrome's
+fake audio capture, the favourite seeded in IndexedDB):
+
+1. **An import cycle captured `undefined`.** backend.js → router → Tune.vue →
+   services/practiceFollow.js → backend.js: while the service module is
+   evaluated, backend.js may still be half-loaded, so passing `ffBackend` as a
+   value handed every window "cannot read transcribePCMSignal of undefined".
+   Every dependency there is reached through a function or getter now.
+2. **A phrase repeating at a short period lost the true place.** That setting
+   has the same 59 notes at two places 35 quavers apart, so a window matches
+   perfectly at both — and the two matches OVERLAP, which `matchSpans`'s
+   no-overlap rule resolved by discarding the later one, i.e. where the music
+   was. The follower jumped back and stayed there for ~6 s, every time
+   through. `positionCandidates` now keeps candidates whose starts AND ends
+   are each ≥ 5 quavers apart (`distinctEnds`): ends alone let through
+   "ghosts" — the best match with its end pushed on by skipping notes, which
+   costs little and passes for a tie. The synthetic benchmark never showed
+   this because its random contours do not repeat; real tunes do.
+
+After both fixes, 90 s of the browser check: the marked line on screen every
+second, the right line 78 of 86 s and the misses all within a second of a
+line change; full screen 43 of 47.
+
+Tests: `practiceFollow.test.mjs` (10), 3 cases in `scorePosition.test.mjs`
+(the repeat, transposition, the alphabet). Verified by mutation: closing the
+microphone whatever a session is doing, ignoring the session's windows,
+claiming a microphone someone else opened, and dropping the generation check
+after a transcription each fail 1. ⚠️ Not yet tried on a device, and only
+with synthesized audio: an iPhone's microphone and a real whistle are the
+test that matters.
 
 ### Live detection: an early first query and an adaptive step (November 2026)
 

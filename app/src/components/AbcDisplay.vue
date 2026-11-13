@@ -7,9 +7,26 @@
             <span class="abcTextView mx-auto">{{ abcText }}</span>
         </v-container>
         <div
+            ref="sheet"
             :class="{ FullScreenAbcDisplay: fullscreen }"
             class="abcSheetMusic"
         >
+            <!-- Practice follow: the staff line being played. A span, so the
+                 full-screen rule for child divs (min-height) cannot reach it. -->
+            <span
+                v-if="followBand"
+                class="followBand"
+                :style="{ top: `${followBand.top}px`, height: `${followBand.height}px` }"
+            />
+            <!-- Where the band is GOING: scrolled to instead of the band,
+                 which animates and would be asked mid-flight — after the tune
+                 wrapped, that scrolled the page to the last line. -->
+            <span
+                v-if="followBand"
+                ref="followAnchor"
+                class="followAnchor"
+                :style="{ top: `${followBand.top}px`, height: `${followBand.height}px` }"
+            />
             <button v-if="fullscreen" class="exitFullScreenBtn" @click.stop="exitFullScreen">
                 ✕
             </button>
@@ -119,6 +136,20 @@ export default {
             required: false,
             default: false,
         },
+        // The staff line to mark as being played (0-based), or null. Set by
+        // the Tune view's practice follow.
+        followLine: {
+            type: Number,
+            required: false,
+            default: null,
+        },
+        // Scroll the marked line to the middle of the screen when it moves.
+        // Off while the user is scrolling by hand.
+        followAutoScroll: {
+            type: Boolean,
+            required: false,
+            default: true,
+        },
     },
     data: function () {
         return {
@@ -132,6 +163,7 @@ export default {
             tempoPercent: 100,
             looping: false,
             highlightedNoteEls: [],
+            followBand: null,
 
             icons: {
                 fullscreen: mdiArrowExpand,
@@ -203,6 +235,7 @@ export default {
         eventBus.$on('stopSynthPlayback', this._onStopSynthPlayback);
     },
     beforeDestroy() {
+        if (this._onFollowResize) window.removeEventListener('resize', this._onFollowResize);
         document.removeEventListener('keydown', this._onKeyDown);
         eventBus.$off('stopSynthPlayback', this._onStopSynthPlayback);
         this.stopPlaying();
@@ -213,6 +246,20 @@ export default {
         }
     },
     watch: {
+        followLine(line, previous) {
+            this._placeFollowBand();
+            if (line !== null && line !== previous) this._revealFollowBand();
+        },
+        followAutoScroll(on) {
+            if (on) this._revealFollowBand();
+        },
+        fullscreen() {
+            // The score moves to a different container.
+            this.$nextTick(() => {
+                this._placeFollowBand();
+                this._revealFollowBand();
+            });
+        },
         instrumentShift() {
             // Notation only; playback is unchanged so keep it going.
             this.drawScore();
@@ -225,6 +272,45 @@ export default {
         },
     },
     methods: {
+        // Positions the band over `followLine`, relative to the sheet, which is
+        // also the scroller in full screen (hence its scrollTop).
+        _placeFollowBand() {
+            const line = this.followLine;
+            const sheet = this.$refs.sheet;
+            const rect = line === null || line === undefined ? null : this.lineClientRect(line);
+            if (!rect || !sheet) {
+                this.followBand = null;
+                this._syncFollowResize();
+                return;
+            }
+            const sheetRect = sheet.getBoundingClientRect();
+            this.followBand = {
+                top: rect.top - sheetRect.top + (sheet.scrollTop || 0),
+                height: Math.max(0, rect.bottom - rect.top),
+            };
+            this._syncFollowResize();
+        },
+        _revealFollowBand() {
+            if (!this.followAutoScroll) return;
+            this.$nextTick(() => {
+                const anchor = this.$refs.followAnchor;
+                if (anchor && typeof anchor.scrollIntoView === 'function') {
+                    anchor.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                }
+            });
+        },
+        // `responsive: 'resize'` rescales the score with the window, which
+        // moves every line.
+        _syncFollowResize() {
+            const want = this.followLine !== null && this.followLine !== undefined;
+            if (want && !this._onFollowResize) {
+                this._onFollowResize = () => this._placeFollowBand();
+                window.addEventListener('resize', this._onFollowResize);
+            } else if (!want && this._onFollowResize) {
+                window.removeEventListener('resize', this._onFollowResize);
+                this._onFollowResize = null;
+            }
+        },
         drawScore() {
             const target = this.$refs.abcTarget;
             if (!target) return;
@@ -241,6 +327,10 @@ export default {
                 // source's own line breaks otherwise. See abcLayout.mjs.
                 ...layoutOptionsFor(this.abcText),
             })[0];
+            // A redraw (transposing, the instrument) moves every line.
+            if (this.followLine !== null && this.followLine !== undefined) {
+                this.$nextTick(() => this._placeFollowBand());
+            }
         },
         // The score's played-out timeline, for the live view's auto-centre
         // (js/scorePosition.mjs): every note event in PLAYBACK order — repeats
@@ -605,6 +695,33 @@ export default {
 
     /* TODO z index flicker here isn't great */
     z-index: 10;
+}
+
+/* The band's containing block. Not in full screen, which is position: fixed
+   and already one; this rule comes later and would override it. */
+.abcSheetMusic:not(.FullScreenAbcDisplay) {
+    position: relative;
+}
+
+.followBand {
+    display: block;
+    position: absolute;
+    left: 0;
+    right: 0;
+    background: rgba(0, 150, 136, 0.10);
+    border-left: 4px solid rgba(0, 137, 123, 0.7);
+    pointer-events: none;
+    z-index: 1;
+    transition: top 0.4s ease, height 0.4s ease;
+}
+
+.followAnchor {
+    display: block;
+    position: absolute;
+    left: 0;
+    width: 1px;
+    visibility: hidden;
+    pointer-events: none;
 }
 
 .FullScreenAbcDisplay > div {

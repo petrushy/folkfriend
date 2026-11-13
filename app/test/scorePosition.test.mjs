@@ -6,9 +6,12 @@
 
 import assert from 'node:assert/strict';
 import {
-    windowPosition, matchSpans, spanFraction, lineAtFraction, decideLine, nextFollowLine,
-    MAX_EXTRAPOLATE_SECONDS, MIN_QUERY_LENGTH,
+    windowPosition, matchSpans, lineAtFraction, nextFollowLine, MIN_QUERY_LENGTH,
+    positionCandidates, trackPosition, followPoint, COAST_SECONDS,
+    transposeContour, CONTOUR_ALPHABET,
 } from '../src/js/scorePosition.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 let passed = 0;
 let failed = 0;
@@ -60,6 +63,72 @@ function needlemanWunsch(a, b) {
 
 const POS = (contourText, readAt = 1000, windowSeconds = 10) => ({ contour: contourText, readAt, windowSeconds });
 
+// A performance of `stored`, built segment by segment, one note every
+// 1/pace seconds. Each note carries where in the played-out tune (unwrapped
+// quavers) the music truly is after it, so the tracker can be checked
+// against the truth at any moment.
+function performance(stored, pace = 6) {
+    const notes = [];
+    const truth = [];
+    let at = 0;
+    let rnd = 12345;
+    const random = () => { rnd = (rnd * 1103515245 + 12345) % 2147483648; return rnd; };
+    const p = {
+        // Play `count` notes of the tune starting from quaver `from`.
+        play(from, count) {
+            for (let k = 0; k < count; k++) {
+                notes.push(stored[(from + k) % stored.length]);
+                truth.push(from + k + 1);
+            }
+            at = from + count;
+            return p;
+        },
+        // Carry on from where the music is.
+        cont(count) { return p.play(at, count); },
+        // Notes that are not the tune, while the structure keeps time.
+        improvise(count) {
+            for (let k = 0; k < count; k++) {
+                notes.push('ABCDEFGHIJ'[random() % 10]);
+                truth.push(at + k + 1);
+            }
+            at += count;
+            return p;
+        },
+        // The window ending at second `t`, as the service publishes it.
+        windowAt(t, windowSeconds = 10) {
+            const end = Math.min(notes.length, Math.floor(t * pace));
+            const start = Math.max(0, Math.floor((t - windowSeconds) * pace));
+            return {
+                position: { contour: notes.slice(start, end).join(''), readAt: t * 1000, windowSeconds },
+                truth: truth[end - 1],
+            };
+        },
+        get seconds() { return notes.length / pace; },
+    };
+    return p;
+}
+
+// Feed every window from `from` to `to` seconds, `step` apart, through the
+// tracker; returns the final state and each window's error in quavers.
+function follow(perf, stored, { from = 10, to = perf.seconds, step = 3, state = null, lineOf = null } = {}) {
+    const errors = [];
+    const reasons = [];
+    for (let t = from; t <= to + 1e-9; t += step) {
+        const { position, truth } = perf.windowAt(t);
+        state = trackPosition(state, position, { storedContour: stored, lineOf });
+        reasons.push(state.reason);
+        const point = followPoint(state, t * 1000, stored.length);
+        if (point) {
+            const at = point.fraction * stored.length;
+            const want = ((truth % stored.length) + stored.length) % stored.length;
+            errors.push(Math.min(Math.abs(at - want), stored.length - Math.abs(at - want)));
+        } else {
+            errors.push(null);
+        }
+    }
+    return { state, errors, reasons };
+}
+
 console.log('scorePosition');
 
 test('matchSpans reports the alignment that produces the match score', () => {
@@ -106,14 +175,23 @@ test('no position from a query longer than the tune, or too short to place', () 
         { contour: 's'.repeat(MIN_QUERY_LENGTH), readAt: 5, windowSeconds: 10 });
 });
 
-test('spanFraction projects forward at the pace the span itself was played', () => {
-    const span = { start: 60, end: 80, score: 1 };
-    assert.equal(spanFraction(span, 160, 10, 0), 0.5);
-    // 20 quavers in 10 s is 2/s: 5 s later the music is 10 quavers on.
-    assert.equal(spanFraction(span, 160, 10, 5), 90 / 160);
-    // Never further than the cap, and never past the end of the tune.
-    assert.equal(spanFraction(span, 160, 10, 100), (80 + 2 * MAX_EXTRAPOLATE_SECONDS) / 160);
-    assert.equal(spanFraction({ start: 140, end: 158, score: 1 }, 160, 10, 8), 1);
+test('a fit alignment ends on the window\'s last note, even a wrong one', () => {
+    // The match score's alignment may drop badly fitting last notes, which
+    // reports where the music was a few notes ago. For a position the end of
+    // the window is the point.
+    const stored = contour(200, 21);
+    const query = stored.slice(40, 67) + 'ABC';
+    assert.ok(matchSpans(query, stored, 1)[0].end < 70);
+    assert.equal(matchSpans(query, stored, 1, { fit: true })[0].end, 70);
+});
+
+test('a window across the end of one time through and the start of the next is placed', () => {
+    const stored = contour(200, 22);
+    const query = stored.slice(190) + stored.slice(0, 15);
+    const [best] = positionCandidates(query, stored);
+    assert.equal(best.end, 15);
+    assert.equal(best.covered, 25);
+    assert.equal(best.score, 1);
 });
 
 test('lineAtFraction follows the played-out order, repeats included', () => {
@@ -127,50 +205,200 @@ test('lineAtFraction follows the played-out order, repeats included', () => {
     assert.equal(lineAtFraction({ events: [], totalMs: 0 }, 0.5), null);
 });
 
-test('the A part and its repeat (same written line) give that line', () => {
+test('a steady performance is followed to within a couple of quavers, round the top included', () => {
+    const stored = contour(240, 31);
+    const perf = performance(stored, 6).play(0, 240 * 3);
+    const { errors, state, reasons } = follow(perf, stored);
+    assert.ok(errors.every(e => e !== null && e <= 2), `errors ${errors}`);
+    assert.ok(reasons.every(r => r === 'ok'), `reasons ${reasons}`);
+    assert.equal(state.epoch, 0, 'never needed to re-align');
+    // Three times through: the projection is on its third lap.
+    assert.equal(followPoint(state, (perf.seconds - 1) * 1000, 240).lap, 2);
+});
+
+test('the A part and its repeat (same written line) lock at once', () => {
     // An AABB tune of 160 quavers: A = 0..40, repeated 40..80; B 80..160.
     const A = contour(40, 3);
     const B = contour(40, 4);
     const stored = A + A + B + B;
-    // A phrase from A, which therefore ends at 25/160 (2.5 s) and again at
-    // 65/160 (6.5 s): both on written line 1 in aabbTimeline().
-    const query = A.slice(5, 25);
-    const d = decideLine(POS(query), { storedContour: stored, nowMs: 1000, timeline: aabbTimeline() });
-    assert.equal(d.reason, 'ok');
-    assert.equal(d.line, 1);
+    const timeline = aabbTimeline();
+    const lineOf = (end) => lineAtFraction(timeline, end / stored.length);
+    // A phrase from A ends at 25/160 and again at 65/160: both line 1.
+    const s = trackPosition(null, POS(A.slice(5, 25)), { storedContour: stored, lineOf });
+    assert.equal(s.reason, 'ok');
+    assert.equal(lineAtFraction(timeline, followPoint(s, 1000, 160).fraction), 1);
 });
 
-test('the same phrase in two different parts holds rather than guesses', () => {
-    const shared = contour(20, 9);
-    // The phrase ends at 20/160 (line 1) and at 100/160 (10 s: line 2).
-    const stored = shared + contour(60, 10) + shared + contour(60, 11);
-    const d = decideLine(POS(shared), { storedContour: stored, nowMs: 1000, timeline: aabbTimeline() });
-    assert.equal(d.reason, 'ambiguous');
-    assert.equal(d.line, null);
+test('which of two repeats it is gets sorted out when the parts diverge', () => {
+    const A = contour(40, 3);
+    const B = contour(40, 4);
+    const stored = A + A + B + B;
+    const timeline = aabbTimeline();
+    const lineOf = (end) => lineAtFraction(timeline, end / stored.length);
+    // Start in the SECOND A: the first window cannot tell the two apart.
+    const perf = performance(stored, 4).play(45, 300);
+    const { errors } = follow(perf, stored, { from: 5, step: 2.5, lineOf });
+    // Once B arrives (≈9 s in) it must be right, and stay right.
+    const late = errors.slice(5);
+    assert.ok(late.every(e => e !== null && e <= 3), `errors ${errors}`);
 });
 
-test('a clearly weaker runner-up does not make it ambiguous', () => {
-    const phrase = contour(20, 9);
-    const altered = phrase.slice(0, 10) + contour(10, 99);
-    const stored = phrase + contour(60, 10) + altered + contour(60, 11);
-    const d = decideLine(POS(phrase), { storedContour: stored, nowMs: 1000, timeline: aabbTimeline() });
-    assert.equal(d.reason, 'ok');
-    assert.equal(d.line, 1);
+test('a phrase shared by two parts is ambiguous from cold, and settled by the next window', () => {
+    const shared = contour(30, 9);
+    const stored = shared + contour(90, 10) + shared + contour(90, 11);
+    let s = trackPosition(null, POS(shared, 1000), { storedContour: stored });
+    assert.equal(s.reason, 'ambiguous');
+    assert.equal(s.main, null);
+    // The music carries on from the SECOND occurrence.
+    const next = stored.slice(120 + 30 - 20, 120 + 30 + 15);
+    s = trackPosition(s, POS(next, 6000), { storedContour: stored });
+    assert.ok(s.main, s.reason);
+    const at = followPoint(s, 6000, stored.length).fraction * stored.length;
+    assert.ok(Math.abs(at - 165) <= 2, `at ${at}`);
 });
 
-test('no position for audio that does not match, no contour, a stale window or no timeline', () => {
-    const t = aabbTimeline();
+test('while following, a shared phrase does not pull it into the other part', () => {
+    const shared = contour(30, 9);
+    const stored = shared + contour(90, 10) + shared + contour(90, 11);
+    // Play the first part through, shared phrase included.
+    const perf = performance(stored, 6).play(0, 240 * 2);
+    const { errors, state } = follow(perf, stored);
+    assert.ok(errors.every(e => e !== null && e <= 2), `errors ${errors}`);
+    assert.equal(state.epoch, 0);
+});
+
+test('one stray window elsewhere does not move it; a real jump re-aligns within two', () => {
+    const stored = contour(300, 41);
+    // Play 40 s from the top, then jump to quaver 200 (someone went to the
+    // B part early) and carry on.
+    const perf = performance(stored, 6).play(0, 240).play(200, 200);
+    const { errors, reasons } = follow(perf, stored, { from: 10, step: 3 });
+    // Windows at 43 s and 46 s straddle the jump; by 52 s two windows lie
+    // wholly after it and must agree.
+    const at52 = (52 - 10) / 3;
+    assert.ok(reasons.includes('realigned'), `reasons ${reasons}`);
+    assert.ok(errors.slice(at52).every(e => e !== null && e <= 3), `errors ${errors}`);
+    // And a single misleading window in the middle of steady playing:
+    let state = follow(performance(stored, 6).play(0, 200), stored, { to: 30 }).state;
+    const epoch = state.epoch;
+    state = trackPosition(state, POS(stored.slice(220, 260), 33000), { storedContour: stored });
+    assert.equal(state.epoch, epoch, 'one window is not a jump');
+    const at = followPoint(state, 33000, 300).fraction * 300;
+    assert.ok(Math.abs(at - 198) <= 3, `stayed with the music, at ${at}`);
+});
+
+test('through improvisation it keeps time, and picks the tune up where it comes back', () => {
+    const stored = contour(300, 51);
+    // 30 s of the tune, 15 s of something else over the same structure,
+    // then the tune again where it would have been.
+    const perf = performance(stored, 6).play(0, 180).improvise(90).cont(240);
+    const { errors, reasons, state } = follow(perf, stored, { step: 3 });
+    assert.ok(reasons.includes('coasting'), `reasons ${reasons}`);
+    assert.equal(state.epoch, 0, 'came back on the place it was keeping');
+    const back = Math.ceil((45 + 10 - 10) / 3) + 1;
+    assert.ok(errors.slice(back).every(e => e !== null && e <= 3), `errors ${errors}`);
+});
+
+test('if the tune comes back somewhere else after improvising, it re-aligns', () => {
+    const stored = contour(300, 61);
+    const perf = performance(stored, 6).play(0, 180).improvise(90).play(30, 240);
+    const { errors, reasons } = follow(perf, stored, { step: 3 });
+    assert.ok(reasons.includes('realigned'), `reasons ${reasons}`);
+    assert.ok(errors.slice(-6).every(e => e !== null && e <= 3), `errors ${errors}`);
+});
+
+test('a damaged window is believed where the music is expected, not out of nowhere', () => {
+    const stored = contour(300, 81);
+    const { state } = follow(performance(stored, 6).play(0, 180), stored, { to: 30 });
+    // The next 10 s, every fourth note wrong: a match score of about 0.5.
+    const damaged = stored.slice(138, 198).split('').map((c, i) => (i % 4 === 3 ? 'A' : c)).join('');
+    const tracked = trackPosition(state, POS(damaged, 33000), { storedContour: stored });
+    assert.equal(tracked.reason, 'ok');
+    assert.ok(tracked.score < 0.6, `score ${tracked.score}`);
+    assert.equal(trackPosition(null, POS(damaged, 33000), { storedContour: stored }).reason, 'weak');
+});
+
+test('wrong last notes in a window do not put the position behind the music', () => {
+    const stored = contour(200, 23);
+    const [best] = positionCandidates(stored.slice(40, 67) + 'ABC', stored);
+    assert.equal(best.end, 70);
+    // And they count against the match: 27 right (+54), 3 extra (-3), of 30.
+    assert.ok(Math.abs(best.score - 51 / 60) < 1e-9, `score ${best.score}`);
+});
+
+test('once the place is lost, one clear window anywhere re-locks', () => {
+    const stored = contour(300, 91);
+    let { state } = follow(performance(stored, 6).play(0, 180), stored, { to: 30 });
+    state = trackPosition(state, POS(contour(60, 5, 'ABCDEF'), 33000), { storedContour: stored });
+    state = trackPosition(state, POS(contour(60, 6, 'ABCDEF'), 36000), { storedContour: stored });
+    assert.equal(state.reason, 'weak');
+    state = trackPosition(state, POS(stored.slice(20, 80), 39000), { storedContour: stored });
+    assert.equal(state.reason, 'realigned');
+    const at = followPoint(state, 39000, 300).fraction * 300;
+    assert.ok(Math.abs(at - 80) <= 2, `at ${at}`);
+});
+
+test('a phrase that repeats at a short period keeps the place where the music is', () => {
+    // Found in the browser with Drowsy Maggie: the same 59 notes stand at two
+    // places 35 quavers apart, so a window matches perfectly at both. The two
+    // matches OVERLAP, and keeping only non-overlapping spans threw away the
+    // one where the music was — the follower jumped back and stayed there.
+    const B = contour(24, 13);
+    const stored = contour(60, 11) + B + B + B + B + contour(80, 12);
+    const candidates = positionCandidates(stored.slice(84, 144), stored);
+    assert.ok(candidates.some(c => c.end === 144 && c.score === 1),
+        `ends ${candidates.map(c => c.end)}`);
+    const perf = performance(stored, 6).play(0, stored.length * 2);
+    const { errors, state } = follow(perf, stored, { step: 2 });
+    assert.ok(errors.every(e => e !== null && e <= 3), `errors ${errors}`);
+    assert.equal(state.epoch, 0, 'never needed to re-align');
+});
+
+test('the projection holds once nothing has confirmed it for a while', () => {
+    const stored = contour(300, 71);
+    const { state } = follow(performance(stored, 6).play(0, 120), stored, { to: 20 });
+    const soon = followPoint(state, 25000, 300);
+    const late = followPoint(state, (20 + COAST_SECONDS + 30) * 1000, 300);
+    const later = followPoint(state, (20 + COAST_SECONDS + 60) * 1000, 300);
+    assert.equal(soon.held, false);
+    assert.equal(late.held, true);
+    assert.equal(late.fraction, later.fraction, 'held means not moving');
+});
+
+test('audio that does not match, or no contour, places nothing', () => {
     const stored = contour(160, 1);
-    const unrelated = contour(30, 77, 'ABCDEF');
-    const weak = decideLine(POS(unrelated), { storedContour: stored, nowMs: 1000, timeline: t });
-    assert.equal(weak.reason, 'weak');
-    const good = POS(stored.slice(20, 50));
-    assert.equal(decideLine(good, { storedContour: '', nowMs: 1000, timeline: t }).reason, 'no-contour');
-    assert.equal(decideLine(null, { storedContour: stored, nowMs: 1000, timeline: t }).reason, 'none');
-    const late = 1000 + (MAX_EXTRAPOLATE_SECONDS + 10 + 1) * 1000;
-    assert.equal(decideLine(good, { storedContour: stored, nowMs: late, timeline: t }).reason, 'stale');
-    assert.equal(decideLine(good, { storedContour: stored, nowMs: 1000, timeline: null }).reason, 'no-timeline');
-    assert.equal(decideLine(good, { storedContour: stored, nowMs: 1000, timeline: t }).reason, 'ok');
+    const s = trackPosition(null, POS(contour(30, 77, 'ABCDEF')), { storedContour: stored });
+    assert.equal(s.reason, 'weak');
+    assert.equal(followPoint(s, 1000, 160), null);
+    assert.equal(trackPosition(null, POS(stored.slice(20, 50)), { storedContour: '' }).main, null);
+    assert.equal(trackPosition(null, null, { storedContour: stored }).main, null);
+    // The same window twice is folded in once.
+    const a = trackPosition(null, POS(stored.slice(20, 50), 5000), { storedContour: stored });
+    assert.equal(trackPosition(a, POS(stored.slice(20, 50), 5000), { storedContour: stored }), a);
+});
+
+test('the contour alphabet is the one the Rust transcriber writes', () => {
+    const rust = readFileSync(fileURLToPath(new URL('../../rust/src/ff_config.rs', import.meta.url)), 'utf8');
+    const table = rust.slice(rust.indexOf('CONTOUR_TO_QUERY_CHAR'));
+    const body = table.slice(table.indexOf('= [') + 3);
+    const chars = body.slice(0, body.indexOf(']')).match(/'(.)'/g).map(c => c[1]).join('');
+    assert.equal(chars, CONTOUR_ALPHABET);
+});
+
+test('a transposed setting is listened for in its new key', () => {
+    assert.equal(transposeContour('opq', 2), 'qrs');
+    assert.equal(transposeContour('opq', -3), 'lmn');
+    assert.equal(transposeContour('opq', 0), 'opq');
+    // Held at the ends of the range rather than dropped, so positions do
+    // not shift.
+    assert.equal(transposeContour('aUV', -1), 'aTU');
+    assert.equal(transposeContour('aUV', 2), 'cVV');
+    // A transposed performance is found in the transposed setting.
+    const stored = contour(240, 33);
+    const playedUpATone = transposeContour(stored.slice(100, 140), 2);
+    const [best] = positionCandidates(playedUpATone, transposeContour(stored, 2));
+    assert.equal(best.end, 140);
+    assert.equal(best.score, 1);
 });
 
 test('forward moves at once; backward only once two windows agree', () => {
@@ -200,6 +428,12 @@ test('a backward blip is forgotten when the next window disagrees with it', () =
     assert.equal(s.pendingLine, null);
     s = nextFollowLine(s, 0, 'w5');
     assert.equal(s.line, 3, 'one window is never enough');
+});
+
+test('a forced move goes back at once', () => {
+    let s = nextFollowLine(null, 3, 'w1');
+    s = nextFollowLine(s, 0, 'w2', { force: true });
+    assert.equal(s.line, 0);
 });
 
 test('no answer leaves the line where it was', () => {

@@ -212,7 +212,7 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
 import { formatSecondsAsClock } from '@/js/sessionAnalysis.js';
 import { resolveFollowTarget, applyOverride, targetScoreKey, needsScoreLoad, getLastShown, setLastShown } from '@/js/liveScoreFollow.mjs';
-import { decideLine, nextFollowLine, matchSpans } from '@/js/scorePosition.mjs';
+import { ScoreFollower } from '@/js/scoreFollower.mjs';
 
 // After the user touches or scrolls the score, auto-centre keeps its hands off
 // for this long. Someone reading ahead, or looking back at a bar, must not
@@ -266,12 +266,11 @@ export default {
         // On an instance so a test can shorten it.
         this._scoreLoadTimeoutMs = SCORE_LOAD_TIMEOUT_MS;
         this._scoreLoadTimer = null;
-        // Auto-centre bookkeeping, non-reactive: the hysteresis state, which
-        // score it is about, and the hold after a manual scroll.
-        this._followState = null;
+        // Auto-centre bookkeeping, non-reactive: the follower, which score it
+        // is about, and the hold after a manual scroll.
+        this._follower = new ScoreFollower();
         this._followKey = null;
         this._manualScrollUntil = 0;
-        this._spansCache = null;
         return {
             target: lastShown.target,
             abcSetting: lastShown.abcSetting,
@@ -501,7 +500,7 @@ export default {
                 store.userSettings.liveAutoCenter = this.autoCenter;
                 store.updateUserSettings(store.userSettings);
             }
-            this._followState = null;
+            this._follower.reset();
             this.followBand = null;
             this.positionReadout = '';
             // Turning it on is the moment the user wants to be taken there.
@@ -527,56 +526,23 @@ export default {
             const key = `${target.tuneId}::${setting.setting_id}`;
             if (key !== this._followKey) {
                 this._followKey = key;
-                this._followState = null;
+                this._follower.reset();
                 this.followBand = null;
-                this._spansCache = null;
             }
-            const timeline = display.followTimeline();
-            const position = liveAnalysisService.scorePosition;
-            // Against the setting actually ON SCREEN. Aligned once per window
-            // and reused by the per-second re-projection.
-            const storedContour = setting.contour || '';
-            let spans = null;
-            if (position && storedContour) {
-                const cache = this._spansCache;
-                if (cache && cache.position === position && cache.key === key) {
-                    spans = cache.spans;
-                } else {
-                    spans = matchSpans(position.contour, storedContour);
-                    this._spansCache = { position, key, spans };
-                }
-            }
-            const decision = decideLine(position, {
-                storedContour,
+            const { line: shown, readout } = this._follower.update({
+                position: liveAnalysisService.scorePosition,
+                // Against the setting actually ON SCREEN.
+                storedContour: setting.contour || '',
+                timeline: display.followTimeline(),
                 nowMs: Date.now(),
-                timeline,
-                spans,
             });
-            this._followState = nextFollowLine(
-                this._followState, decision.line, position ? position.readAt : null);
-            const line = this._followState.line;
-            const count = timeline ? timeline.lineCount : 0;
-            this.positionReadout = this._positionText(decision, line, count);
-            if (line === null) return;
+            this.positionReadout = readout;
+            if (shown === null) return;
             // The freeze is total: nothing moves while the user reads.
             if (this.frozen) return;
             // While the user is scrolling by hand the band still follows the
             // music; only the page stays where they put it.
-            this._centreLine(display, line, Date.now() >= this._manualScrollUntil);
-        },
-        _positionText(decision, line, count) {
-            if (decision.reason === 'ok') {
-                return `line ${decision.line + 1}/${count} · ${Math.round(decision.fraction * 100)}%`;
-            }
-            const held = line !== null ? `line ${line + 1}/${count}, ` : '';
-            switch (decision.reason) {
-            case 'ambiguous': return `${held}which part?`;
-            case 'weak': return `${held}position unclear (${(decision.score || 0).toFixed(2)})`;
-            case 'stale': return `${held}no recent match`;
-            case 'no-contour':
-            case 'no-timeline': return 'position n/a';
-            default: return held ? held.replace(/, $/, '') : '';
-            }
+            this._centreLine(display, shown, Date.now() >= this._manualScrollUntil);
         },
         _centreLine(display, line, scroll) {
             const body = this.$refs.scoreBody;

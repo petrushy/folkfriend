@@ -482,6 +482,37 @@ class FFBackend {
         };
     }
 
+    // Audio → contour, with no query: for following one setting the score is
+    // already known, and the search over ~62k settings is the expensive half
+    // of a live cycle. Same lock and the same failure shapes as
+    // transcribeAndQueryPCMSignal; also works with no tune index loaded.
+    transcribePCMSignal(PCMSignal, sampleRate = null) {
+        return this._withPCMBufferLock(async () => {
+            await this._applySampleRateForJob(sampleRate);
+            await this.flushPCMBuffer();
+            try {
+                await this.feedEntirePCMSignal(PCMSignal);
+            } catch (e) {
+                await this.flushPCMBuffer();
+                return { error: e && e.message ? e.message : String(e), contour: '' };
+            }
+            const contour = await this.transcribePCMBuffer();
+            try {
+                const maybeError = JSON.parse(contour);
+                if (maybeError && maybeError.error) {
+                    await this.flushPCMBuffer();
+                    return { error: maybeError.error, contour: '' };
+                }
+            } catch (e) {
+                if (!(e instanceof SyntaxError)) {
+                    await this.flushPCMBuffer();
+                    throw e;
+                }
+            }
+            return { error: null, contour };
+        });
+    }
+
     analyzeRingBuffer(pcm) {
         return this._withPCMBufferLock(async () => {
             await this.feedEntirePCMSignal(pcm);

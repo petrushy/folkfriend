@@ -165,6 +165,9 @@
                     </div>
                     <AbcDisplay :abc="settingData.abc" :transpose="transposeFor(settingData)" :instrumentShift="instrumentShift" :mode="settingData.mode" :meter="settingData.meter"
                                 :title="name" :settingID="settingData.setting_id"
+                                :followLine="followSettingId === settingData.setting_id ? followLine : null"
+                                :followAutoScroll="!followHeld"
+                                :ref="`abcDisplay-${settingData.setting_id}`"
                                 @abcGoFullScreen="abcGoFullScreen" @abcExitFullScreen="abcExitFullScreen"
                                 @abcRendered="scrollIntoView">
                         <!-- Session recording ▶ — only when a saved session recorded this tune -->
@@ -212,6 +215,22 @@
                                 <v-icon small color="primary" class="mr-1">{{ recordingPlaying ? icons.pause : icons.play }}</v-icon>
                                 <span class="recordingBtnLabel">{{ recordingPlaying ? 'Pause' : 'Recording' }}</span>
                             </v-btn>
+                            <!-- Practice follow: listen and mark the line being played -->
+                            <v-btn
+                                v-if="settingData.contour"
+                                small
+                                class="mx-1 px-2 abcControls"
+                                :color="followSettingId === settingData.setting_id ? 'primary' : ''"
+                                :aria-pressed="followSettingId === settingData.setting_id ? 'true' : 'false'"
+                                :title="followSettingId === settingData.setting_id ? 'Stop following' : 'Follow me: listen while you play and keep the line you are on in view'"
+                                :loading="followStarting && followSettingId === settingData.setting_id"
+                                @click.stop="toggleFollow(settingData)"
+                            >
+                                <v-icon small class="mr-1">{{ icons.follow }}</v-icon>
+                                <span class="recordingBtnLabel">Follow</span>
+                            </v-btn>
+                            <span v-if="followSettingId === settingData.setting_id"
+                                  class="followReadout" aria-live="polite">{{ followReadout || 'Listening…' }}</span>
                         </template>
                     </AbcDisplay>
                 </v-expansion-panel-content>
@@ -237,6 +256,7 @@
             </v-card>
         </v-dialog>
         <v-snackbar v-model="recordingSnackbar" :timeout="3000">{{ recordingSnackbarText }}</v-snackbar>
+        <v-snackbar v-model="followSnackbar" :timeout="6000">{{ followSnackbarText }}</v-snackbar>
 
     </v-container>
     <v-container v-else-if="loadError" class="px-10">
@@ -272,7 +292,15 @@ import {
     mdiTagPlusOutline,
     mdiPlay,
     mdiPause,
+    mdiCrosshairsGps,
 } from '@mdi/js';
+import practiceFollow from '@/services/practiceFollow.js';
+import { ScoreFollower } from '@/js/scoreFollower.mjs';
+import { transposeContour } from '@/js/scorePosition.mjs';
+
+// How long a touch or scroll of the page holds the practice follow's
+// auto-scroll, as in the live view; the band keeps moving meanwhile.
+const FOLLOW_MANUAL_HOLD_MS = 8000;
 import store, { clampTranspose } from '@/services/store.js';
 import { indexRecordingsByTune, sessionDetections, formatSessionDate } from '@/js/tuneRecordings.mjs';
 import { listManifests } from '@/services/sessionAudioStore.js';
@@ -353,6 +381,16 @@ export default {
             addTagMenus: {},
             tagInputValues: {},
 
+            // Practice follow (services/practiceFollow.js): which setting is
+            // being followed, the line to mark, and what the follower thinks.
+            followSettingId: null,
+            followStarting: false,
+            followLine: null,
+            followReadout: '',
+            followHeld: false,
+            followSnackbar: false,
+            followSnackbarText: '',
+
             icons: {
                 openInNew: mdiOpenInNew,
                 star: mdiStar,
@@ -365,6 +403,7 @@ export default {
                 cog: mdiCog,
                 play: mdiPlay,
                 pause: mdiPause,
+                follow: mdiCrosshairsGps,
             },
         };
     },
@@ -525,8 +564,23 @@ export default {
             this._reloadFromIndex();
         };
         eventBus.$on('indexStatusChanged', this._onIndexStatus);
+
+        this._onPracticePosition = () => this._updateFollow();
+        eventBus.$on('practiceFollowPosition', this._onPracticePosition);
+        // A follow ended elsewhere — another Tune view, or a refused microphone.
+        this._onPracticeState = (state) => {
+            if (!state.active && this.followSettingId !== null && !this.followStarting) this._clearFollow();
+        };
+        eventBus.$on('practiceFollowState', this._onPracticeState);
     },
     beforeDestroy: function () {
+        // Practising this tune ends with the page.
+        if (this.followSettingId !== null) {
+            this._clearFollow();
+            practiceFollow.stop();
+        }
+        eventBus.$off('practiceFollowPosition', this._onPracticePosition);
+        eventBus.$off('practiceFollowState', this._onPracticeState);
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
         if (this._onSightingsChanged) eventBus.$off('sightingsChanged', this._onSightingsChanged);
         eventBus.$off('liveSessionsChanged', this._loadRecordings);
@@ -537,6 +591,76 @@ export default {
     },
     methods: {
         formatSessionDate,
+        async toggleFollow(settingData) {
+            if (this.followSettingId === settingData.setting_id) {
+                this._clearFollow();
+                await practiceFollow.stop();
+                return;
+            }
+            // The synth would be heard by the microphone it is listening on.
+            eventBus.$emit('stopSynthPlayback');
+            this._clearFollow();
+            this.followSettingId = settingData.setting_id;
+            this.followStarting = true;
+            this._follower = new ScoreFollower();
+            try {
+                await practiceFollow.start(settingData.setting_id);
+            } catch (e) {
+                if (this.followSettingId === settingData.setting_id) this._clearFollow();
+                this.followSnackbarText = `Could not listen: ${(e && e.message) || 'the microphone could not be opened'}`;
+                this.followSnackbar = true;
+                return;
+            } finally {
+                this.followStarting = false;
+            }
+            if (this.followSettingId !== settingData.setting_id) return;
+            // Re-projected every second between windows, as in the live view.
+            this._followTimer = setInterval(() => this._updateFollow(), 1000);
+            this._onFollowManualScroll = () => {
+                this.followHeld = true;
+                clearTimeout(this._followHoldTimer);
+                this._followHoldTimer = setTimeout(() => { this.followHeld = false; }, FOLLOW_MANUAL_HOLD_MS);
+            };
+            window.addEventListener('touchstart', this._onFollowManualScroll, { passive: true });
+            window.addEventListener('wheel', this._onFollowManualScroll, { passive: true });
+        },
+        _clearFollow() {
+            clearInterval(this._followTimer);
+            this._followTimer = null;
+            clearTimeout(this._followHoldTimer);
+            if (this._onFollowManualScroll) {
+                window.removeEventListener('touchstart', this._onFollowManualScroll);
+                window.removeEventListener('wheel', this._onFollowManualScroll);
+                this._onFollowManualScroll = null;
+            }
+            this.followSettingId = null;
+            this.followLine = null;
+            this.followReadout = '';
+            this.followHeld = false;
+            this._follower = null;
+        },
+        _updateFollow() {
+            if (this.followSettingId === null || !this._follower) return;
+            const setting = this.settings.find(s => s.setting_id === this.followSettingId);
+            const ref = this.$refs[`abcDisplay-${this.followSettingId}`];
+            const display = Array.isArray(ref) ? ref[0] : ref;
+            if (!setting || !display || typeof display.followTimeline !== 'function') {
+                // Its panel is closed: nothing on screen to follow.
+                this.followLine = null;
+                this.followReadout = 'open the setting to follow it';
+                return;
+            }
+            const { line, readout } = this._follower.update({
+                position: practiceFollow.position,
+                // What is played is what is shown: a transposed setting is
+                // listened for in its new key.
+                storedContour: transposeContour(setting.contour, this.transposeFor(setting)),
+                timeline: display.followTimeline(),
+                nowMs: Date.now(),
+            });
+            this.followLine = line;
+            this.followReadout = readout;
+        },
         // Saved sessions that recorded this tune and whose audio this device
         // holds (or Dropbox may). Same rule as the ▶ on a favourite.
         async _loadRecordings() {
@@ -845,6 +969,13 @@ export default {
 </script>
 
 <style scoped>
+.followReadout {
+    font-size: 0.75rem;
+    color: rgba(0, 0, 0, 0.6);
+    margin: 0 4px;
+    white-space: nowrap;
+}
+
 .recordingBtnLabel {
     text-transform: none;
     letter-spacing: normal;

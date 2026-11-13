@@ -158,7 +158,7 @@ async function loadOverlay({ initialDetections = null } = {}) {
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
         // Deliberately the real module.
         ["from '@/js/liveScoreFollow.mjs'", `from '${followModule}'`],
-        ["from '@/js/scorePosition.mjs'", `from '${path.join(srcDir, 'js', 'scorePosition.mjs')}'`],
+        ["from '@/js/scoreFollower.mjs'", `from '${path.join(srcDir, 'js', 'scoreFollower.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in the SFC`);
@@ -678,6 +678,31 @@ await test('audio that does not match the setting on screen moves nothing and sa
     vm.toggleAutoCenter();
     assert.deepEqual(scrolls, []);
     assert.match(vm.positionReadout, /^position unclear/);
+});
+
+await test('coming round to the top of the tune moves back at once', async () => {
+    // The tracker follows the music across the end of the tune; the view
+    // must not then hold the band on the last line waiting for a second
+    // window, which is what made the first version sit there for seconds
+    // at every time through.
+    const { vm, push, live } = await loadOverlay();
+    await push([det(1, 10, 'The Kesh', 0.8)]);
+    vm.abcSetting.contour = STORED;
+    const scrolls = fakeScoreRefs(vm);
+    // The second window is stamped ten seconds after the first (20 quavers
+    // in 10 s is 2 a second, so the music has gone 150 -> 170 = 10 on the
+    // next time through); the view's clock is the real one, and a window
+    // stamped ahead of it is simply not projected further.
+    const now = Date.now();
+    live.default.scorePosition = { contour: STORED.slice(130, 150), readAt: now, windowSeconds: 10 };
+    vm.toggleAutoCenter();
+    assert.match(vm.positionReadout, /^line 4\/4/);
+    live.default.scorePosition = {
+        contour: STORED.slice(150) + STORED.slice(0, 10), readAt: now + 10000, windowSeconds: 10,
+    };
+    vm._updateFollowPosition();
+    assert.match(vm.positionReadout, /^line 1\/4/);
+    assert.equal(scrolls[scrolls.length - 1], 0);
 });
 
 await rm(tmpDir, { recursive: true, force: true });
