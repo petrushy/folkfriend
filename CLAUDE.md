@@ -1264,7 +1264,7 @@ score says what it thinks (`line 3/8 · 41%`, `· realigned`, `· keeping time`,
   contour, `readAt` and length. Display-only, never persisted, cleared on
   Pause.
 
-Tests: `scorePosition.test.mjs` (24), 8 cases in
+Tests: `scorePosition.test.mjs` (27), 8 cases in
 `liveScoreFollowComponent.test.mjs`, 1 in `liveSessions.test.mjs`.
 Detection is untouched: no Rust change, and the loop only reads the window's
 contour after its result is taken. The alignment costs ~0.7 ms per window on
@@ -1272,6 +1272,72 @@ desktop, on the main thread, only with the toggle on.
 ⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.4 / 0.6
 floors, the tolerance and the 20 s coast are tuned on the synthetic replay
 only.
+
+### Practice follow in the Tune view (November 2026)
+
+A **Follow** button on each setting's score in the Tune view (the page a
+favourite opens) listens while the user plays and marks the staff line they
+are on, scrolling it into view — for practising, with no session.
+
+- **The same follower as the live view.** `js/scoreFollower.mjs` wraps the
+  tracker, the line hysteresis and the readout; `LiveScoreFollow` and
+  `Tune.vue` both drive one, so they cannot drift apart.
+- **Transcription only** (`backend.transcribePCMSignal`): the setting is
+  known, so the search over the index — the expensive half of a live cycle —
+  is skipped, and it works with no index loaded. No session record, history,
+  sightings or recording.
+- **`js/practiceFollow.mjs`** is the loop (dependencies injected, tested in
+  node); `services/practiceFollow.js` wires the real ones. First window at
+  4 s, then every 4 s, sooner on a fast device (`liveCadence`).
+- **It shares the microphone with a live session.** While a session is
+  LISTENING it takes that session's windows and transcribes nothing; a
+  session started while practising finds the microphone open and uses it,
+  and practice then leaves it open; a paused session has released it, so
+  practice reopens it — and closes what it opened when it stops. A microphone
+  practice did not open is never practice's to close.
+- **A transposed setting is listened for in its new key**
+  (`transposeContour`: one contour letter per semitone from MIDI 48, the
+  table in `ff_config.rs`, which a test reads to keep the two in step). The
+  instrument shift is written-pitch only and is ignored, as for the synth.
+- **The band lives in `AbcDisplay`** (`followLine` prop), so it works inline
+  and in full screen. Auto-scroll targets an invisible, un-animated anchor:
+  scrolling to the band itself, which animates `top`, read its position
+  mid-flight, and after the tune wrapped scrolled the page to the LAST line.
+  Held for 8 s after a touch or wheel.
+- Starting stops the synth (the microphone would hear it); leaving the page
+  stops practice.
+
+**Two bugs only a real browser found** (a one-off Playwright check: the app
+built, a synthesized Drowsy Maggie fed in as the microphone with Chrome's
+fake audio capture, the favourite seeded in IndexedDB):
+
+1. **An import cycle captured `undefined`.** backend.js → router → Tune.vue →
+   services/practiceFollow.js → backend.js: while the service module is
+   evaluated, backend.js may still be half-loaded, so passing `ffBackend` as a
+   value handed every window "cannot read transcribePCMSignal of undefined".
+   Every dependency there is reached through a function or getter now.
+2. **A phrase repeating at a short period lost the true place.** That setting
+   has the same 59 notes at two places 35 quavers apart, so a window matches
+   perfectly at both — and the two matches OVERLAP, which `matchSpans`'s
+   no-overlap rule resolved by discarding the later one, i.e. where the music
+   was. The follower jumped back and stayed there for ~6 s, every time
+   through. `positionCandidates` now keeps candidates whose starts AND ends
+   are each ≥ 5 quavers apart (`distinctEnds`): ends alone let through
+   "ghosts" — the best match with its end pushed on by skipping notes, which
+   costs little and passes for a tie. The synthetic benchmark never showed
+   this because its random contours do not repeat; real tunes do.
+
+After both fixes, 90 s of the browser check: the marked line on screen every
+second, the right line 78 of 86 s and the misses all within a second of a
+line change; full screen 43 of 47.
+
+Tests: `practiceFollow.test.mjs` (10), 3 cases in `scorePosition.test.mjs`
+(the repeat, transposition, the alphabet). Verified by mutation: closing the
+microphone whatever a session is doing, ignoring the session's windows,
+claiming a microphone someone else opened, and dropping the generation check
+after a transcription each fail 1. ⚠️ Not yet tried on a device, and only
+with synthesized audio: an iPhone's microphone and a real whistle are the
+test that matters.
 
 ### Live detection: an early first query and an adaptive step (November 2026)
 

@@ -158,7 +158,7 @@ async function loadOverlay({ initialDetections = null } = {}) {
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
         // Deliberately the real module.
         ["from '@/js/liveScoreFollow.mjs'", `from '${followModule}'`],
-        ["from '@/js/scorePosition.mjs'", `from '${path.join(srcDir, 'js', 'scorePosition.mjs')}'`],
+        ["from '@/js/scoreFollower.mjs'", `from '${path.join(srcDir, 'js', 'scoreFollower.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in the SFC`);

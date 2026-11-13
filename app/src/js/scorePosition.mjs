@@ -79,7 +79,13 @@ const GAP = -1;
 // are cheaper than wrong notes) still took time to play, so a fit span's end
 // is moved on by that many quavers: a few wrong last notes must not put the
 // position behind the music.
-export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false } = {}) {
+//
+// `distinctEnds: n` replaces the no-overlap rule with "starts and ends each at
+// least n apart".
+// Overlap is the wrong test for a POSITION: a phrase that repeats at a short
+// period matches perfectly at two places whose spans overlap, and only one
+// of them is where the music is.
+export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false, distinctEnds = 0 } = {}) {
     if (!query || !stored || query.length > stored.length || maxSpans <= 0) return [];
     const n = query.length;
     let prevH = new Int32Array(n + 1);
@@ -145,7 +151,14 @@ export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false } 
         if (raw <= 0) break;
         const start = rowStart[row];
         const end = row + 1;
-        if (spans.some(s => start < s.matchedEnd && s.start < end)) continue;
+        if (distinctEnds > 0
+            // Apart at BOTH ends. A real repeat shifts the whole span; an
+            // alignment that keeps a better span's start and only pushes its
+            // end on (skipping notes of the tune, cheaply) is that same match
+            // again, and would otherwise pass for a near-tie elsewhere.
+            ? spans.some(s => Math.abs(s.matchedEnd - end) < distinctEnds
+                || Math.abs(s.start - start) < distinctEnds)
+            : spans.some(s => start < s.matchedEnd && s.start < end)) continue;
         spans.push({
             start,
             end: Math.min(stored.length, end + rowTrail[row]),
@@ -255,7 +268,9 @@ export function positionCandidates(query, stored, maxSpans = MAX_SPANS) {
     if (!query || !stored || query.length < MIN_QUERY_LENGTH || query.length > stored.length) return [];
     const length = stored.length;
     const looped = stored + stored.slice(0, query.length);
-    const spans = matchSpans(query, looped, maxSpans * 2, { fit: true });
+    // Ends kept apart, not spans: see matchSpans. Twice the slack of "the
+    // same place", so near-identical neighbouring rows collapse into one.
+    const spans = matchSpans(query, looped, maxSpans * 2, { fit: true, distinctEnds: 2 * SAME_PLACE_QUAVERS + 1 });
     const out = [];
     for (const s of spans) {
         const end = s.end > length ? s.end - length : s.end;
@@ -451,4 +466,25 @@ export function nextFollowLine(state, line, windowKey, { force = false } = {}) {
         return { ...current, pendingCount, pendingKey: windowKey };
     }
     return { ...current, pendingLine: line, pendingCount: 1, pendingKey: windowKey };
+}
+
+// The contour alphabet: one character per semitone from MIDI 48 (C3), as
+// rust/src/ff_config.rs CONTOUR_TO_QUERY_CHAR. Kept in step with it by a test.
+export const CONTOUR_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV';
+
+// A stored contour as it sounds `semitones` away. The Tune view can transpose
+// a setting, and someone practising it then plays the transposed key — so the
+// follower has to listen for that, not for what was written. Notes pushed
+// past either end of the range are held at the end rather than dropped: a
+// dropped note would shift every position after it.
+export function transposeContour(contour, semitones) {
+    const shift = Math.round(semitones || 0);
+    if (!contour || !shift) return contour || '';
+    const top = CONTOUR_ALPHABET.length - 1;
+    let out = '';
+    for (const ch of contour) {
+        const i = CONTOUR_ALPHABET.indexOf(ch);
+        out += i < 0 ? ch : CONTOUR_ALPHABET[Math.max(0, Math.min(top, i + shift))];
+    }
+    return out;
 }

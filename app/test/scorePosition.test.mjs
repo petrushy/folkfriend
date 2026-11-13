@@ -8,7 +8,10 @@ import assert from 'node:assert/strict';
 import {
     windowPosition, matchSpans, lineAtFraction, nextFollowLine, MIN_QUERY_LENGTH,
     positionCandidates, trackPosition, followPoint, COAST_SECONDS,
+    transposeContour, CONTOUR_ALPHABET,
 } from '../src/js/scorePosition.mjs';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 let passed = 0;
 let failed = 0;
@@ -335,6 +338,22 @@ test('once the place is lost, one clear window anywhere re-locks', () => {
     assert.ok(Math.abs(at - 80) <= 2, `at ${at}`);
 });
 
+test('a phrase that repeats at a short period keeps the place where the music is', () => {
+    // Found in the browser with Drowsy Maggie: the same 59 notes stand at two
+    // places 35 quavers apart, so a window matches perfectly at both. The two
+    // matches OVERLAP, and keeping only non-overlapping spans threw away the
+    // one where the music was — the follower jumped back and stayed there.
+    const B = contour(24, 13);
+    const stored = contour(60, 11) + B + B + B + B + contour(80, 12);
+    const candidates = positionCandidates(stored.slice(84, 144), stored);
+    assert.ok(candidates.some(c => c.end === 144 && c.score === 1),
+        `ends ${candidates.map(c => c.end)}`);
+    const perf = performance(stored, 6).play(0, stored.length * 2);
+    const { errors, state } = follow(perf, stored, { step: 2 });
+    assert.ok(errors.every(e => e !== null && e <= 3), `errors ${errors}`);
+    assert.equal(state.epoch, 0, 'never needed to re-align');
+});
+
 test('the projection holds once nothing has confirmed it for a while', () => {
     const stored = contour(300, 71);
     const { state } = follow(performance(stored, 6).play(0, 120), stored, { to: 20 });
@@ -356,6 +375,30 @@ test('audio that does not match, or no contour, places nothing', () => {
     // The same window twice is folded in once.
     const a = trackPosition(null, POS(stored.slice(20, 50), 5000), { storedContour: stored });
     assert.equal(trackPosition(a, POS(stored.slice(20, 50), 5000), { storedContour: stored }), a);
+});
+
+test('the contour alphabet is the one the Rust transcriber writes', () => {
+    const rust = readFileSync(fileURLToPath(new URL('../../rust/src/ff_config.rs', import.meta.url)), 'utf8');
+    const table = rust.slice(rust.indexOf('CONTOUR_TO_QUERY_CHAR'));
+    const body = table.slice(table.indexOf('= [') + 3);
+    const chars = body.slice(0, body.indexOf(']')).match(/'(.)'/g).map(c => c[1]).join('');
+    assert.equal(chars, CONTOUR_ALPHABET);
+});
+
+test('a transposed setting is listened for in its new key', () => {
+    assert.equal(transposeContour('opq', 2), 'qrs');
+    assert.equal(transposeContour('opq', -3), 'lmn');
+    assert.equal(transposeContour('opq', 0), 'opq');
+    // Held at the ends of the range rather than dropped, so positions do
+    // not shift.
+    assert.equal(transposeContour('aUV', -1), 'aTU');
+    assert.equal(transposeContour('aUV', 2), 'cVV');
+    // A transposed performance is found in the transposed setting.
+    const stored = contour(240, 33);
+    const playedUpATone = transposeContour(stored.slice(100, 140), 2);
+    const [best] = positionCandidates(playedUpATone, transposeContour(stored, 2));
+    assert.equal(best.end, 140);
+    assert.equal(best.score, 1);
 });
 
 test('forward moves at once; backward only once two windows agree', () => {
