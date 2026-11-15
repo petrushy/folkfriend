@@ -223,6 +223,54 @@ try {
     await evaluate("window.setsVM.$set(window.setsVM.expanded, window.setsVM.draft.entries[0].id, true)");
     await waitFor(`!!document.querySelector('.abcSheetMusic svg')`, 10000, 'offline saved score');
     check('saved setting renders its score offline', true);
+    await evaluate(`window.findVM = name => {
+        const find = vm => vm.$options.name === name ? vm : vm.$children.map(find).find(Boolean);
+        return find(document.querySelector('#app').__vue__);
+    };`);
+    await evaluate(`(async () => {
+        const entries = window.setsVM.draft.entries;
+        const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open('keyval-store');
+            request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+        });
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction('keyval', 'readwrite');
+            tx.objectStore('keyval').put(entries.map((e, i) => ({ result: e.result, timestamp: Date.now() + i, tags: [] })), 'favouriteItems');
+            tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+        }); db.close();
+        await document.querySelector('#app').__vue__.$router.push('/favourites');
+    })()`);
+    await waitFor(`window.findVM('FavouritesView')?.favouriteItems.length === 2`, 15000, 'favorite tunes');
+    await evaluate(`document.querySelector('.favourite-row-wrapper button[title="Add to set"]').click()`);
+    await waitFor(`window.findVM('AddToSetDialog').open && !window.findVM('AddToSetDialog').loading`, 10000, 'favorite destination picker');
+    const oneFavorite = await evaluate(`(async () => {
+        const dialog = window.findVM('AddToSetDialog');
+        const exact = dialog.batch.length === 1 && !!dialog.batch[0].setting_id && !!dialog.batch[0].setting.abc;
+        dialog.destination = 'new'; dialog.name = 'Favorite row regression'; await dialog.add();
+        return { exact, error: dialog.error, path: location.pathname };
+    })()`);
+    check('favorite row icon saves its exact setting offline without navigation',
+        oneFavorite.exact && !oneFavorite.error && oneFavorite.path === '/favourites', JSON.stringify(oneFavorite));
+    await evaluate(`window.findVM('FavouritesView').selectedIDs = new Set(window.findVM('FavouritesView').favouriteItems.map(f => f.result.settingID));`);
+    await sleep(100);
+    await evaluate(`document.querySelector('[title="Add selected tunes to a set"]').click()`);
+    await waitFor(`window.findVM('AddToSetDialog').open && !window.findVM('AddToSetDialog').loading`, 10000, 'bulk favorite picker');
+    const bulkFavorite = await evaluate(`(async () => {
+        const dialog = window.findVM('AddToSetDialog');
+        const original = dialog.batch.map(e => String(e.setting_id));
+        dialog.move(1, -1);
+        dialog.destination = dialog.sets.find(s => s.name === 'Favorite row regression').id;
+        await dialog.add();
+        const error = dialog.error;
+        const favoriteCount = window.findVM('FavouritesView').favouriteItems.length;
+        await document.querySelector('#app').__vue__.$router.push('/sets');
+        return { original, error, favoriteCount };
+    })()`);
+    await waitFor(`window.findVM('SetsView')?.sets.some(s => s.name === 'Favorite row regression')`, 10000, 'bulk saved set');
+    const bulkIDs = await evaluate(`window.findVM('SetsView').sets.find(s => s.name === 'Favorite row regression').entries.map(e => String(e.result.settingID))`);
+    check('selected favorites append together in chosen order and remain starred',
+        !bulkFavorite.error && bulkFavorite.favoriteCount === 2 && bulkIDs.length === 3 &&
+        bulkIDs.slice(1).join(',') === [...bulkFavorite.original].reverse().join(','), JSON.stringify({ ...bulkFavorite, bulkIDs }));
     const vueWarnings = warnings.filter(w => /\[Vue warn\]|EXC/.test(w));
     check('no Vue warnings or runtime exceptions', vueWarnings.length === 0, vueWarnings.slice(0, 3).join(' // '));
 } catch (e) {

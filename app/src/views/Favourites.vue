@@ -271,7 +271,7 @@
         <!-- Select all + name filter bar -->
         <div
             v-if="favouriteItems.length > 0"
-            class="d-flex align-center px-2 py-1 select-all-bar"
+            class="d-flex align-center px-2 py-1 select-all-bar flex-wrap"
         >
             <v-checkbox
                 :input-value="allVisibleSelected"
@@ -284,6 +284,23 @@
                 {{ allVisibleSelected ? 'Deselect all' : 'Select all' }}
                 <template v-if="selectedIDs.size > 0">({{ selectedIDs.size }})</template>
             </span>
+            <v-btn
+                v-if="selectedIDs.size > 0"
+                small
+                text
+                color="primary"
+                class="ml-2"
+                title="Add selected tunes to a set"
+                @click="addSelectedToSet"
+            >
+                <v-icon
+                    small
+                    left
+                >
+                    {{ icons.addToSet }}
+                </v-icon>
+                Add to set ({{ selectedIDs.size }})
+            </v-btn>
             <v-menu
                 v-model="bulkTagMenu"
                 :close-on-content-click="false"
@@ -357,6 +374,7 @@
                     :recording-playing="isRecordingPlaying(row.tuneID)"
                     @playRecording="playRecording($event, row.name)"
                     @favouriteItemClicked="loadFavouriteItem"
+                    @addToSet="addFavouriteToSet"
                     @unstar="removeFavourite"
                     @toggle="toggleSelected"
                     @addTag="addTag"
@@ -418,6 +436,7 @@
                             :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
+                            @addToSet="addFavouriteToSet"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -475,6 +494,7 @@
                             :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
+                            @addToSet="addFavouriteToSet"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -535,6 +555,7 @@
                             :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
+                            @addToSet="addFavouriteToSet"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -579,7 +600,9 @@
             max-width="400"
         >
             <v-card>
-                <v-card-title class="text-subtitle-1">Play {{ recordingPicker.name }} from…</v-card-title>
+                <v-card-title class="text-subtitle-1">
+                    Play {{ recordingPicker.name }} from…
+                </v-card-title>
                 <v-list dense>
                     <v-list-item
                         v-for="entry in recordingPicker.entries"
@@ -594,7 +617,12 @@
                 </v-list>
                 <v-card-actions>
                     <v-spacer />
-                    <v-btn text @click="recordingPicker.open = false">Cancel</v-btn>
+                    <v-btn
+                        text
+                        @click="recordingPicker.open = false"
+                    >
+                        Cancel
+                    </v-btn>
                 </v-card-actions>
             </v-card>
         </v-dialog>
@@ -726,7 +754,7 @@
 </template>
 
 <script>
-import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline, mdiShuffleVariant } from '@mdi/js';
+import { mdiPlaylistPlus, mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline, mdiShuffleVariant } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
@@ -810,6 +838,7 @@ export default {
             ],
             shuffleSeed: Math.floor(Math.random() * 2 ** 31),
             icons: {
+                addToSet: mdiPlaylistPlus,
                 export: mdiExport,
                 pencil: mdiPencil,
                 delete: mdiDelete,
@@ -1487,6 +1516,27 @@ export default {
                 this.deleteTagDialog = false;
                 this.deleteTagTarget = null;
                 this.loadFavourites();
+            });
+        },
+        addFavouriteToSet(settingID) {
+            const item = this.favouriteItems.find(f => String(f.result.settingID) === String(settingID));
+            if (item) this.showSetDestination([item]);
+        },
+        addSelectedToSet() {
+            const selected = new Set([...this.selectedIDs].map(String));
+            const seen = new Set();
+            // Current sort first; include selected items hidden by filters too.
+            const items = [...this.filteredItems, ...this.favouriteItems].filter(item => {
+                const id = String(item.result.settingID);
+                if (!selected.has(id) || seen.has(id)) return false;
+                seen.add(id); return true;
+            });
+            if (items.length) this.showSetDestination(items);
+        },
+        showSetDestination(items) {
+            eventBus.$emit('showAddToSet', { title: items.length === 1 ? items[0].result.displayName : `${items.length} tunes`,
+                                             entries: items.map(item => ({ setting_id: item.result.settingID,
+                                                                           setting: item.result.setting, display_name: item.result.displayName })),
             });
         },
         shareFavourites(format = 'html') {

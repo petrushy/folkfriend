@@ -18,6 +18,12 @@ Choose its key/setting (starred settings first) and an existing or new set.
 Opened from the set editor, it defaults to the current draft and inserts after
 the starting tune, without navigating away or saving unfinished edits.
 
+Favorite Tunes also offers an “Add to set” icon on every row. Selecting tunes
+reveals an “Add to set” button beside the selection controls. The destination
+dialog uses the exact saved settings and lets a selected group be reordered
+before appending it to an existing or new set. This works offline and leaves
+the favourites untouched.
+
 ## Persistence and sync
 
 IndexedDB `tuneSets` is the local source. All set writes and inbound merges use

@@ -22,10 +22,49 @@
                         aria-label="Loading tune settings"
                     />
                     <template v-else>
-                        <p v-if="!settings.length">
+                        <p v-if="!settings.length && !batch.length">
                             No saved or downloaded settings are available for this tune. Enable its database in Settings.
                         </p>
+                        <v-list
+                            v-if="batch.length"
+                            dense
+                            aria-label="Selected tunes in set order"
+                        >
+                            <v-list-item
+                                v-for="(entry, i) in batch"
+                                :key="entry.setting_id"
+                            >
+                                <v-list-item-content>
+                                    <v-list-item-title>{{ i + 1 }}. {{ displayName(entry.display_name) }}</v-list-item-title>
+                                    <v-list-item-subtitle>{{ settingLabel(entry) }}</v-list-item-subtitle>
+                                </v-list-item-content>
+                                <v-list-item-action
+                                    v-if="batch.length > 1"
+                                    class="d-flex flex-row"
+                                >
+                                    <v-btn
+                                        icon
+                                        small
+                                        :disabled="saving || i === 0"
+                                        :aria-label="'Move selected tune ' + (i + 1) + ' up'"
+                                        @click="move(i, -1)"
+                                    >
+                                        <v-icon>{{ icons.up }}</v-icon>
+                                    </v-btn>
+                                    <v-btn
+                                        icon
+                                        small
+                                        :disabled="saving || i === batch.length - 1"
+                                        :aria-label="'Move selected tune ' + (i + 1) + ' down'"
+                                        @click="move(i, 1)"
+                                    >
+                                        <v-icon>{{ icons.down }}</v-icon>
+                                    </v-btn>
+                                </v-list-item-action>
+                            </v-list-item>
+                        </v-list>
                         <v-select
+                            v-else
                             v-model="selectedID"
                             :items="settingOptions"
                             label="Choose key and setting"
@@ -54,7 +93,7 @@
                             v-else
                             class="caption"
                         >
-                            The tune will be added at the end of the set.
+                            {{ batch.length > 1 ? 'Tunes will be added at the end of the set in the order shown.' : 'The tune will be added at the end of the set.' }}
                         </p>
                     </template>
                 </v-card-text>
@@ -70,7 +109,7 @@
                     <v-btn
                         color="primary"
                         :loading="saving"
-                        :disabled="loading || !selectedID || !destination || (destination === 'new' && !name.trim())"
+                        :disabled="loading || (!batch.length && !selectedID) || !destination || (destination === 'new' && !name.trim())"
                         @click="add"
                     >
                         Add to set
@@ -87,6 +126,7 @@
     </div>
 </template>
 <script>
+import { mdiArrowUp, mdiArrowDown } from '@mdi/js';
 import eventBus from '@/eventBus.js';
 import store from '@/services/store.js';
 import ffBackend from '@/services/backend.js';
@@ -98,6 +138,7 @@ export default {
     name: 'AddToSetDialog',
     data: () => ({
         open: false, loading: false, saving: false, error: '', title: '',
+        batch: [], icons: { up: mdiArrowUp, down: mdiArrowDown },
         settings: [], sets: [], selectedID: null, destination: null, name: '', draftTarget: null,
         noticeOpen: false, notice: '',
     }),
@@ -120,34 +161,42 @@ export default {
     },
     beforeDestroy() { eventBus.$off('showAddToSet', this._show); },
     methods: {
+        settingLabel(entry) {
+            return `${entry.setting.mode ? keyLabel(entry.setting.mode) : 'Key unknown'} · ${entry.setting.dance ? typeLabel(entry.setting.dance) : 'Type unknown'} · Setting ${entry.setting_id}`;
+        },
+        move(index, offset) {
+            const entry = this.batch.splice(index, 1)[0];
+            this.batch.splice(index + offset, 0, entry);
+        },
         displayName: value => utils.parseDisplayableName(value || ''),
-        async show({ tuneID, title, draftTarget = null }) {
+        async show({ tuneID, title, draftTarget = null, entries = null }) {
             if (this.saving) return;
             const request = (this._request || 0) + 1;
             this._request = request;
             this.open = true; this.loading = true; this.error = ''; this.title = title;
+            this.batch = entries ? JSON.parse(JSON.stringify(entries)) : [];
             this.settings = []; this.sets = []; this.selectedID = null; this.name = '';
             this.draftTarget = draftTarget;
             this.destination = draftTarget ? 'draft' : 'new';
             try {
                 const [favourites, sets] = await Promise.all([store.getFavourites(), store.getTuneSets()]);
-                const settings = await settingsForSetTune(ffBackend, tuneID, title, favourites);
+                const settings = entries ? [] : await settingsForSetTune(ffBackend, tuneID, title, favourites);
                 if (request !== this._request || !this.open) return;
                 this.sets = sets.sort((a, b) => b.updatedAt - a.updatedAt);
                 this.settings = settings;
                 if (!draftTarget && sets.length) this.destination = sets[0].id;
-                if (settings.length === 1 || settings[0]?.favourite) this.selectedID = String(settings[0].setting_id);
+                if (!entries && (settings.length === 1 || settings[0]?.favourite)) this.selectedID = String(settings[0].setting_id);
             } catch (e) { if (request === this._request) this.error = e.message; }
             finally { if (request === this._request) this.loading = false; }
         },
         async add() {
             if (this.saving) return;
-            const selected = this.settings.find(r => String(r.setting_id) === this.selectedID);
-            if (!selected) return;
+            const selected = this.batch.length ? this.batch : this.settings.filter(r => String(r.setting_id) === this.selectedID);
+            if (!selected.length) return;
             this.saving = true; this.error = '';
             try {
                 if (this.destination === 'draft') {
-                    await this.draftTarget.add(selected);
+                    for (const entry of [...selected].reverse()) await this.draftTarget.add(entry);
                     this.notice = 'Added to the draft. Save the set when you are ready.';
                 } else {
                     const existing = this.sets.find(s => s.id === this.destination);
@@ -155,9 +204,9 @@ export default {
                     const draft = existing ? JSON.parse(JSON.stringify(existing)) : {
                         id: globalThis.crypto.randomUUID(), name: this.name.trim(), tags: [], notes: '', entries: [],
                     };
-                    draft.entries.push({ id: globalThis.crypto.randomUUID(), result: {
-                        settingID: selected.setting_id, setting: selected.setting, displayName: selected.display_name,
-                    } });
+                    draft.entries.push(...selected.map(entry => ({ id: globalThis.crypto.randomUUID(), result: {
+                        settingID: entry.setting_id, setting: entry.setting, displayName: entry.display_name,
+                    } })));
                     await store.saveTuneSet(draft, existing ? existing.updatedAt : null);
                     this.notice = `Added to ${draft.name}.`;
                 }
