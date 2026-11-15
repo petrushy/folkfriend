@@ -65,12 +65,42 @@ also supply the tune page's offline fallback independently of Favorite Tunes.
 ## Following a performance
 
 In the full score view, Follow my playing uses the existing practice microphone
-and staff-line tracker. It highlights the current row and can scroll through
-the complete arrangement. It compares every saved tune in the set; two strong, distinct windows must
-favour one unambiguous tune before changing entries. Skips and restarts are
-recognized, while shared phrases and repeats hold the current tune. There is
-one Follow my playing control, with a Next tune cue for identical occurrences
-that audio cannot distinguish. Entry identity is kept separate from setting identity.
+and staff-line tracker. It highlights the current row and scrolls through the
+complete arrangement **without any tapping**: playing with a whistle or fiddle
+leaves no hand free. Every analysed window (10 s, every 4 s) is compared with
+every saved tune in the set, so moving on, skipping a tune or going back to an
+earlier one is followed by itself. It moves when one tune scores at least
+**0.5** and beats every other tune by **0.15**, on a single window; anything
+less ambiguous holds the current tune, so repeats and shared phrases stay put.
+Next tune remains only for identical occurrences (the same setting twice in a
+row), which audio cannot tell apart. Entry identity is kept separate from
+setting identity.
+
+**These numbers are measured.** `app/test/bench/replaySetFollow.mjs` replays
+simulated sessions — real thesession tunes rendered with wrong notes, tempo
+drift and room noise, transcribed by the real DSP — through the follower. The
+earlier rule (0.8 on two windows) was hardly ever met by real transcriptions:
+
+| 160 sessions, 320 tune changes | old: 0.8 × 2 windows | now: 0.5 × 1 window |
+|---|---|---|
+| set holds the setting played: never followed | 16 % normal / 80 % noisy | 0 % / 0 % |
+| set holds a different same-key setting: never followed | 61 % / 89 % | 11 % / 17 % |
+| median time to move after the tune changes | ~12 s | ~6–7 s |
+| time on a tune not being played (unplayed same-type, same-key tune after every played one) | 0 % | 0 % |
+
+The margin is what keeps it honest: the best of five unplayed same-key tunes
+scores 0.09 at the median and 0.38 at the 99th percentile. To re-measure:
+
+```sh
+cd rust && cargo build --release --example detect_sim
+DETECT_SIM_CONTOURS=1 ./target/release/examples/detect_sim ../app/public/res/thesession.json 80 11 > /tmp/setsim.jsonl
+node ../app/test/bench/replaySetFollow.mjs /tmp/setsim.jsonl
+```
+
+⚠️ Synthetic audio says nothing absolute about a real whistle in a real room;
+it compares rules fairly. A setting stored very differently from how it is
+played (about one change in seven above) is still not followed and needs Next
+tune.
 
 Auto-scroll can be switched off independently. Touch/wheel browsing holds it
 for eight seconds; Resume scrolling restores it immediately. Editing, changing

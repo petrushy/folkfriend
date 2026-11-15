@@ -428,13 +428,13 @@ try {
             await vm.$nextTick();
             const firstLine = vm.line;
             vm.updateFollow({ contour: contours[1].slice(0, 32), readAt: at + 100, windowSeconds: 4 }, at + 100);
-            const heldFirst = vm.activeIndex === 0;
+            const movedOnFirst = vm.activeIndex === 1;
             vm.updateFollow({ contour: contours[1].slice(16, 48), readAt: at + 200, windowSeconds: 4 }, at + 200);
             await vm.$nextTick();
-            return { firstLine, heldFirst, index: vm.activeIndex, band: !!document.querySelector('.set-score-active .followBand'), scrolled: window.scrollCalls > 0 };
+            return { firstLine, movedOnFirst, index: vm.activeIndex, band: !!document.querySelector('.set-score-active .followBand'), scrolled: window.scrollCalls > 0 };
         })()`);
-        check('set Follow highlights a row and advances only on confirmed next-tune evidence',
-            Number.isInteger(followed.firstLine) && followed.heldFirst && followed.index === 1 && followed.band && followed.scrolled, JSON.stringify(followed));
+        check('set Follow highlights a row and moves to the next tune by itself on the first clear window',
+            Number.isInteger(followed.firstLine) && followed.movedOnFirst && followed.index === 1 && followed.band && followed.scrolled, JSON.stringify(followed));
         await sleep(400);
         check('auto-scroll brings the active staff row into view', await evaluate(`(() => { const r = document.querySelector('.set-score-active .followBand')?.getBoundingClientRect(); return !!r && r.top >= 0 && r.bottom <= innerHeight; })()`));
         await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, session);
