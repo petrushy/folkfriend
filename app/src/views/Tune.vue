@@ -32,6 +32,8 @@
             <SetPartnersButton class="ma-1" chip :tuneID="tuneID" :title="name || displayName" />
         </v-container>
 
+        <TuneSetMembership :tune-i-d="tuneID" />
+
         <v-container v-if="geoTaggingOn" class="heardAt py-1">
             <span class="heardAtLabel pr-1">
                 <v-icon small class="pb-1">{{ icons.mapMarker }}</v-icon>
@@ -308,6 +310,7 @@ import { dropboxState } from '@/services/dropbox.js';
 import { playSessionTuneLooped, playerHost, sessionPlayer } from '@/services/sessionPlayerHost.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
+import TuneSetMembership from '@/components/TuneSetMembership.vue';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
@@ -319,7 +322,7 @@ const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
     name: 'TuneView',
-    components: { AbcDisplay, TuneBackgroundButton, SetPartnersButton, TunePlaceDialog },
+    components: { AbcDisplay, TuneBackgroundButton, SetPartnersButton, TunePlaceDialog, TuneSetMembership },
     props: {
         tuneID: {
             type: String,
@@ -827,12 +830,18 @@ export default {
                 timeout,
             ]).finally(() => clearTimeout(timer));
         },
-        // Reconstruct settings for this tune from favourites (stored with their
-        // own ABC), so favourited tunes remain fully viewable offline.
+        // Reconstruct settings from saved favourites and sets, so set-only tunes
+        // also remain fully viewable without their database.
         async _settingsFromFavourites() {
             let favourites;
             try {
                 favourites = await store.getFavourites();
+                // A set-only tune has its own durable score snapshot too.
+                // Failure to read sets must not hide an available favourite.
+                try {
+                    const sets = await store.getTuneSets();
+                    favourites = favourites.concat(sets.flatMap(set => set.entries.map(entry => ({ result: entry.result }))));
+                } catch (e) { console.warn('Could not read set snapshots for offline fallback', e); }
             } catch (e) {
                 console.warn('Could not read favourites for offline fallback', e);
                 return null;

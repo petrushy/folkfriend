@@ -190,7 +190,7 @@ try {
             vm.add({ setting_id: id, display_name: 'Tune ' + id,
                 setting: { tune_id: id, abc: 'X:1\\nT:Test\\nM:4/4\\nL:1/8\\nK:D\\nDEFG ABcd|', mode, dance } });
         }
-        vm.move(1, -1); await vm.save();
+        vm.move(1, -1); await vm.save(); await vm.showList();
         return { error: vm.error, order: vm.sets[0]?.entries.map(e => e.result.settingID) };
     })()`);
     check('browser saves reordered full settings', !state.error && state.order.join(',') === '430,420', JSON.stringify(state));
@@ -271,6 +271,66 @@ try {
     check('selected favorites append together in chosen order and remain starred',
         !bulkFavorite.error && bulkFavorite.favoriteCount === 2 && bulkIDs.length === 3 &&
         bulkIDs.slice(1).join(',') === [...bulkFavorite.original].reverse().join(','), JSON.stringify({ ...bulkFavorite, bulkIDs }));
+    await send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false }, session);
+    await waitFor(`!!document.querySelector('.set-score-preview svg')`, 10000, 'first tune thumbnail');
+    check('set rows show compact first-tune score previews on wide screens', true);
+    const quickTags = await evaluate(`(async () => {
+        const row = window.findVM('SetRow');
+        window.taggedSetID = row.set.id;
+        row.addTag('Session test');
+        return row.set.id;
+    })()`);
+    await waitFor(`window.findVM('SetsView').sets.find(s => s.id === window.taggedSetID)?.tags.includes('Session test')`, 10000, 'quick set tag');
+    const tagFilter = await evaluate(`(() => {
+        const vm = window.findVM('SetsView');
+        vm.toggleTagFilter('Session test');
+        return { count: vm.visibleSets.length, id: vm.visibleSets[0].id };
+    })()`);
+    check('quick tagging and tag filters work for sets', tagFilter.count === 1 && tagFilter.id === quickTags);
+    await evaluate(`window.findVM('SetsView').activeTags = [];`);
+    check('duplicate/delete are kept out of the compact row', await evaluate(`![...document.querySelectorAll('.set-row')].some(e => /Duplicate|Delete/.test(e.innerText))`));
+    const listShot = await send('Page.captureScreenshot', { format: 'png' }, session);
+    const layoutFS = await import('node:fs');
+    layoutFS.writeFileSync('/tmp/ff-sets-list.png', Buffer.from(listShot.data, 'base64'));
+    await evaluate(`document.querySelector('.set-summary').click()`);
+    await waitFor(`!!window.findVM('SetsView').viewedSet && !window.findVM('SetsView').draft && [...document.querySelectorAll('.set-score')].every(e => e.querySelector('.abcSheetMusic svg'))`, 10000, 'all scores in set view');
+    const viewShot = await send('Page.captureScreenshot', { format: 'png' }, session);
+    layoutFS.writeFileSync('/tmp/ff-sets-score-view.png', Buffer.from(viewShot.data, 'base64'));
+    const viewed = await evaluate(`({ count: document.querySelectorAll('.set-score').length, expected: window.findVM('SetsView').viewedSet.entries.length, id: window.findVM('SetsView').viewedSet.id })`);
+    check('View displays every score in order without entering Edit', viewed.count === viewed.expected && viewed.count > 0);
+    await evaluate(`window.findVM('SetsView').edit(window.findVM('SetsView').viewedSet)`);
+    check('Edit opens the arrangement editor separately', await evaluate(`!!window.findVM('SetsView').draft && !document.querySelector('.set-score')`));
+    const guarded = await evaluate(`(async () => {
+        const vm = window.findVM('SetsView');
+        vm.draft.name += ' unsaved';
+        const id = vm.draft.id;
+        window.confirm = () => false;
+        await vm.$router.push({ name: 'sets' }).catch(() => {});
+        const preserved = vm.draft?.id === id && vm.draft.name.endsWith(' unsaved');
+        window.confirm = () => true; vm.close();
+        return preserved && !vm.viewedSet.name.endsWith(' unsaved');
+    })()`);
+    check('changing set URLs protects unsaved edits and viewing leaves the saved name intact', guarded);
+    await evaluate(`document.querySelector('.set-score a').click()`);
+    await waitFor(`!!document.querySelector('[aria-label="Sets containing this tune"] .v-chip')`, 30000, 'tune set membership');
+    check('Tune view shows clickable set-membership chips', true);
+    const setOnly = await evaluate(`(async () => {
+        const db = await new Promise((resolve, reject) => {
+            const request = indexedDB.open('keyval-store');
+            request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+        });
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction('keyval', 'readwrite');
+            tx.objectStore('keyval').put([], 'favouriteItems');
+            tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+        }); db.close();
+        const fallback = await window.findVM('TuneView')._settingsFromFavourites();
+        return !!fallback?.settings.length && fallback.settings.every(s => !!s.abc);
+    })()`);
+    check('a tune saved only in sets has an offline tune-page fallback', setOnly);
+    await evaluate(`document.querySelector('[aria-label="Sets containing this tune"] .v-chip').click()`);
+    await waitFor(`!!window.findVM('SetsView')?.viewedSet && !!document.querySelector('.set-score')`, 10000, 'membership opens set scores');
+    check('membership chip opens the full set score view', true);
     const vueWarnings = warnings.filter(w => /\[Vue warn\]|EXC/.test(w));
     check('no Vue warnings or runtime exceptions', vueWarnings.length === 0, vueWarnings.slice(0, 3).join(' // '));
 } catch (e) {

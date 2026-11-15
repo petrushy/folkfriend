@@ -111,7 +111,7 @@ export default {
             default: null
         },
         settingID: {
-            type: Number,
+            type: [Number, String],
             required: false,
             default: null,
         },

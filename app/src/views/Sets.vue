@@ -30,12 +30,38 @@
             indeterminate
             aria-label="Loading sets"
         />
-        <template v-if="!draft">
+        <template v-if="!draft && !viewedSet">
             <v-text-field
                 v-model="filter"
                 label="Find a set by name or tag"
                 clearable
             />
+            <div
+                v-if="allTags.length"
+                class="d-flex flex-wrap align-center mb-3"
+                style="gap:6px"
+                aria-label="Filter sets by tags"
+            >
+                <span class="caption text--secondary">Tags:</span>
+                <v-chip
+                    v-for="tag in allTags"
+                    :key="tag"
+                    small
+                    :outlined="!activeTags.includes(tag)"
+                    :color="activeTags.includes(tag) ? 'primary' : undefined"
+                    @click="toggleTagFilter(tag)"
+                >
+                    {{ tag }} <span class="caption ml-1">{{ tagCount(tag) }}</span>
+                </v-chip>
+                <v-btn
+                    v-if="activeTags.length"
+                    x-small
+                    text
+                    @click="activeTags = []"
+                >
+                    Clear
+                </v-btn>
+            </div>
             <v-card
                 v-if="!loading && !sets.length"
                 outlined
@@ -46,47 +72,110 @@
             <p v-else-if="!visibleSets.length">
                 No sets match this filter.
             </p>
-            <v-card
+            <SetRow
                 v-for="set in visibleSets"
                 :key="set.id"
-                outlined
-                class="mb-3 pa-3"
+                :set="set"
+                :all-tags="allTags"
+                @view="openSet(set)"
+                @edit="edit(set)"
+                @duplicate="duplicate(set)"
+                @delete="deleteSet(set)"
+                @tags="updateSetTags(set, $event)"
+                @filter-tag="toggleTagFilter"
+            />
+        </template>
+        <template v-else-if="!draft && viewedSet">
+            <div
+                class="d-flex align-center flex-wrap my-3"
+                style="gap:8px"
             >
-                <h2 class="title">
-                    {{ set.name }}
+                <v-btn
+                    text
+                    @click="showList"
+                >
+                    Back to sets
+                </v-btn>
+                <h2 class="title flex-grow-1">
+                    {{ viewedSet.name }}
                 </h2>
-                <p class="mb-2">
-                    {{ set.entries.map(e => title(e.result.displayName) + ' (' + key(e.result.setting.mode) + ', ' + type(e.result.setting.dance) + ')').join(' → ') || 'Empty draft' }}
-                </p>
-                <v-chip
-                    v-for="tag in set.tags"
-                    :key="tag"
-                    small
+                <v-btn
                     outlined
-                    class="mr-1 mb-2"
+                    @click="edit(viewedSet)"
                 >
-                    {{ tag }}
-                </v-chip>
-                <p
-                    v-if="set.notes"
-                    class="set-notes"
+                    Edit set
+                </v-btn>
+                <v-menu
+                    offset-y
+                    left
                 >
-                    {{ set.notes }}
+                    <template #activator="{ on, attrs }">
+                        <v-btn
+                            icon
+                            title="Set actions"
+                            aria-label="Set actions"
+                            v-bind="attrs"
+                            v-on="on"
+                        >
+                            <v-icon>{{ icons.more }}</v-icon>
+                        </v-btn>
+                    </template>
+                    <v-list dense>
+                        <v-list-item @click="duplicate(viewedSet)">
+                            <v-list-item-title>Duplicate</v-list-item-title>
+                        </v-list-item>
+                        <v-list-item @click="deleteSet(viewedSet)">
+                            <v-list-item-title class="error--text">
+                                Delete
+                            </v-list-item-title>
+                        </v-list-item>
+                    </v-list>
+                </v-menu>
+            </div>
+            <v-chip
+                v-for="tag in viewedSet.tags"
+                :key="tag"
+                small
+                outlined
+                class="mr-1 mb-2"
+            >
+                {{ tag }}
+            </v-chip>
+            <p
+                v-if="viewedSet.notes"
+                class="set-notes"
+            >
+                {{ viewedSet.notes }}
+            </p>
+            <p v-if="!viewedSet.entries.length">
+                This set has no tunes yet. Choose Edit set to add tunes.
+            </p>
+            <div
+                v-for="(entry, i) in viewedSet.entries"
+                :key="entry.id"
+                class="set-score mb-6"
+            >
+                <h3 class="subtitle-1 font-weight-bold">
+                    {{ i + 1 }}. {{ title(entry.result.displayName) }}
+                </h3>
+                <p class="caption text--secondary mb-1">
+                    {{ key(entry.result.setting.mode) }} · {{ type(entry.result.setting.dance) }}
                 </p>
+                <AbcDisplay
+                    :abc="entry.result.setting.abc"
+                    :title="entry.result.displayName"
+                    :mode="entry.result.setting.mode"
+                    :meter="entry.result.setting.meter"
+                    :instrument-shift="instrumentShift"
+                />
                 <v-btn
+                    small
                     text
-                    color="primary"
-                    @click="edit(set)"
+                    :to="{ name: 'tune', query: { tuneID: String(entry.result.setting.tune_id), settingID: String(entry.result.settingID), displayName: entry.result.displayName } }"
                 >
-                    Open set
+                    Open tune
                 </v-btn>
-                <v-btn
-                    text
-                    @click="duplicate(set)"
-                >
-                    Duplicate
-                </v-btn>
-            </v-card>
+            </div>
         </template>
         <v-card
             v-else
@@ -260,15 +349,6 @@
                     Close
                 </v-btn>
                 <v-spacer />
-                <v-btn
-                    v-if="version !== null"
-                    text
-                    color="error"
-                    :disabled="busy"
-                    @click="remove"
-                >
-                    Delete set
-                </v-btn>
             </div>
         </v-card>
     </v-container>
@@ -281,29 +361,39 @@ import eventBus from '@/eventBus';
 import { keyLabel, typeLabel } from '@/js/favouriteFacets.mjs';
 import utils from '@/js/utils';
 import AbcDisplay from '@/components/AbcDisplay';
+import SetRow from '@/components/SetRow.vue';
 import SetPartnersButton from '@/components/SetPartnersButton';
-import { mdiArrowUp, mdiArrowDown, mdiClose, mdiStar } from '@mdi/js';
+import { mdiArrowUp, mdiArrowDown, mdiClose, mdiStar, mdiDotsVertical } from '@mdi/js';
 
 export default {
     name: 'SetsView',
-    components: { AbcDisplay, SetPartnersButton },
+    components: { AbcDisplay, SetPartnersButton, SetRow },
     beforeRouteLeave(to, from, next) {
         next(!this.busy && (!this.dirty || window.confirm('Discard unsaved changes to this set?')));
     },
+    beforeRouteUpdate(to, from, next) {
+        if (this.busy || (this.dirty && !window.confirm('Discard unsaved changes to this set?'))) { next(false); return; }
+        this.draft = null; next();
+    },
     data: () => ({
+        viewID: null, activeTags: [],
         sets: [], loading: true, filter: '', draft: null, original: '', version: null,
         query: '', results: [], searching: false, searched: false, expanded: {},
         busy: false, error: '', signedIn: !!store.currentUser,
-        icons: { up: mdiArrowUp, down: mdiArrowDown, close: mdiClose, star: mdiStar },
+        icons: { up: mdiArrowUp, down: mdiArrowDown, close: mdiClose, star: mdiStar, more: mdiDotsVertical },
     }),
     computed: {
         visibleSets() {
             const q = (this.filter || '').toLocaleLowerCase();
-            return this.sets.filter(s => [s.name, ...s.tags].some(t => t.toLocaleLowerCase().includes(q)));
+            return this.sets.filter(s => [s.name, ...s.tags].some(t => t.toLocaleLowerCase().includes(q)) && this.activeTags.every(t => s.tags.includes(t)));
         },
+        viewedSet() { return this.sets.find(s => s.id === this.viewID) || null; },
         allTags() { return [...new Set(this.sets.flatMap(s => s.tags))].sort(); },
         dirty() { return this.draft && JSON.stringify(this.draft) !== this.original; },
         instrumentShift() { return store.userSettings.instrumentShift || 0; },
+    },
+    watch: {
+        '$route.query.setID': { immediate: true, handler(value) { this.viewID = value || null; } },
     },
     created() {
         this.refresh();
@@ -325,9 +415,31 @@ export default {
         title: value => utils.parseDisplayableName(value),
         id() { return globalThis.crypto.randomUUID(); },
         async refresh() {
-            try { this.sets = (await store.getTuneSets()).sort((a, b) => b.updatedAt - a.updatedAt); }
+            try {
+                this.sets = (await store.getTuneSets()).sort((a, b) => b.updatedAt - a.updatedAt);
+                this.activeTags = this.activeTags.filter(t => this.sets.some(s => s.tags.includes(t)));
+            }
             catch (e) { this.error = 'Could not read sets from this device. ' + e.message; }
             finally { this.loading = false; }
+        },
+        toggleTagFilter(tag) { this.activeTags = this.activeTags.includes(tag) ? this.activeTags.filter(t => t !== tag) : [...this.activeTags, tag]; },
+        tagCount(tag) { return this.sets.filter(s => s.tags.includes(tag)).length; },
+        openSet(set) { return this.$router.push({ name: 'sets', query: { setID: set.id } }).catch(() => {}); },
+        showList() { this.viewID = null; return this.$router.push({ name: 'sets' }).catch(() => {}); },
+        async updateSetTags(set, tags) {
+            try { await store.saveTuneSet({ ...set, tags }, set.updatedAt); await this.refresh(); }
+            catch (e) { this.error = e.message; }
+        },
+        async deleteSet(set) {
+            if (!window.confirm('Delete this set from your devices?')) return false;
+            this.busy = true; this.error = '';
+            try {
+                await store.deleteTuneSet(set.id, set.updatedAt);
+                if (this.draft?.id === set.id) this.draft = null;
+                if (this.viewID === set.id) { this.busy = false; await this.showList(); }
+                await this.refresh(); return true;
+            } catch (e) { this.error = e.message; return false; }
+            finally { this.busy = false; }
         },
         create() { this.edit({ id: this.id(), name: '', notes: '', tags: [], entries: [] }); },
         edit(set) {
@@ -378,16 +490,12 @@ export default {
         },
         async save() {
             this.busy = true; this.error = '';
-            try { await store.saveTuneSet(this.draft, this.version); this.draft = null; await this.refresh(); }
+            try { const saved = await store.saveTuneSet(this.draft, this.version); this.draft = null; await this.refresh(); await this.openSet(saved); }
             catch (e) { this.error = e.message; }
             finally { this.busy = false; }
         },
         async remove() {
-            if (!window.confirm('Delete this set from your devices?')) return;
-            this.busy = true;
-            try { await store.deleteTuneSet(this.draft.id, this.version); this.draft = null; await this.refresh(); }
-            catch (e) { this.error = e.message; }
-            finally { this.busy = false; }
+            if (await this.deleteSet({ id: this.draft.id, updatedAt: this.version })) this.draft = null;
         },
     },
 };

@@ -24,6 +24,22 @@ dialog uses the exact saved settings and lets a selected group be reordered
 before appending it to an existing or new set. This works offline and leaves
 the favourites untouched.
 
+## Browsing and editing
+
+The set list uses compact rows with the first tune's score on the right when
+there is room, engraved only near the viewport. Use the same tag-plus icon as
+Favorite Tunes to tag a set; tag chips above the list filter with AND semantics.
+A row's overflow menu contains View scores, Edit set, Duplicate and Delete.
+
+Clicking a set opens its own URL (`/sets?setID=…`) and all saved scores in order
+on one scrollable page. Viewing never opens an editable draft. Edit set opens
+the arrangement editor; saving returns to the score view. Unsaved edits remain
+protected when navigating between set URLs as well as away from the page.
+
+Tune pages show clickable membership chips with each set's name and the keys
+used for that tune. Those chips open the complete set score view. Set snapshots
+also supply the tune page's offline fallback independently of Favorite Tunes.
+
 ## Persistence and sync
 
 IndexedDB `tuneSets` is the local source. All set writes and inbound merges use
