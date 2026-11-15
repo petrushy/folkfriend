@@ -1,7 +1,7 @@
 <template>
     <v-container class="viewContainerWrapper">
         <div class="d-flex align-center my-2">
-            <h1>Favourites</h1>
+            <h1>Favorite Tunes</h1>
             <v-spacer />
             <v-select
                 v-model="sortBy"
@@ -271,7 +271,7 @@
         <!-- Select all + name filter bar -->
         <div
             v-if="favouriteItems.length > 0"
-            class="d-flex align-center px-2 py-1 select-all-bar"
+            class="d-flex align-center px-2 py-1 select-all-bar flex-wrap"
         >
             <v-checkbox
                 :input-value="allVisibleSelected"
@@ -284,6 +284,23 @@
                 {{ allVisibleSelected ? 'Deselect all' : 'Select all' }}
                 <template v-if="selectedIDs.size > 0">({{ selectedIDs.size }})</template>
             </span>
+            <v-btn
+                v-if="selectedIDs.size > 0"
+                small
+                text
+                color="primary"
+                class="ml-2"
+                title="Add selected tunes to a set"
+                @click="addSelectedToSet"
+            >
+                <v-icon
+                    small
+                    left
+                >
+                    {{ icons.addToSet }}
+                </v-icon>
+                Add to set ({{ selectedIDs.size }})
+            </v-btn>
             <v-menu
                 v-model="bulkTagMenu"
                 :close-on-content-click="false"
@@ -348,6 +365,7 @@
                     :setting-i-d="row.settingID"
                     :timestamp="row.timestamp"
                     :selected="selectedIDs.has(row.settingID)"
+                    :sets="row.sets"
                     :tags="row.tags"
                     :all-tags="allTags"
                     :setting="row.setting"
@@ -357,6 +375,7 @@
                     :recording-playing="isRecordingPlaying(row.tuneID)"
                     @playRecording="playRecording($event, row.name)"
                     @favouriteItemClicked="loadFavouriteItem"
+                    @addToSet="addFavouriteToSet"
                     @unstar="removeFavourite"
                     @toggle="toggleSelected"
                     @addTag="addTag"
@@ -410,6 +429,7 @@
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
+                            :sets="row.sets"
                             :tags="row.tags"
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
@@ -418,6 +438,7 @@
                             :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
+                            @addToSet="addFavouriteToSet"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -467,6 +488,7 @@
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
+                            :sets="row.sets"
                             :tags="row.tags"
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
@@ -475,6 +497,7 @@
                             :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
+                            @addToSet="addFavouriteToSet"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -527,6 +550,7 @@
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
+                            :sets="row.sets"
                             :tags="row.tags"
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
@@ -535,6 +559,7 @@
                             :recording-playing="isRecordingPlaying(row.tuneID)"
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
+                            @addToSet="addFavouriteToSet"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -579,7 +604,9 @@
             max-width="400"
         >
             <v-card>
-                <v-card-title class="text-subtitle-1">Play {{ recordingPicker.name }} from…</v-card-title>
+                <v-card-title class="text-subtitle-1">
+                    Play {{ recordingPicker.name }} from…
+                </v-card-title>
                 <v-list dense>
                     <v-list-item
                         v-for="entry in recordingPicker.entries"
@@ -594,7 +621,12 @@
                 </v-list>
                 <v-card-actions>
                     <v-spacer />
-                    <v-btn text @click="recordingPicker.open = false">Cancel</v-btn>
+                    <v-btn
+                        text
+                        @click="recordingPicker.open = false"
+                    >
+                        Cancel
+                    </v-btn>
                 </v-card-actions>
             </v-card>
         </v-dialog>
@@ -726,10 +758,11 @@
 </template>
 
 <script>
-import { mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline, mdiShuffleVariant } from '@mdi/js';
+import { mdiPlaylistPlus, mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline, mdiShuffleVariant } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
+import { indexSetsBySetting } from '@/js/setMembership.mjs';
 import FavouriteRow from '@/components/FavouriteRow';
 import utils from '@/js/utils';
 import { settingSourceUrl } from '@/js/source.mjs';
@@ -766,6 +799,7 @@ export default {
         return {
             favouriteItems: [],
             selectedIDs: new Set(),
+            tuneSets: [],
             activeTags: Array.isArray(persisted.activeTags) ? persisted.activeTags : [],
             activePlaceIDs: Array.isArray(persisted.activePlaceIDs) ? persisted.activePlaceIDs : [],
             activeTypes: Array.isArray(persisted.activeTypes) ? persisted.activeTypes : [],
@@ -810,6 +844,7 @@ export default {
             ],
             shuffleSeed: Math.floor(Math.random() * 2 ** 31),
             icons: {
+                addToSet: mdiPlaylistPlus,
                 export: mdiExport,
                 pencil: mdiPencil,
                 delete: mdiDelete,
@@ -830,6 +865,7 @@ export default {
         };
     },
     computed: {
+        setMemberships() { return indexSetsBySetting(this.tuneSets); },
         // The tune the shared session player is sounding right now, whoever
         // started it — its row shows a pause instead of the ▶.
         playingRecordingTuneID() {
@@ -1073,6 +1109,8 @@ export default {
     created() {
         eventBus.$emit('parentViewActivated');
         this.loadFavourites();
+        this.loadTuneSets();
+        eventBus.$on('tuneSetsChanged', this.loadTuneSets);
         this.loadPlaces();
         this.loadRecordings();
         eventBus.$on('syncComplete', this.loadFavourites);
@@ -1103,6 +1141,7 @@ export default {
         this._fillViewport();
     },
     beforeDestroy() {
+        eventBus.$off('tuneSetsChanged', this.loadTuneSets);
         eventBus.$off('syncComplete', this.loadFavourites);
         eventBus.$off('sightingsChanged', this.loadPlaces);
         eventBus.$off('liveSessionsChanged', this.loadRecordings);
@@ -1111,6 +1150,10 @@ export default {
         this._observedSentinel = null;
     },
     methods: {
+        async loadTuneSets() {
+            try { this.tuneSets = await store.getTuneSets(); }
+            catch (e) { eventBus.$emit('syncError', 'Could not read set membership on this device.'); }
+        },
         _resetRowBudget() {
             if (Number.isFinite(this.rowBudget)) this.rowBudget = INITIAL_ROW_BUDGET;
         },
@@ -1169,6 +1212,7 @@ export default {
                 descriptor: utils.parseDisplayableDescription(item.result.setting),
                 settingID: item.result.settingID,
                 timestamp: item.timestamp,
+                sets: this.setMemberships[String(item.result.settingID)] || [],
                 tags: item.tags || [],
                 setting: item.result.setting || null,
                 // Lifted out of `setting` so the tag-grouped list — which does
@@ -1487,6 +1531,27 @@ export default {
                 this.deleteTagDialog = false;
                 this.deleteTagTarget = null;
                 this.loadFavourites();
+            });
+        },
+        addFavouriteToSet(settingID) {
+            const item = this.favouriteItems.find(f => String(f.result.settingID) === String(settingID));
+            if (item) this.showSetDestination([item]);
+        },
+        addSelectedToSet() {
+            const selected = new Set([...this.selectedIDs].map(String));
+            const seen = new Set();
+            // Current sort first; include selected items hidden by filters too.
+            const items = [...this.filteredItems, ...this.favouriteItems].filter(item => {
+                const id = String(item.result.settingID);
+                if (!selected.has(id) || seen.has(id)) return false;
+                seen.add(id); return true;
+            });
+            if (items.length) this.showSetDestination(items);
+        },
+        showSetDestination(items) {
+            eventBus.$emit('showAddToSet', { title: items.length === 1 ? items[0].result.displayName : `${items.length} tunes`,
+                                             entries: items.map(item => ({ setting_id: item.result.settingID,
+                                                                           setting: item.result.setting, display_name: item.result.displayName })),
             });
         },
         shareFavourites(format = 'html') {

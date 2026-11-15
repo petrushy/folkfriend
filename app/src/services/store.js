@@ -16,6 +16,15 @@ import {
     logEvent
 } from 'firebase/analytics';
 
+// Canonical map ordering keeps equal-version conflict resolution stable across
+// IndexedDB and Firestore, which do not preserve the same object key order.
+function canonicalRecord(value) {
+    if (Array.isArray(value)) return '[' + value.map(canonicalRecord).join(',') + ']';
+    if (value && typeof value === 'object') return '{' + Object.keys(value).sort()
+        .map(k => JSON.stringify(k) + ':' + canonicalRecord(value[k])).join(',') + '}';
+    return JSON.stringify(value);
+}
+
 // TODO load from local storage or similar
 const USER_SETTING_DEFAULTS = {
     advancedMode: false,
@@ -1500,6 +1509,111 @@ class Store {
         return run;
     }
 
+    // Sets are independent of favourites. Deleted records stay as tombstones so
+    // a device returning from offline cannot seed a deleted arrangement again.
+    async getTuneSets(includeDeleted = false) {
+        const records = await get('tuneSets') || [];
+        return JSON.parse(JSON.stringify(records.filter(r => includeDeleted || !r.deleted))).map(record => ({ ...record, ...(record.entries ? { entries: record.entries.map(entry => ({ ...entry, repetitions: entry.repetitions === undefined ? 2 : entry.repetitions })) } : {}) }));
+    }
+
+    _validateTuneSet(record) {
+        if (!record || typeof record.id !== 'string' || !record.id || record.id.includes('/') ||
+            !Number.isFinite(record.updatedAt)) throw new Error('Invalid set record.');
+        if (record.deleted === true) return;
+        if (typeof record.name !== 'string' || !record.name.trim()) throw new Error('Give the set a name before saving.');
+        if (record.name.length > 200) throw new Error('The set name must be 200 characters or fewer.');
+        if (typeof record.notes !== 'string' || record.notes.length > 10000) throw new Error('Set notes must be text with at most 10,000 characters.');
+        if (!Array.isArray(record.tags) || record.tags.length > 50 ||
+            record.tags.some(t => typeof t !== 'string' || !t.trim() || t.length > 100)) {
+            throw new Error('Use at most 50 set tags, each with 1–100 characters.');
+        }
+        if (!Array.isArray(record.entries) || record.entries.length > 100) throw new Error('A set can contain at most 100 tune entries.');
+        record.entries.forEach((entry, index) => {
+            const label = `Tune ${index + 1}${entry?.result?.displayName ? ' (' + entry.result.displayName + ')' : ''}`;
+            if (!entry || typeof entry.id !== 'string' || !entry.id || !entry.result || !entry.result.setting) {
+                throw new Error(`${label} has incomplete setting data. Remove it and add it again from search.`);
+            }
+            if (entry.repetitions !== undefined && (!Number.isInteger(entry.repetitions) || entry.repetitions < 1 || entry.repetitions > 99)) {
+                throw new Error(`${label}: times played must be a whole number from 1 to 99.`);
+            }
+            if (!this._isValidSettingID(entry.result.settingID)) {
+                throw new Error(`${label} has no setting ID. Remove it and add a specific setting from search.`);
+            }
+            if (typeof entry.result.displayName !== 'string' || typeof entry.result.setting.abc !== 'string' || !entry.result.setting.abc.trim()) {
+                throw new Error(`${label} is missing its name or score. Remove it and add it again from search.`);
+            }
+        });
+        if (new Set(record.entries.map(e => e.id)).size !== record.entries.length) {
+            throw new Error('Two tune entries have the same entry ID. Remove the duplicate entry and add the tune again.');
+        }
+        // Leave room below Firestore's 1 MiB document limit, including overhead.
+        if (new TextEncoder().encode(JSON.stringify(record)).length > 700000) {
+            throw new Error('This set is too large to save. Remove some tunes or notes.');
+        }
+    }
+
+    async saveTuneSet(draft, expectedVersion = null) {
+        return this._withRecords('tuneSets', records => {
+            const previous = records.find(r => r.id === draft.id);
+            if (previous && (previous.deleted || previous.updatedAt !== expectedVersion)) {
+                throw new Error('This set changed on another screen or device. Reopen it before saving. Your draft is still here.');
+            }
+            const record = JSON.parse(JSON.stringify({
+                id: draft.id, name: draft.name.trim(), notes: draft.notes || '',
+                tags: [...new Set((draft.tags || []).map(t => t.trim()).filter(Boolean))],
+                entries: draft.entries.map(entry => ({ ...entry, repetitions: entry.repetitions === undefined ? 2 : entry.repetitions })),
+                createdAt: previous ? previous.createdAt : Date.now(),
+                updatedAt: nextUpdatedAt(previous ? previous.updatedAt : 0),
+            }));
+            this._validateTuneSet(record);
+            const next = records.filter(r => r.id !== record.id).concat(record);
+            // Start remote work only after the strict local write, while still
+            // inside the mutation chain, preserving edit/delete ordering.
+            return this._commitTuneSets(next, record);
+        }, 'tuneSetsChanged');
+    }
+
+    async _commitTuneSets(records, record) {
+        await this._dbSetStrict('tuneSets', records);
+        this._syncPush('tuneSets', record);
+        eventBus.$emit('tuneSetsChanged');
+        return { value: record };
+    }
+
+    deleteTuneSet(id, expectedVersion) {
+        return this._withRecords('tuneSets', records => {
+            const previous = records.find(r => r.id === id);
+            if (!previous || previous.deleted) return;
+            if (previous.updatedAt !== expectedVersion) throw new Error('This set changed. Reopen it before deleting.');
+            const record = { id, deleted: true, updatedAt: nextUpdatedAt(previous.updatedAt) };
+            return this._commitTuneSets(records.filter(r => r.id !== id).concat(record), record);
+        });
+    }
+
+    _mergeRemoteTuneSets(incoming) {
+        return this._withRecords('tuneSets', records => {
+            const merged = new Map(records.map(r => [r.id, r]));
+            const refused = [];
+            for (const record of incoming) {
+                // One unusable document must not block every other set: skip
+                // it (keeping any local copy) and say so, rather than
+                // rejecting the whole snapshot.
+                try { this._validateTuneSet(record); }
+                catch (e) { refused.push(`${(record && record.name) || (record && record.id) || 'unknown'}: ${e.message}`); continue; }
+                const local = merged.get(record.id);
+                if (!local || record.updatedAt > local.updatedAt ||
+                    (record.updatedAt === local.updatedAt && canonicalRecord(record) > canonicalRecord(local))) {
+                    merged.set(record.id, record);
+                }
+            }
+            if (refused.length) {
+                console.warn('[folkfriend sync] skipped unusable sets from the account:', refused);
+                eventBus.$emit('syncError', `Skipped ${refused.length} set${refused.length === 1 ? '' : 's'} from your account that could not be read (${refused[0]}).`);
+            }
+            return { write: true, records: [...merged.values()] };
+        }, 'tuneSetsChanged');
+    }
+
     // Creates or updates a session record by id. liveAnalysis.js calls this
     // repeatedly while a session is open (on each tune change, on a checkpoint,
     // on Pause and on Finish), so lookup is always by id rather than by list
@@ -1672,6 +1786,11 @@ class Store {
 
     _subscribeRecordCollections(uid) {
         const subs = [
+            subscribeCollection(uid, 'tuneSets', {
+                versioned: true,
+                getLocal: () => this.getTuneSets(true),
+                applyRemote: upserts => this._mergeRemoteTuneSets(upserts),
+            }),
             subscribeCollection(uid, 'places', {
                 getLocal: () => this.getPlaces(),
                 applyRemote: (upserts, removals) => this._mergeRemoteRecords(
@@ -1764,9 +1883,10 @@ class Store {
 
     async exportUserData() {
         const payload = {
-            version: 5,
+            version: 6,
             exportedAt: Date.now(),
             userSettings: this.userSettings,
+            tuneSets: await this.getTuneSets(true),
             historyItems: await this._exportRead('historyItems'),
             // Read strictly, then handed to getFavourites() for the folderId
             // migration — so a failed read cannot present as "no favourites".
@@ -1804,11 +1924,11 @@ class Store {
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
             return 'the file does not contain FolkFriend data';
         }
-        if (![1, 2, 3, 4, 5].includes(payload.version)) {
+        if (![1, 2, 3, 4, 5, 6].includes(payload.version)) {
             return `unsupported data version: ${payload.version}`;
         }
         for (const key of ['historyItems', 'favouriteItems', 'tuneSightings',
-            'places', 'liveSessions', 'favouriteFolders']) {
+            'places', 'liveSessions', 'tuneSets', 'favouriteFolders']) {
             if (payload[key] !== undefined && !Array.isArray(payload[key])) {
                 return `"${key}" is not a list — the file looks damaged`;
             }
@@ -1819,7 +1939,7 @@ class Store {
             return 'the settings in this file look damaged';
         }
         // A backup carrying none of these parsed, but is not a backup.
-        const carries = ['historyItems', 'favouriteItems', 'tuneSightings', 'places', 'liveSessions']
+        const carries = ['historyItems', 'favouriteItems', 'tuneSightings', 'places', 'liveSessions', 'tuneSets']
             .some(key => Array.isArray(payload[key]));
         if (!carries) return 'the file contains no favourites, history, sessions or places';
         return null;
@@ -1841,7 +1961,13 @@ class Store {
         // something else — silently destroyed every favourite. Absence is not an
         // instruction to delete; an export that genuinely has none writes an
         // empty array, which is present and still restores as empty.
+        if (payload.tuneSets) payload.tuneSets.forEach(r => this._validateTuneSet(r));
         const writes = [];
+        if (payload.tuneSets) {
+            const merged = new Map((await this.getTuneSets(true)).map(r => [r.id, r]));
+            for (const r of payload.tuneSets) merged.set(r.id, { ...r, updatedAt: nextUpdatedAt(Math.max(r.updatedAt, merged.get(r.id)?.updatedAt || 0)) });
+            writes.push(['tuneSets', [...merged.values()]]);
+        }
         if (payload.historyItems) writes.push(['historyItems', payload.historyItems]);
         if (payload.tuneSightings) writes.push([KEY_SIGHTINGS, payload.tuneSightings]);
         if (payload.places) writes.push([KEY_PLACES, payload.places]);
@@ -1897,6 +2023,7 @@ class Store {
         // while already signed in would otherwise stay on this device until the
         // next launch, looking as though half the restore had failed.
         for (const [key, value] of writes) {
+            if (key === 'tuneSets') { this._syncPushMany('tuneSets', value); eventBus.$emit('tuneSetsChanged'); }
             if (key === KEY_SIGHTINGS) this._syncPushMany('sightings', value);
             if (key === KEY_PLACES) this._syncPushMany('places', value);
             if (key === KEY_LIVE_SESSIONS) this._syncPushMany('liveSessions', value);

@@ -1760,7 +1760,7 @@ async function run() {
         assert.equal(inventory.datasets.norbeck.label, 'Norbeck');
     });
 
-    // --- set partners ("played in sets with") ------------------------------
+    // --- set partners ("often played with") ------------------------------
 
     console.log('\nSet partners');
 

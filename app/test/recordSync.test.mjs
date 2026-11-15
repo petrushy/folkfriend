@@ -1052,9 +1052,107 @@ async function run() {
         assert.deepEqual(idb.__db.get('historyItems'), [old]);
     });
 
+    const setDraft = (id = 'set-one') => ({
+        id, name: 'Session reels', tags: ['Tuesday'], notes: 'Steady tempo',
+        entries: ['420', '430'].map((sid, i) => ({
+            id: `entry-${i}`, result: { settingID: sid, displayName: `Tune ${i}`,
+                setting: { tune_id: String(i + 1), abc: 'X:1\nK:D\nDEFG|', mode: 'Dmajor', dance: 'reel' } },
+        })),
+    });
+    await test('sets save and sync full ordered settings without starring tunes', async () => {
+        const { store, sync, idb } = await signedInStore();
+        const saved = await store.saveTuneSet(setDraft());
+        assert.deepEqual(saved.entries.map(e => e.result.settingID), ['420', '430']);
+        assert.equal(saved.entries[0].result.setting.mode, 'Dmajor');
+        assert.equal(idb.__db.get('favouriteItems'), undefined);
+        assert.ok(sync.__records.some(r => r.name === 'tuneSets'));
+        const read = await store.getTuneSets();
+        read[0].entries.reverse();
+        assert.equal((await store.getTuneSets())[0].entries[0].result.settingID, '420');
+    });
+    await test('set validation names the tune with a missing setting ID or score', async () => {
+        const { store } = await signedInStore();
+        const draft = setDraft();
+        delete draft.entries[1].result.settingID;
+        await assert.rejects(store.saveTuneSet(draft), /Tune 2 \(Tune 1\) has no setting ID/);
+        draft.entries[1].result.settingID = '430';
+        delete draft.entries[1].result.setting.abc;
+        await assert.rejects(store.saveTuneSet(draft), /Tune 2.*missing its name or score/);
+        assert.equal((await store.getTuneSets()).length, 0);
+    });
+    await test('set repetition counts default to two, persist and reject invalid values', async () => {
+        const { store } = await signedInStore();
+        const saved = await store.saveTuneSet(setDraft());
+        assert.equal(saved.entries[0].repetitions, 2);
+        saved.entries[0].repetitions = 3;
+        const edited = await store.saveTuneSet(saved, saved.updatedAt);
+        assert.equal((await store.getTuneSets())[0].entries[0].repetitions, 3);
+        const backup = await store.exportUserData();
+        assert.equal(JSON.parse(backup).tuneSets[0].entries[0].repetitions, 3);
+        for (const repetitions of [0, 1.5, 100, '2', null]) {
+            const draft = { ...edited, entries: edited.entries.map((e, i) => i ? e : { ...e, repetitions }) };
+            await assert.rejects(store.saveTuneSet(draft, edited.updatedAt), /times played.*whole number/);
+        }
+    });
+    await test('reordering, duplication and deletion remain independent', async () => {
+        const { store } = await signedInStore();
+        const one = await store.saveTuneSet(setDraft());
+        const copy = await store.saveTuneSet({ ...one, id: 'set-copy', entries: [...one.entries].reverse() });
+        assert.equal(copy.entries[0].result.settingID, '430');
+        await store.deleteTuneSet(one.id, one.updatedAt);
+        assert.deepEqual((await store.getTuneSets()).map(r => r.id), ['set-copy']);
+        assert.equal((await store.getTuneSets(true)).find(r => r.id === one.id).deleted, true);
+    });
+    await test('stale set edits and stale remote copies cannot resurrect deleted sets', async () => {
+        const { store } = await signedInStore();
+        const one = await store.saveTuneSet(setDraft());
+        const edited = await store.saveTuneSet({ ...one, name: 'Changed' }, one.updatedAt);
+        await assert.rejects(store.saveTuneSet(one, one.updatedAt), /changed/);
+        await store.deleteTuneSet(edited.id, edited.updatedAt);
+        await store._mergeRemoteTuneSets([one]);
+        assert.equal((await store.getTuneSets()).length, 0);
+        await assert.rejects(store.saveTuneSet(one, one.updatedAt), /changed/);
+    });
+    await test('one unusable remote set is skipped without blocking the others', async () => {
+        const { store } = await signedInStore();
+        const good = { ...setDraft('good'), createdAt: 1, updatedAt: 5 };
+        const bad = { ...setDraft('bad'), name: '', createdAt: 1, updatedAt: 5 };
+        await store._mergeRemoteTuneSets([bad, good]);
+        assert.deepEqual((await store.getTuneSets()).map(r => r.id), ['good']);
+    });
+    await test('two concurrent set creations survive, and a failed read never wipes sets', async () => {
+        const { store, idb } = await signedInStore();
+        await Promise.all([store.saveTuneSet(setDraft('a')), store.saveTuneSet(setDraft('b'))]);
+        assert.equal((await store.getTuneSets()).length, 2);
+        idb.__failReadsOf('tuneSets');
+        await assert.rejects(store.saveTuneSet(setDraft('c')), /read failed/);
+        idb.__allowAll();
+        assert.equal((await store.getTuneSets()).length, 2);
+    });
+    await test('sets survive backup and restore without dropping sets absent from the file', async () => {
+        const { store } = await signedInStore();
+        await store.saveTuneSet(setDraft());
+        const json = await store.exportUserData();
+        assert.equal(JSON.parse(json).tuneSets[0].entries.length, 2);
+        await store.saveTuneSet(setDraft('another'));
+        await store.importUserData(json);
+        assert.equal((await store.getTuneSets()).length, 2);
+        await assert.rejects(store.importUserData(JSON.stringify({ version: 6, tuneSets: [{}] })), /Invalid set/);
+    });
+    await test('versioned collection seeds newer offline edits and deletion tombstones', async () => {
+        const { sync, firestore } = await loadSync();
+        const local = [ { id: 'edit', updatedAt: 20 }, { id: 'gone', deleted: true, updatedAt: 30 } ];
+        sync.subscribeCollection('u1', 'tuneSets', {
+            versioned: true, getLocal: async () => local, applyRemote: async () => {},
+        });
+        await firestore.__listeners[0].onNext(snapshot([{ id: 'edit', updatedAt: 10 }]));
+        assert.equal(firestore.__writes.length, 2);
+        assert.equal(firestore.__writes[1].data.deleted, true);
+    });
+
     await test('signing out stops the collection listeners', async () => {
         const { store, sync } = await signedInStore();
-        assert.equal(sync.__subs.length, 3, 'places, sightings and sessions');
+        assert.equal(sync.__subs.length, 4, 'sets, places, sightings and sessions');
         store.onSignedOut();
         await store.addSighting({ tuneID: '42', fix: COBBLESTONE });
         assert.deepEqual(sync.__records, [], 'and nothing is pushed after');

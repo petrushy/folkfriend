@@ -169,6 +169,25 @@ async function run() {
     bob = testEnv.authenticatedContext('bob').firestore();
     anon = testEnv.unauthenticatedContext().firestore();
 
+    await test('sets and tombstones are accepted only for their owner', async () => {
+        const ref = db => doc(db, 'users/alice/tuneSets/one');
+        const set = { id: 'one', name: 'Reels', notes: '', tags: ['Session'],
+            entries: [{ id: 'entry', result: { settingID: '420', displayName: 'Tune',
+                setting: { abc: 'K:D\nDEFG|', mode: 'Dmajor', dance: 'reel' } } }], updatedAt: 1 };
+        await assertSucceeds(setDoc(ref(alice), set));
+        await assertSucceeds(getDoc(ref(alice)));
+        await assertFails(getDoc(ref(bob)));
+        await assertFails(getDoc(ref(anon)));
+        await assertFails(setDoc(ref(bob), set));
+        await assertFails(setDoc(ref(anon), set));
+        await assertFails(setDoc(ref(alice), { ...set, id: 'wrong' }));
+        await assertFails(setDoc(ref(alice), { ...set, entries: 'broken' }));
+        await assertSucceeds(setDoc(ref(alice), { id: 'one', updatedAt: 2, deleted: true }));
+        await assertFails(setDoc(ref(alice), set));
+        await assertFails(setDoc(ref(alice), { ...set, updatedAt: 2 }));
+        await assertFails(deleteDoc(ref(alice)));
+    });
+
     console.log('\nthe documents the app actually writes are accepted');
 
     await test('a sighting with a fix and a matched place', async () => {

@@ -269,7 +269,7 @@ class FolkFriendWASMWrapper {
         // from the numeric ID range. Rebuilt wholesale by every merge.
         this.datasetByTune = {};
         // Which tunes are played together, and each tune's type — for the
-        // "played in sets with" suggestions. Rebuilt wholesale by every merge.
+        // "often played with" suggestions. Rebuilt wholesale by every merge.
         this.setPartnersByTune = {};
         this.danceByTune = {};
 

@@ -84,6 +84,7 @@ fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>) {
 
 // DETECT_SIM_HARD=1: a noisier room and more wrong notes.
 fn hard() -> bool { std::env::var("DETECT_SIM_HARD").map(|v| v == "1").unwrap_or(false) }
+fn contours_only() -> bool { std::env::var("DETECT_SIM_CONTOURS").map(|v| v == "1").unwrap_or(false) }
 fn wrong_note_rate() -> f32 { if hard() { 0.12 } else { 0.05 } }
 
 fn add_noise(signal: &mut [f32], snr_db: f32, rng: &mut Rng) {
@@ -116,6 +117,9 @@ fn transcribe_and_query(ff: &mut FolkFriend, pcm: &[f32]) -> serde_json::Value {
         Ok(c) => c,
         Err(_) => return json!({ "contour": "", "results": [] }),
     };
+    // DETECT_SIM_CONTOURS=1: the transcribed contour only, for replaying the
+    // set score follower (app/test/bench/replaySetFollow.mjs). No query.
+    if contours_only() { return json!({ "contour": contour }); }
     let results = ff.run_transcription_query(&contour).unwrap_or_default();
     let top: Vec<serde_json::Value> = results.iter().take(20).map(|r| json!({
         "setting_id": r.setting_id.parse::<i64>().unwrap_or(0),

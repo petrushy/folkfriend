@@ -92,9 +92,16 @@
                         </v-list-item-action>
                         <v-list-item-content>
                             <v-list-item-title class="navBarEntry">
-                                Favourites
+                                Favorite Tunes
                             </v-list-item-title>
                         </v-list-item-content>
+                    </v-list-item>
+                </router-link>
+
+                <router-link to="/sets">
+                    <v-list-item @click="0">
+                        <v-list-item-action><v-icon medium>{{ icons.formatListBulleted }}</v-icon></v-list-item-action>
+                        <v-list-item-content><v-list-item-title class="navBarEntry">Sets</v-list-item-title></v-list-item-content>
                     </v-list-item>
                 </router-link>
 
@@ -260,8 +267,9 @@
              event bus. Mounted here so a list of favourites does not create one
              dialog per row. -->
         <TuneBackgroundDialog />
-        <!-- Same pattern: "Played in sets with…", opened from any tune. -->
+        <!-- Same pattern: "Often played with…", opened from any tune. -->
         <SetPartnersDialog />
+        <AddToSetDialog />
     </v-app>
 </template>
 
@@ -298,6 +306,7 @@ import {
 } from '@mdi/js';
 import utils from '@/js/utils.js';
 import TuneBackgroundDialog from '@/components/TuneBackgroundDialog.vue';
+import AddToSetDialog from '@/components/AddToSetDialog.vue';
 import SetPartnersDialog from '@/components/SetPartnersDialog.vue';
 import SessionStatusBar from '@/components/SessionStatusBar.vue';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
@@ -305,7 +314,7 @@ import { playerHost, registerPlayer } from '@/services/sessionPlayerHost.js';
 
 export default {
     name: 'App',
-    components: { TuneBackgroundDialog, SetPartnersDialog, SessionStatusBar, SessionAudioPlayer },
+    components: { TuneBackgroundDialog, SetPartnersDialog, AddToSetDialog, SessionStatusBar, SessionAudioPlayer },
     data: () => ({
         drawer: null,
         menu: null,

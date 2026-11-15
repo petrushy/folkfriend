@@ -1,4 +1,4 @@
-// The shared "Played in sets with…" dialog (components/SetPartnersDialog.vue).
+// The shared "Often played with…" dialog (components/SetPartnersDialog.vue).
 //
 // Same harness as tuneBackgroundDialog.test.mjs: lift the SFC's <script>,
 // rewrite its imports to fakes, drive it against a fake `this`. The hazard

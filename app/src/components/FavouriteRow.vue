@@ -1,5 +1,8 @@
 <template>
-    <div ref="rowEl" class="favourite-row-wrapper d-flex align-center">
+    <div
+        ref="rowEl"
+        class="favourite-row-wrapper d-flex align-center"
+    >
         <v-checkbox
             :input-value="selected"
             class="ml-2 mr-0 mt-0 pt-0 flex-grow-0"
@@ -23,22 +26,59 @@
                 </v-col>
             </v-row>
             <!-- Tag chips — @click.stop on the row prevents bubbling to the container's navigation handler -->
-            <v-row v-if="tags.length > 0" class="pb-2 pt-1" @click.stop>
-                <v-col class="py-0 d-flex flex-wrap align-center" style="gap:4px">
+            <v-row
+                v-if="tags.length > 0"
+                class="pb-2 pt-1"
+                @click.stop
+            >
+                <v-col
+                    class="py-0 d-flex flex-wrap align-center"
+                    style="gap:4px"
+                >
                     <v-chip
                         v-for="tag in tags"
                         :key="tag"
                         x-small
                         close
                         @click:close="$emit('removeTag', { settingID, tag })"
-                    >{{ tag }}</v-chip>
+                    >
+                        {{ tag }}
+                    </v-chip>
+                </v-col>
+            </v-row>
+            <v-row
+                v-if="sets.length"
+                class="pt-1"
+                @click.stop
+            >
+                <v-col
+                    class="py-0 d-flex flex-wrap align-center"
+                    style="gap:4px"
+                    aria-label="Sets containing this setting"
+                >
+                    <span class="caption text--secondary">In sets:</span>
+                    <v-chip
+                        v-for="set in sets"
+                        :key="set.id"
+                        x-small
+                        outlined
+                        :to="{ name: 'sets', query: { setID: set.id } }"
+                    >
+                        {{ set.name }}
+                    </v-chip>
                 </v-col>
             </v-row>
         </v-container>
 
         <!-- ABC preview — only rendered when the row is wide enough -->
         <!-- eslint-disable-next-line vue/no-v-html -->
-        <div v-if="showAbcPreview" class="abc-preview" :style="{ width: abcPreviewDisplayWidth + 'px' }" @click.stop="favouriteItemClicked" v-html="abcSvg" />
+        <div
+            v-if="showAbcPreview"
+            class="abc-preview"
+            :style="{ width: abcPreviewDisplayWidth + 'px' }"
+            @click.stop="favouriteItemClicked"
+            v-html="abcSvg"
+        />
 
         <!-- Session recording ▶ — only when a saved session recorded this tune -->
         <v-btn
@@ -49,20 +89,54 @@
             :aria-pressed="recordingPlaying ? 'true' : 'false'"
             @click.stop="$emit('playRecording', tuneID)"
         >
-            <v-icon color="primary">{{ recordingPlaying ? icons.pause : icons.play }}</v-icon>
+            <v-icon color="primary">
+                {{ recordingPlaying ? icons.pause : icons.play }}
+            </v-icon>
         </v-btn>
 
         <!-- Tune background (i) — outside the clickable container so it does not navigate -->
-        <TuneBackgroundButton :tuneID="tuneID" :displayName="name" :sourceUrl="sourceUrl" :small="false" />
+        <TuneBackgroundButton
+            :tune-i-d="tuneID"
+            :display-name="name"
+            :source-url="sourceUrl"
+            :small="false"
+        />
+
+        <v-btn
+            icon
+            class="mr-0"
+            title="Add to set"
+            :aria-label="'Add ' + name + ' to set'"
+            @click.stop="$emit('addToSet', settingID)"
+        >
+            <v-icon color="grey darken-1">
+                {{ icons.addToSet }}
+            </v-icon>
+        </v-btn>
 
         <!-- Add tag button — outside the clickable container, left of star, easy to tap -->
-        <v-menu v-model="addTagMenu" :close-on-content-click="false" offset-y left>
+        <v-menu
+            v-model="addTagMenu"
+            :close-on-content-click="false"
+            offset-y
+            left
+        >
             <template #activator="{ on }">
-                <v-btn icon class="mr-0" @click.stop v-on="on">
-                    <v-icon color="grey darken-1">{{ icons.plus }}</v-icon>
+                <v-btn
+                    icon
+                    class="mr-0"
+                    @click.stop
+                    v-on="on"
+                >
+                    <v-icon color="grey darken-1">
+                        {{ icons.plus }}
+                    </v-icon>
                 </v-btn>
             </template>
-            <v-card width="220" @click.stop>
+            <v-card
+                width="220"
+                @click.stop
+            >
                 <v-combobox
                     ref="tagInput"
                     v-model="tagInputValue"
@@ -79,7 +153,11 @@
             </v-card>
         </v-menu>
 
-        <v-btn icon class="mr-2" @click.stop="unstar">
+        <v-btn
+            icon
+            class="mr-2"
+            @click.stop="unstar"
+        >
             <v-icon color="amber darken-1">
                 {{ icons.star }}
             </v-icon>
@@ -88,7 +166,7 @@
 </template>
 
 <script>
-import { mdiStar, mdiTagPlusOutline, mdiPlayCircleOutline, mdiPauseCircleOutline } from '@mdi/js';
+import { mdiStar, mdiPlaylistPlus, mdiTagPlusOutline, mdiPlayCircleOutline, mdiPauseCircleOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
 import utils from '@/js/utils';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
@@ -123,6 +201,7 @@ export default {
         timestamp: { type: Number, required: true },
         selected: { type: Boolean, default: false },
         tags: { type: Array, default: () => [] },
+        sets: { type: Array, default: () => [] },
         allTags: { type: Array, default: () => [] },
         setting: { type: Object, default: null },
         // How many saved sessions hold a playable recording of this TUNE (any
@@ -142,6 +221,7 @@ export default {
             tagInputValue: null,
             icons: {
                 star: mdiStar,
+                addToSet: mdiPlaylistPlus,
                 plus: mdiTagPlusOutline,
                 play: mdiPlayCircleOutline,
                 pause: mdiPauseCircleOutline,

@@ -1,4 +1,4 @@
-// "Played in sets with…" ordering (src/js/setPartners.mjs).
+// "Often played with…" ordering (src/js/setPartners.mjs).
 //
 // The rule asked for: starred tunes come first, but ONLY when they are
 // commonly played with the tune in focus. A favourite that turned up together

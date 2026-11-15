@@ -1,0 +1,5 @@
+/* Shared interface typography for set lists, editors, scores and dialogs. */
+.sets-ui { font-family: Roboto, Arial, sans-serif; font-size: 1rem; line-height: 1.5; }
+.sets-ui .v-btn { font-family: inherit; font-size: .875rem; font-weight: 500; letter-spacing: .025em; text-transform: none; }
+.sets-ui .v-card__title { font-family: inherit; font-size: 1.125rem; font-weight: 600; line-height: 1.4; }
+.sets-ui .v-chip, .sets-ui .v-label, .sets-ui input, .sets-ui textarea { font-family: inherit; }

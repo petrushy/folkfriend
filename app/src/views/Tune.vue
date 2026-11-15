@@ -113,6 +113,45 @@
                         </div>
                     </div>
                     <div class="headerActions">
+                        <!-- One set control per setting: which sets hold it, and adding it.
+                             Shown on the same rule as the star (expanded, or in use). -->
+                        <v-menu
+                            v-if="expandedIndex.includes(i) || setsForSetting(settingData.setting_id).length"
+                            offset-y
+                            left
+                        >
+                            <template #activator="{ on, attrs }">
+                                <v-btn
+                                    icon
+                                    small
+                                    :title="setsForSetting(settingData.setting_id).length ? 'In sets' : 'Add to a set'"
+                                    :aria-label="'Sets for setting ' + settingData.setting_id"
+                                    v-bind="attrs"
+                                    @click.stop
+                                    v-on="on"
+                                >
+                                    <v-icon :color="setsForSetting(settingData.setting_id).length ? 'primary' : 'grey darken-1'">
+                                        {{ setsForSetting(settingData.setting_id).length ? icons.set : icons.setAdd }}
+                                    </v-icon>
+                                </v-btn>
+                            </template>
+                            <v-list dense>
+                                <v-subheader v-if="setsForSetting(settingData.setting_id).length">
+                                    In sets
+                                </v-subheader>
+                                <v-list-item
+                                    v-for="set in setsForSetting(settingData.setting_id)"
+                                    :key="set.id"
+                                    :to="{ name: 'sets', query: { setID: set.id } }"
+                                >
+                                    <v-list-item-title>{{ set.name }}</v-list-item-title>
+                                </v-list-item>
+                                <v-divider v-if="setsForSetting(settingData.setting_id).length" />
+                                <v-list-item @click="addSettingToSet(settingData)">
+                                    <v-list-item-title>Add to a set…</v-list-item-title>
+                                </v-list-item>
+                            </v-list>
+                        </v-menu>
                         <v-menu
                             v-if="expandedIndex.includes(i) && favouritedSettings[settingData.setting_id]"
                             v-model="addTagMenus[settingData.setting_id]"
@@ -293,6 +332,8 @@ import {
     mdiPlay,
     mdiPause,
     mdiCrosshairsGps,
+    mdiPlaylistMusic,
+    mdiPlaylistPlus,
 } from '@mdi/js';
 import practiceFollow from '@/services/practiceFollow.js';
 import { ScoreFollower } from '@/js/scoreFollower.mjs';
@@ -308,6 +349,7 @@ import { dropboxState } from '@/services/dropbox.js';
 import { playSessionTuneLooped, playerHost, sessionPlayer } from '@/services/sessionPlayerHost.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
+import { indexSetsBySetting } from '@/js/setMembership.mjs';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
@@ -340,6 +382,7 @@ export default {
     data: function () {
         return {
             settings: null,
+            tuneSets: [],
             name: null,
             displayableAliases: [],
             abcFullScreen: false,
@@ -396,6 +439,8 @@ export default {
                 star: mdiStar,
                 starOutline: mdiStarOutline,
                 tagPlus: mdiTagPlusOutline,
+                set: mdiPlaylistMusic,
+                setAdd: mdiPlaylistPlus,
                 mapMarker: mdiMapMarker,
                 close: mdiCloseCircle,
                 plus: mdiPlus,
@@ -408,6 +453,7 @@ export default {
         };
     },
     computed: {
+        setMemberships() { return indexSetsBySetting(this.tuneSets); },
         instrumentItems() {
             return instrumentItems(this.instrumentShift);
         },
@@ -459,6 +505,8 @@ export default {
     },
     created: async function () {
         eventBus.$emit('childViewActivated');
+        this.loadTuneSets();
+        eventBus.$on('tuneSetsChanged', this.loadTuneSets);
 
         if (this.tuneID === '') {
             return;
@@ -579,6 +627,7 @@ export default {
             this._clearFollow();
             practiceFollow.stop();
         }
+        eventBus.$off('tuneSetsChanged', this.loadTuneSets);
         eventBus.$off('practiceFollowPosition', this._onPracticePosition);
         eventBus.$off('practiceFollowState', this._onPracticeState);
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
@@ -590,6 +639,17 @@ export default {
         next();
     },
     methods: {
+        async loadTuneSets() {
+            try { this.tuneSets = await store.getTuneSets(); }
+            catch (e) { eventBus.$emit('syncError', 'Could not read set membership on this device.'); }
+        },
+        setsForSetting(id) { return this.setMemberships[String(id)] || []; },
+        // The exact setting on screen, so the dialog does not ask for a key.
+        addSettingToSet(settingData) {
+            const displayName = this.name || this.displayName;
+            const entry = { setting_id: settingData.setting_id, setting: settingData, display_name: this.displayName || displayName };
+            eventBus.$emit('showAddToSet', { tuneID: this.tuneID, title: displayName, entries: [entry] });
+        },
         formatSessionDate,
         async toggleFollow(settingData) {
             if (this.followSettingId === settingData.setting_id) {
@@ -797,13 +857,15 @@ export default {
             const status = await this._waitForIndex(TUNE_INDEX_WAIT_MS);
 
             if (status === 'ready') {
-                const [settings, aliases] = await Promise.all([
-                    ffBackend.settingsFromTuneID(this.tuneID),
-                    ffBackend.aliasesFromTuneID(this.tuneID),
-                ]);
-                if (settings && settings.length) {
-                    return { settings, aliases };
-                }
+                try {
+                    const [settings, aliases] = await Promise.all([
+                        ffBackend.settingsFromTuneID(this.tuneID),
+                        ffBackend.aliasesFromTuneID(this.tuneID),
+                    ]);
+                    if (settings && settings.length) {
+                        return { settings, aliases };
+                    }
+                } catch (e) { console.warn('Using saved settings after an index lookup failed', e); }
             }
 
             const fallback = await this._settingsFromFavourites();
@@ -827,12 +889,18 @@ export default {
                 timeout,
             ]).finally(() => clearTimeout(timer));
         },
-        // Reconstruct settings for this tune from favourites (stored with their
-        // own ABC), so favourited tunes remain fully viewable offline.
+        // Reconstruct settings from saved favourites and sets, so set-only tunes
+        // also remain fully viewable without their database.
         async _settingsFromFavourites() {
             let favourites;
             try {
                 favourites = await store.getFavourites();
+                // A set-only tune has its own durable score snapshot too.
+                // Failure to read sets must not hide an available favourite.
+                try {
+                    const sets = await store.getTuneSets();
+                    favourites = favourites.concat(sets.flatMap(set => set.entries.map(entry => ({ result: entry.result }))));
+                } catch (e) { console.warn('Could not read set snapshots for offline fallback', e); }
             } catch (e) {
                 console.warn('Could not read favourites for offline fallback', e);
                 return null;

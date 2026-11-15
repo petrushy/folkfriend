@@ -86,6 +86,29 @@ service cloud.firestore {
       allow create, update: if isOwner(uid) && isValidFavourite(settingID);
     }
 
+    match /users/{uid}/tuneSets/{setID} {
+      allow read: if isOwner(uid);
+      // Keep tombstones; absence cannot communicate deletion to offline devices.
+      allow create, update: if isOwner(uid) && idMatches(setID)
+        // Reject a queued offline write older than the account copy, including
+        // an edit queued before another device deleted this arrangement.
+        && (resource == null || request.resource.data.updatedAt > resource.data.updatedAt
+          || (request.resource.data.updatedAt == resource.data.updatedAt
+            && (resource.data.get('deleted', false) != true
+              || request.resource.data.get('deleted', false) == true)))
+        && request.resource.data.updatedAt is number
+        && (request.resource.data.get('deleted', false) == true || (
+          request.resource.data.name is string
+          && request.resource.data.name.size() > 0
+          && request.resource.data.name.size() <= 200
+          && request.resource.data.notes is string
+          && request.resource.data.notes.size() <= 10000
+          && request.resource.data.tags is list
+          && request.resource.data.tags.size() <= 50
+          && request.resource.data.entries is list
+          && request.resource.data.entries.size() <= 100));
+    }
+
     match /users/{uid}/places/{placeID} {
       allow read, delete: if isOwner(uid);
       allow create, update: if isOwner(uid) && isValidPlace(placeID);

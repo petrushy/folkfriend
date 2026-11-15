@@ -1,21 +1,27 @@
 <template>
-    <span v-if="available" class="setPartnersButton">
+    <span
+        v-if="available"
+        class="setPartnersButton"
+    >
         <v-chip
             v-if="chip"
             small
             class="px-2"
-            title="Tunes commonly played in a set with this one"
+            title="Tunes often played with this one"
             @click.stop="openPartners"
         >
-            <v-icon small left>{{ icon }}</v-icon>
-            Played in sets with
+            <v-icon
+                small
+                left
+            >{{ icon }}</v-icon>
+            Often played with
         </v-chip>
         <v-btn
             v-else
             icon
             small
-            aria-label="Tunes commonly played in a set with this one"
-            title="Tunes commonly played in a set with this one — what to play next"
+            aria-label="Tunes often played with this one"
+            title="Tunes often played with this one — what to play next"
             @click.stop="openPartners"
         >
             <v-icon color="grey darken-1">{{ icon }}</v-icon>
@@ -40,6 +46,7 @@ export default {
     props: {
         tuneID: { type: [String, Number], default: '' },
         title: { type: String, default: '' },
+        draftTarget: { type: Object, default: null },
         // A labelled chip (Tune view) or a bare icon (the follow header).
         chip: { type: Boolean, default: false },
     },
@@ -92,6 +99,7 @@ export default {
             eventBus.$emit('showSetPartners', {
                 tuneID: String(this.tuneID),
                 title: this.title,
+                draftTarget: this.draftTarget,
             });
         },
     },
