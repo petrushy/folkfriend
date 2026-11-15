@@ -66,8 +66,8 @@ export class SetScoreFollower {
                 this._hits = this._candidate === target ? this._hits + 1 : 1;
                 this._candidate = target;
             } else { this._candidate = null; this._hits = 0; }
-            // Compare every tune, but require distinct windows and an
-            // unambiguous winner. Identical occurrences use their set order;
+            // Compare every tune and require an unambiguous winner (see the
+            // constants above). Identical occurrences use their set order;
             // audio alone cannot distinguish a repeat from a new occurrence.
             if (this._hits >= this.options.windows) {
                 this.index = target;
