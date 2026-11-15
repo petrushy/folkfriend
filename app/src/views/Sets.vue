@@ -260,6 +260,7 @@
     </v-container>
 </template>
 <script>
+import { searchSetSettings } from '@/services/setSearch.mjs';
 import store from '@/services/store';
 import ffBackend from '@/services/backend';
 import eventBus from '@/eventBus';
@@ -332,6 +333,10 @@ export default {
             this.draft.entries.splice(i + offset, 0, entry);
         },
         add(r) {
+            if (r.setting_id == null || !r.setting || !r.setting.abc) {
+                this.error = 'This setting is missing its ID or score. Search again before adding it.';
+                return;
+            }
             this.draft.entries.push({ id: this.id(), result: {
                 settingID: r.setting_id, setting: JSON.parse(JSON.stringify(r.setting)), displayName: r.display_name,
             } });
@@ -342,7 +347,7 @@ export default {
             try {
                 const ready = await ffBackend.indexReady();
                 if (!ready) throw new Error('No tune database is available. Open Settings to download one.');
-                this.results = await ffBackend.runNameQuery(this.query.trim());
+                this.results = await searchSetSettings(ffBackend, this.query.trim());
             } catch (e) { this.error = e.message; this.results = []; }
             finally { this.searching = false; }
         },

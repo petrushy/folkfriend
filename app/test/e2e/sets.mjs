@@ -1,6 +1,5 @@
-// Verifies that every interactive control on the Settings page is actually
-// wired to a method — the failure mode being a Vue 2 template that references a
-// handler which no longer exists, where clicking silently does nothing.
+// Exercises set persistence, arrangement editing and offline score rendering.
+// FF_REAL_SEARCH=1 also checks the real WASM name-search/settings path.
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -92,6 +91,24 @@ try {
         const find = vm => vm.$options.name === 'SetsView' ? vm : vm.$children.map(find).find(Boolean);
         return find(document.querySelector('#app').__vue__);
     })(); true`);
+    if (process.env.FF_REAL_SEARCH) {
+        const realSearch = await evaluate(`(async () => {
+            const vm = window.setsVM;
+            vm.create(); vm.draft.name = 'Real search regression'; vm.query = 'cooley';
+            await vm.search();
+            const results = vm.results;
+            if (vm.error || results.length < 2) return { error: vm.error || 'No settings found' };
+            vm.add(results[0]); vm.add(results[1]); await vm.save();
+            const saved = vm.sets.find(s => s.name === 'Real search regression');
+            const detail = { error: vm.error, ids: saved?.entries.map(e => e.result.settingID),
+                scores: saved?.entries.every(e => !!e.result.setting.abc) };
+            if (saved) { window.confirm = () => true; vm.edit(saved); await vm.remove(); }
+            return detail;
+        })()`);
+        check('real tune search resolves settings that save with IDs and scores',
+            !realSearch.error && realSearch.ids?.length === 2 && realSearch.ids.every(Boolean) && realSearch.scores,
+            JSON.stringify(realSearch));
+    }
     const state = await evaluate(`(async () => {
         const vm = window.setsVM;
         vm.create(); vm.draft.name = 'Browser reels'; vm.draft.tags = ['Tuesday'];

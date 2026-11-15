@@ -1520,16 +1520,28 @@ class Store {
         if (!record || typeof record.id !== 'string' || !record.id || record.id.includes('/') ||
             !Number.isFinite(record.updatedAt)) throw new Error('Invalid set record.');
         if (record.deleted === true) return;
-        if (typeof record.name !== 'string' || !record.name.trim() || record.name.length > 200 ||
-            typeof record.notes !== 'string' || record.notes.length > 10000 ||
-            !Array.isArray(record.tags) || record.tags.length > 50 ||
-            record.tags.some(t => typeof t !== 'string' || !t.trim() || t.length > 100) ||
-            !Array.isArray(record.entries) || record.entries.length > 100 ||
-            record.entries.some(e => !e || typeof e.id !== 'string' || !e.id ||
-                !e.result || !e.result.setting || !this._isValidSettingID(e.result.settingID) ||
-                typeof e.result.displayName !== 'string' || typeof e.result.setting.abc !== 'string') ||
-            new Set(record.entries.map(e => e.id)).size !== record.entries.length) {
-            throw new Error('Invalid set. Check its name, tags and tune settings.');
+        if (typeof record.name !== 'string' || !record.name.trim()) throw new Error('Give the set a name before saving.');
+        if (record.name.length > 200) throw new Error('The set name must be 200 characters or fewer.');
+        if (typeof record.notes !== 'string' || record.notes.length > 10000) throw new Error('Set notes must be text with at most 10,000 characters.');
+        if (!Array.isArray(record.tags) || record.tags.length > 50 ||
+            record.tags.some(t => typeof t !== 'string' || !t.trim() || t.length > 100)) {
+            throw new Error('Use at most 50 set tags, each with 1–100 characters.');
+        }
+        if (!Array.isArray(record.entries) || record.entries.length > 100) throw new Error('A set can contain at most 100 tune entries.');
+        record.entries.forEach((entry, index) => {
+            const label = `Tune ${index + 1}${entry?.result?.displayName ? ' (' + entry.result.displayName + ')' : ''}`;
+            if (!entry || typeof entry.id !== 'string' || !entry.id || !entry.result || !entry.result.setting) {
+                throw new Error(`${label} has incomplete setting data. Remove it and add it again from search.`);
+            }
+            if (!this._isValidSettingID(entry.result.settingID)) {
+                throw new Error(`${label} has no setting ID. Remove it and add a specific setting from search.`);
+            }
+            if (typeof entry.result.displayName !== 'string' || typeof entry.result.setting.abc !== 'string' || !entry.result.setting.abc.trim()) {
+                throw new Error(`${label} is missing its name or score. Remove it and add it again from search.`);
+            }
+        });
+        if (new Set(record.entries.map(e => e.id)).size !== record.entries.length) {
+            throw new Error('Two tune entries have the same entry ID. Remove the duplicate entry and add the tune again.');
         }
         // Leave room below Firestore's 1 MiB document limit, including overhead.
         if (new TextEncoder().encode(JSON.stringify(record)).length > 700000) {

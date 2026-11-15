@@ -1070,6 +1070,16 @@ async function run() {
         read[0].entries.reverse();
         assert.equal((await store.getTuneSets())[0].entries[0].result.settingID, '420');
     });
+    await test('set validation names the tune with a missing setting ID or score', async () => {
+        const { store } = await signedInStore();
+        const draft = setDraft();
+        delete draft.entries[1].result.settingID;
+        await assert.rejects(store.saveTuneSet(draft), /Tune 2 \(Tune 1\) has no setting ID/);
+        draft.entries[1].result.settingID = '430';
+        delete draft.entries[1].result.setting.abc;
+        await assert.rejects(store.saveTuneSet(draft), /Tune 2.*missing its name or score/);
+        assert.equal((await store.getTuneSets()).length, 0);
+    });
     await test('reordering, duplication and deletion remain independent', async () => {
         const { store } = await signedInStore();
         const one = await store.saveTuneSet(setDraft());
