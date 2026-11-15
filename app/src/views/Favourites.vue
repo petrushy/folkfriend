@@ -1,7 +1,7 @@
 <template>
     <v-container class="viewContainerWrapper">
         <div class="d-flex align-center my-2">
-            <h1>Favourites</h1>
+            <h1>Favorite Tunes</h1>
             <v-spacer />
             <v-select
                 v-model="sortBy"

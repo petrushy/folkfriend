@@ -475,7 +475,7 @@ async function run() {
         idb.__allowAll();
 
         const json = JSON.parse(await store.exportUserData());
-        assert.equal(json.version, 5);
+        assert.equal(json.version, 6);
         assert.equal(json.liveSessions.length, 1, 'sessions travel in the backup');
     });
 
@@ -499,7 +499,7 @@ async function run() {
         // fixed set, and none of them is an audio store.
         assert.deepEqual(Object.keys(parsed).sort(), [
             'exportedAt', 'favouriteItems', 'historyItems', 'liveSessions',
-            'places', 'tuneSightings', 'userSettings', 'version',
+            'places', 'tuneSets', 'tuneSightings', 'userSettings', 'version',
         ]);
         assert.ok(!Object.keys(parsed).some(k => k.startsWith('sessionAudio')));
         assert.ok(!('segments' in parsed.liveSessions[0]), 'no audio manifest rides along');
@@ -575,11 +575,11 @@ async function run() {
         assert.ok(bus.__events.some(e => e.name === 'liveSessionsChanged'));
     });
 
-    await test('exportUserData reports version 5 and includes liveSessions', async () => {
+    await test('exportUserData reports version 6 and includes liveSessions', async () => {
         const { store } = await loadStore();
         await store.upsertLiveSession({ id: 's1', startedAt: 1, tunes: [{ tuneId: 1 }] });
         const exported = JSON.parse(await store.exportUserData());
-        assert.equal(exported.version, 5);
+        assert.equal(exported.version, 6);
         assert.equal(exported.liveSessions.length, 1);
     });
 

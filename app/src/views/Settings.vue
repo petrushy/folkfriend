@@ -228,7 +228,7 @@
             </h1>
             <p>
                 Sign into the same FolkFriend account on each device. Firebase keeps your sessions,
-                tune lists, favourites, history and places in sync.
+                tune lists, favorite tunes, sets, history and places in sync.
                 For recordings, connect the same Dropbox account on each device using Dropbox audio storage above.
                 Audio uses your own Dropbox storage; FolkFriend account sync continues through Firebase.
             </p>
@@ -537,7 +537,7 @@
                 Transfer Data
             </h1>
             <p>
-                Export your favourites, history and settings to a file, then
+                Export your favorite tunes, sets, history and settings to a file, then
                 restore them on another device.
             </p>
             <v-row class="px-2">

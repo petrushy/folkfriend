@@ -4,6 +4,15 @@ import {
 import { firestore as db } from './firebase.js';
 import eventBus from '@/eventBus';
 
+// Canonical map ordering keeps equal-version conflict resolution stable across
+// IndexedDB and Firestore, which do not preserve the same object key order.
+function canonicalRecord(value) {
+    if (Array.isArray(value)) return '[' + value.map(canonicalRecord).join(',') + ']';
+    if (value && typeof value === 'object') return '{' + Object.keys(value).sort()
+        .map(k => JSON.stringify(k) + ':' + canonicalRecord(value[k])).join(',') + '}';
+    return JSON.stringify(value);
+}
+
 // ---- Favourites -------------------------------------------------------------
 //
 // ONE DOCUMENT PER FAVOURITE, under users/{uid}/favourites/{settingID}
@@ -257,7 +266,7 @@ function toPlain(items) {
 // It also makes deletion explicit. The favourites document has to encode
 // deletion as absence, which is what forced the tombstone machinery around AI
 // summaries; here a delete is a deleted document and the listener reports it.
-export const SYNCED_COLLECTIONS = ['places', 'sightings', 'liveSessions'];
+export const SYNCED_COLLECTIONS = ['places', 'sightings', 'liveSessions', 'tuneSets'];
 
 // Firestore rejects a batch over 500 operations.
 const BATCH_LIMIT = 400;
@@ -300,52 +309,62 @@ function recordRef(uid, name, id) {
 // The seed waits for a SERVER snapshot (`fromCache` false). The local cache
 // answers first when persistence is on, and seeding from it would push
 // everything the cache happens to be missing straight back up.
-export function subscribeCollection(uid, name, { applyRemote, getLocal }) {
+export function subscribeCollection(uid, name, { applyRemote, getLocal, versioned = false }) {
     let seeded = false;
 
     // includeMetadataChanges: see subscribeFavourites — without it a warm
     // cache means the server snapshot is never delivered and the seed never runs.
-    return onSnapshot(collectionRef(uid, name), { includeMetadataChanges: true }, async snap => {
-        const upserts = [];
-        const removals = [];
-        for (const change of snap.docChanges()) {
-            if (change.type === 'removed') removals.push(change.doc.id);
-            else upserts.push(change.doc.data());
-        }
-
-        if (upserts.length || removals.length) {
-            // The store's writes are strict now, so a failed merge rejects
-            // rather than quietly writing an empty collection. Inside an
-            // onSnapshot callback that would otherwise surface only as an
-            // unhandled rejection.
-            try {
-                await applyRemote(upserts, removals);
-            } catch (e) {
-                // NOT a sync failure: the data arrived, and writing it to this
-                // device's own IndexedDB is what failed — quota, or a browser
-                // blocking storage. Saying "sync error" sends anyone debugging
-                // it to the network and the security rules, which is the wrong
-                // half of the system entirely.
-                const reason = (e && (e.name || e.message)) || 'unknown error';
-                console.error(`[folkfriend sync] could not store ${name} locally:`, e);
-                reportSyncProblem(`local:${name}`,
-                    `Could not save ${name} on this device (${reason}).`);
-                return;
+    let chain = Promise.resolve();
+    let active = true;
+    const unsubscribe = onSnapshot(collectionRef(uid, name), { includeMetadataChanges: true }, snap => {
+        return chain = chain.then(async () => {
+            if (!active) return;
+            const upserts = [];
+            const removals = [];
+            for (const change of snap.docChanges()) {
+                if (change.type === 'removed') removals.push(change.doc.id);
+                else upserts.push(change.doc.data());
             }
-        }
 
-        if (!seeded && !snap.metadata.fromCache) {
-            seeded = true;
-            const local = await getLocal();
-            const remoteIDs = new Set(snap.docs.map(d => d.id));
-            const missing = (local || []).filter(r => r && r.id && !remoteIDs.has(String(r.id)));
-            if (missing.length) await pushRecords(uid, name, missing);
-        }
+            if (upserts.length || removals.length) {
+                // The store's writes are strict now, so a failed merge rejects
+                // rather than quietly writing an empty collection. Inside an
+                // onSnapshot callback that would otherwise surface only as an
+                // unhandled rejection.
+                try {
+                    await applyRemote(upserts, removals);
+                } catch (e) {
+                    // NOT a sync failure: the data arrived, and writing it to this
+                    // device's own IndexedDB is what failed — quota, or a browser
+                    // blocking storage. Saying "sync error" sends anyone debugging
+                    // it to the network and the security rules, which is the wrong
+                    // half of the system entirely.
+                    const reason = (e && (e.name || e.message)) || 'unknown error';
+                    console.error(`[folkfriend sync] could not store ${name} locally:`, e);
+                    reportSyncProblem(`local:${name}`,
+                        `Could not save ${name} on this device (${reason}).`);
+                    return;
+                }
+            }
+
+            if ((!seeded || versioned) && !snap.metadata.fromCache) {
+                seeded = true;
+                const local = await getLocal();
+                const remoteIDs = new Set(snap.docs.map(d => d.id));
+                const remote = new Map(snap.docs.map(d => [d.id, d.data()]));
+                const missing = (local || []).filter(r => r && r.id && (versioned
+                    ? !remote.has(String(r.id)) || r.updatedAt > remote.get(String(r.id)).updatedAt ||
+                        (r.updatedAt === remote.get(String(r.id)).updatedAt && canonicalRecord(r) > canonicalRecord(remote.get(String(r.id))))
+                    : !remoteIDs.has(String(r.id))));
+                if (missing.length) await pushRecords(uid, name, missing);
+            }
+        }).catch(e => reportSyncProblem(`merge:${name}`, `Could not sync ${name}: ${e.message}`));
     }, err => {
         console.error(`[folkfriend sync] ${name} listener failed:`, err.code, err.message, err);
         reportSyncProblem(`listen:${name}`,
             `Could not read ${name} from your account (${err.code || 'unknown'}).`);
     });
+    return () => { active = false; unsubscribe(); };
 }
 
 export function pushRecord(uid, name, record) {

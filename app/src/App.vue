@@ -92,9 +92,16 @@
                         </v-list-item-action>
                         <v-list-item-content>
                             <v-list-item-title class="navBarEntry">
-                                Favourites
+                                Favorite Tunes
                             </v-list-item-title>
                         </v-list-item-content>
+                    </v-list-item>
+                </router-link>
+
+                <router-link to="/sets">
+                    <v-list-item @click="0">
+                        <v-list-item-action><v-icon medium>{{ icons.formatListBulleted }}</v-icon></v-list-item-action>
+                        <v-list-item-content><v-list-item-title class="navBarEntry">Sets</v-list-item-title></v-list-item-content>
                     </v-list-item>
                 </router-link>
 
