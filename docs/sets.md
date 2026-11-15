@@ -13,10 +13,11 @@ playback work from these snapshots without the tune database. Search puts starre
 then remaining matches in database relevance order. Matching saved favorites are
 also available when their database is unavailable. Set tags are independent of tune tags.
 
-The “Often played with” list offers “Add to set” on every suggested tune.
-Choose its key/setting (starred settings first) and an existing or new set.
-Opened from the set editor, it defaults to the current draft and inserts after
-the starting tune, without navigating away or saving unfinished edits.
+Opened from the set editor, the “Often played with” list offers “Add to set” on
+every suggested tune: choose its key/setting (starred settings first); it
+defaults to the current draft and inserts after the starting tune, without
+navigating away or saving unfinished edits. Opened anywhere else (Tune view,
+live view) the list is for reading only and has no Add to set button.
 
 Favorite Tunes also offers an “Add to set” icon on every row. Selecting tunes
 reveals an “Add to set” button beside the selection controls. The destination

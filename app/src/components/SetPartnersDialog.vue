@@ -84,7 +84,13 @@
                                     <span class="partnerCounts"> · {{ describeCounts(p) }}</span>
                                 </v-list-item-subtitle>
                             </v-list-item-content>
-                            <v-list-item-action class="ml-2">
+                            <!-- Only when building a set: elsewhere (Tune view, live
+                                 view) this list is for reading, and adding goes
+                                 through search results or Favourite Tunes. -->
+                            <v-list-item-action
+                                v-if="draftTarget"
+                                class="ml-2"
+                            >
                                 <v-btn
                                     small
                                     outlined
