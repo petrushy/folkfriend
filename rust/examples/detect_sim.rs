@@ -46,7 +46,9 @@ fn char_to_midi(c: char) -> Option<f32> {
 
 /// One tune played for `seconds`, looping its contour: per-quaver onsets,
 /// harmonic tone with vibrato, occasional wrong notes, slow tempo drift.
-fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>) {
+/// `starts` receives (sample offset, contour index) for every note played:
+/// the ground truth for measuring score-position tracking.
+fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>, starts: &mut Vec<(usize, usize)>) {
     let notes: Vec<f32> = contour.chars().filter_map(char_to_midi).collect();
     if notes.is_empty() { return; }
     let base_q = rng.range(0.17, 0.24);
@@ -58,6 +60,7 @@ fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>) {
     while out.len() - start < total {
         let progress = (out.len() - start) as f32 / total as f32;
         let q = base_q * (1.0 + 0.04 * (progress * 6.28).sin()) * (1.0 + 0.03 * rng.gauss());
+        starts.push((out.len(), i % notes.len()));
         let mut midi = notes[i % notes.len()];
         if rng.f() < wrong_note_rate() {
             // A wrong or varied note.
@@ -186,10 +189,11 @@ fn main() {
                 let mut rng = Rng(seed.max(1));
                 let mut pcm = Vec::new();
                 let mut truth = Vec::new();
+                let mut starts: Vec<(usize, usize)> = Vec::new();
                 for (tid, sid, secs) in &parts {
                     let contour = settings["settings"][sid]["contour"].as_str().unwrap().to_string();
                     let start = pcm.len() as f32 / SR as f32;
-                    render_tune(&contour, *secs, &mut rng, &mut pcm);
+                    render_tune(&contour, *secs, &mut rng, &mut pcm, &mut starts);
                     truth.push(json!({ "tuneId": tid, "settingId": sid, "start": start, "end": pcm.len() as f32 / SR as f32 }));
                 }
                 add_noise(&mut pcm, snr, &mut rng);
@@ -200,6 +204,10 @@ fn main() {
                     let to = t * SR as usize;
                     let mut w = transcribe_and_query(&mut ff, &pcm[from..to]);
                     w["t"] = json!(t);
+                    // Contour index of the note sounding at the end of the window.
+                    if let Some(&(_, idx)) = starts.iter().take_while(|(at, _)| *at <= to).last() {
+                        w["pos"] = json!(idx);
+                    }
                     w["windowSeconds"] = json!((to - from) as f32 / SR as f32);
                     windows.push(w);
                 }
