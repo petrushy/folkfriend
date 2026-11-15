@@ -365,6 +365,7 @@
                     :setting-i-d="row.settingID"
                     :timestamp="row.timestamp"
                     :selected="selectedIDs.has(row.settingID)"
+                    :sets="row.sets"
                     :tags="row.tags"
                     :all-tags="allTags"
                     :setting="row.setting"
@@ -428,6 +429,7 @@
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
+                            :sets="row.sets"
                             :tags="row.tags"
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
@@ -486,6 +488,7 @@
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
+                            :sets="row.sets"
                             :tags="row.tags"
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
@@ -547,6 +550,7 @@
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
+                            :sets="row.sets"
                             :tags="row.tags"
                             :all-tags="allTags"
                             :tune-i-d="row.tuneID"
@@ -758,6 +762,7 @@ import { mdiPlaylistPlus, mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil,
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
+import { indexSetsBySetting } from '@/js/setMembership.mjs';
 import FavouriteRow from '@/components/FavouriteRow';
 import utils from '@/js/utils';
 import { settingSourceUrl } from '@/js/source.mjs';
@@ -794,6 +799,7 @@ export default {
         return {
             favouriteItems: [],
             selectedIDs: new Set(),
+            tuneSets: [],
             activeTags: Array.isArray(persisted.activeTags) ? persisted.activeTags : [],
             activePlaceIDs: Array.isArray(persisted.activePlaceIDs) ? persisted.activePlaceIDs : [],
             activeTypes: Array.isArray(persisted.activeTypes) ? persisted.activeTypes : [],
@@ -859,6 +865,7 @@ export default {
         };
     },
     computed: {
+        setMemberships() { return indexSetsBySetting(this.tuneSets); },
         // The tune the shared session player is sounding right now, whoever
         // started it — its row shows a pause instead of the ▶.
         playingRecordingTuneID() {
@@ -1102,6 +1109,8 @@ export default {
     created() {
         eventBus.$emit('parentViewActivated');
         this.loadFavourites();
+        this.loadTuneSets();
+        eventBus.$on('tuneSetsChanged', this.loadTuneSets);
         this.loadPlaces();
         this.loadRecordings();
         eventBus.$on('syncComplete', this.loadFavourites);
@@ -1132,6 +1141,7 @@ export default {
         this._fillViewport();
     },
     beforeDestroy() {
+        eventBus.$off('tuneSetsChanged', this.loadTuneSets);
         eventBus.$off('syncComplete', this.loadFavourites);
         eventBus.$off('sightingsChanged', this.loadPlaces);
         eventBus.$off('liveSessionsChanged', this.loadRecordings);
@@ -1140,6 +1150,10 @@ export default {
         this._observedSentinel = null;
     },
     methods: {
+        async loadTuneSets() {
+            try { this.tuneSets = await store.getTuneSets(); }
+            catch (e) { eventBus.$emit('syncError', 'Could not read set membership on this device.'); }
+        },
         _resetRowBudget() {
             if (Number.isFinite(this.rowBudget)) this.rowBudget = INITIAL_ROW_BUDGET;
         },
@@ -1198,6 +1212,7 @@ export default {
                 descriptor: utils.parseDisplayableDescription(item.result.setting),
                 settingID: item.result.settingID,
                 timestamp: item.timestamp,
+                sets: this.setMemberships[String(item.result.settingID)] || [],
                 tags: item.tags || [],
                 setting: item.result.setting || null,
                 // Lifted out of `setting` so the tag-grouped list — which does

@@ -1513,7 +1513,7 @@ class Store {
     // a device returning from offline cannot seed a deleted arrangement again.
     async getTuneSets(includeDeleted = false) {
         const records = await get('tuneSets') || [];
-        return JSON.parse(JSON.stringify(records.filter(r => includeDeleted || !r.deleted)));
+        return JSON.parse(JSON.stringify(records.filter(r => includeDeleted || !r.deleted))).map(record => ({ ...record, ...(record.entries ? { entries: record.entries.map(entry => ({ ...entry, repetitions: entry.repetitions === undefined ? 2 : entry.repetitions })) } : {}) }));
     }
 
     _validateTuneSet(record) {
@@ -1532,6 +1532,9 @@ class Store {
             const label = `Tune ${index + 1}${entry?.result?.displayName ? ' (' + entry.result.displayName + ')' : ''}`;
             if (!entry || typeof entry.id !== 'string' || !entry.id || !entry.result || !entry.result.setting) {
                 throw new Error(`${label} has incomplete setting data. Remove it and add it again from search.`);
+            }
+            if (entry.repetitions !== undefined && (!Number.isInteger(entry.repetitions) || entry.repetitions < 1 || entry.repetitions > 99)) {
+                throw new Error(`${label}: times played must be a whole number from 1 to 99.`);
             }
             if (!this._isValidSettingID(entry.result.settingID)) {
                 throw new Error(`${label} has no setting ID. Remove it and add a specific setting from search.`);
@@ -1558,7 +1561,7 @@ class Store {
             const record = JSON.parse(JSON.stringify({
                 id: draft.id, name: draft.name.trim(), notes: draft.notes || '',
                 tags: [...new Set((draft.tags || []).map(t => t.trim()).filter(Boolean))],
-                entries: draft.entries,
+                entries: draft.entries.map(entry => ({ ...entry, repetitions: entry.repetitions === undefined ? 2 : entry.repetitions })),
                 createdAt: previous ? previous.createdAt : Date.now(),
                 updatedAt: nextUpdatedAt(previous ? previous.updatedAt : 0),
             }));
@@ -1590,13 +1593,22 @@ class Store {
     _mergeRemoteTuneSets(incoming) {
         return this._withRecords('tuneSets', records => {
             const merged = new Map(records.map(r => [r.id, r]));
+            const refused = [];
             for (const record of incoming) {
-                this._validateTuneSet(record);
+                // One unusable document must not block every other set: skip
+                // it (keeping any local copy) and say so, rather than
+                // rejecting the whole snapshot.
+                try { this._validateTuneSet(record); }
+                catch (e) { refused.push(`${(record && record.name) || (record && record.id) || 'unknown'}: ${e.message}`); continue; }
                 const local = merged.get(record.id);
                 if (!local || record.updatedAt > local.updatedAt ||
                     (record.updatedAt === local.updatedAt && canonicalRecord(record) > canonicalRecord(local))) {
                     merged.set(record.id, record);
                 }
+            }
+            if (refused.length) {
+                console.warn('[folkfriend sync] skipped unusable sets from the account:', refused);
+                eventBus.$emit('syncError', `Skipped ${refused.length} set${refused.length === 1 ? '' : 's'} from your account that could not be read (${refused[0]}).`);
             }
             return { write: true, records: [...merged.values()] };
         }, 'tuneSetsChanged');

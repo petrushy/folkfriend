@@ -6,7 +6,7 @@
             :persistent="saving"
             scrollable
         >
-            <v-card>
+            <v-card class="sets-ui">
                 <v-card-title>Add {{ displayName(title) }} to a set</v-card-title>
                 <v-card-text>
                     <v-alert
@@ -35,7 +35,14 @@
                                 :key="entry.setting_id"
                             >
                                 <v-list-item-content>
-                                    <v-list-item-title>{{ i + 1 }}. {{ displayName(entry.display_name) }}</v-list-item-title>
+                                    <v-list-item-title>
+                                        <router-link
+                                            :to="{ name: 'tune', query: { tuneID: String(entry.setting.tune_id), settingID: String(entry.setting_id), displayName: entry.display_name } }"
+                                            @click.native="open = false"
+                                        >
+                                            {{ i + 1 }}. {{ displayName(entry.display_name) }}
+                                        </router-link>
+                                    </v-list-item-title>
                                     <v-list-item-subtitle>{{ settingLabel(entry) }}</v-list-item-subtitle>
                                 </v-list-item-content>
                                 <v-list-item-action
@@ -75,7 +82,19 @@
                             :items="destinations"
                             label="Add to"
                             :disabled="saving"
-                        />
+                        >
+                            <template #selection="{ item }">
+                                <router-link
+                                    v-if="sets.some(set => set.id === item.value)"
+                                    :to="{ name: 'sets', query: { setID: item.value } }"
+                                    @mousedown.native.stop
+                                    @click.native.stop="open = false"
+                                >
+                                    {{ item.text }}
+                                </router-link>
+                                <span v-else>{{ item.text }}</span>
+                            </template>
+                        </v-select>
                         <v-text-field
                             v-if="destination === 'new'"
                             v-model="name"
@@ -169,7 +188,7 @@ export default {
             this.batch.splice(index + offset, 0, entry);
         },
         displayName: value => utils.parseDisplayableName(value || ''),
-        async show({ tuneID, title, draftTarget = null, entries = null }) {
+        async show({ tuneID, title, draftTarget = null, entries = null, preferredSettingID = null }) {
             if (this.saving) return;
             const request = (this._request || 0) + 1;
             this._request = request;
@@ -185,7 +204,8 @@ export default {
                 this.sets = sets.sort((a, b) => b.updatedAt - a.updatedAt);
                 this.settings = settings;
                 if (!draftTarget && sets.length) this.destination = sets[0].id;
-                if (!entries && (settings.length === 1 || settings[0]?.favourite)) this.selectedID = String(settings[0].setting_id);
+                if (!entries && preferredSettingID != null && settings.some(r => String(r.setting_id) === String(preferredSettingID))) this.selectedID = String(preferredSettingID);
+                else if (!entries && (settings.length === 1 || settings[0]?.favourite)) this.selectedID = String(settings[0].setting_id);
             } catch (e) { if (request === this._request) this.error = e.message; }
             finally { if (request === this._request) this.loading = false; }
         },
@@ -204,7 +224,7 @@ export default {
                     const draft = existing ? JSON.parse(JSON.stringify(existing)) : {
                         id: globalThis.crypto.randomUUID(), name: this.name.trim(), tags: [], notes: '', entries: [],
                     };
-                    draft.entries.push(...selected.map(entry => ({ id: globalThis.crypto.randomUUID(), result: {
+                    draft.entries.push(...selected.map(entry => ({ id: globalThis.crypto.randomUUID(), repetitions: 2, result: {
                         settingID: entry.setting_id, setting: entry.setting, displayName: entry.display_name,
                     } })));
                     await store.saveTuneSet(draft, existing ? existing.updatedAt : null);

@@ -1080,6 +1080,20 @@ async function run() {
         await assert.rejects(store.saveTuneSet(draft), /Tune 2.*missing its name or score/);
         assert.equal((await store.getTuneSets()).length, 0);
     });
+    await test('set repetition counts default to two, persist and reject invalid values', async () => {
+        const { store } = await signedInStore();
+        const saved = await store.saveTuneSet(setDraft());
+        assert.equal(saved.entries[0].repetitions, 2);
+        saved.entries[0].repetitions = 3;
+        const edited = await store.saveTuneSet(saved, saved.updatedAt);
+        assert.equal((await store.getTuneSets())[0].entries[0].repetitions, 3);
+        const backup = await store.exportUserData();
+        assert.equal(JSON.parse(backup).tuneSets[0].entries[0].repetitions, 3);
+        for (const repetitions of [0, 1.5, 100, '2', null]) {
+            const draft = { ...edited, entries: edited.entries.map((e, i) => i ? e : { ...e, repetitions }) };
+            await assert.rejects(store.saveTuneSet(draft, edited.updatedAt), /times played.*whole number/);
+        }
+    });
     await test('reordering, duplication and deletion remain independent', async () => {
         const { store } = await signedInStore();
         const one = await store.saveTuneSet(setDraft());
@@ -1098,6 +1112,13 @@ async function run() {
         await store._mergeRemoteTuneSets([one]);
         assert.equal((await store.getTuneSets()).length, 0);
         await assert.rejects(store.saveTuneSet(one, one.updatedAt), /changed/);
+    });
+    await test('one unusable remote set is skipped without blocking the others', async () => {
+        const { store } = await signedInStore();
+        const good = { ...setDraft('good'), createdAt: 1, updatedAt: 5 };
+        const bad = { ...setDraft('bad'), name: '', createdAt: 1, updatedAt: 5 };
+        await store._mergeRemoteTuneSets([bad, good]);
+        assert.deepEqual((await store.getTuneSets()).map(r => r.id), ['good']);
     });
     await test('two concurrent set creations survive, and a failed read never wipes sets', async () => {
         const { store, idb } = await signedInStore();

@@ -1,5 +1,5 @@
 <template>
-    <v-container class="viewContainerWrapper">
+    <v-container class="viewContainerWrapper sets-page sets-ui">
         <div
             class="sets-toolbar d-flex flex-wrap align-center my-2"
             :class="{ 'sets-toolbar-editing': !!draft }"
@@ -30,11 +30,17 @@
                 New set
             </v-btn>
         </div>
-        <p class="text--secondary">
+        <p
+            v-if="!viewedSet || draft"
+            class="sets-description"
+        >
             Arrange tunes in playing order. Sets are saved independently of Favorite Tunes.
         </p>
-        <p class="caption">
-            {{ signedIn ? 'Changes are saved on this device and sync to your account. Concurrent edits to the same set use the latest saved version.' : 'Saved on this device. Sign in in Settings to sync sets across devices.' }}
+        <p
+            v-if="!viewedSet || draft"
+            class="sets-status"
+        >
+            {{ signedIn ? 'Saved on this device. Changes sync to your account.' : 'Saved on this device. Sign in in Settings to sync sets across devices.' }}
         </p>
         <v-alert
             v-if="error"
@@ -116,7 +122,7 @@
                 >
                     Back to sets
                 </v-btn>
-                <h2 class="title flex-grow-1">
+                <h2 class="set-name flex-grow-1">
                     {{ viewedSet.name }}
                 </h2>
                 <v-btn
@@ -206,7 +212,7 @@
                 :disabled="busy"
             />
             <p class="caption">
-                Tunes in playing order · {{ draft.entries.length }} tunes. Use the arrows to rearrange.
+                Tunes in playing order · {{ draft.entries.length }} tunes. Use the arrows to rearrange. Times played counts complete runs through the score, including its written repeats.
             </p>
             <v-card
                 v-for="(entry, i) in draft.entries"
@@ -246,6 +252,17 @@
                         <v-icon>{{ icons.close }}</v-icon>
                     </v-btn>
                 </div>
+                <v-text-field
+                    v-model.number="entry.repetitions"
+                    type="number"
+                    label="Times played"
+                    min="1"
+                    max="99"
+                    step="1"
+                    dense
+                    :disabled="busy"
+                    style="max-width:140px"
+                />
                 <v-btn
                     small
                     text
@@ -272,6 +289,7 @@
                 <div class="d-flex align-center">
                     <v-text-field
                         v-model="query"
+                        clearable
                         label="Find a tune to add"
                         hint="Choose a setting below. Adding a tune does not star it."
                         persistent-hint
@@ -281,7 +299,7 @@
                         text
                         type="submit"
                         :loading="searching"
-                        :disabled="busy || !query.trim()"
+                        :disabled="busy || !(query || '').trim()"
                     >
                         Search
                     </v-btn>
@@ -332,6 +350,7 @@
     </v-container>
 </template>
 <script>
+import '@/assets/sets.css';
 import { searchSetSettings } from '@/services/setSearch.mjs';
 import store from '@/services/store';
 import ffBackend from '@/services/backend';
@@ -423,6 +442,7 @@ export default {
         create() { this.edit({ id: this.id(), name: '', notes: '', tags: [], entries: [] }); },
         edit(set) {
             this.draft = JSON.parse(JSON.stringify(set));
+            this.draft.entries = this.draft.entries.map(entry => ({ ...entry, repetitions: entry.repetitions === undefined ? 2 : entry.repetitions }));
             this.version = set.updatedAt || null;
             this.original = JSON.stringify(this.draft);
             this.results = []; this.query = ''; this.searched = false; this.expanded = {}; this.error = '';
@@ -444,7 +464,7 @@ export default {
                 const index = this.draft.entries.findIndex(e => e.id === entryID);
                 if (index < 0) throw new Error('The starting tune was removed. Reopen the suggestions from another tune.');
                 if (result.setting_id == null || !result.setting?.abc) throw new Error('This setting is missing its ID or score. Choose another setting.');
-                this.draft.entries.splice(index + 1, 0, { id: this.id(), result: {
+                this.draft.entries.splice(index + 1, 0, { id: this.id(), repetitions: 2, result: {
                     settingID: result.setting_id, setting: JSON.parse(JSON.stringify(result.setting)), displayName: result.display_name,
                 } });
             } };
@@ -454,16 +474,16 @@ export default {
                 this.error = 'This setting is missing its ID or score. Search again before adding it.';
                 return;
             }
-            this.draft.entries.push({ id: this.id(), result: {
+            this.draft.entries.push({ id: this.id(), repetitions: 2, result: {
                 settingID: r.setting_id, setting: JSON.parse(JSON.stringify(r.setting)), displayName: r.display_name,
             } });
         },
         async search() {
-            if (!this.query.trim() || this.searching) return;
+            if (!(this.query || '').trim() || this.searching) return;
             this.searching = true; this.searched = true; this.error = '';
             try {
                 const [ready, favourites] = await Promise.all([ffBackend.indexReady(), store.getFavourites()]);
-                this.results = await searchSetSettings(ffBackend, this.query.trim(), { favourites, indexReady: ready });
+                this.results = await searchSetSettings(ffBackend, (this.query || '').trim(), { favourites, indexReady: ready });
             } catch (e) { this.error = e.message; this.results = []; }
             finally { this.searching = false; }
         },
@@ -480,7 +500,12 @@ export default {
 };
 </script>
 <style scoped>
-.set-notes { white-space: pre-wrap; }
+.sets-page { width: calc(100% - 32px); max-width: 1100px; }
+.sets-page h1 { font-size: 1.75rem; font-weight: 600; line-height: 1.25; }
+.set-name { font-size: 1.25rem; font-weight: 600; line-height: 1.4; }
+.sets-description { font-size: .9375rem; color: #616161; margin-bottom: 8px; }
+.sets-status { font-size: .875rem; color: #616161; }
+.set-notes { white-space: pre-wrap; font-size: .9375rem; }
 .sets-toolbar-editing { position: sticky; top: 64px; z-index: 5; background: white; padding: 8px 0; }
 @media (max-width: 600px) { .sets-toolbar-editing { top: 56px; } }
 </style>

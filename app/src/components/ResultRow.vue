@@ -1,5 +1,8 @@
 <template>
-    <div ref="rowEl" class="result-row-wrapper d-flex align-center">
+    <div
+        ref="rowEl"
+        class="result-row-wrapper d-flex align-center"
+    >
         <router-link
             class="flex-grow-1 d-flex align-center result-link"
             :to="{
@@ -34,21 +37,60 @@
                         {{ scoreLabel }}
                     </v-col>
                 </v-row>
-                <v-row v-if="tags.length > 0" class="pb-2 pt-1">
-                    <v-col class="py-0 d-flex flex-wrap" style="gap:4px">
-                        <v-chip v-for="tag in tags" :key="tag" x-small outlined>{{ tag }}</v-chip>
+                <v-row
+                    v-if="tags.length > 0"
+                    class="pb-2 pt-1"
+                >
+                    <v-col
+                        class="py-0 d-flex flex-wrap"
+                        style="gap:4px"
+                    >
+                        <v-chip
+                            v-for="tag in tags"
+                            :key="tag"
+                            x-small
+                            outlined
+                        >
+                            {{ tag }}
+                        </v-chip>
                     </v-col>
                 </v-row>
             </v-container>
 
             <!-- ABC thumbnail — only shown when the row is wide enough -->
             <!-- eslint-disable-next-line vue/no-v-html -->
-            <div v-if="showAbcPreview" class="abc-preview" :style="{ width: abcPreviewDisplayWidth + 'px' }" @click="addToHistory" v-html="abcSvg" />
+            <div
+                v-if="showAbcPreview"
+                class="abc-preview"
+                :style="{ width: abcPreviewDisplayWidth + 'px' }"
+                @click="addToHistory"
+                v-html="abcSvg"
+            />
         </router-link>
         <!-- Outside the router-link, so tapping it opens the note rather than
              navigating to the tune. -->
-        <TuneBackgroundButton :tuneID="setting.tune_id" :displayName="name" :sourceUrl="setting.source_url || ''" :small="false" />
-        <v-btn icon class="mr-2" :disabled="!hasValidSettingID && !favourited" @click.stop="toggleFavourite">
+        <TuneBackgroundButton
+            :tune-i-d="setting.tune_id"
+            :display-name="name"
+            :source-url="setting.source_url || ''"
+            :small="false"
+        />
+        <v-btn
+            icon
+            title="Add to set"
+            :aria-label="'Add ' + name + ' to set'"
+            @click.stop="addToSet"
+        >
+            <v-icon color="grey darken-1">
+                {{ addSetIcon }}
+            </v-icon>
+        </v-btn>
+        <v-btn
+            icon
+            class="mr-2"
+            :disabled="!hasValidSettingID && !favourited"
+            @click.stop="toggleFavourite"
+        >
             <v-icon :color="favourited ? 'amber darken-1' : 'grey lighten-1'">
                 {{ favourited ? starIcon : starOutlineIcon }}
             </v-icon>
@@ -57,7 +99,8 @@
 </template>
 
 <script>
-import { mdiStar, mdiStarOutline } from '@mdi/js';
+import { mdiStar, mdiStarOutline, mdiPlaylistPlus } from '@mdi/js';
+import eventBus from '@/eventBus.js';
 import ABCJS from 'abcjs';
 import utils from '@/js/utils.js';
 import store from '@/services/store.js';
@@ -102,47 +145,10 @@ export default {
             // results (which have setting_id). For name results (no setting_id)
             // or stale cached workers, we lazy-fetch it on mount.
             loadedAbc: (this.setting && this.setting.abc) || '',
+            addSetIcon: mdiPlaylistPlus,
             starIcon: mdiStar,
             starOutlineIcon: mdiStarOutline,
         };
-    },
-    mounted() {
-        this._syncRowWidth = () => {
-            if (!this.$refs.rowEl) return;
-            const nextWidth = Math.round(this.$refs.rowEl.getBoundingClientRect().width);
-            if (this.rowWidth !== nextWidth) {
-                this.rowWidth = nextWidth;
-            }
-        };
-        this._queueRowWidthSync = () => {
-            if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
-            this._resizeFrame = requestAnimationFrame(() => {
-                this._syncRowWidth();
-                this._resizeFrame = null;
-            });
-        };
-        window.addEventListener('resize', this._queueRowWidthSync, { passive: true });
-        this.$nextTick(() => this._queueRowWidthSync());
-        // Lazily fetch ABC if not already present (name query results lack
-        // setting_id so worker.js cannot pre-populate it)
-        if (!this.loadedAbc && this.setting && this.setting.tune_id) {
-            ffBackend.settingsFromTuneID(this.setting.tune_id).then(settings => {
-                const target = this.settingID
-                    ? settings.find(s => String(s.setting_id) === String(this.settingID))
-                    : settings[0];
-                if (target && target.abc) this.loadedAbc = target.abc;
-            }).catch(() => {});
-        }
-    },
-    beforeDestroy() {
-        window.removeEventListener('resize', this._queueRowWidthSync);
-        if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
-    },
-    created() {
-        store.isTuneFavourite(this.setting.tune_id).then(v => {
-            this.favourited = v;
-            if (v) this._loadTags();
-        });
     },
     computed: {
         descriptor: function () {
@@ -227,7 +233,52 @@ export default {
             return utils.lerpColor(a, b, x);
         },
     },
+    mounted() {
+        this._syncRowWidth = () => {
+            if (!this.$refs.rowEl) return;
+            const nextWidth = Math.round(this.$refs.rowEl.getBoundingClientRect().width);
+            if (this.rowWidth !== nextWidth) {
+                this.rowWidth = nextWidth;
+            }
+        };
+        this._queueRowWidthSync = () => {
+            if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
+            this._resizeFrame = requestAnimationFrame(() => {
+                this._syncRowWidth();
+                this._resizeFrame = null;
+            });
+        };
+        window.addEventListener('resize', this._queueRowWidthSync, { passive: true });
+        this.$nextTick(() => this._queueRowWidthSync());
+        // Lazily fetch ABC if not already present (name query results lack
+        // setting_id so worker.js cannot pre-populate it)
+        if (!this.loadedAbc && this.setting && this.setting.tune_id) {
+            ffBackend.settingsFromTuneID(this.setting.tune_id).then(settings => {
+                const target = this.settingID
+                    ? settings.find(s => String(s.setting_id) === String(this.settingID))
+                    : settings[0];
+                if (target && target.abc) this.loadedAbc = target.abc;
+            }).catch(() => {});
+        }
+    },
+    beforeDestroy() {
+        window.removeEventListener('resize', this._queueRowWidthSync);
+        if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
+    },
+    created() {
+        store.isTuneFavourite(this.setting.tune_id).then(v => {
+            this.favourited = v;
+            if (v) this._loadTags();
+        });
+    },
     methods: {
+        addToSet() {
+            eventBus.$emit('showAddToSet', { tuneID: this.setting.tune_id, title: this.displayName,
+                                             preferredSettingID: this.hasValidSettingID ? this.settingID : null,
+                                             ...(this.hasValidSettingID && this.loadedAbc ? { entries: [{ setting_id: this.settingID,
+                                                                                                          setting: { ...this.setting, abc: this.loadedAbc }, display_name: this.displayName }] } : {}),
+            });
+        },
         _loadTags() {
             store.getTagsForTune(this.setting.tune_id).then(tags => { this.tags = tags; });
         },

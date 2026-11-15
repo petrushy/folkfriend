@@ -32,8 +32,6 @@
             <SetPartnersButton class="ma-1" chip :tuneID="tuneID" :title="name || displayName" />
         </v-container>
 
-        <TuneSetMembership :tune-i-d="tuneID" />
-
         <v-container v-if="geoTaggingOn" class="heardAt py-1">
             <span class="heardAtLabel pr-1">
                 <v-icon small class="pb-1">{{ icons.mapMarker }}</v-icon>
@@ -115,6 +113,14 @@
                         </div>
                     </div>
                     <div class="headerActions">
+                        <v-menu v-if="!expandedIndex.includes(i) && setsForSetting(settingData.setting_id).length" offset-y left>
+                            <template #activator="{ on, attrs }">
+                                <v-btn icon small title="In sets" :aria-label="'Sets containing setting ' + settingData.setting_id" v-bind="attrs" @click.stop v-on="on"><v-icon color="primary">{{ icons.set }}</v-icon></v-btn>
+                            </template>
+                            <v-list dense>
+                                <v-list-item v-for="set in setsForSetting(settingData.setting_id)" :key="set.id" :to="{ name: 'sets', query: { setID: set.id } }"><v-list-item-title>{{ set.name }}</v-list-item-title></v-list-item>
+                            </v-list>
+                        </v-menu>
                         <v-menu
                             v-if="expandedIndex.includes(i) && favouritedSettings[settingData.setting_id]"
                             v-model="addTagMenus[settingData.setting_id]"
@@ -157,6 +163,10 @@
                     </div>
                 </v-expansion-panel-header>
                 <v-expansion-panel-content>
+                    <div v-if="setsForSetting(settingData.setting_id).length" class="d-flex flex-wrap align-center mb-2" style="gap:6px" aria-label="Sets containing this setting">
+                        <span class="caption text--secondary">In sets:</span>
+                        <v-chip v-for="set in setsForSetting(settingData.setting_id)" :key="set.id" small outlined :to="{ name: 'sets', query: { setID: set.id } }">{{ set.name }}</v-chip>
+                    </div>
                     <div v-if="settingData.composer || settingData.origin" class="settingMeta">
                         <span v-if="settingData.composer" class="settingMetaItem">
                             <span class="settingMetaLabel">Composer</span> {{ settingData.composer }}
@@ -295,6 +305,7 @@ import {
     mdiPlay,
     mdiPause,
     mdiCrosshairsGps,
+    mdiPlaylistMusic,
 } from '@mdi/js';
 import practiceFollow from '@/services/practiceFollow.js';
 import { ScoreFollower } from '@/js/scoreFollower.mjs';
@@ -310,7 +321,7 @@ import { dropboxState } from '@/services/dropbox.js';
 import { playSessionTuneLooped, playerHost, sessionPlayer } from '@/services/sessionPlayerHost.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
-import TuneSetMembership from '@/components/TuneSetMembership.vue';
+import { indexSetsBySetting } from '@/js/setMembership.mjs';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
@@ -322,7 +333,7 @@ const TUNE_INDEX_WAIT_MS = 20000;
 
 export default {
     name: 'TuneView',
-    components: { AbcDisplay, TuneBackgroundButton, SetPartnersButton, TunePlaceDialog, TuneSetMembership },
+    components: { AbcDisplay, TuneBackgroundButton, SetPartnersButton, TunePlaceDialog },
     props: {
         tuneID: {
             type: String,
@@ -343,6 +354,7 @@ export default {
     data: function () {
         return {
             settings: null,
+            tuneSets: [],
             name: null,
             displayableAliases: [],
             abcFullScreen: false,
@@ -399,6 +411,7 @@ export default {
                 star: mdiStar,
                 starOutline: mdiStarOutline,
                 tagPlus: mdiTagPlusOutline,
+                set: mdiPlaylistMusic,
                 mapMarker: mdiMapMarker,
                 close: mdiCloseCircle,
                 plus: mdiPlus,
@@ -411,6 +424,7 @@ export default {
         };
     },
     computed: {
+        setMemberships() { return indexSetsBySetting(this.tuneSets); },
         instrumentItems() {
             return instrumentItems(this.instrumentShift);
         },
@@ -462,6 +476,8 @@ export default {
     },
     created: async function () {
         eventBus.$emit('childViewActivated');
+        this.loadTuneSets();
+        eventBus.$on('tuneSetsChanged', this.loadTuneSets);
 
         if (this.tuneID === '') {
             return;
@@ -582,6 +598,7 @@ export default {
             this._clearFollow();
             practiceFollow.stop();
         }
+        eventBus.$off('tuneSetsChanged', this.loadTuneSets);
         eventBus.$off('practiceFollowPosition', this._onPracticePosition);
         eventBus.$off('practiceFollowState', this._onPracticeState);
         eventBus.$off('indexStatusChanged', this._onIndexStatus);
@@ -593,6 +610,11 @@ export default {
         next();
     },
     methods: {
+        async loadTuneSets() {
+            try { this.tuneSets = await store.getTuneSets(); }
+            catch (e) { eventBus.$emit('syncError', 'Could not read set membership on this device.'); }
+        },
+        setsForSetting(id) { return this.setMemberships[String(id)] || []; },
         formatSessionDate,
         async toggleFollow(settingData) {
             if (this.followSettingId === settingData.setting_id) {
@@ -800,13 +822,15 @@ export default {
             const status = await this._waitForIndex(TUNE_INDEX_WAIT_MS);
 
             if (status === 'ready') {
-                const [settings, aliases] = await Promise.all([
-                    ffBackend.settingsFromTuneID(this.tuneID),
-                    ffBackend.aliasesFromTuneID(this.tuneID),
-                ]);
-                if (settings && settings.length) {
-                    return { settings, aliases };
-                }
+                try {
+                    const [settings, aliases] = await Promise.all([
+                        ffBackend.settingsFromTuneID(this.tuneID),
+                        ffBackend.aliasesFromTuneID(this.tuneID),
+                    ]);
+                    if (settings && settings.length) {
+                        return { settings, aliases };
+                    }
+                } catch (e) { console.warn('Using saved settings after an index lookup failed', e); }
             }
 
             const fallback = await this._settingsFromFavourites();

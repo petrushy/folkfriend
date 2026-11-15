@@ -46,6 +46,28 @@
                     </v-chip>
                 </v-col>
             </v-row>
+            <v-row
+                v-if="sets.length"
+                class="pt-1"
+                @click.stop
+            >
+                <v-col
+                    class="py-0 d-flex flex-wrap align-center"
+                    style="gap:4px"
+                    aria-label="Sets containing this setting"
+                >
+                    <span class="caption text--secondary">In sets:</span>
+                    <v-chip
+                        v-for="set in sets"
+                        :key="set.id"
+                        x-small
+                        outlined
+                        :to="{ name: 'sets', query: { setID: set.id } }"
+                    >
+                        {{ set.name }}
+                    </v-chip>
+                </v-col>
+            </v-row>
         </v-container>
 
         <!-- ABC preview — only rendered when the row is wide enough -->
@@ -179,6 +201,7 @@ export default {
         timestamp: { type: Number, required: true },
         selected: { type: Boolean, default: false },
         tags: { type: Array, default: () => [] },
+        sets: { type: Array, default: () => [] },
         allTags: { type: Array, default: () => [] },
         setting: { type: Object, default: null },
         // How many saved sessions hold a playable recording of this TUNE (any

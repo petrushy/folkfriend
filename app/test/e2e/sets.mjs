@@ -12,7 +12,7 @@ const profile = mkdtempSync(path.join(tmpdir(), 'ff-sets-'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const chrome = spawn(CHROME, [
-    ...BASE_ARGS,
+    ...BASE_ARGS, '--mute-audio', '--autoplay-policy=no-user-gesture-required',
     ...(TEST_FOLLOW ? ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'] : []),
     '--remote-debugging-port=9712', `--user-data-dir=${profile}`,
     'about:blank',
@@ -191,7 +191,7 @@ try {
         vm.create(); vm.draft.name = 'Browser reels'; vm.draft.tags = ['Tuesday'];
         for (const [id, mode, dance] of [['420', 'Dmajor', 'reel'], ['430', 'Gmajor', 'jig']]) {
             vm.add({ setting_id: id, display_name: 'Tune ' + id,
-                setting: { tune_id: id, abc: 'X:1\\nT:Test\\nM:4/4\\nL:1/8\\nK:D\\nDEFG ABcd|', mode, dance } });
+                setting: { tune_id: '987654321' + id, abc: 'X:1\\nT:Test\\nM:4/4\\nL:1/8\\nK:D\\nDEFG ABcd|', mode, dance } });
         }
         vm.move(1, -1); await vm.save(); await vm.showList();
         return { error: vm.error, order: vm.sets[0]?.entries.map(e => e.result.settingID) };
@@ -244,6 +244,8 @@ try {
         await document.querySelector('#app').__vue__.$router.push('/favourites');
     })()`);
     await waitFor(`window.findVM('FavouritesView')?.favouriteItems.length === 2`, 15000, 'favorite tunes');
+    await waitFor(`!!document.querySelector('.favourite-row-wrapper [aria-label="Sets containing this setting"] .v-chip')`, 10000, 'favorite setting membership');
+    check('Favorite Tunes shows clickable exact-setting set names', await evaluate(`!!document.querySelector('.favourite-row-wrapper [aria-label="Sets containing this setting"] a[href*="setID="]')`));
     await evaluate(`document.querySelector('.favourite-row-wrapper button[title="Add to set"]').click()`);
     await waitFor(`window.findVM('AddToSetDialog').open && !window.findVM('AddToSetDialog').loading`, 10000, 'favorite destination picker');
     const oneFavorite = await evaluate(`(async () => {
@@ -315,8 +317,18 @@ try {
     })()`);
     check('changing set URLs protects unsaved edits and viewing leaves the saved name intact', guarded);
     await evaluate(`document.querySelector('.set-score a').click()`);
-    await waitFor(`!!document.querySelector('[aria-label="Sets containing this tune"] .v-chip')`, 30000, 'tune set membership');
-    check('Tune view shows clickable set-membership chips', true);
+    await waitFor(`!!document.querySelector('[aria-label="Sets containing this setting"] .v-chip')`, 30000, 'tune set membership');
+    const exactMembership = await evaluate(`(async () => {
+        const vm = window.findVM('TuneView');
+        const names = [...document.querySelectorAll('[aria-label="Sets containing this setting"] .v-chip')].map(e => e.innerText.trim());
+        const expected = vm.setsForSetting(vm.settings[vm.expandedIndex[0]].setting_id).map(s => s.name);
+        vm.expandedIndex = []; await vm.$nextTick();
+        const collapsedIcon = !!document.querySelector('button[title="In sets"]');
+        vm.expandedIndex = [0]; await vm.$nextTick();
+        return { names, expected, collapsedIcon };
+    })()`);
+    check('exact setting memberships show names only, with a collapsed set icon',
+        exactMembership.collapsedIcon && exactMembership.names.every(name => exactMembership.expected.includes(name)), JSON.stringify(exactMembership));
     const setOnly = await evaluate(`(async () => {
         const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open('keyval-store');
@@ -331,7 +343,7 @@ try {
         return !!fallback?.settings.length && fallback.settings.every(s => !!s.abc);
     })()`);
     check('a tune saved only in sets has an offline tune-page fallback', setOnly);
-    await evaluate(`document.querySelector('[aria-label="Sets containing this tune"] .v-chip').click()`);
+    await evaluate(`document.querySelector('[aria-label="Sets containing this setting"] .v-chip').click()`);
     await waitFor(`!!window.findVM('SetsView')?.viewedSet && !!document.querySelector('.set-score')`, 10000, 'membership opens set scores');
     check('membership chip opens the full set score view', true);
     if (TEST_FOLLOW) {
@@ -431,6 +443,80 @@ try {
         await evaluate(`(async () => { const vm = window.findVM('SetScoreView'); await vm.startFollow(1); window.findVM('SetsView').edit(window.findVM('SetsView').viewedSet); })()`);
         await waitFor(`!window.findVM('SetScoreView') && window.followTracks.every(t => t.readyState === 'ended')`, 5000, 'microphone released when editing');
         check('entering Edit ends set Follow and releases its microphone', true);
+    }
+    await send('Network.emulateNetworkConditions', { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 }, session);
+    await evaluate(`(async () => {
+        const vm = window.findVM('SetsView');
+        if (vm.draft) { window.confirm = () => true; vm.close(); }
+        vm.create(); vm.draft.name = 'MIDI repetition regression';
+        for (const [id, body] of [['99001', '|: C D :|'], ['99002', 'E F|']]) vm.add({
+            setting_id: id, display_name: 'MIDI ' + id,
+            setting: { tune_id: '98765' + id, mode: 'Cmajor', meter: '4/4', dance: 'reel', abc: 'X:1\\nM:4/4\\nL:1/4\\nQ:1/4=600\\nK:C\\n' + body },
+        });
+        vm.draft.entries[0].repetitions = 3;
+        await vm.save();
+        window.midiStarts = []; window.midiEnds = []; window.midiDurations = [];
+        const scoreView = window.findVM('SetScoreView');
+        for (let index = 0; index < scoreView.set.entries.length; index++) {
+            const ref = scoreView.$refs['score-' + scoreView.set.entries[index].id]; const display = Array.isArray(ref) ? ref[0] : ref;
+            const prepare = display.prepareSetPlayback.bind(display);
+            display.prepareSetPlayback = async (...args) => {
+                const handle = await prepare(...args); const start = handle.start;
+                handle.start = ended => { window.midiStarts.push(index); start(() => { window.midiEnds.push(index); ended(); }); };
+                return handle;
+            };
+        }
+        scoreView._midiContext = new AudioContext();
+        const create = scoreView._midiContext.createBufferSource.bind(scoreView._midiContext);
+        scoreView._midiContext.createBufferSource = () => {
+            const source = create(); const start = source.start.bind(source);
+            source.start = (...args) => { if (source.buffer) window.midiDurations.push(source.buffer.duration); return start(...args); };
+            return source;
+        };
+        await scoreView.playSet();
+    })()`);
+    await waitFor(`window.findVM('SetScoreView').midiStatus === 'complete' || !!window.findVM('SetScoreView').error`, 20000, 'whole set MIDI playback');
+    const midi = await evaluate(`({ error: window.findVM('SetScoreView').error, starts: window.midiStarts, ends: window.midiEnds, durations: window.midiDurations, reps: window.findVM('SetScoreView').set.entries.map(e => e.repetitions) })`);
+    check('native synth plays complete tunes the configured number of times in order',
+        !midi.error && midi.starts.join(',') === '0,0,0,1,1' && midi.ends.join(',') === midi.starts.join(',') && midi.reps.join(',') === '3,2', JSON.stringify(midi));
+    check('written ABC repeats are included in each complete playback', midi.durations.length === 5 && Math.abs(midi.durations[0] - 2 * midi.durations[3]) < 0.04);
+    await evaluate(`(async () => { const vm = window.findVM('SetScoreView'); vm.midiTempo = 25; await vm.playSet(); })()`);
+    await waitFor(`!!document.querySelector('.set-score-active .followBand') && !!document.querySelector('.set-score-active .abcjs-current-note')`, 10000, 'MIDI score position');
+    check('synthesized set playback marks the current note and staff row', true);
+    const midiPause = await evaluate(`(() => {
+        const vm = window.findVM('SetScoreView'); vm.toggleMidiPause();
+        return { status: vm.midiStatus, starts: window.midiStarts.length };
+    })()`);
+    await sleep(250);
+    check('pausing whole-set playback holds its place', midiPause.status === 'paused' && await evaluate(`window.findVM('SetScoreView').midiStatus === 'paused' && window.midiStarts.length === ${midiPause.starts}`));
+    const stoppedMidi = await evaluate(`(async () => {
+        const vm = window.findVM('SetScoreView'); vm.toggleMidiPause();
+        const resumed = vm.midiStatus === 'playing'; vm.stopSetPlayback();
+        const count = window.midiStarts.length;
+        const starting = vm.playSet(); vm.stopSetPlayback(); await starting;
+        return { resumed, stopped: vm.midiStatus === 'idle', count, now: window.midiStarts.length };
+    })()`);
+    check('resume, stop and cancellation cannot start a late tune', stoppedMidi.resumed && stoppedMidi.stopped && stoppedMidi.count === stoppedMidi.now, JSON.stringify(stoppedMidi));
+    check('set view has one Follow control and linked tune names', await evaluate(`![...document.querySelectorAll('.set-score button')].some(b => /follow from here|open tune/i.test(b.innerText)) && document.querySelectorAll('.set-score .set-tune-title').length === 2`));
+    await evaluate(`(async () => { const vm = window.findVM('SetScoreView'); await vm.playSet(); window.savedMidiContext = vm._midiContext; window.findVM('SetsView').edit(window.findVM('SetsView').viewedSet); })()`);
+    await waitFor(`window.savedMidiContext.state === 'closed'`, 5000, 'playlist context closed on edit');
+    check('entering Edit stops synthesized set playback and closes its shared context', true);
+    // Clearable search must accept Vuetify's null clear value.
+    const clearSearch = await evaluate(`(async () => { const vm = window.findVM('SetsView'); vm.query = null; await vm.search(); return !vm.searching; })()`);
+    check('clearing the set editor search is safe', clearSearch);
+    if (process.env.FF_REAL_SEARCH) {
+        await evaluate(`window.confirm = () => true; window.findVM('SetsView').close(); document.querySelector('#app').__vue__.$router.push({ name: 'search' }).then(() => true)`);
+        await waitFor(`!!window.findVM('SearchView')`, 10000, 'main search');
+        await evaluate(`window.findVM('SearchView').textQuery = 'cooley'; window.findVM('SearchView').nameQuery()`);
+        await waitFor(`!!document.querySelector('.result-row-wrapper button[title="Add to set"]')`, 15000, 'search result add action');
+        await evaluate(`document.querySelector('.result-row-wrapper button[title="Add to set"]').click()`);
+        await waitFor(`window.findVM('AddToSetDialog').open && !window.findVM('AddToSetDialog').loading`, 10000, 'result setting picker');
+        check('search results offer Add to set with selectable full settings', await evaluate(`window.findVM('AddToSetDialog').settings.length > 0 || window.findVM('AddToSetDialog').batch.length > 0`));
+        await evaluate(`window.findVM('AddToSetDialog').destination = window.findVM('AddToSetDialog').sets[0].id`);
+        await sleep(100);
+        await evaluate(`document.querySelector('.v-select__selections a[href*="setID="]').click()`);
+        await waitFor(`!!window.findVM('SetsView')?.viewedSet`, 10000, 'selected set link');
+        check('the selected set name in Add to set opens its score view', true);
     }
     const vueWarnings = warnings.filter(w => /\[Vue warn\]|EXC/.test(w));
     check('no Vue warnings or runtime exceptions', vueWarnings.length === 0, vueWarnings.slice(0, 3).join(' // '));

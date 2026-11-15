@@ -27,20 +27,44 @@
                 class="followAnchor"
                 :style="{ top: `${followBand.top}px`, height: `${followBand.height}px` }"
             />
-            <button v-if="fullscreen" class="exitFullScreenBtn" @click.stop="exitFullScreen">
+            <button
+                v-if="fullscreen"
+                class="exitFullScreenBtn"
+                @click.stop="exitFullScreen"
+            >
                 ✕
             </button>
-            <h2 v-if="fullscreen && title" class="fullScreenTitle">
+            <h2
+                v-if="fullscreen && title"
+                class="fullScreenTitle"
+            >
                 {{ title }}
             </h2>
             <!-- Render ABC sheet music here -->
             <div ref="abcTarget" />
         </div>
         <!-- Controls bar — sibling of the full-screen div so fixed positioning works correctly -->
-        <div v-if="!hideControls" :class="fullscreen ? 'fullScreenControls' : 'inlineControls'">
-            <v-btn small class="mx-1 px-2 abcControls" @click="playButton">
-                <v-icon small v-if="paused">{{ icons.play }}</v-icon>
-                <v-icon small v-else>{{ icons.pause }}</v-icon>
+        <div
+            v-if="!hideControls"
+            :class="fullscreen ? 'fullScreenControls' : 'inlineControls'"
+        >
+            <v-btn
+                small
+                class="mx-1 px-2 abcControls"
+                @click="playButton"
+            >
+                <v-icon
+                    v-if="paused"
+                    small
+                >
+                    {{ icons.play }}
+                </v-icon>
+                <v-icon
+                    v-else
+                    small
+                >
+                    {{ icons.pause }}
+                </v-icon>
             </v-btn>
             <v-btn
                 small
@@ -49,17 +73,36 @@
                 :title="looping ? 'Loop on' : 'Loop off'"
                 @click="looping = !looping"
             >
-                <v-icon small>{{ icons.repeat }}</v-icon>
+                <v-icon small>
+                    {{ icons.repeat }}
+                </v-icon>
             </v-btn>
-            <v-btn small class="mx-1 px-2 abcControls" @click="stopPlaying">
-                <v-icon small>{{ icons.stop }}</v-icon>
+            <v-btn
+                small
+                class="mx-1 px-2 abcControls"
+                @click="stopPlaying"
+            >
+                <v-icon small>
+                    {{ icons.stop }}
+                </v-icon>
             </v-btn>
-            <v-btn small class="mx-1 px-2 abcControls" @click="fullscreen ? exitFullScreen() : goFullScreen()">
-                <v-icon small>{{ fullscreen ? icons.fullscreenExit : icons.fullscreen }}</v-icon>
+            <v-btn
+                small
+                class="mx-1 px-2 abcControls"
+                @click="fullscreen ? exitFullScreen() : goFullScreen()"
+            >
+                <v-icon small>
+                    {{ fullscreen ? icons.fullscreenExit : icons.fullscreen }}
+                </v-icon>
             </v-btn>
             <slot name="controls" />
             <div class="ml-auto d-flex align-center tempoControl">
-                <v-icon small class="mr-1">{{ icons.metronome }}</v-icon>
+                <v-icon
+                    small
+                    class="mr-1"
+                >
+                    {{ icons.metronome }}
+                </v-icon>
                 <v-slider
                     v-model="tempoPercent"
                     min="25"
@@ -136,6 +179,7 @@ export default {
             required: false,
             default: false,
         },
+        hideScoreTitle: { type: Boolean, default: false },
         // The staff line to mark as being played (0-based), or null. Set by
         // the Tune view's practice follow.
         followLine: {
@@ -195,7 +239,7 @@ export default {
             // A Q: would be drawn above the stave and would show up in the raw
             // ABC text view, presenting an editorial tempo the source never
             // stated as though it came from the tune.
-            abcLines.push(this.abc);
+            abcLines.push(this.hideScoreTitle ? this.abc.replace(/^T:[^\n]*(?:\n|$)/gm, '') : this.abc);
             return abcLines.join('\n');
         },
         showAbcText: function () {
@@ -210,6 +254,32 @@ export default {
             // Polkas are the one meter needing a slower pulse than that.
             const isPolka = this.meter === '2/4' || /^M:2\/4/m.test(this.abc);
             return isPolka ? 120 : 180;
+        },
+    },
+    watch: {
+        followLine(line, previous) {
+            this._placeFollowBand();
+            if (line !== null && line !== previous) this._revealFollowBand();
+        },
+        followAutoScroll(on) {
+            if (on) this._revealFollowBand();
+        },
+        fullscreen() {
+            // The score moves to a different container.
+            this.$nextTick(() => {
+                this._placeFollowBand();
+                this._revealFollowBand();
+            });
+        },
+        instrumentShift() {
+            // Notation only; playback is unchanged so keep it going.
+            this.drawScore();
+        },
+        transpose() {
+            // The synth holds the old notes, so stop rather than keep playing
+            // the previous key under a score that has already changed.
+            this.stopPlaying();
+            this.drawScore();
         },
     },
     mounted: async function () {
@@ -244,32 +314,6 @@ export default {
             this.audioContext.close();
             this.audioContext = null;
         }
-    },
-    watch: {
-        followLine(line, previous) {
-            this._placeFollowBand();
-            if (line !== null && line !== previous) this._revealFollowBand();
-        },
-        followAutoScroll(on) {
-            if (on) this._revealFollowBand();
-        },
-        fullscreen() {
-            // The score moves to a different container.
-            this.$nextTick(() => {
-                this._placeFollowBand();
-                this._revealFollowBand();
-            });
-        },
-        instrumentShift() {
-            // Notation only; playback is unchanged so keep it going.
-            this.drawScore();
-        },
-        transpose() {
-            // The synth holds the old notes, so stop rather than keep playing
-            // the previous key under a score that has already changed.
-            this.stopPlaying();
-            this.drawScore();
-        },
     },
     methods: {
         // Positions the band over `followLine`, relative to the sheet, which is
@@ -551,6 +595,49 @@ export default {
             }
             this._activeHighlightEvent = null;
             this._clearHighlightedNotes();
+        },
+        // A playlist owns capture/playback coordination and one AudioContext.
+        // This handle does not use the individual score's loop or tempo state.
+        async prepareSetPlayback(audioContext, tempoPercent) {
+            if (!this.abcVisual) throw new Error('The score is not ready to play.');
+            const millisecondsPerMeasure = this._msPerMeasure() * this.tempoPercent / tempoPercent;
+            const synth = new ABCJS.synth.CreateSynth();
+            const initialized = await synth.init({
+                visualObj: this.abcVisual, audioContext, millisecondsPerMeasure,
+                options: { ...this._synthOptions(() => {}), fadeLength: 0 },
+            });
+            if (initialized?.error?.length) throw new Error('Could not load the sounds for this tune.');
+            await synth.prime();
+            if (!synth.audioBuffers?.length) throw new Error('This score has no playable notes.');
+            const timer = this._createPlaybackTimer(millisecondsPerMeasure);
+            let disposed = false;
+            let lastEvent = null;
+            let ownsHighlight = false;
+            const silenceEnd = () => { synth.onEnded = () => {}; (synth.directSource || []).forEach(source => { source.onended = null; }); };
+            const bindEnd = onEnded => { synth.onEnded = () => { synth.finished(); onEnded(); }; };
+            return {
+                start: onEnded => { if (disposed) return; bindEnd(onEnded); lastEvent = null; synth.start(); },
+                pause: () => { silenceEnd(); synth.pause(); },
+                resume: onEnded => { bindEnd(onEnded); synth.resume(); },
+                progress: () => {
+                    if (disposed || typeof synth.startTimeSec !== 'number') return null;
+                    const latency = audioContext.outputLatency || audioContext.baseLatency || 0;
+                    const elapsed = Math.max(0, audioContext.currentTime - synth.startTimeSec - latency);
+                    const events = timer.noteTimings || [];
+                    let event = null;
+                    for (const candidate of events) {
+                        if (candidate.milliseconds > elapsed * 1000 + HIGHLIGHT_LEAD_MS) break;
+                        if (candidate.type === 'event') event = candidate;
+                    }
+                    if (event !== lastEvent) { lastEvent = event; ownsHighlight = true; this._highlightTimingEvent(event); }
+                    return { line: event && typeof event.line === 'number' ? event.line : null, elapsed };
+                },
+                dispose: () => {
+                    if (disposed) return; disposed = true;
+                    silenceEnd(); synth.stop(); synth.audioBuffers = [];
+                    timer.stop(); if (ownsHighlight) this._clearHighlightedNotes();
+                },
+            };
         },
         _handlePlaybackEnded() {
             this.midiBuffer = null;

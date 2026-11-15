@@ -38,19 +38,20 @@ top toolbar shows Save set and Cancel in place of New set and remains visible
 while scrolling through search results. Unsaved edits remain
 protected when navigating between set URLs as well as away from the page.
 
-Tune pages show clickable membership chips with each set's name and the keys
-used for that tune. Those chips open the complete set score view. Set snapshots
+Tune settings and Favorite Tunes show clickable name-only membership chips,
+matched by exact settingID. Collapsed tune settings have a set icon beside the
+favourite star; its menu links to the containing sets. Those chips open the complete set score view. Set snapshots
 also supply the tune page's offline fallback independently of Favorite Tunes.
 
 ## Following a performance
 
 In the full score view, Follow my playing uses the existing practice microphone
 and staff-line tracker. It highlights the current row and can scroll through
-the complete arrangement. It compares the current and next saved tune only;
-two strong, distinct windows must favour the next tune before changing entries.
-Shared phrases and repeats stay in the current tune. Next tune and Follow from
-here provide explicit cues, including adjacent identical settings, which audio
-cannot distinguish. Entry identity is kept separate from setting identity.
+the complete arrangement. It compares every saved tune in the set; two strong, distinct windows must
+favour one unambiguous tune before changing entries. Skips and restarts are
+recognized, while shared phrases and repeats hold the current tune. There is
+one Follow my playing control, with a Next tune cue for identical occurrences
+that audio cannot distinguish. Entry identity is kept separate from setting identity.
 
 Auto-scroll can be switched off independently. Touch/wheel browsing holds it
 for eight seconds; Resume scrolling restores it immediately. Editing, changing
@@ -67,6 +68,24 @@ The browser suite uses a fake microphone for capture and scrolling by default
 (`FF_FOLLOW_TEST=0` skips those checks). To include real tune-database search, run:
 `APP_URL=http://localhost:3000 FF_REAL_SEARCH=1 FF_FOLLOW_TEST=1 node app/test/e2e/sets.mjs`.
 
+## Whole-set synthesized playback
+
+Each entry stores `repetitions` (1–99), defaulting to 2 for new and older sets.
+“Times played” counts complete runs through that tune, including repeats already
+written in its ABC. These counts persist through duplication, sync and backups.
+Play set runs the tunes in order, with pause/resume, stop and a playback-speed
+control. One AudioContext and at most the current/next primed audio buffers are
+used; repeating a tune reuses its buffer. Native audio completion, rather than
+estimated timers, advances the sequence. MIDI note highlighting and optional
+row scrolling track the audio clock. Stopping, editing, navigating away, starting
+Follow or another score player cancels the playlist and stale preparation.
+
+The set interface uses a consistent sans-serif hierarchy and a reading-width
+score column rather than stretching scores across wide screens. Tune titles
+are clickable; there are no per-tune Follow or Open tune buttons. The editor
+search is clearable. Search-result rows offer Add to set; the destination dialog
+links both numbered tune names and the selected existing set name to their views.
+
 ## Persistence and sync
 
 IndexedDB `tuneSets` is the local source. All set writes and inbound merges use
@@ -79,7 +98,8 @@ Signed-in sets sync as private documents at `users/{uid}/tuneSets/{id}`. Every
 edit has a monotone `updatedAt`; deletes retain versioned tombstones locally and
 remotely. Server snapshots reconcile the union and push newer local copies,
 including offline edits and tombstones. Security rules reject writes older than
-the stored document. Concurrent offline edits to the same set resolve to the
+the stored document. A remote set that fails validation is skipped and reported; it never blocks the
+rest of the snapshot. Concurrent offline edits to the same set resolve to the
 newest version of the whole set; they do not merge individual tune moves. Equal
 versions resolve deterministically using canonical map ordering. As with other
 app records, timestamp ordering depends on device clocks.

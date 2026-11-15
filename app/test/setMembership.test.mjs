@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict';
-import { setsForTune } from '../src/js/setMembership.mjs';
-const entry = (tuneID, settingID, mode) => ({ id: settingID, result: { settingID, setting: { tune_id: tuneID, mode } } });
+import { indexSetsBySetting } from '../src/js/setMembership.mjs';
+const entry = (tuneID, settingID) => ({ id: settingID, result: { settingID, setting: { tune_id: tuneID } } });
 const sets = [
-    { id: 'a', name: 'A', entries: [entry('1', '10', 'Dmajor'), entry('2', '20', 'Gmajor'), entry('1', '11', 'Eminor')] },
-    { id: 'b', name: 'B', entries: [entry('2', '20', 'Gmajor')] },
-    { id: 'c', name: 'C', entries: [entry('1', '10', 'Dmajor')] },
+    { id: 'a', name: 'A', entries: [entry('1', '10'), entry('1', '11'), entry('1', '10')] },
+    { id: 'b', name: 'B', entries: [entry('2', '20')] },
+    { id: 'c', name: 'C', entries: [entry('1', '12')] },
+    { id: 'd', name: 'D', entries: [entry('1', 10)] },
     { id: 'deleted', deleted: true },
 ];
-const memberships = setsForTune(sets, 1);
-assert.deepEqual(memberships.map(s => s.id), ['a', 'c']);
-assert.deepEqual(memberships[0].entries.map(e => e.result.settingID), ['10', '11']);
-assert.deepEqual(setsForTune(sets, 'unknown'), []);
-console.log('Tune membership includes all containing sets and preserves their chosen settings.');
+const index = indexSetsBySetting(sets);
+assert.deepEqual(index['10'], [{ id: 'a', name: 'A' }, { id: 'd', name: 'D' }]);
+assert.deepEqual(index['11'], [{ id: 'a', name: 'A' }]);
+assert.deepEqual(index['12'], [{ id: 'c', name: 'C' }]);
+assert.equal(index['unknown'], undefined);
+assert.equal(index['10'].some(s => s.id === 'c'), false, 'another setting of the same tune is not membership');
+console.log('Set membership is exact to settingID, deduplicated and contains names only.');
