@@ -113,12 +113,43 @@
                         </div>
                     </div>
                     <div class="headerActions">
-                        <v-menu v-if="!expandedIndex.includes(i) && setsForSetting(settingData.setting_id).length" offset-y left>
+                        <!-- One set control per setting: which sets hold it, and adding it.
+                             Shown on the same rule as the star (expanded, or in use). -->
+                        <v-menu
+                            v-if="expandedIndex.includes(i) || setsForSetting(settingData.setting_id).length"
+                            offset-y
+                            left
+                        >
                             <template #activator="{ on, attrs }">
-                                <v-btn icon small title="In sets" :aria-label="'Sets containing setting ' + settingData.setting_id" v-bind="attrs" @click.stop v-on="on"><v-icon color="primary">{{ icons.set }}</v-icon></v-btn>
+                                <v-btn
+                                    icon
+                                    small
+                                    :title="setsForSetting(settingData.setting_id).length ? 'In sets' : 'Add to a set'"
+                                    :aria-label="'Sets for setting ' + settingData.setting_id"
+                                    v-bind="attrs"
+                                    @click.stop
+                                    v-on="on"
+                                >
+                                    <v-icon :color="setsForSetting(settingData.setting_id).length ? 'primary' : 'grey darken-1'">
+                                        {{ setsForSetting(settingData.setting_id).length ? icons.set : icons.setAdd }}
+                                    </v-icon>
+                                </v-btn>
                             </template>
                             <v-list dense>
-                                <v-list-item v-for="set in setsForSetting(settingData.setting_id)" :key="set.id" :to="{ name: 'sets', query: { setID: set.id } }"><v-list-item-title>{{ set.name }}</v-list-item-title></v-list-item>
+                                <v-subheader v-if="setsForSetting(settingData.setting_id).length">
+                                    In sets
+                                </v-subheader>
+                                <v-list-item
+                                    v-for="set in setsForSetting(settingData.setting_id)"
+                                    :key="set.id"
+                                    :to="{ name: 'sets', query: { setID: set.id } }"
+                                >
+                                    <v-list-item-title>{{ set.name }}</v-list-item-title>
+                                </v-list-item>
+                                <v-divider v-if="setsForSetting(settingData.setting_id).length" />
+                                <v-list-item @click="addSettingToSet(settingData)">
+                                    <v-list-item-title>Add to a set…</v-list-item-title>
+                                </v-list-item>
                             </v-list>
                         </v-menu>
                         <v-menu
@@ -163,10 +194,6 @@
                     </div>
                 </v-expansion-panel-header>
                 <v-expansion-panel-content>
-                    <div v-if="setsForSetting(settingData.setting_id).length" class="d-flex flex-wrap align-center mb-2" style="gap:6px" aria-label="Sets containing this setting">
-                        <span class="caption text--secondary">In sets:</span>
-                        <v-chip v-for="set in setsForSetting(settingData.setting_id)" :key="set.id" small outlined :to="{ name: 'sets', query: { setID: set.id } }">{{ set.name }}</v-chip>
-                    </div>
                     <div v-if="settingData.composer || settingData.origin" class="settingMeta">
                         <span v-if="settingData.composer" class="settingMetaItem">
                             <span class="settingMetaLabel">Composer</span> {{ settingData.composer }}
@@ -306,6 +333,7 @@ import {
     mdiPause,
     mdiCrosshairsGps,
     mdiPlaylistMusic,
+    mdiPlaylistPlus,
 } from '@mdi/js';
 import practiceFollow from '@/services/practiceFollow.js';
 import { ScoreFollower } from '@/js/scoreFollower.mjs';
@@ -412,6 +440,7 @@ export default {
                 starOutline: mdiStarOutline,
                 tagPlus: mdiTagPlusOutline,
                 set: mdiPlaylistMusic,
+                setAdd: mdiPlaylistPlus,
                 mapMarker: mdiMapMarker,
                 close: mdiCloseCircle,
                 plus: mdiPlus,
@@ -615,6 +644,12 @@ export default {
             catch (e) { eventBus.$emit('syncError', 'Could not read set membership on this device.'); }
         },
         setsForSetting(id) { return this.setMemberships[String(id)] || []; },
+        // The exact setting on screen, so the dialog does not ask for a key.
+        addSettingToSet(settingData) {
+            const displayName = this.name || this.displayName;
+            const entry = { setting_id: settingData.setting_id, setting: settingData, display_name: this.displayName || displayName };
+            eventBus.$emit('showAddToSet', { tuneID: this.tuneID, title: displayName, entries: [entry] });
+        },
         formatSessionDate,
         async toggleFollow(settingData) {
             if (this.followSettingId === settingData.setting_id) {

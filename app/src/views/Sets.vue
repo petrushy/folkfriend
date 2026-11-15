@@ -369,9 +369,13 @@ export default {
     beforeRouteLeave(to, from, next) {
         next(!this.busy && (!this.dirty || window.confirm('Discard unsaved changes to this set?')));
     },
+    // Editing has its own URL (?setID=…&edit=1, or ?edit=new for an unsaved
+    // new/duplicated set), so Back from the editor returns to where it was
+    // opened instead of leaving the Sets page.
     beforeRouteUpdate(to, from, next) {
+        if (this._editsDraft(to.query)) { next(); return; }
         if (this.busy || (this.dirty && !window.confirm('Discard unsaved changes to this set?'))) { next(false); return; }
-        this.draft = null; next();
+        this.draft = null; this._pushedEdit = false; next();
     },
     data: () => ({
         viewID: null, activeTags: [],
@@ -392,6 +396,7 @@ export default {
     },
     watch: {
         '$route.query.setID': { immediate: true, handler(value) { this.viewID = value || null; } },
+        '$route.query.edit'(edit) { if (!edit) this._leaving = false; this._syncDraftToRoute(); },
     },
     created() {
         this.refresh();
@@ -419,6 +424,38 @@ export default {
             }
             catch (e) { this.error = 'Could not read sets from this device. ' + e.message; }
             finally { this.loading = false; }
+            this._syncDraftToRoute();
+        },
+        _editsDraft(query) {
+            if (!this.draft || !query.edit) return false;
+            return query.edit === 'new' ? this._draftIsNew : query.setID === this.draft.id;
+        },
+        // A reload or deep link onto an edit URL: reopen the editor from the
+        // stored set, or fall back when there is nothing to edit.
+        _syncDraftToRoute() {
+            const { edit, setID } = this.$route.query;
+            if (!edit || this.loading || this._leaving || this._editsDraft(this.$route.query)) return;
+            const set = edit === 'new' ? null : this.sets.find(s => s.id === setID);
+            if (set) { this._openDraft(set); this._editReturn = { setID }; return; }
+            this.$router.replace({ name: 'sets', query: setID && edit !== 'new' ? { setID } : {} }).catch(() => {});
+        },
+        _startEditing(draftSource, query) {
+            this._openDraft(draftSource, query.edit === 'new');
+            this._editReturn = this.$route.query.setID && !this.$route.query.edit ? { setID: this.$route.query.setID } : {};
+            this._pushedEdit = true;
+            return this.$router.push({ name: 'sets', query }).catch(() => {});
+        },
+        // Leave the editor: Back when we pushed it (so history does not
+        // duplicate the page), otherwise replace with the target.
+        _leaveEditor(target) {
+            const pushed = this._pushedEdit;
+            this.draft = null; this._pushedEdit = false;
+            // Until the URL has left the editor, a refresh must not treat the
+            // edit URL as a deep link to reopen or redirect.
+            this._leaving = true;
+            const returning = target === undefined;
+            if (pushed && (returning || (this._editReturn || {}).setID === target.setID)) { this.$router.back(); return; }
+            this.$router.replace({ name: 'sets', query: returning ? (this._editReturn || {}) : target }).catch(() => {});
         },
         toggleTagFilter(tag) { this.activeTags = this.activeTags.includes(tag) ? this.activeTags.filter(t => t !== tag) : [...this.activeTags, tag]; },
         tagCount(tag) { return this.sets.filter(s => s.tags.includes(tag)).length; },
@@ -439,8 +476,10 @@ export default {
             } catch (e) { this.error = e.message; return false; }
             finally { this.busy = false; }
         },
-        create() { this.edit({ id: this.id(), name: '', notes: '', tags: [], entries: [] }); },
-        edit(set) {
+        create() { this._startEditing({ id: this.id(), name: '', notes: '', tags: [], entries: [] }, { edit: 'new' }); },
+        edit(set) { this._startEditing(set, { setID: set.id, edit: '1' }); },
+        _openDraft(set, isNew = false) {
+            this._draftIsNew = isNew;
             this.draft = JSON.parse(JSON.stringify(set));
             this.draft.entries = this.draft.entries.map(entry => ({ ...entry, repetitions: entry.repetitions === undefined ? 2 : entry.repetitions }));
             this.version = set.updatedAt || null;
@@ -448,11 +487,11 @@ export default {
             this.results = []; this.query = ''; this.searched = false; this.expanded = {}; this.error = '';
         },
         duplicate(set) {
-            this.edit({ ...set, id: this.id(), name: (set.name.slice(0, 190) + ' (copy)'), updatedAt: undefined,
-                        entries: set.entries.map(e => ({ ...e, id: this.id() })) });
+            this._startEditing({ ...set, id: this.id(), name: (set.name.slice(0, 190) + ' (copy)'), updatedAt: undefined,
+                                 entries: set.entries.map(e => ({ ...e, id: this.id() })) }, { edit: 'new' });
             this.original = '';
         },
-        close() { if (!this.dirty || window.confirm('Discard unsaved changes to this set?')) this.draft = null; },
+        close() { if (!this.dirty || window.confirm('Discard unsaved changes to this set?')) this._leaveEditor(); },
         move(i, offset) {
             const entry = this.draft.entries.splice(i, 1)[0];
             this.draft.entries.splice(i + offset, 0, entry);
@@ -489,7 +528,12 @@ export default {
         },
         async save() {
             this.busy = true; this.error = '';
-            try { const saved = await store.saveTuneSet(this.draft, this.version); this.draft = null; await this.refresh(); this.busy = false; await this.openSet(saved); }
+            try {
+                const saved = await store.saveTuneSet(this.draft, this.version);
+                await this.refresh(); this.busy = false;
+                // Saving always lands on the set's score view.
+                this._leaveEditor({ setID: saved.id });
+            }
             catch (e) { this.error = e.message; }
             finally { this.busy = false; }
         },

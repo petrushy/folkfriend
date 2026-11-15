@@ -115,7 +115,7 @@
                         <v-select
                             v-model="destination"
                             :items="destinations"
-                            label="Add to"
+                            label="Choose a set"
                             :disabled="saving"
                         >
                             <template #selection="{ item }">
@@ -130,6 +130,12 @@
                                 <span v-else>{{ item.text }}</span>
                             </template>
                         </v-select>
+                        <p
+                            v-if="duplicateInDestination"
+                            class="caption warning--text"
+                        >
+                            {{ batch.length > 1 ? 'Some of these settings are' : 'This setting is' }} already in {{ destinationName }}. Adding will repeat {{ batch.length > 1 ? 'them' : 'it' }}.
+                        </p>
                         <v-text-field
                             v-if="destination === 'new'"
                             v-model="name"
@@ -144,7 +150,7 @@
                             The tune will be added after the tune you opened the suggestions from. Save the set when you are ready.
                         </p>
                         <p
-                            v-else
+                            v-else-if="destination"
                             class="caption"
                         >
                             {{ batch.length > 1 ? 'Tunes will be added at the end of the set in the order shown.' : 'The tune will be added at the end of the set.' }}
@@ -176,6 +182,18 @@
             timeout="4000"
         >
             {{ notice }}
+            <template #action="{ attrs }">
+                <v-btn
+                    v-if="noticeSetID"
+                    text
+                    color="primary"
+                    v-bind="attrs"
+                    :to="{ name: 'sets', query: { setID: noticeSetID } }"
+                    @click="noticeOpen = false"
+                >
+                    Open set
+                </v-btn>
+            </template>
         </v-snackbar>
     </div>
 </template>
@@ -195,7 +213,7 @@ export default {
         open: false, loading: false, saving: false, error: '', title: '',
         batch: [], icons: { up: mdiArrowUp, down: mdiArrowDown },
         settings: [], sets: [], selectedID: null, destination: null, name: '', draftTarget: null,
-        noticeOpen: false, notice: '',
+        noticeOpen: false, notice: '', noticeSetID: null,
     }),
     computed: {
         // Exact settingID, as on the Tune view and Favourite Tunes chips.
@@ -213,11 +231,23 @@ export default {
                 `${r.favourite ? '★ ' : ''}${r.setting.mode ? keyLabel(r.setting.mode) : 'Key unknown'} · ${r.setting.dance ? typeLabel(r.setting.dance) : 'Type unknown'} · Setting ${r.setting_id}` }));
         },
         destinations() {
+            // From the set editor the only sensible target is the draft being
+            // edited; saving into another set from there is surprising.
+            if (this.draftTarget) return [{ value: 'draft', text: this.draftTarget.label }];
             return [
-                ...(this.draftTarget ? [{ value: 'draft', text: this.draftTarget.label }] : []),
                 ...this.sets.map(s => ({ value: s.id, text: s.name })),
                 { value: 'new', text: 'Create a new set…' },
             ];
+        },
+        destinationName() {
+            const set = this.sets.find(s => s.id === this.destination);
+            return set ? set.name : '';
+        },
+        duplicateInDestination() {
+            const set = this.sets.find(s => s.id === this.destination);
+            if (!set) return false;
+            const held = new Set(set.entries.map(e => String(e.result.settingID)));
+            return this.selectedSettingIDs.some(id => held.has(id));
         },
     },
     created() {
@@ -243,13 +273,16 @@ export default {
             this.settings = []; this.sets = []; this.selectedID = null; this.name = '';
             this.draftTarget = draftTarget;
             this.destination = draftTarget ? 'draft' : 'new';
+            this.noticeOpen = false; this.noticeSetID = null;
             try {
                 const [favourites, sets] = await Promise.all([store.getFavourites(), store.getTuneSets()]);
                 const settings = entries ? [] : await settingsForSetTune(ffBackend, tuneID, title, favourites);
                 if (request !== this._request || !this.open) return;
                 this.sets = sets.sort((a, b) => b.updatedAt - a.updatedAt);
                 this.settings = settings;
-                if (!draftTarget && sets.length) this.destination = sets[0].id;
+                // No preselected set: one tap must never add to whichever set
+                // was touched last. With no sets yet, creating one is the only choice.
+                if (!draftTarget && sets.length) this.destination = null;
                 if (!entries && preferredSettingID != null && settings.some(r => String(r.setting_id) === String(preferredSettingID))) this.selectedID = String(preferredSettingID);
                 else if (!entries && (settings.length === 1 || settings[0]?.favourite)) this.selectedID = String(settings[0].setting_id);
             } catch (e) { if (request === this._request) this.error = e.message; }
@@ -264,6 +297,7 @@ export default {
                 if (this.destination === 'draft') {
                     for (const entry of [...selected].reverse()) await this.draftTarget.add(entry);
                     this.notice = 'Added to the draft. Save the set when you are ready.';
+                    this.noticeSetID = null;
                 } else {
                     const existing = this.sets.find(s => s.id === this.destination);
                     if (this.destination !== 'new' && !existing) throw new Error('Choose a set to add this tune to.');
@@ -273,8 +307,9 @@ export default {
                     draft.entries.push(...selected.map(entry => ({ id: globalThis.crypto.randomUUID(), repetitions: 2, result: {
                         settingID: entry.setting_id, setting: entry.setting, displayName: entry.display_name,
                     } })));
-                    await store.saveTuneSet(draft, existing ? existing.updatedAt : null);
-                    this.notice = `Added to ${draft.name}.`;
+                    const saved = await store.saveTuneSet(draft, existing ? existing.updatedAt : null);
+                    this.notice = `Added to ${saved.name}.`;
+                    this.noticeSetID = saved.id;
                 }
                 this.open = false; this.noticeOpen = true;
             } catch (e) { this.error = e.message; }

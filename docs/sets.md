@@ -25,6 +25,17 @@ dialog uses the exact saved settings and lets a selected group be reordered
 before appending it to an existing or new set. This works offline and leaves
 the favourites untouched.
 
+### Adding from outside the editor
+
+Search results (name and audio), Favorite Tunes and the Tune page all open the
+same dialog. It lists the sets that already contain the exact setting (each
+opens that set), and no set is preselected: a single tap must never add to
+whichever set was touched last (with no sets yet, “Create a new set…” is the
+only choice). Choosing a set that already holds the setting shows a warning;
+adding again is still allowed, since repeats are legitimate. After adding you
+stay where you are, and the confirmation offers **Open set**. Opened from the
+set editor, the only destination is the draft being edited.
+
 ## Browsing and editing
 
 The set list uses compact rows with the first tune's score on the right when
@@ -34,14 +45,21 @@ A row's overflow menu contains View scores, Edit set, Duplicate and Delete.
 
 Clicking a set opens its own URL (`/sets?setID=…`) and all saved scores in order
 on one scrollable page. Viewing never opens an editable draft. Edit set opens
-the arrangement editor; saving returns to the score view. During editing, the
+the arrangement editor at its own URL (`?setID=…&edit=1`, or `?edit=new` for a
+new or duplicated set), so Back — including the iPhone back-swipe — returns to
+where editing started, after confirming any unsaved changes. Saving lands on
+the set's score view and does not leave the editor in the history. Reloading an
+`edit=1` URL reopens the editor from the stored set; an unsaved `edit=new`
+draft cannot survive a reload and falls back to the list. During editing, the
 top toolbar shows Save set and Cancel in place of New set and remains visible
 while scrolling through search results. Unsaved edits remain
 protected when navigating between set URLs as well as away from the page.
 
-Tune settings and Favorite Tunes show clickable name-only membership chips,
-matched by exact settingID. Collapsed tune settings have a set icon beside the
-favourite star; its menu links to the containing sets. Those chips open the complete set score view. Set snapshots
+Favorite Tunes rows show clickable name-only membership chips, matched by exact
+settingID. On the Tune page each setting has one set button beside its star,
+shown on the same rule as the star (expanded, or already in a set): its menu
+lists the containing sets, which open the complete set score view, and “Add to
+a set…” for that exact setting. Set snapshots
 also supply the tune page's offline fallback independently of Favorite Tunes.
 
 ## Following a performance

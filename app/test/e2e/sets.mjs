@@ -252,10 +252,12 @@ try {
         const dialog = window.findVM('AddToSetDialog');
         const exact = dialog.batch.length === 1 && !!dialog.batch[0].setting_id && !!dialog.batch[0].setting.abc;
         dialog.destination = 'new'; dialog.name = 'Favorite row regression'; await dialog.add();
-        return { exact, error: dialog.error, path: location.pathname };
+        await new Promise(r => setTimeout(r, 300));
+        const openSet = [...document.querySelectorAll('.v-snack__action a')].some(a => a.textContent.trim() === 'Open set' && a.href.includes(dialog.noticeSetID));
+        return { exact, error: dialog.error, path: location.pathname, openSet };
     })()`);
-    check('favorite row icon saves its exact setting offline without navigation',
-        oneFavorite.exact && !oneFavorite.error && oneFavorite.path === '/favourites', JSON.stringify(oneFavorite));
+    check('favorite row icon saves its exact setting offline without navigation, offering Open set',
+        oneFavorite.exact && !oneFavorite.error && oneFavorite.path === '/favourites' && oneFavorite.openSet, JSON.stringify(oneFavorite));
     await evaluate(`window.findVM('FavouritesView').selectedIDs = new Set(window.findVM('FavouritesView').favouriteItems.map(f => f.result.settingID));`);
     await sleep(100);
     await evaluate(`document.querySelector('[title="Add selected tunes to a set"]').click()`);
@@ -305,6 +307,33 @@ try {
     check('View displays every score in order without entering Edit', viewed.count === viewed.expected && viewed.count > 0);
     await evaluate(`window.findVM('SetsView').edit(window.findVM('SetsView').viewedSet)`);
     check('Edit opens the arrangement editor separately', await evaluate(`!!window.findVM('SetsView').draft && !document.querySelector('.set-score')`));
+    const backFlow = await evaluate(`(async () => {
+        const vm = window.findVM('SetsView');
+        const wait = ms => new Promise(r => setTimeout(r, ms));
+        const setID = vm.viewedSet.id;
+        const editURL = location.search;
+        history.back(); await wait(400);                       // unedited: no prompt
+        const backToView = !vm.draft && vm.viewID === setID && !location.search.includes('edit');
+        vm.edit(vm.viewedSet); await wait(200);
+        vm.draft.name += ' x'; window.confirm = () => false;
+        history.back(); await wait(400);                       // dirty, declined
+        const kept = !!vm.draft && vm.draft.name.endsWith(' x');
+        window.confirm = () => true; vm.close(); await wait(400);
+        const cancelled = !vm.draft && vm.viewID === setID;
+        const before = history.length;
+        vm.create(); await wait(200); vm.draft.name = 'Back flow new set';
+        await vm.save(); await wait(400);
+        const created = vm.sets.find(s => s.name === 'Back flow new set');
+        const landed = !vm.draft && vm.viewID === created?.id && !location.search.includes('edit');
+        history.back(); await wait(400);                       // not back into the editor
+        const notEditor = !vm.draft && !location.search.includes('edit');
+        await vm.deleteSet(created); await vm.openSet(vm.sets.find(s => s.id === setID)); await wait(300);
+        vm.edit(vm.viewedSet); await wait(200);
+        return { editURL, backToView, kept, cancelled, landed, notEditor, historyGrew: history.length - before };
+    })()`);
+    check('Back from the editor returns to the set, protects edits, and saving a new set lands on it',
+        backFlow.editURL.includes('edit=1') && backFlow.backToView && backFlow.kept && backFlow.cancelled
+        && backFlow.landed && backFlow.notEditor, JSON.stringify(backFlow));
     const guarded = await evaluate(`(async () => {
         const vm = window.findVM('SetsView');
         vm.draft.name += ' unsaved';
@@ -317,18 +346,31 @@ try {
     })()`);
     check('changing set URLs protects unsaved edits and viewing leaves the saved name intact', guarded);
     await evaluate(`document.querySelector('.set-score a').click()`);
-    await waitFor(`!!document.querySelector('[aria-label="Sets containing this setting"] .v-chip')`, 30000, 'tune set membership');
+    await waitFor(`!!document.querySelector('button[title="In sets"]')`, 30000, 'tune set membership');
     const exactMembership = await evaluate(`(async () => {
         const vm = window.findVM('TuneView');
-        const names = [...document.querySelectorAll('[aria-label="Sets containing this setting"] .v-chip')].map(e => e.innerText.trim());
-        const expected = vm.setsForSetting(vm.settings[vm.expandedIndex[0]].setting_id).map(s => s.name);
+        const sid = vm.settings[0].setting_id;
+        const expected = vm.setsForSetting(sid).map(s => s.name);
         vm.expandedIndex = []; await vm.$nextTick();
-        const collapsedIcon = !!document.querySelector('button[title="In sets"]');
-        vm.expandedIndex = [0]; await vm.$nextTick();
-        return { names, expected, collapsedIcon };
+        const collapsedButton = !!document.querySelector('button[title="In sets"]');
+        document.querySelector('button[title="In sets"]').click();
+        await new Promise(r => setTimeout(r, 400));
+        const items = [...document.querySelectorAll('.menuable__content__active .v-list-item__title')].map(e => e.innerText.trim());
+        const add = [...document.querySelectorAll('.menuable__content__active .v-list-item')].find(e => e.innerText.includes('Add to a set'));
+        add.click();
+        await new Promise(r => setTimeout(r, 400));
+        const dialog = window.findVM('AddToSetDialog');
+        const exact = dialog.open && dialog.batch.length === 1 && String(dialog.batch[0].setting_id) === String(sid);
+        const noDefault = dialog.destination === null;
+        const warnsAfterChoosing = (() => { dialog.destination = dialog.sets.find(s => s.entries.some(e => String(e.result.settingID) === String(sid)))?.id; return dialog.duplicateInDestination; })();
+        dialog.open = false; vm.expandedIndex = [0]; await vm.$nextTick();
+        return { items, expected, collapsedButton, exact, noDefault, warnsAfterChoosing };
     })()`);
-    check('exact setting memberships show names only, with a collapsed set icon',
-        exactMembership.collapsedIcon && exactMembership.names.every(name => exactMembership.expected.includes(name)), JSON.stringify(exactMembership));
+    check('one set button lists exact-setting sets and adds that exact setting with no preselected set',
+        exactMembership.collapsedButton && exactMembership.expected.length > 0
+        && exactMembership.expected.every(name => exactMembership.items.includes(name))
+        && exactMembership.items.includes('Add to a set…') && exactMembership.exact && exactMembership.noDefault
+        && exactMembership.warnsAfterChoosing, JSON.stringify(exactMembership));
     const setOnly = await evaluate(`(async () => {
         const db = await new Promise((resolve, reject) => {
             const request = indexedDB.open('keyval-store');
@@ -343,9 +385,13 @@ try {
         return !!fallback?.settings.length && fallback.settings.every(s => !!s.abc);
     })()`);
     check('a tune saved only in sets has an offline tune-page fallback', setOnly);
-    await evaluate(`document.querySelector('[aria-label="Sets containing this setting"] .v-chip').click()`);
+    await evaluate(`(async () => {
+        document.querySelector('button[title="In sets"]').click();
+        await new Promise(r => setTimeout(r, 400));
+        document.querySelector('.menuable__content__active a.v-list-item').click();
+    })()`);
     await waitFor(`!!window.findVM('SetsView')?.viewedSet && !!document.querySelector('.set-score')`, 10000, 'membership opens set scores');
-    check('membership chip opens the full set score view', true);
+    check('a set in the tune page set menu opens the full set score view', true);
     if (TEST_FOLLOW) {
         const makeContour = (seed, alphabet) => {
             let x = seed;
