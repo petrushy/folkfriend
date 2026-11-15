@@ -40,6 +40,31 @@ Tune pages show clickable membership chips with each set's name and the keys
 used for that tune. Those chips open the complete set score view. Set snapshots
 also supply the tune page's offline fallback independently of Favorite Tunes.
 
+## Following a performance
+
+In the full score view, Follow my playing uses the existing practice microphone
+and staff-line tracker. It highlights the current row and can scroll through
+the complete arrangement. It compares the current and next saved tune only;
+two strong, distinct windows must favour the next tune before changing entries.
+Shared phrases and repeats stay in the current tune. Next tune and Follow from
+here provide explicit cues, including adjacent identical settings, which audio
+cannot distinguish. Entry identity is kept separate from setting identity.
+
+Auto-scroll can be switched off independently. Touch/wheel browsing holds it
+for eight seconds; Resume scrolling restores it immediately. Editing, changing
+the scores, leaving the set, or stopping Follow clears marks and releases the
+practice microphone if it owns it. A live session retains its own microphone.
+Starting Follow stops score playback and hides playback controls while listening.
+No tune index is needed: stored contours and scores are used locally. Missing
+contours are reported instead of pretending to track them. Instrument shift
+changes written notation, not the pitch expected from the saved setting.
+
+The transition thresholds have deterministic matching tests; live playing
+accuracy still needs validation on instruments, phrasing and device conditions.
+The browser suite uses a fake microphone for capture and scrolling by default
+(`FF_FOLLOW_TEST=0` skips those checks). To include real tune-database search, run:
+`APP_URL=http://localhost:3000 FF_REAL_SEARCH=1 FF_FOLLOW_TEST=1 node app/test/e2e/sets.mjs`.
+
 ## Persistence and sync
 
 IndexedDB `tuneSets` is the local source. All set writes and inbound merges use

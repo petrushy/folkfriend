@@ -150,32 +150,10 @@
             <p v-if="!viewedSet.entries.length">
                 This set has no tunes yet. Choose Edit set to add tunes.
             </p>
-            <div
-                v-for="(entry, i) in viewedSet.entries"
-                :key="entry.id"
-                class="set-score mb-6"
-            >
-                <h3 class="subtitle-1 font-weight-bold">
-                    {{ i + 1 }}. {{ title(entry.result.displayName) }}
-                </h3>
-                <p class="caption text--secondary mb-1">
-                    {{ key(entry.result.setting.mode) }} · {{ type(entry.result.setting.dance) }}
-                </p>
-                <AbcDisplay
-                    :abc="entry.result.setting.abc"
-                    :title="entry.result.displayName"
-                    :mode="entry.result.setting.mode"
-                    :meter="entry.result.setting.meter"
-                    :instrument-shift="instrumentShift"
-                />
-                <v-btn
-                    small
-                    text
-                    :to="{ name: 'tune', query: { tuneID: String(entry.result.setting.tune_id), settingID: String(entry.result.settingID), displayName: entry.result.displayName } }"
-                >
-                    Open tune
-                </v-btn>
-            </div>
+            <SetScoreView
+                :set="viewedSet"
+                :instrument-shift="instrumentShift"
+            />
         </template>
         <v-card
             v-else
@@ -361,13 +339,14 @@ import eventBus from '@/eventBus';
 import { keyLabel, typeLabel } from '@/js/favouriteFacets.mjs';
 import utils from '@/js/utils';
 import AbcDisplay from '@/components/AbcDisplay';
+import SetScoreView from '@/components/SetScoreView.vue';
 import SetRow from '@/components/SetRow.vue';
 import SetPartnersButton from '@/components/SetPartnersButton';
 import { mdiArrowUp, mdiArrowDown, mdiClose, mdiStar, mdiDotsVertical } from '@mdi/js';
 
 export default {
     name: 'SetsView',
-    components: { AbcDisplay, SetPartnersButton, SetRow },
+    components: { AbcDisplay, SetPartnersButton, SetRow, SetScoreView },
     beforeRouteLeave(to, from, next) {
         next(!this.busy && (!this.dirty || window.confirm('Discard unsaved changes to this set?')));
     },
@@ -490,7 +469,7 @@ export default {
         },
         async save() {
             this.busy = true; this.error = '';
-            try { const saved = await store.saveTuneSet(this.draft, this.version); this.draft = null; await this.refresh(); await this.openSet(saved); }
+            try { const saved = await store.saveTuneSet(this.draft, this.version); this.draft = null; await this.refresh(); this.busy = false; await this.openSet(saved); }
             catch (e) { this.error = e.message; }
             finally { this.busy = false; }
         },

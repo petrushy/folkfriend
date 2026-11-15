@@ -6,12 +6,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { CHROME, BASE_ARGS } from './chrome.mjs';
 
+const TEST_FOLLOW = process.env.FF_FOLLOW_TEST !== '0';
 const APP = process.env.APP_URL || 'http://localhost:3000';
 const profile = mkdtempSync(path.join(tmpdir(), 'ff-sets-'));
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 const chrome = spawn(CHROME, [
-    ...BASE_ARGS, '--remote-debugging-port=9712', `--user-data-dir=${profile}`,
+    ...BASE_ARGS,
+    ...(TEST_FOLLOW ? ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', '--autoplay-policy=no-user-gesture-required'] : []),
+    '--remote-debugging-port=9712', `--user-data-dir=${profile}`,
     'about:blank',
 ], { stdio: 'ignore' });
 
@@ -331,10 +334,109 @@ try {
     await evaluate(`document.querySelector('[aria-label="Sets containing this tune"] .v-chip').click()`);
     await waitFor(`!!window.findVM('SetsView')?.viewedSet && !!document.querySelector('.set-score')`, 10000, 'membership opens set scores');
     check('membership chip opens the full set score view', true);
+    if (TEST_FOLLOW) {
+        const makeContour = (seed, alphabet) => {
+            let x = seed;
+            return Array.from({ length: 160 }, () => { x = (x * 1664525 + 1013904223) >>> 0; return alphabet[x % alphabet.length]; }).join('');
+        };
+        const contours = [makeContour(17, 'opqrstuvwxyz'), makeContour(43, 'abcdefghijk')];
+        const fixture = contours.map((contour, i) => ({ setting_id: String(8000 + i), display_name: 'Follow tune ' + (i + 1), setting: {
+            tune_id: String(8000 + i), contour, mode: 'Dmajor', dance: 'reel', meter: '4/4',
+            abc: ['X:1', 'T:Follow tune ' + (i + 1), 'M:4/4', 'L:1/8', 'K:D',
+                'DEFG ABcd|efga bgfe|dcBA GFED|DEFG ABcd|', 'efga bgfe|dcBA GFED|DEFG ABcd|efga bgfe|',
+                'DEFG ABcd|efga bgfe|dcBA GFED|DEFG ABcd|', 'efga bgfe|dcBA GFED|DEFG ABcd|efga bgfe|'].join('\n'),
+        } }));
+        await evaluate(`(async () => {
+            const vm = window.findVM('SetsView'); vm.create(); vm.draft.name = 'Follow regression';
+            for (const result of ${JSON.stringify(fixture)}) vm.add(result);
+            await vm.save();
+            window.followFixtureState = { error: vm.error, draft: !!vm.draft, viewed: vm.viewedSet?.name, names: vm.sets.map(s => s.name) };
+            window.followTracks = [];
+            window.realGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+            window.captureFakeMedia = async options => {
+                const stream = await window.realGetUserMedia(options); window.followTracks.push(...stream.getTracks()); return stream;
+            };
+            navigator.mediaDevices.getUserMedia = window.captureFakeMedia;
+            window.scrollCalls = 0;
+            const reveal = Element.prototype.scrollIntoView;
+            Element.prototype.scrollIntoView = function(options) { window.scrollCalls++; return reveal.call(this, options); };
+        })()`);
+        await waitFor(`window.findVM('SetScoreView')?.set.name === 'Follow regression' && !!document.querySelector('.set-score .abcSheetMusic svg')`, 10000, 'follow score fixture');
+        const started = await evaluate(`(async () => { const vm = window.findVM('SetScoreView'); await vm.startFollow(0); return { running: vm.running, error: vm.error }; })()`);
+        check('set Follow starts with the fake microphone', started.running && !started.error, JSON.stringify(started));
+        const followed = await evaluate(`(async () => {
+            const vm = window.findVM('SetScoreView'); const contours = ${JSON.stringify(contours)}; const at = Date.now(); window.scrollCalls = 0;
+            vm.updateFollow({ contour: contours[0].slice(20, 52), readAt: at, windowSeconds: 4 }, at);
+            await vm.$nextTick();
+            const firstLine = vm.line;
+            vm.updateFollow({ contour: contours[1].slice(0, 32), readAt: at + 100, windowSeconds: 4 }, at + 100);
+            const heldFirst = vm.activeIndex === 0;
+            vm.updateFollow({ contour: contours[1].slice(16, 48), readAt: at + 200, windowSeconds: 4 }, at + 200);
+            await vm.$nextTick();
+            return { firstLine, heldFirst, index: vm.activeIndex, band: !!document.querySelector('.set-score-active .followBand'), scrolled: window.scrollCalls > 0 };
+        })()`);
+        check('set Follow highlights a row and advances only on confirmed next-tune evidence',
+            Number.isInteger(followed.firstLine) && followed.heldFirst && followed.index === 1 && followed.band && followed.scrolled, JSON.stringify(followed));
+        await sleep(400);
+        check('auto-scroll brings the active staff row into view', await evaluate(`(() => { const r = document.querySelector('.set-score-active .followBand')?.getBoundingClientRect(); return !!r && r.top >= 0 && r.bottom <= innerHeight; })()`));
+        await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, session);
+        await sleep(800);
+        check('set Follow controls fit a phone screen', await evaluate('document.documentElement.scrollWidth <= 390'));
+        const rowGeometry = await evaluate(`(() => {
+            const vm = window.findVM('SetScoreView');
+            const ref = vm.$refs['score-' + vm.set.entries[vm.activeIndex].id];
+            const display = Array.isArray(ref) ? ref[0] : ref;
+            const event = display.followTimeline()?.events.find(e => e.line === vm.line && e.elements?.length);
+            const element = event?.elements.flat().find(e => e?.getBoundingClientRect && e.getBoundingClientRect().height > 0);
+            const note = element?.getBoundingClientRect();
+            const band = document.querySelector('.set-score-active .followBand')?.getBoundingClientRect();
+            return { line: vm.line, fresh: display.lineClientRect(vm.line), geometry: display.followTimeline().lines[vm.line], cached: display.followBand, svgCount: display.$refs.abcTarget.querySelectorAll('svg').length, note: note && { top: note.top, bottom: note.bottom }, band: band && { top: band.top, bottom: band.bottom } };
+        })()`);
+        check('follow band covers the matching rendered staff row after resizing',
+            rowGeometry.note && rowGeometry.band && rowGeometry.note.bottom >= rowGeometry.band.top - 8 && rowGeometry.note.top <= rowGeometry.band.bottom + 8, JSON.stringify(rowGeometry));
+        const followShot = await send('Page.captureScreenshot', { format: 'png' }, session);
+        layoutFS.writeFileSync('/tmp/ff-set-follow-mobile.png', Buffer.from(followShot.data, 'base64'));
+        const autoOff = await evaluate(`(async () => {
+            const vm = window.findVM('SetScoreView'); vm.autoScroll = false; await vm.$nextTick();
+            const before = window.scrollCalls; vm.revealEntry(); await vm.$nextTick();
+            const stayed = vm.running && window.scrollCalls === before; vm.autoScroll = true; await vm.$nextTick(); return stayed;
+        })()`);
+        check('auto-scroll can be disabled while listening continues', autoOff);
+        const manual = await evaluate(`(async () => {
+            const vm = window.findVM('SetScoreView'); window.dispatchEvent(new WheelEvent('wheel', { deltaY: 50 })); await vm.$nextTick();
+            const held = vm.held; const before = window.scrollCalls;
+            vm.revealEntry(); await vm.$nextTick();
+            const stayed = window.scrollCalls === before;
+            vm.resumeScroll(); await vm.$nextTick();
+            return held && stayed && !vm.held;
+        })()`);
+        check('manual scrolling holds auto-scroll until resumed', manual);
+        const cue = await evaluate(`(async () => {
+            const vm = window.findVM('SetScoreView'); const tracks = window.followTracks.length;
+            vm.selectEntry(0); await vm.$nextTick();
+            [...document.querySelectorAll('.set-follow-bar button')].find(b => /next tune/i.test(b.innerText)).click();
+            return vm.running && vm.activeIndex === 1 && window.followTracks.length === tracks;
+        })()`);
+        check('Next tune cues another entry without reopening the microphone', cue);
+        await evaluate(`window.findVM('SetScoreView').stopFollow()`);
+        await waitFor(`window.followTracks.length > 0 && window.followTracks.every(t => t.readyState === 'ended')`, 5000, 'microphone released after stop');
+        check('stopping set Follow clears highlighting and releases its microphone', await evaluate(`!window.findVM('SetScoreView').running && !document.querySelector('.followBand')`));
+        const denied = await evaluate(`(async () => {
+            navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Test microphone refusal', 'NotAllowedError'); };
+            const vm = window.findVM('SetScoreView'); await vm.startFollow(0);
+            navigator.mediaDevices.getUserMedia = window.captureFakeMedia;
+            return !vm.running && /Test microphone refusal/.test(vm.error);
+        })()`);
+        check('microphone refusal leaves Follow off and shows the reason', denied);
+        await evaluate(`(async () => { const vm = window.findVM('SetScoreView'); await vm.startFollow(1); window.findVM('SetsView').edit(window.findVM('SetsView').viewedSet); })()`);
+        await waitFor(`!window.findVM('SetScoreView') && window.followTracks.every(t => t.readyState === 'ended')`, 5000, 'microphone released when editing');
+        check('entering Edit ends set Follow and releases its microphone', true);
+    }
     const vueWarnings = warnings.filter(w => /\[Vue warn\]|EXC/.test(w));
     check('no Vue warnings or runtime exceptions', vueWarnings.length === 0, vueWarnings.slice(0, 3).join(' // '));
 } catch (e) {
     console.error('\nFATAL:', e.message);
+    try { console.error('Browser state:', await evaluate('JSON.stringify({ text: document.body.innerText.slice(-2500), fixture: window.followFixtureState })')); console.error('Warnings:', warnings.slice(-5)); } catch (_) { /* browser gone */ }
     results.push({ name: 'harness', ok: false, detail: e.message });
 } finally {
     chrome.kill();

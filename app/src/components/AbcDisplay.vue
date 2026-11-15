@@ -235,7 +235,7 @@ export default {
         eventBus.$on('stopSynthPlayback', this._onStopSynthPlayback);
     },
     beforeDestroy() {
-        if (this._onFollowResize) window.removeEventListener('resize', this._onFollowResize);
+        this._clearFollowResize();
         document.removeEventListener('keydown', this._onKeyDown);
         eventBus.$off('stopSynthPlayback', this._onStopSynthPlayback);
         this.stopPlaying();
@@ -301,15 +301,33 @@ export default {
         },
         // `responsive: 'resize'` rescales the score with the window, which
         // moves every line.
+        _clearFollowResize() {
+            if (this._onFollowResize) window.removeEventListener('resize', this._onFollowResize);
+            if (this._followResizeObserver) this._followResizeObserver.disconnect();
+            if (this._followResizeFrame) cancelAnimationFrame(this._followResizeFrame);
+            this._onFollowResize = null;
+            this._followResizeObserver = null;
+            this._followResizeFrame = null;
+        },
         _syncFollowResize() {
             const want = this.followLine !== null && this.followLine !== undefined;
             if (want && !this._onFollowResize) {
-                this._onFollowResize = () => this._placeFollowBand();
+                this._onFollowResize = () => {
+                    if (this._followResizeFrame) cancelAnimationFrame(this._followResizeFrame);
+                    this._followResizeFrame = requestAnimationFrame(() => {
+                        this._followResizeFrame = null;
+                        this._placeFollowBand();
+                        this._revealFollowBand();
+                    });
+                };
                 window.addEventListener('resize', this._onFollowResize);
-            } else if (!want && this._onFollowResize) {
-                window.removeEventListener('resize', this._onFollowResize);
-                this._onFollowResize = null;
-            }
+                // Sidebar/layout changes can resize the SVG after the window
+                // resize event. Measure the actual sheet, including fullscreen.
+                if (typeof ResizeObserver !== 'undefined' && this.$refs.sheet) {
+                    this._followResizeObserver = new ResizeObserver(this._onFollowResize);
+                    this._followResizeObserver.observe(this.$refs.sheet);
+                }
+            } else if (!want) this._clearFollowResize();
         },
         drawScore() {
             const target = this.$refs.abcTarget;

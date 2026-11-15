@@ -1,5 +1,5 @@
 // The app's one practice follower (js/practiceFollow.mjs), wired to the real
-// microphone, backend and live session. Used by the Tune view.
+// microphone, backend and live session. Used by the Tune and set score views.
 //
 // Every dependency is reached through a function or getter, never captured
 // as a value: backend.js imports the router, the router the Tune view, and
