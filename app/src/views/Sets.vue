@@ -203,7 +203,7 @@
                 v-if="searched && !results.length && !searching"
                 class="caption mt-3"
             >
-                No settings found. Check the name and that a tune database is available in Settings.
+                No matching settings found. Try another name or enable a tune database in Settings.
             </p>
             <v-list
                 v-if="results.length"
@@ -214,7 +214,20 @@
                     v-for="r in results"
                     :key="r.setting_id"
                 >
-                    <v-list-item-content><v-list-item-title>{{ title(r.display_name) }}</v-list-item-title><v-list-item-subtitle>{{ key(r.setting.mode) }} · {{ type(r.setting.dance) }} · Setting {{ r.setting_id }}</v-list-item-subtitle></v-list-item-content>
+                    <v-list-item-content>
+                        <v-list-item-title>
+                            <v-icon
+                                v-if="r.favourite"
+                                small
+                                color="amber darken-1"
+                                aria-label="In Favorite Tunes"
+                                class="mr-1"
+                            >
+                                {{ icons.star }}
+                            </v-icon>
+                            {{ title(r.display_name) }}
+                        </v-list-item-title><v-list-item-subtitle>{{ key(r.setting.mode) }} · {{ type(r.setting.dance) }} · Setting {{ r.setting_id }}</v-list-item-subtitle>
+                    </v-list-item-content>
                     <v-list-item-action>
                         <v-btn
                             small
@@ -268,7 +281,7 @@ import { keyLabel, typeLabel } from '@/js/favouriteFacets.mjs';
 import utils from '@/js/utils';
 import AbcDisplay from '@/components/AbcDisplay';
 import SetPartnersButton from '@/components/SetPartnersButton';
-import { mdiArrowUp, mdiArrowDown, mdiClose } from '@mdi/js';
+import { mdiArrowUp, mdiArrowDown, mdiClose, mdiStar } from '@mdi/js';
 
 export default {
     name: 'SetsView',
@@ -280,7 +293,7 @@ export default {
         sets: [], loading: true, filter: '', draft: null, original: '', version: null,
         query: '', results: [], searching: false, searched: false, expanded: {},
         busy: false, error: '', signedIn: !!store.currentUser,
-        icons: { up: mdiArrowUp, down: mdiArrowDown, close: mdiClose },
+        icons: { up: mdiArrowUp, down: mdiArrowDown, close: mdiClose, star: mdiStar },
     }),
     computed: {
         visibleSets() {
@@ -345,9 +358,8 @@ export default {
             if (!this.query.trim() || this.searching) return;
             this.searching = true; this.searched = true; this.error = '';
             try {
-                const ready = await ffBackend.indexReady();
-                if (!ready) throw new Error('No tune database is available. Open Settings to download one.');
-                this.results = await searchSetSettings(ffBackend, this.query.trim());
+                const [ready, favourites] = await Promise.all([ffBackend.indexReady(), store.getFavourites()]);
+                this.results = await searchSetSettings(ffBackend, this.query.trim(), { favourites, indexReady: ready });
             } catch (e) { this.error = e.message; this.results = []; }
             finally { this.searching = false; }
         },

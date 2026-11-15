@@ -9,8 +9,9 @@ The typical musical set is 2–8 tunes; the storage safety limit is 100 entries.
 Entries retain their selected `settingID` and full setting, including ABC, key
 (`mode`), and tune type (`dance`). Different settings of a tune, and deliberate
 repeats, are allowed. Entry IDs identify occurrences, not tunes. Scores and
-playback work from these snapshots without the tune database. Searching for new
-tunes uses the currently available database. Set tags are independent of tune tags.
+playback work from these snapshots without the tune database. Search puts starred settings first, followed by other settings of favorite tunes,
+then remaining matches in database relevance order. Matching saved favorites are
+also available when their database is unavailable. Set tags are independent of tune tags.
 
 ## Persistence and sync
 

@@ -98,15 +98,33 @@ try {
             await vm.search();
             const results = vm.results;
             if (vm.error || results.length < 2) return { error: vm.error || 'No settings found' };
-            vm.add(results[0]); vm.add(results[1]); await vm.save();
+            // Seed a saved favourite in this isolated browser profile, then
+            // verify the real search places that exact setting first.
+            const starred = results[1];
+            const db = await new Promise((resolve, reject) => {
+                const request = indexedDB.open('keyval-store');
+                request.onsuccess = () => resolve(request.result);
+                request.onerror = () => reject(request.error);
+            });
+            await new Promise((resolve, reject) => {
+                const tx = db.transaction('keyval', 'readwrite');
+                tx.objectStore('keyval').put([{ timestamp: Date.now(), tags: [], result: {
+                    settingID: starred.setting_id, setting: starred.setting, displayName: starred.display_name,
+                } }], 'favouriteItems');
+                tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+            });
+            db.close();
+            await vm.search();
+            const favouriteFirst = vm.results[0].favourite && vm.results[0].setting_id === starred.setting_id;
+            vm.add(vm.results[0]); vm.add(vm.results[1]); await vm.save();
             const saved = vm.sets.find(s => s.name === 'Real search regression');
-            const detail = { error: vm.error, ids: saved?.entries.map(e => e.result.settingID),
+            const detail = { error: vm.error, favouriteFirst, ids: saved?.entries.map(e => e.result.settingID),
                 scores: saved?.entries.every(e => !!e.result.setting.abc) };
             if (saved) { window.confirm = () => true; vm.edit(saved); await vm.remove(); }
             return detail;
         })()`);
-        check('real tune search resolves settings that save with IDs and scores',
-            !realSearch.error && realSearch.ids?.length === 2 && realSearch.ids.every(Boolean) && realSearch.scores,
+        check('real search puts the favorite setting first and saves IDs and scores',
+            !realSearch.error && realSearch.favouriteFirst && realSearch.ids?.length === 2 && realSearch.ids.every(Boolean) && realSearch.scores,
             JSON.stringify(realSearch));
     }
     const state = await evaluate(`(async () => {
