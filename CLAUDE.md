@@ -1221,7 +1221,10 @@ score says what it thinks (`line 3/8 · 41%`, `· realigned`, `· keeping time`,
   `scorePosition.test.mjs` and verified by breaking it:
   - **Expected places need less evidence**: a candidate within tolerance of
     the projection (6 quavers + 15 % of the distance projected since the last
-    match) is believed from 0.4; anywhere else needs 0.6. Among agreeing
+    match) is believed from 0.3; finding the place again once LOST needs
+    0.4; starting an ALTERNATIVE while the place is held needs 0.6 (see
+    "Measured on transcriber output" below — these were 0.4 / 0.6 / 0.6).
+    Among agreeing
     candidates the prior wins, which is what settles a phrase shared by an A
     and a B part.
   - **Re-aligning when it is wrong** (improvisation, skipped repeats): a
@@ -1269,9 +1272,51 @@ Tests: `scorePosition.test.mjs` (27), 8 cases in
 Detection is untouched: no Rust change, and the loop only reads the window's
 contour after its result is taken. The alignment costs ~0.7 ms per window on
 desktop, on the main thread, only with the toggle on.
-⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the 0.4 / 0.6
-floors, the tolerance and the 20 s coast are tuned on the synthetic replay
-only.
+⚠️ **Unmeasured on real audio** (the WAV corpus is gone): the floors, the
+tolerance and the 20 s coast are tuned on synthetic replays only.
+
+#### Measured on transcriber output, and an octave fix (November 2026)
+
+`replayScorePosition.mjs` damages contours directly; it never involved the
+transcriber. `rust/examples/detect_sim.rs` now records the contour index
+sounding each second, and `app/test/bench/replaySetFollow.mjs` scores the line
+set Follow shows against it (a repeat of the same written line counts as
+right). On that, the right tune's windows score only ~0.44 at the median, and
+the line was right under half the time whenever the stored setting differed
+from what was played. Three changes, all in `positionCandidates` /
+`trackPosition`, so the live view, the Tune view and set Follow all get them:
+
+- **Semitone-tolerant position scoring** (`matchSpans` `graded`): a note one
+  semitone off — the commonest transcription error, ~9 % of notes, against
+  ~1 % octave/tempo — costs little instead of counting as a wrong tune's note.
+  The Rust-equivalent lattice is untouched (the parity test still holds).
+- **Floors lowered to what the right tune scores** (track 0.3, relock 0.4),
+  with ALTERNATIVE seeding kept at 0.6: at 0.4 weak chance matches seeded
+  alternatives everywhere and one stray window "confirmed" one of them (caught
+  by the existing stray-window test).
+- **Octave-invariant matching.** `rust/src/decode/octave.rs` drops a window an
+  octave only when 85 % of its notes are ≥ E5. A tin whistle sounds an octave
+  above written pitch with its low notes right on that line, so some windows
+  come out at written pitch and others an octave up — and an octave-up window
+  scored 0 against every stored contour. Each window is now matched as heard
+  and ±12. ⚠️ The MAIN SEARCH (Rust query) still has this weakness for
+  whistle; not changed here.
+
+Set replay, right tune AND right line (normal / noisy room): stored setting
+differs 44 / 37 % → 57 / 54 %, exact 73 / 65 % → 80 / 79 %; simulated whistle
+(`DETECT_SIM_WHISTLE=1`) 72 % → 79 % exact. `replayScorePosition`: normal
+90.8 → 90.5 %, hard 83.4 → 90.7 %, wrong moves/min 0.23 → 0.11. No switch to
+an unplayed tune in any variant.
+
+**Real audio is the missing measurement.** Set Follow has **Save the run for
+diagnosis** (`js/followCapture.mjs`): the microphone at ~16–22 kHz (≤ 40 MB,
+then audio stops and the log continues) plus every window, what was shown,
+Next-tune taps and manual scrolls, on one audio clock, shared as WAV + JSON.
+`test/bench/replayFollowCapture.mjs` replays it through the current rules
+(`--truth` scores it against hand-written tune start times), and
+`detect_sim --wav file.wav` re-transcribes the WAV for transcriber changes
+(`--windows`). The capture lives only until the view is left, so share it
+first.
 
 ### Practice follow in the Tune view (November 2026)
 

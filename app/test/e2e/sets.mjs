@@ -479,6 +479,26 @@ try {
         await evaluate(`window.findVM('SetScoreView').stopFollow()`);
         await waitFor(`window.followTracks.length > 0 && window.followTracks.every(t => t.readyState === 'ended')`, 5000, 'microphone released after stop');
         check('stopping set Follow clears highlighting and releases its microphone', await evaluate(`!window.findVM('SetScoreView').running && !document.querySelector('.followBand')`));
+        const captured = await evaluate(`(async () => {
+            const vm = window.findVM('SetScoreView'); const contours = ${JSON.stringify(contours)};
+            vm.captureEnabled = true; await vm.$nextTick();
+            await vm.startFollow(0);
+            await new Promise(r => setTimeout(r, 2500));               // fake microphone audio arrives
+            const at = Date.now();
+            vm.updateFollow({ contour: contours[1].slice(0, 32), readAt: at, windowSeconds: 4 }, at);
+            vm.selectEntry(0);
+            await vm.stopFollow(); await vm.$nextTick();
+            const capture = vm._finishedCapture; const log = capture && capture.log();
+            const button = [...document.querySelectorAll('.set-follow-bar button')].some(b => /share diagnosis/i.test(b.textContent));
+            const types = log ? [...new Set(log.events.map(e => e.type))] : [];
+            const result = { summary: vm.captureSummary, button, types, seconds: log && log.audioSeconds, rate: log && log.sampleRate,
+                samples: capture ? capture.pcm().length : 0, entries: log && log.set.entries.length, remembered: localStorage.getItem('setFollowCapture') };
+            vm.captureEnabled = false;
+            return result;
+        })()`);
+        check('Save the run for diagnosis records audio and a log of windows, what was shown and taps',
+            captured.button && captured.seconds > 1 && captured.samples > 16000 && captured.entries === 2 && captured.remembered === '1'
+            && ['start', 'window', 'shown', 'cue', 'stop'].every(t => captured.types.includes(t)), JSON.stringify(captured));
         const denied = await evaluate(`(async () => {
             navigator.mediaDevices.getUserMedia = async () => { throw new DOMException('Test microphone refusal', 'NotAllowedError'); };
             const vm = window.findVM('SetScoreView'); await vm.startFollow(0);
@@ -564,7 +584,13 @@ try {
         await waitFor(`!!window.findVM('SetsView')?.viewedSet`, 10000, 'selected set link');
         check('the selected set name in Add to set opens its score view', true);
     }
-    const vueWarnings = warnings.filter(w => /\[Vue warn\]|EXC/.test(w));
+    // The middle of this test runs with the network deliberately off. Firebase
+    // Installations (behind Analytics) then rejects with app-offline once its
+    // retry comes round — the SDK's own offline noise, the same on a plane, and
+    // whether it lands inside the run depends only on how long the offline
+    // stretch lasts. Every other exception still fails the check.
+    const firebaseOffline = w => /FirebaseError: Installations: .*\(installations\/app-offline\)/.test(w);
+    const vueWarnings = warnings.filter(w => /\[Vue warn\]|EXC/.test(w) && !firebaseOffline(w));
     check('no Vue warnings or runtime exceptions', vueWarnings.length === 0, vueWarnings.slice(0, 3).join(' // '));
 } catch (e) {
     console.error('\nFATAL:', e.message);

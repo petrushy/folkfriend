@@ -55,6 +55,23 @@
                         {{ icon }}
                     </v-icon>{{ running ? 'Stop following' : 'Follow my playing' }}
                 </v-btn>
+                <v-checkbox
+                    v-if="!running && !midiActive"
+                    v-model="captureEnabled"
+                    label="Save the run for diagnosis"
+                    dense
+                    hide-details
+                    class="mt-0 pt-0"
+                />
+                <v-btn
+                    v-if="!running && captureSummary"
+                    small
+                    outlined
+                    :loading="sharingCapture"
+                    @click="shareCapture"
+                >
+                    Share diagnosis ({{ captureSummary }})
+                </v-btn>
                 <template v-if="performanceActive">
                     <v-switch
                         v-model="autoScroll"
@@ -150,17 +167,24 @@ import AbcDisplay from '@/components/AbcDisplay';
 import practiceFollow from '@/services/practiceFollow.js';
 import eventBus from '@/eventBus';
 import { SetMidiPlayer, repetitionsFor } from '@/js/setMidiPlayer.mjs';
-import { SetScoreFollower } from '@/js/setScoreFollower.mjs';
-import { MIN_QUERY_LENGTH } from '@/js/scorePosition.mjs';
+import { SetScoreFollower, SET_SWITCH_SCORE, SET_SWITCH_MARGIN, SET_SWITCH_WINDOWS } from '@/js/setScoreFollower.mjs';
+import { MIN_QUERY_LENGTH, RELOCK_MIN_SCORE, TRACK_MIN_SCORE } from '@/js/scorePosition.mjs';
 import { keyLabel, typeLabel } from '@/js/favouriteFacets.mjs';
 import utils from '@/js/utils.js';
+import micService from '@/services/mic.js';
+import ffConfig from '@/ffConfig.js';
+import { FollowCapture, encodeWavInt16 } from '@/js/followCapture.mjs';
+import { slugify } from '@/js/wav.mjs';
+
+const CAPTURE_SETTING_KEY = 'setFollowCapture';
+function readCaptureSetting() { try { return localStorage.getItem(CAPTURE_SETTING_KEY) === '1'; } catch (_) { return false; } }
 
 const MANUAL_HOLD_MS = 8000;
 export default {
     name: 'SetScoreView',
     components: { AbcDisplay },
     props: { set: { type: Object, required: true }, instrumentShift: { type: Number, default: 0 } },
-    data: () => ({ midiStatus: 'idle', midiIndex: 0, midiRepetition: 1, midiTempo: 100, running: false, starting: false, activeIndex: 0, line: null, readout: '', autoScroll: true, held: false, error: '', icon: mdiCrosshairsGps }),
+    data: () => ({ captureEnabled: readCaptureSetting(), captureSummary: '', sharingCapture: false, midiStatus: 'idle', midiIndex: 0, midiRepetition: 1, midiTempo: 100, running: false, starting: false, activeIndex: 0, line: null, readout: '', autoScroll: true, held: false, error: '', icon: mdiCrosshairsGps }),
     computed: {
         midiActive() { return ['preparing', 'playing', 'paused'].includes(this.midiStatus); },
         performanceActive() { return this.running || this.midiActive; },
@@ -169,6 +193,7 @@ export default {
     watch: {
         scoreSignature() { this.stopSetPlayback(); this.stopFollow(); this.activeIndex = 0; },
         autoScroll(on) { if (on) this.resumeScroll(); },
+        captureEnabled(on) { try { localStorage.setItem(CAPTURE_SETTING_KEY, on ? '1' : '0'); } catch (_) { /* per-device convenience only */ } },
     },
     created() {
         this._position = () => this.updateFollow();
@@ -288,6 +313,7 @@ export default {
             this._engine = new SetScoreFollower(this.set.entries.map(e => ({ id: e.id, contour: e.result.setting.contour })));
             this._engine.select(index);
             this.activeIndex = index;
+            this._beginCapture(index);
             try {
                 this._startTask = practiceFollow.start(owner);
                 await this._startTask;
@@ -306,6 +332,7 @@ export default {
             }
         },
         clearLocal() {
+            this._endCapture();
             clearInterval(this._timer); clearTimeout(this._holdTimer);
             if (this._manual) { window.removeEventListener('wheel', this._manual); window.removeEventListener('touchstart', this._manual); }
             this._manual = null; this._engine = null; this.running = false; this.line = null; this.readout = ''; this.held = false;
@@ -319,6 +346,8 @@ export default {
         },
         selectEntry(index) {
             if (!this._engine || !this._engine.select(index, practiceFollow.position?.readAt)) return;
+            // A tap is a sign the follower did not manage on its own.
+            this._capture?.event('cue', { index });
             this.activeIndex = index; this.line = null; this.readout = ''; this.resumeScroll();
         },
         updateFollow(position = practiceFollow.position, nowMs = Date.now()) {
@@ -330,8 +359,78 @@ export default {
             } });
             this.activeIndex = result.index; this.line = result.line; this.readout = result.readout;
             if (result.changed) this.revealEntry();
+            this._logFollow(position, nowMs, result);
+        },
+        // ---- diagnostic capture (Save the run for diagnosis) ----
+        _beginCapture(index) {
+            this._capture = null; this.captureSummary = '';
+            if (!this.captureEnabled) return;
+            this._capture = new FollowCapture({ meta: {
+                kind: 'set-follow',
+                appVersion: ffConfig.FRONTEND_VERSION || '',
+                userAgent: navigator.userAgent,
+                rules: { SET_SWITCH_SCORE, SET_SWITCH_MARGIN, SET_SWITCH_WINDOWS, RELOCK_MIN_SCORE, TRACK_MIN_SCORE },
+                set: { id: this.set.id, name: this.set.name, entries: this.set.entries.map(e => ({
+                    id: e.id, settingID: e.result.settingID, tuneID: e.result.setting.tune_id,
+                    name: e.result.displayName, contour: e.result.setting.contour || '',
+                })) },
+            } });
+            this._capture.event('start', { index });
+            this._untap = micService.addContinuousTap((chunk, rate) => this._capture && this._capture.addAudio(chunk, rate));
+            this._loggedWindow = null; this._loggedShown = null;
+        },
+        _logFollow(position, nowMs, result) {
+            const capture = this._capture;
+            if (!capture) return;
+            if (position && position.readAt !== this._loggedWindow) {
+                this._loggedWindow = position.readAt;
+                // The window ENDED when it was read, a transcription earlier
+                // than now: that is the moment in the audio it describes.
+                const windowEndAudioSeconds = Math.max(0, capture.audioSeconds - (nowMs - position.readAt) / 1000);
+                const { readAt, windowSeconds, contour } = position;
+                capture.event('window', { readAt, windowSeconds, contour, windowEndAudioSeconds });
+            }
+            const shown = `${result.index}:${result.line}`;
+            if (shown !== this._loggedShown) {
+                this._loggedShown = shown;
+                capture.event('shown', { index: result.index, line: result.line, readout: result.readout, changed: !!result.changed });
+            }
+        },
+        _endCapture() {
+            if (this._untap) { this._untap(); this._untap = null; }
+            const capture = this._capture;
+            if (!capture) return;
+            capture.event('stop');
+            this._finishedCapture = capture; this._capture = null;
+            const minutes = Math.floor(capture.audioSeconds / 60), seconds = Math.round(capture.audioSeconds % 60);
+            this.captureSummary = `${minutes}:${String(seconds).padStart(2, '0')}`;
+        },
+        async shareCapture() {
+            const capture = this._finishedCapture;
+            if (!capture || this.sharingCapture) return;
+            this.sharingCapture = true;
+            try {
+                const stamp = new Date(capture.startedAt).toISOString().replace(/[:.]/g, '-').slice(0, 19);
+                const base = `follow_${slugify(this.set.name)}_${stamp}`;
+                const files = [
+                    new File([JSON.stringify(capture.log(), null, 1)], base + '.json', { type: 'application/json' }),
+                    ...(capture.rate ? [new File([encodeWavInt16(capture.pcm(), capture.rate)], base + '.wav', { type: 'audio/wav' })] : []),
+                ];
+                if (navigator.canShare && navigator.canShare({ files })) {
+                    try { await navigator.share({ files, title: base }); return; }
+                    catch (e) { if (e && e.name === 'AbortError') return; }
+                }
+                for (const file of files) {
+                    const url = URL.createObjectURL(file);
+                    const a = document.createElement('a'); a.href = url; a.download = file.name;
+                    document.body.appendChild(a); a.click(); a.remove();
+                    setTimeout(() => URL.revokeObjectURL(url), 1000);
+                }
+            } catch (e) { this.error = `Could not share the diagnosis: ${e.message || e}`; }
+            finally { this.sharingCapture = false; }
         },
         onManualScroll() {
+            if (!this.held) this._capture?.event('hold');
             this.held = true; clearTimeout(this._holdTimer);
             this._holdTimer = setTimeout(() => this.resumeScroll(), MANUAL_HOLD_MS);
         },
