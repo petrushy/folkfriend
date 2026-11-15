@@ -13,6 +13,11 @@ playback work from these snapshots without the tune database. Search puts starre
 then remaining matches in database relevance order. Matching saved favorites are
 also available when their database is unavailable. Set tags are independent of tune tags.
 
+The “Played in sets with” list offers “Add to set” on every suggested tune.
+Choose its key/setting (starred settings first) and an existing or new set.
+Opened from the set editor, it defaults to the current draft and inserts after
+the starting tune, without navigating away or saving unfinished edits.
+
 ## Persistence and sync
 
 IndexedDB `tuneSets` is the local source. All set writes and inbound merges use

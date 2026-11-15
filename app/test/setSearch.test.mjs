@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { searchSetSettings } from '../src/services/setSearch.mjs';
+import { searchSetSettings, settingsForSetTune } from '../src/services/setSearch.mjs';
 
 // Matches rust/src/query/mod.rs NameQueryRecord: no setting_id and no ABC.
 const nameResults = [{ display_name: "Cooley's", setting: {
@@ -48,3 +48,10 @@ const moreTunes = { ...backend, async runNameQuery() { return [
 const tuneRanked = await searchSetSettings(moreTunes, 'cooley', { favourites: [favourite('11')] });
 assert.deepEqual(tuneRanked.map(r => r.setting_id), ['11', '10', '20']);
 console.log('Favourite settings rank first, followed by their other settings; saved favourites work offline.');
+
+const partnerSettings = await settingsForSetTune(backend, '1', "Cooley's", [favourite('11')]);
+assert.deepEqual(partnerSettings.map(r => String(r.setting_id)), ['11', '10']);
+assert.equal(partnerSettings[0].favourite, true);
+const savedPartner = await settingsForSetTune({ async settingsFromTuneID() { return []; } }, '1', "Cooley's", [favourite('99'), favourite('100', 'Other', '2')]);
+assert.deepEqual(savedPartner.map(r => r.setting_id), ['99']);
+console.log('Partner tune settings include saved favourites and prefer the starred version.');

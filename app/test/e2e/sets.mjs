@@ -127,6 +127,62 @@ try {
             !realSearch.error && realSearch.favouriteFirst && realSearch.ids?.length === 2 && realSearch.ids.every(Boolean) && realSearch.scores,
             JSON.stringify(realSearch));
     }
+    if (process.env.FF_REAL_SEARCH) {
+        await evaluate(`window.findVM = name => {
+            const find = vm => vm.$options.name === name ? vm : vm.$children.map(find).find(Boolean);
+            return find(document.querySelector('#app').__vue__);
+        };`);
+        await evaluate(`(async () => {
+            const vm = window.setsVM;
+            vm.create(); vm.draft.name = 'Partner draft regression'; vm.query = 'cooley';
+            await vm.search(); vm.add(vm.results[0]); await vm.$nextTick();
+            window.findVM('SetPartnersButton').openPartners();
+        })()`);
+        await waitFor(`window.findVM('SetPartnersDialog').partners.length > 0`, 15000, 'partner suggestions');
+        await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, session);
+        await evaluate(`document.querySelector('.partnerRow button').click()`);
+        await waitFor(`window.findVM('AddToSetDialog').open && !window.findVM('AddToSetDialog').loading`, 15000, 'add-to-set settings');
+        check('partner setting picker fits a phone screen', await evaluate('document.documentElement.scrollWidth <= 390'));
+        const pickerShot = await send('Page.captureScreenshot', { format: 'png' }, session);
+        const fs = await import('node:fs');
+        fs.writeFileSync('/tmp/ff-addset-mobile.png', Buffer.from(pickerShot.data, 'base64'));
+        const draftAdd = await evaluate(`(async () => {
+            const dialog = window.findVM('AddToSetDialog');
+            const wasDraft = dialog.destination === 'draft';
+            dialog.selectedID = dialog.settingOptions[0].value;
+            const id = dialog.selectedID;
+            await dialog.add();
+            return { error: dialog.error, wasDraft, path: location.pathname,
+                count: window.setsVM.draft.entries.length, id: String(window.setsVM.draft.entries[1]?.result.settingID), selected: id };
+        })()`);
+        check('partner row adds chosen setting to the current draft without navigation',
+            !draftAdd.error && draftAdd.wasDraft && draftAdd.path === '/sets' && draftAdd.count === 2 && draftAdd.id === draftAdd.selected,
+            JSON.stringify(draftAdd));
+        const savedAdd = await evaluate(`(async () => {
+            const vm = window.setsVM;
+            await vm.save();
+            const set = vm.sets.find(s => s.name === 'Partner draft regression');
+            const partners = window.findVM('SetPartnersDialog');
+            const dialog = window.findVM('AddToSetDialog');
+            await dialog.show({ tuneID: partners.partners[0].tuneID, title: partners.partners[0].name });
+            dialog.destination = set.id; dialog.selectedID = dialog.settingOptions[0].value;
+            await dialog.add(); await vm.refresh();
+            const count = vm.sets.find(s => s.id === set.id).entries.length;
+            const error = dialog.error;
+            window.confirm = () => true;
+            vm.edit(vm.sets.find(s => s.id === set.id)); await vm.remove();
+            await dialog.show({ tuneID: partners.partners[0].tuneID, title: partners.partners[0].name });
+            dialog.destination = 'new'; dialog.name = 'New partner set'; dialog.selectedID = dialog.settingOptions[0].value;
+            await dialog.add(); await vm.refresh();
+            const created = vm.sets.find(s => s.name === 'New partner set');
+            const newCount = created?.entries.length;
+            if (created) { vm.edit(created); await vm.remove(); }
+            partners.open = false;
+            return { error: error || dialog.error, count, newCount };
+        })()`);
+        check('partner setting can be saved to an existing or newly created set',
+            !savedAdd.error && savedAdd.count === 3 && savedAdd.newCount === 1, JSON.stringify(savedAdd));
+    }
     const state = await evaluate(`(async () => {
         const vm = window.setsVM;
         vm.create(); vm.draft.name = 'Browser reels'; vm.draft.tags = ['Tuesday'];

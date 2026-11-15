@@ -169,6 +169,7 @@
                 <SetPartnersButton
                     :tune-i-d="String(entry.result.setting.tune_id)"
                     :title="entry.result.displayName"
+                    :draft-target="partnerDraftTarget(entry.id)"
                     chip
                 />
                 <AbcDisplay
@@ -344,6 +345,18 @@ export default {
         move(i, offset) {
             const entry = this.draft.entries.splice(i, 1)[0];
             this.draft.entries.splice(i + offset, 0, entry);
+        },
+        partnerDraftTarget(entryID) {
+            const draftID = this.draft.id;
+            return { label: `Current draft: ${this.draft.name || 'Untitled set'}`, add: result => {
+                if (!this.draft || this.draft.id !== draftID || this.busy) throw new Error('This draft is no longer open. Reopen the suggestions from the current set.');
+                const index = this.draft.entries.findIndex(e => e.id === entryID);
+                if (index < 0) throw new Error('The starting tune was removed. Reopen the suggestions from another tune.');
+                if (result.setting_id == null || !result.setting?.abc) throw new Error('This setting is missing its ID or score. Choose another setting.');
+                this.draft.entries.splice(index + 1, 0, { id: this.id(), result: {
+                    settingID: result.setting_id, setting: JSON.parse(JSON.stringify(result.setting)), displayName: result.display_name,
+                } });
+            } };
         },
         add(r) {
             if (r.setting_id == null || !r.setting || !r.setting.abc) {

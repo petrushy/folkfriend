@@ -1,5 +1,9 @@
 <template>
-    <v-dialog v-model="open" max-width="520" scrollable>
+    <v-dialog
+        v-model="open"
+        max-width="520"
+        scrollable
+    >
         <v-card v-if="tuneID">
             <v-card-title class="partnersTitle">
                 <span>Played in sets with {{ title ? displayName(title) : 'this tune' }}</span>
@@ -8,15 +12,30 @@
                 {{ subtitle }}
             </v-card-subtitle>
             <v-card-text class="px-2">
-                <div v-if="loading" class="d-flex align-center pa-3">
-                    <v-progress-circular indeterminate size="22" width="2" class="mr-3" />
+                <div
+                    v-if="loading"
+                    class="d-flex align-center pa-3"
+                >
+                    <v-progress-circular
+                        indeterminate
+                        size="22"
+                        width="2"
+                        class="mr-3"
+                    />
                     <span>Looking up sets…</span>
                 </div>
-                <p v-else-if="!partners.length" class="pa-3 mb-0">
+                <p
+                    v-else-if="!partners.length"
+                    class="pa-3 mb-0"
+                >
                     No set information for this tune. It is only available for
                     tunes from thesession.org.
                 </p>
-                <v-list v-else dense class="py-0">
+                <v-list
+                    v-else
+                    dense
+                    class="py-0"
+                >
                     <template v-for="(p, i) in partners">
                         <v-subheader
                             v-if="i > 0 && !p.common && partners[i - 1].common"
@@ -46,18 +65,43 @@
                                     {{ displayName(p.name) }}
                                 </v-list-item-title>
                                 <v-list-item-subtitle class="partnerDetail">
-                                    <span v-if="p.dance" class="partnerDance">{{ p.dance }}</span>
-                                    <span v-if="p.direction === 'after'" class="partnerDirection">
+                                    <span
+                                        v-if="p.dance"
+                                        class="partnerDance"
+                                    >{{ p.dance }}</span>
+                                    <span
+                                        v-if="p.direction === 'after'"
+                                        class="partnerDirection"
+                                    >
                                         · usually played after it
                                     </span>
-                                    <span v-else-if="p.direction === 'before'" class="partnerDirection">
+                                    <span
+                                        v-else-if="p.direction === 'before'"
+                                        class="partnerDirection"
+                                    >
                                         · usually played before it
                                     </span>
                                     <span class="partnerCounts"> · {{ describeCounts(p) }}</span>
                                 </v-list-item-subtitle>
                             </v-list-item-content>
-                            <div class="partnerBar" :title="describeCounts(p)">
-                                <div class="partnerBarFill" :style="{ width: barWidth(p) }" />
+                            <v-list-item-action class="ml-2">
+                                <v-btn
+                                    small
+                                    outlined
+                                    :aria-label="'Add ' + displayName(p.name) + ' to set'"
+                                    @click.stop="addToSet(p)"
+                                >
+                                    Add to set
+                                </v-btn>
+                            </v-list-item-action>
+                            <div
+                                class="partnerBar d-none d-sm-block"
+                                :title="describeCounts(p)"
+                            >
+                                <div
+                                    class="partnerBarFill"
+                                    :style="{ width: barWidth(p) }"
+                                />
                             </div>
                         </v-list-item>
                     </template>
@@ -66,7 +110,12 @@
             <v-card-actions>
                 <span class="caption text--secondary pl-2">Data: thesession.org</span>
                 <v-spacer />
-                <v-btn text @click="open = false">Close</v-btn>
+                <v-btn
+                    text
+                    @click="open = false"
+                >
+                    Close
+                </v-btn>
             </v-card-actions>
         </v-card>
     </v-dialog>
@@ -96,6 +145,7 @@ export default {
         title: '',
         partners: [],
         loading: false,
+        draftTarget: null,
         icons: { star: mdiStar },
     }),
     computed: {
@@ -120,12 +170,13 @@ export default {
         displayName(raw) {
             return raw ? utils.parseDisplayableName(String(raw)) : '';
         },
-        async show({ tuneID, title = '' }) {
+        async show({ tuneID, title = '', draftTarget = null }) {
             const asked = String(tuneID || '');
             if (!asked) return;
             if (asked !== this.tuneID) this.partners = [];
             this.tuneID = asked;
             this.title = title;
+            this.draftTarget = draftTarget;
             this.open = true;
             this.loading = true;
             let raw = [];
@@ -147,6 +198,9 @@ export default {
         barWidth(p) {
             const top = this.partners.reduce((m, q) => Math.max(m, q.total), 0) || 1;
             return `${Math.max(4, Math.round(100 * p.total / top))}%`;
+        },
+        addToSet(p) {
+            eventBus.$emit('showAddToSet', { tuneID: p.tuneID, title: p.name, draftTarget: this.draftTarget });
         },
         openTune(p) {
             this.open = false;

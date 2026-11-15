@@ -35,3 +35,20 @@ export async function searchSetSettings(backend, query, { favourites = [], index
     const rank = r => r.favourite ? 0 : favouriteTuneIDs.has(String(r.setting.tune_id)) ? 1 : 2;
     return [...byID.values()].sort((a, b) => rank(a) - rank(b));
 }
+
+// Partner suggestions identify a tune, so select an actual setting before
+// adding it. Include the saved favourite version when the index lacks it.
+export async function settingsForSetTune(backend, tuneID, title, favourites = []) {
+    const settings = await backend.settingsFromTuneID(tuneID);
+    const byID = new Map(settings.map(setting => [String(setting.setting_id), {
+        setting_id: setting.setting_id, setting, display_name: title,
+    }]));
+    for (const { result: r } of favourites) {
+        if (!r || !r.setting || String(r.setting.tune_id) !== String(tuneID) ||
+            r.settingID == null || !r.setting.abc) continue;
+        byID.set(String(r.settingID), {
+            setting_id: r.settingID, setting: r.setting, display_name: r.displayName, favourite: true,
+        });
+    }
+    return [...byID.values()].sort((a, b) => Number(!!b.favourite) - Number(!!a.favourite));
+}
