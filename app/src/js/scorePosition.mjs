@@ -295,13 +295,25 @@ function unwrapNear(end, near, length) {
 // up to its last note) against the stored contour looped once, so a window
 // spanning the end of one time through and the start of the next is found
 // too. Best first, distinct places only: { end, covered, score }.
+const OCTAVE_SHIFTS = [0, -12, 12];
+
 export function positionCandidates(query, stored, maxSpans = MAX_SPANS) {
     if (!query || !stored || query.length < MIN_QUERY_LENGTH || query.length > stored.length) return [];
     const length = stored.length;
     const looped = stored + stored.slice(0, query.length);
     // Ends kept apart, not spans: see matchSpans. Twice the slack of "the
     // same place", so near-identical neighbouring rows collapse into one.
-    const spans = matchSpans(query, looped, maxSpans * 2, { fit: true, distinctEnds: 2 * SAME_PLACE_QUAVERS + 1, graded: true });
+    // OCTAVE-INVARIANT: the transcriber decides the octave per window
+    // (rust/src/decode/octave.rs drops a window an octave only when 85 % of its
+    // notes are at or above E5), so a tin whistle — which sounds an octave
+    // above the written pitch, its low notes D5 and E5 right at that line —
+    // comes out at written pitch in some windows and an octave up in others,
+    // and an octave-up window scored 0 against every stored contour. The same
+    // melody an octave away is the same tune at the same place, so the window
+    // is matched as heard and an octave either way, best first.
+    const spans = OCTAVE_SHIFTS.flatMap(shift => matchSpans(shift ? transposeContour(query, shift) : query, looped,
+        maxSpans * 2, { fit: true, distinctEnds: 2 * SAME_PLACE_QUAVERS + 1, graded: true }))
+        .sort((a, b) => (b.score - a.score) || (a.end - b.end));
     const out = [];
     for (const s of spans) {
         const end = s.end > length ? s.end - length : s.end;

@@ -331,6 +331,20 @@ test('a window scoring about 0.5 finds the place from nothing (the old 0.6 floor
     assert.ok(Math.abs(fresh.main.pos % 300 - 198) <= 3, `at ${fresh.main.pos}`);
 });
 
+test('a window heard an octave away is the same place (tin whistle sounds an octave up)', () => {
+    // Middle of the range, so a shift either way stays representable.
+    const stored = contour(240, 31, 'mnopqrstuvwx');
+    const played = stored.slice(100, 150);
+    for (const shift of [12, -12]) {
+        const [best] = positionCandidates(transposeContour(played, shift), stored);
+        assert.ok(best && best.score > 0.95, `shift ${shift}: score ${best && best.score}`);
+        assert.equal(best.end, 150, `shift ${shift}`);
+    }
+    // A fifth away is NOT forgiven: that is a different key, i.e. not this setting.
+    const [fifth] = positionCandidates(transposeContour(played, 7), stored);
+    assert.ok(!fifth || fifth.score < 0.5, `fifth ${fifth && fifth.score}`);
+});
+
 test('a semitone slip costs less than a wrong note, for position only', () => {
     const stored = contour(200, 23);
     const slice = stored.slice(40, 80);
