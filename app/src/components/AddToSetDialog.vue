@@ -25,8 +25,13 @@
                         <p v-if="!settings.length && !batch.length">
                             No saved or downloaded settings are available for this tune. Enable its database in Settings.
                         </p>
+                        <template v-if="batch.length === 1">
+                            <p class="caption mb-2">
+                                {{ settingLabel(batch[0]) }}
+                            </p>
+                        </template>
                         <v-list
-                            v-if="batch.length"
+                            v-if="batch.length > 1"
                             dense
                             aria-label="Selected tunes in set order"
                         >
@@ -71,12 +76,42 @@
                             </v-list-item>
                         </v-list>
                         <v-select
-                            v-else
+                            v-if="!batch.length"
                             v-model="selectedID"
                             :items="settingOptions"
                             label="Choose key and setting"
                             :disabled="saving"
                         />
+                        <div
+                            v-if="containingSets.length"
+                            class="mb-2"
+                            aria-label="Sets that already contain this setting"
+                        >
+                            <p class="caption mb-1">
+                                {{ batch.length > 1 ? 'Already in these sets:' : 'Already in:' }}
+                            </p>
+                            <v-list
+                                dense
+                                class="py-0"
+                            >
+                                <v-list-item
+                                    v-for="set in containingSets"
+                                    :key="set.id"
+                                    :to="{ name: 'sets', query: { setID: set.id } }"
+                                    @click="open = false"
+                                >
+                                    <v-list-item-content>
+                                        <v-list-item-title>{{ set.name }}</v-list-item-title>
+                                    </v-list-item-content>
+                                </v-list-item>
+                            </v-list>
+                        </div>
+                        <p
+                            v-else-if="selectedSettingIDs.length"
+                            class="caption"
+                        >
+                            Not in any set yet.
+                        </p>
                         <v-select
                             v-model="destination"
                             :items="destinations"
@@ -152,6 +187,7 @@ import ffBackend from '@/services/backend.js';
 import { settingsForSetTune } from '@/services/setSearch.mjs';
 import { keyLabel, typeLabel } from '@/js/favouriteFacets.mjs';
 import utils from '@/js/utils.js';
+import { indexSetsBySetting } from '@/js/setMembership.mjs';
 
 export default {
     name: 'AddToSetDialog',
@@ -162,6 +198,16 @@ export default {
         noticeOpen: false, notice: '',
     }),
     computed: {
+        // Exact settingID, as on the Tune view and Favourite Tunes chips.
+        selectedSettingIDs() {
+            return this.batch.length ? this.batch.map(e => String(e.setting_id)) : (this.selectedID ? [String(this.selectedID)] : []);
+        },
+        containingSets() {
+            const index = indexSetsBySetting(this.sets);
+            const seen = new Set();
+            return this.selectedSettingIDs.flatMap(id => index[id] || [])
+                .filter(set => !seen.has(set.id) && seen.add(set.id));
+        },
         settingOptions() {
             return this.settings.map(r => ({ value: String(r.setting_id), text:
                 `${r.favourite ? '★ ' : ''}${r.setting.mode ? keyLabel(r.setting.mode) : 'Key unknown'} · ${r.setting.dance ? typeLabel(r.setting.dance) : 'Type unknown'} · Setting ${r.setting_id}` }));
