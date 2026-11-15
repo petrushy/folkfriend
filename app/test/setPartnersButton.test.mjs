@@ -1,4 +1,4 @@
-// The "Played in sets with" button (components/SetPartnersButton.vue).
+// The "Often played with" button (components/SetPartnersButton.vue).
 //
 // Same harness as setPartnersDialog.test.mjs: lift the SFC's <script>,
 // rewrite its imports to fakes, drive it against a fake `this` with no Vue

@@ -13,7 +13,7 @@ playback work from these snapshots without the tune database. Search puts starre
 then remaining matches in database relevance order. Matching saved favorites are
 also available when their database is unavailable. Set tags are independent of tune tags.
 
-The “Played in sets with” list offers “Add to set” on every suggested tune.
+The “Often played with” list offers “Add to set” on every suggested tune.
 Choose its key/setting (starred settings first) and an existing or new set.
 Opened from the set editor, it defaults to the current draft and inserts after
 the starting tune, without navigating away or saving unfinished edits.
@@ -33,7 +33,9 @@ A row's overflow menu contains View scores, Edit set, Duplicate and Delete.
 
 Clicking a set opens its own URL (`/sets?setID=…`) and all saved scores in order
 on one scrollable page. Viewing never opens an editable draft. Edit set opens
-the arrangement editor; saving returns to the score view. Unsaved edits remain
+the arrangement editor; saving returns to the score view. During editing, the
+top toolbar shows Save set and Cancel in place of New set and remains visible
+while scrolling through search results. Unsaved edits remain
 protected when navigating between set URLs as well as away from the page.
 
 Tune pages show clickable membership chips with each set's name and the keys

@@ -1,4 +1,4 @@
-// "Played in sets with…" — which order to suggest a tune's set partners in.
+// "Often played with…" — which order to suggest a tune's set partners in.
 //
 // The data (thesession.org member sets and recording tracks, built by the data
 // repo's thesession_sets.py) says how often two tunes are played together.

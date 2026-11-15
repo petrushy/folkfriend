@@ -7,21 +7,21 @@
             v-if="chip"
             small
             class="px-2"
-            title="Tunes commonly played in a set with this one"
+            title="Tunes often played with this one"
             @click.stop="openPartners"
         >
             <v-icon
                 small
                 left
             >{{ icon }}</v-icon>
-            Played in sets with
+            Often played with
         </v-chip>
         <v-btn
             v-else
             icon
             small
-            aria-label="Tunes commonly played in a set with this one"
-            title="Tunes commonly played in a set with this one — what to play next"
+            aria-label="Tunes often played with this one"
+            title="Tunes often played with this one — what to play next"
             @click.stop="openPartners"
         >
             <v-icon color="grey darken-1">{{ icon }}</v-icon>

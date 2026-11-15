@@ -267,7 +267,7 @@
              event bus. Mounted here so a list of favourites does not create one
              dialog per row. -->
         <TuneBackgroundDialog />
-        <!-- Same pattern: "Played in sets with…", opened from any tune. -->
+        <!-- Same pattern: "Often played with…", opened from any tune. -->
         <SetPartnersDialog />
         <AddToSetDialog />
     </v-app>

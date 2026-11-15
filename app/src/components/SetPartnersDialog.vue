@@ -6,7 +6,7 @@
     >
         <v-card v-if="tuneID">
             <v-card-title class="partnersTitle">
-                <span>Played in sets with {{ title ? displayName(title) : 'this tune' }}</span>
+                <span>Often played with {{ title ? displayName(title) : 'this tune' }}</span>
             </v-card-title>
             <v-card-subtitle class="pb-1">
                 {{ subtitle }}
@@ -22,13 +22,13 @@
                         width="2"
                         class="mr-3"
                     />
-                    <span>Looking up sets…</span>
+                    <span>Looking up suggestions…</span>
                 </div>
                 <p
                     v-else-if="!partners.length"
                     class="pa-3 mb-0"
                 >
-                    No set information for this tune. It is only available for
+                    No suggestions for this tune. Suggestions are only available for
                     tunes from thesession.org.
                 </p>
                 <v-list
@@ -122,7 +122,7 @@
 </template>
 
 <script>
-// "Played in sets with…" — the tunes most often played in a set with the one
+// "Often played with…" — the tunes most often played in a set with the one
 // in focus, for picking what to play next in a session and for building sets
 // beforehand. One dialog for the whole app, mounted in App.vue and opened with
 // eventBus.$emit('showSetPartners', { tuneID, title }), like the tune

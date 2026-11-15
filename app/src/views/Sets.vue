@@ -1,10 +1,30 @@
 <template>
     <v-container class="viewContainerWrapper">
-        <div class="d-flex align-center my-2">
+        <div
+            class="sets-toolbar d-flex flex-wrap align-center my-2"
+            :class="{ 'sets-toolbar-editing': !!draft }"
+            style="gap:8px"
+        >
             <h1>Sets</h1><v-spacer />
+            <template v-if="draft">
+                <v-btn
+                    :disabled="busy"
+                    @click="close"
+                >
+                    Cancel
+                </v-btn>
+                <v-btn
+                    color="primary"
+                    :disabled="!draft.name.trim() || busy"
+                    :loading="busy"
+                    @click="save"
+                >
+                    Save set
+                </v-btn>
+            </template>
             <v-btn
+                v-else
                 color="primary"
-                :disabled="!!draft"
                 @click="create"
             >
                 New set
@@ -308,26 +328,6 @@
                     </v-list-item-action>
                 </v-list-item>
             </v-list>
-            <div
-                class="d-flex flex-wrap mt-4"
-                style="gap:8px"
-            >
-                <v-btn
-                    color="primary"
-                    :disabled="!draft.name.trim() || busy"
-                    :loading="busy"
-                    @click="save"
-                >
-                    Save set
-                </v-btn>
-                <v-btn
-                    :disabled="busy"
-                    @click="close"
-                >
-                    Close
-                </v-btn>
-                <v-spacer />
-            </div>
         </v-card>
     </v-container>
 </template>
@@ -481,4 +481,6 @@ export default {
 </script>
 <style scoped>
 .set-notes { white-space: pre-wrap; }
+.sets-toolbar-editing { position: sticky; top: 64px; z-index: 5; background: white; padding: 8px 0; }
+@media (max-width: 600px) { .sets-toolbar-editing { top: 56px; } }
 </style>
