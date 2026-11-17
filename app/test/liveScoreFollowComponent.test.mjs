@@ -344,6 +344,51 @@ await test('rejecting hands the tune to the service and falls back to the previo
     assert.deepEqual(backend.__calls, [1, 2, 1]);
 });
 
+console.log('\n"or: …" — a close rival');
+
+await test('a close rival is offered, and one tap shows it as a manual pick', async () => {
+    const { vm, push, backend } = await loadOverlay();
+    const rival = { tuneId: 2, settingId: '20', title: 'The Maid in the Meadow', score: 0.7, windows: 9 };
+    await push([{ ...det(1, 10, "Jimmy O'Brien's", 0.72, [opt(2, 20, 'The Maid in the Meadow', 0.7)]), closeRival: rival }]);
+    assert.equal(vm.rivalOffer.title, 'The Maid in the Meadow');
+
+    vm.takeRival();
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    assert.equal(vm.target.tuneId, 2, 'the rival is on screen');
+    assert.equal(vm.target.overridden, true, 'as a manual pick, which holds until the tune changes');
+    assert.equal(vm.selectedTuneKey, '20::2', 'the dropdown agrees');
+    assert.equal(vm.abcSetting.setting_id, 20, 'its score is loaded');
+    assert.ok(backend.__calls.length > 0);
+    assert.equal(vm.rivalOffer, null, 'once the user has chosen, the offer goes');
+
+    // The next tick of the same detected tune does not wash the pick away.
+    await push([{ ...det(1, 10, "Jimmy O'Brien's", 0.74, [opt(2, 20, 'The Maid in the Meadow', 0.7)]), closeRival: rival }]);
+    assert.equal(vm.target.tuneId, 2);
+});
+
+await test('a pick of some third tune from the dropdown also ends the offer', async () => {
+    const { vm, push } = await loadOverlay();
+    const rival = { tuneId: 2, settingId: '20', title: 'The Maid in the Meadow', score: 0.7, windows: 9 };
+    await push([{ ...det(1, 10, "Jimmy O'Brien's", 0.72,
+        [opt(2, 20, 'The Maid in the Meadow', 0.7), opt(5, 50, 'The Green Fields of America', 0.6)]), closeRival: rival }]);
+    vm.onOverrideChange('50::5');
+    assert.equal(vm.target.tuneId, 5);
+    assert.equal(vm.rivalOffer, null, 'the user has chosen; offering the detected tune\'s twin now would be noise');
+});
+
+await test('no rival, no offer; and the rival follows the detection as it updates', async () => {
+    const { vm, push } = await loadOverlay();
+    await push([det(1, 10, 'The Kesh', 0.8)]);
+    assert.equal(vm.rivalOffer, null);
+    const rival = { tuneId: 3, settingId: '30', title: 'The Clogger\'s Quilt', score: 0.6, windows: 5 };
+    await push([{ ...det(1, 10, 'The Kesh', 0.8), closeRival: rival }]);
+    assert.equal(vm.rivalOffer && vm.rivalOffer.title, "The Clogger's Quilt", 'a rival that appears mid-tune is offered');
+    // Not among the dropdown options: the rival itself carries the override.
+    vm.takeRival();
+    assert.equal(vm.target.tuneId, 3);
+    assert.equal(vm.target.settingId, '30');
+});
+
 await test('rejecting rejects what the ANALYSIS said, not a manual override', async () => {
     const { vm, push, live } = await loadOverlay();
 

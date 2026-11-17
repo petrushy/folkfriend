@@ -147,7 +147,7 @@ function d(tuneId, startSeconds, endSeconds) {
 // The one pipeline live listening and file analysis share.
 {
     const { buildSessionDetections, buildLiveDetections, getAnalysisOptions, SESSION_ANALYSIS_DEFAULTS,
-        STRONG_SINGLE_DETECTION_SCORE, CONFIRM_RELEASE_SCORE } =
+        STRONG_SINGLE_DETECTION_SCORE, CONFIRM_RELEASE_SCORE, closeRivalOf, CLOSE_RIVAL_GAP, CLOSE_RIVAL_SHARE } =
         await loadSessionAnalysisModule();
     const options = getAnalysisOptions(120); // 10s window, 5s step
     const m = (tuneId, startSeconds, score = 0.6) => ({
@@ -205,6 +205,39 @@ function d(tuneId, startSeconds, endSeconds) {
         m(1, 0), m(1, 10), m(2, 20, strong - 0.01), m(3, 30), m(3, 40),
     ], sparse, { final: true }).map(x => x.tuneId);
     assert.deepEqual(weak, [1, 3], 'a single window below the strong score is still dropped');
+
+    // A close rival: another tune within CLOSE_RIVAL_GAP of the top in at
+    // least CLOSE_RIVAL_SHARE of a tune's windows.
+    {
+        const hit = (t, score, alts) => ({ tuneId: 1, displayName: 'Jimmy O\'Brien\'s', startSeconds: t, score,
+            alternatives: [{ tuneId: 1, settingId: '10', title: 'Jimmy O\'Brien\'s', score }, ...alts] });
+        const twin = s => ({ tuneId: 2, settingId: '20', title: 'The Maid in the Meadow', score: s });
+        const far = s => ({ tuneId: 3, settingId: '30', title: 'Some Other Reel', score: s });
+        const close = [hit(0, 0.7, [twin(0.68)]), hit(2, 0.72, [twin(0.70)]), hit(4, 0.7, [far(0.4)]), hit(6, 0.7, [far(0.4)])];
+        const rival = closeRivalOf(close);
+        assert.equal(rival && rival.tuneId, 2, 'a twin close in half the windows is a rival');
+        assert.equal(rival.windows, 2);
+        assert.equal(rival.score, 0.70, 'carrying its best score');
+        assert.equal(closeRivalOf([hit(0, 0.7, [twin(0.6)]), hit(2, 0.7, [twin(0.6)]), hit(4, 0.7, [twin(0.6)])]), null,
+            'a runner-up 0.1 behind is an ordinary runner-up');
+        assert.equal(closeRivalOf([hit(0, 0.7, [twin(0.7)]), hit(2, 0.7, [far(0.4)]), hit(4, 0.7, [far(0.4)]),
+            hit(6, 0.7, [far(0.4)]), hit(8, 0.7, [far(0.4)])]), null, 'close in one window of five is not enough');
+        assert.equal(closeRivalOf(close.slice(0, 2)), null, 'two windows are too few to judge');
+        const sameName = { tuneId: 4, settingId: '40', title: 'Jimmy O\'Brien\'s', score: 0.7 };
+        assert.equal(closeRivalOf([hit(0, 0.7, [sameName]), hit(2, 0.7, [sameName]), hit(4, 0.7, [sameName])]), null,
+            'a different tune with the same name is not offered — "or:" the same title says nothing');
+        assert.ok(CLOSE_RIVAL_GAP === 0.08 && CLOSE_RIVAL_SHARE === 0.25,
+            'measured on two tagged sessions: flags only near-twins (scoreTaggedSession.mjs --review)');
+
+        // Through the pipeline, and across a same-tune merge: the tallies add.
+        const m2 = (t, score, alts) => ({ ...hit(t, score, alts), settingId: '10', sourceUrl: '', dataset: '' });
+        const rows = buildSessionDetections([
+            m2(0, 0.7, [twin(0.69)]), m2(5, 0.7, [far(0.3)]), m2(10, 0.7, [twin(0.69)]),
+            m2(40, 0.7, [twin(0.69)]), m2(45, 0.7, [twin(0.69)]), m2(50, 0.7, [far(0.3)]),
+        ], options);
+        assert.equal(rows.length, 1, 'one tune, two clusters merged into one row');
+        assert.equal(rows[0].closeRival && rows[0].closeRival.windows, 4, 'the rival windows of both clusters add up');
+    }
 
     // Confirmation of a new tune at the tail (live listening faster than the
     // configured step). Tune 1 established; tune 2 starts matching at 2 s

@@ -102,6 +102,18 @@
                     <span v-if="target" class="scoreReadout">
                         match {{ target.score.toFixed(2) }}
                     </span>
+                    <!-- A near-twin the search rates almost as highly, window
+                         after window: one tap shows it instead (a manual
+                         pick, as from the dropdown). Not offered once the
+                         user has picked something themselves. -->
+                    <button
+                        v-if="rivalOffer"
+                        class="rivalBtn"
+                        :title="`The search finds ${rivalOffer.title} almost as likely — tap to show it instead`"
+                        @click="takeRival"
+                    >
+                        or: {{ rivalOffer.title }}
+                    </button>
                     <span v-if="target && autoCenter && positionReadout" class="positionReadout">
                         {{ positionReadout }}
                     </span>
@@ -318,6 +330,14 @@ export default {
         };
     },
     computed: {
+        // The close rival to offer as "or: …", or null. Hidden after a manual
+        // pick: the user has already chosen, and the dropdown is still there.
+        rivalOffer() {
+            const target = this.target;
+            if (!target || target.overridden || !target.closeRival) return null;
+            if (String(target.closeRival.tuneId) === String(target.tuneId)) return null;
+            return target.closeRival;
+        },
         recordingNow() {
             return this.captureLevel !== null && this.captureLevel !== undefined;
         },
@@ -599,6 +619,20 @@ export default {
             const option = this.target.tuneOptions.find(o => o.value === value);
             const { target } = applyOverride(this.target, option);
             this.target = target;
+            this._syncFavourited();
+            if (needsScoreLoad(target, this._abcTargetKey, this._loadingTargetKey)) this.loadScore();
+        },
+        // "or: …" — show the close rival instead, exactly as picking it from
+        // the dropdown would. The rival is usually among the options; when it
+        // is not (it came from windows whose alternatives were merged away),
+        // the rival itself carries everything an override needs.
+        takeRival() {
+            const rival = this.rivalOffer;
+            if (!rival) return;
+            const option = this.target.tuneOptions.find(o => String(o.tuneId) === String(rival.tuneId)) || rival;
+            const { target } = applyOverride(this.target, option);
+            this.target = target;
+            this.selectedTuneKey = option.value || this._optionKeyFor(target);
             this._syncFavourited();
             if (needsScoreLoad(target, this._abcTargetKey, this._loadingTargetKey)) this.loadScore();
         },
@@ -945,6 +979,21 @@ export default {
 
 .positionReadout {
     color: #00796b;
+}
+
+/* Quiet but tappable: a suggestion, not a warning. */
+.rivalBtn {
+    border: 1px solid rgba(25, 118, 210, 0.45);
+    border-radius: 12px;
+    padding: 0 8px;
+    color: #1565c0;
+    background: transparent;
+    font-size: inherit;
+    line-height: 1.6;
+    white-space: nowrap;
+    max-width: 14em;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .emptyState {

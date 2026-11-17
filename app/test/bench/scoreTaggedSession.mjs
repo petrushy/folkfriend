@@ -300,3 +300,12 @@ if (argv.includes('--review') && wrongShows.size) {
         console.log(`  during ${tag ? tag.name : '?'} (${mmss(Number(start))}): ${names.get(id) || id} [${id}] for ${secs} s`);
     }
 }
+
+if (argv.includes('--review')) {
+    const rivals = final.filter(d => d.closeRival);
+    console.log(`\nClose rivals the app would offer as "or: …" (${rivals.length} of ${final.length} tunes in the saved list)`);
+    for (const d of rivals) {
+        const tag = tagAt(d.startSeconds + 5);
+        console.log(`  ${mmss(d.startSeconds).padStart(7)} ${d.title} — or: ${d.closeRival.title} (${d.closeRival.windows}/${d.hits} windows)${tag && !tag.isBreak ? `   [tagged: ${tag.name}]` : ''}`);
+    }
+}
