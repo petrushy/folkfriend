@@ -1539,6 +1539,27 @@ but once the Quilt was up the previous-tune bias kept it), and *The Green
 Fields of America* through *Jimmy O'Brien's* / *The Maid in the Meadow*.
 That is the next thing to look at.
 
+**Near-twins are offered, not guessed: "or: …"** (November 2026). Some
+tunes are close enough that the person tagging could not always tell them
+apart by ear either, so choosing harder between them would chase noise in the
+tags. Instead each detection carries a `closeRival` (`closeRivalOf` in
+`sessionAnalysis.js`): another tune, with a different NAME, within
+`CLOSE_RIVAL_GAP` (0.08) of the top in at least `CLOSE_RIVAL_SHARE` (25 %) of
+its windows, from at least 3 windows; merged rows add their tallies. The
+follow view shows it as an "or: …" button beside the match score — one tap is
+a manual pick, exactly as from the dropdown — and the session tune list as a
+small "or: …" under the row's dropdown. It is not persisted (saved sessions
+and the Firestore rules are unchanged).
+
+Measured on the two tagged sessions (`--review` lists them): 8 of 93 tunes get
+one, all near-twins (The Glen Cottage / Dalaigh's, Out on the Ocean /
+O'Sullivan's March, Will You Come Home With Me? / I Buried My Wife and Danced
+on Her Grave, …), and in every case where the app SHOWED the wrong twin, the
+offer is the right one: Clogger's Quilt → or: Lad O'Beirne's, The Green Fields
+of America → or: Jimmy O'Brien's, a wrong Hillside Cottage → or: Off to
+California. At a 0.1 gap ordinary tunes start to be flagged. A rival with the
+same name (thesession has two tunes called The Glen Cottage) is not offered.
+
 **Tagging conventions** the scorer understands: a marker per tune start;
 `break` where the music stops; `UNKNOWN` for a tune nobody could name (scored
 neither way; `--review` says what the search heard there); `ignore` for a

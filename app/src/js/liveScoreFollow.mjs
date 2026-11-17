@@ -25,6 +25,9 @@ function targetFromDetection(detection) {
         title: detection.title || '',
         score: detection.bestScore || 0,
         tuneOptions: optionsOf(detection),
+        // A near-twin the search rates almost as highly (sessionAnalysis
+        // closeRivalOf), offered as "or: …". Null when there is none.
+        closeRival: detection.closeRival || null,
         overridden: false,
     };
 }
@@ -70,6 +73,7 @@ export function resolveFollowTarget(detections, previous, frozen = false) {
             ...previous,
             score: previous.overridden ? previous.score : (latest.bestScore || 0),
             tuneOptions: optionsOf(latest),
+            closeRival: latest.closeRival || null,
         },
         changed: false,
     };

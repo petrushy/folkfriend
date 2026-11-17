@@ -273,6 +273,68 @@ export function buildTuneOptions(detection) {
     return options;
 }
 
+// A "close rival": another tune the search rates almost as highly as the
+// detected one, window after window — a near-twin a listener may not be able
+// to tell apart by ear either (Jimmy O'Brien's / The Maid in the Meadow, Lad
+// O'Beirne's / The Clogger's Quilt). The live view offers it as "or: …"
+// rather than pretending to know.
+//
+// Measured on two hand-tagged sessions (test/bench/scoreTaggedSession.mjs
+// --review): a rival within 0.08 of the top in at least a quarter of a tune's
+// windows flagged 6 of 93 tunes, every one a genuine near-twin (The Glen
+// Cottage / Dalaigh's, Out on the Ocean / O'Sullivan's March, Will You Come
+// Home With Me? / I Buried My Wife and Danced on Her Grave, and the three
+// above). At 0.1 ordinary tunes started to appear.
+export const CLOSE_RIVAL_GAP = 0.08;
+export const CLOSE_RIVAL_SHARE = 0.25;
+export const CLOSE_RIVAL_MIN_WINDOWS = 3;
+
+const sameName = (a, b) => String(a || '').trim().toLowerCase() === String(b || '').trim().toLowerCase();
+
+// The close rival of a run of window matches of one tune, or null. A rival
+// with the SAME name (thesession has several tunes called The Glen Cottage)
+// is not offered: "or: The Glen Cottage" under The Glen Cottage says nothing.
+export function closeRivalOf(hits) {
+    if (!hits || hits.length < CLOSE_RIVAL_MIN_WINDOWS) return null;
+    const tally = new Map();
+    for (const hit of hits) {
+        const rival = (hit.alternatives || []).find(alt =>
+            String(alt.tuneId) !== String(hit.tuneId)
+            && !sameName(alt.title, hit.displayName)
+            && alt.score >= hit.score - CLOSE_RIVAL_GAP);
+        if (!rival) continue;
+        const key = String(rival.tuneId);
+        const entry = tally.get(key) || { windows: 0, best: rival };
+        entry.windows += 1;
+        if (rival.score > entry.best.score) entry.best = rival;
+        tally.set(key, entry);
+    }
+    let top = null;
+    for (const entry of tally.values()) if (!top || entry.windows > top.windows) top = entry;
+    if (!top || top.windows / hits.length < CLOSE_RIVAL_SHARE) return null;
+    return {
+        tuneId: top.best.tuneId,
+        settingId: top.best.settingId ? String(top.best.settingId) : '',
+        sourceUrl: top.best.sourceUrl || '',
+        dataset: top.best.dataset || '',
+        title: top.best.title,
+        score: top.best.score,
+        windows: top.windows,
+    };
+}
+
+// Two clusters of one tune merged into a row: their rival tallies add up when
+// they name the same tune, and the share is re-judged over all the windows.
+function mergeCloseRivals(a, b, totalHits) {
+    let rival = a;
+    if (a && b && String(a.tuneId) === String(b.tuneId)) {
+        rival = { ...(b.score > a.score ? b : a), windows: a.windows + b.windows };
+    } else if (!a || (b && b.windows > a.windows)) {
+        rival = b;
+    }
+    return rival && rival.windows / totalHits >= CLOSE_RIVAL_SHARE ? rival : null;
+}
+
 function mergeAlternatives(...alternativeLists) {
     const byTuneId = new Map();
     for (const alternatives of alternativeLists) {
@@ -424,6 +486,7 @@ export function clusterDetections(windowMatches, options) {
                 averageScore,
                 hits: cluster.hits.length,
                 alternatives: mergeAlternatives(...cluster.hits.map(hit => hit.alternatives || [])),
+                closeRival: closeRivalOf(cluster.hits),
             };
         })
         // Keep clusters with multiple hits (robust) or a single hit that
@@ -462,6 +525,7 @@ export function mergeConsecutiveSameTune(detections) {
             (det.averageScore ?? det.bestScore) * detHits) / (prevHits + detHits);
         prev.hits = prevHits + detHits;
         prev.alternatives = mergeAlternatives(prev.alternatives, det.alternatives);
+        prev.closeRival = mergeCloseRivals(prev.closeRival || null, det.closeRival || null, prev.hits);
         if (det.bestScore > prev.bestScore) {
             prev.bestScore = det.bestScore;
             prev.settingId = det.settingId;

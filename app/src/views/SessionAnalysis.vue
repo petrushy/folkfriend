@@ -519,6 +519,17 @@
                                     :disabled="workspaceBusy || (viewMode === 'file' && isFileAnalyzing)"
                                     @change="onTuneChange(detection)"
                                 />
+                                <!-- A near-twin the search rated almost as
+                                     highly (closeRivalOf); one tap picks it,
+                                     exactly as the dropdown would. -->
+                                <button
+                                    v-if="rivalOptionFor(detection)"
+                                    class="rivalHint"
+                                    :disabled="workspaceBusy || (viewMode === 'file' && isFileAnalyzing)"
+                                    @click="takeRival(detection)"
+                                >
+                                    or: {{ rivalOptionFor(detection).title }}
+                                </button>
                             </td>
                             <td class="duration-cell">
                                 {{ formatSecondsAsDuration(detection.endSeconds - detection.startSeconds) }}
@@ -1636,6 +1647,22 @@ export default {
             detection.selectedSourceUrl = selected.sourceUrl || '';
             detection.selectedTitle = selected.title;
         },
+        // The row's close rival as one of its own dropdown options, or null
+        // when there is none, it is already the one selected, or it is not
+        // among the options (a selection the dropdown cannot show).
+        rivalOptionFor(detection) {
+            const rival = detection.closeRival;
+            if (!rival) return null;
+            const option = (detection.tuneOptions || []).find(o => String(o.tuneId) === String(rival.tuneId));
+            if (!option || option.value === detection.selectedTuneKey) return null;
+            return option;
+        },
+        takeRival(detection) {
+            const option = this.rivalOptionFor(detection);
+            if (!option) return;
+            detection.selectedTuneKey = option.value;
+            this.onTuneChange(detection);
+        },
         onTuneChange(detection) {
             this.syncSelectedTune(detection);
             if (this.viewMode === 'file') {
@@ -2097,6 +2124,16 @@ export default {
     text-transform: uppercase;
     color: #5f6b77;
     margin-bottom: 8px;
+}
+
+.rivalHint {
+    margin-top: 2px;
+    font-size: 0.8rem;
+    color: #1565c0;
+    background: transparent;
+    border: none;
+    padding: 0 4px;
+    text-align: left;
 }
 
 .start-cell {
