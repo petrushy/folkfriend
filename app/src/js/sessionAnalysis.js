@@ -51,13 +51,16 @@ export const STRONG_SINGLE_DETECTION_SCORE = 0.7;
 
 // A new tune held back at the tail (see buildSessionDetections'
 // confirmSpanSeconds) is released at once when any of its windows scores this.
-// Measured on a real 90-minute session tagged by hand
-// (test/bench/scoreTaggedSession.mjs): at 0.7 the hold delayed nearly every
-// tune by ~4 s; at 0.55 the right tune is on screen 92 % of the time instead
-// of 90 %, with no more unplayed tunes shown during breaks (5 %). At 0.5 that
-// rose to 12 %, at 0.45 to 19 %, so 0.55 is close to the edge — re-measure
-// before lowering it.
-export const CONFIRM_RELEASE_SCORE = 0.55;
+// Measured on two real sessions tagged by hand (test/bench/scoreTaggedSession.mjs;
+// a 90-minute one from a good recorder and a 2 h 20 min one from the app's own
+// iPhone recording). At 0.7 the hold delayed nearly every tune by ~4 s. 0.55
+// was right for the first session but on the second, with its long breaks,
+// one chance match in the talking got through and stayed up until the next
+// tune: an unplayed tune on screen for 11 % of break time instead of 5 %.
+// At 0.6 both sessions are at 5 %, right tune 91 % / 88 % (0.7: 90 / 87 %),
+// median time to show 9 / 10 s (0.7: 10 / 11 s). Requiring two agreeing
+// windows as well changed nothing. Re-measure on every new tagged session.
+export const CONFIRM_RELEASE_SCORE = 0.6;
 
 /**
  * Drops short-lived detections from the *past* part of the list.

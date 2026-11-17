@@ -1413,8 +1413,8 @@ both in `js/liveCadence.mjs` (pure) and wired in `liveAnalysis._runLoop`:
   nobody played rose from 4.8 % to 6.6 %. `buildSessionDetections` now takes
   `confirmSpanSeconds` and holds a NEW tail tune back (the previous one stays
   current) until its windows span that long, unless one scored ≥
-  `CONFIRM_RELEASE_SCORE` (0.55; it was 0.7 — see "Measured on a real
-  session" below).
+  `CONFIRM_RELEASE_SCORE` (0.6; it was 0.7, briefly 0.55 — see "Measured on
+  a real session" below).
   `confirmSpanSeconds(configured, actual)` (`liveCadence.mjs`) is the
   configured step minus the measured one: **0 on a slow device, so it behaves
   exactly as before**, 3 s at a 2 s step. `_liveStepSeconds` is null until the
@@ -1496,7 +1496,8 @@ Findings, at a fast device's 2 s step:
 | | right | previous tune still up | wrong | breaks: unplayed tune | median to show |
 |---|---|---|---|---|---|
 | before (screen bias, release 0.7) | 88 % | 9 % | 3 % | 5 % | 10 s |
-| now (heard bias, release 0.55) | 92 % | 8 % | 1 % | 5 % | 8 s |
+| heard bias, release 0.55 (#117) | 92 % | 8 % | 1 % | 5 % | 8 s |
+| **now (heard bias, release 0.6)** | 91 % | 8 % | 1 % | 5 % | 9 s |
 | no hold at all | 94 % | 5 % | 1 % | 19 % | 7 s |
 
 Release thresholds tried: 0.6 → 91 %, 0.5 → breaks 12 %, 0.45 → breaks 19 %.
@@ -1508,9 +1509,44 @@ unplayed tune 0.8 → 2.4 % (hard 1.7 → 3.4 %) — synthetic wrong matches are
 similar tunes scoring 0.55–0.7 on clean audio, which the real room did not
 produce. The real recording was taken as the better evidence (the synthetic
 set is also what justified the 0.7 hold that the recording showed costing
-4 s a tune). **Re-check `CONFIRM_RELEASE_SCORE` when a second tagged session
-exists.** `replayLiveCadence.mjs` and `scoreTaggedSession.mjs` both keep the
-old rules behind switches (`--bias-screen --hold-strong 0.7`) for that.
+4 s a tune). `replayLiveCadence.mjs` and `scoreTaggedSession.mjs` both keep
+the old rules behind switches (`--bias-screen --hold-strong 0.7`).
+
+**The second session moved the release to 0.6.** A 2 h 20 min session
+recorded by the app itself on an iPhone (session audio, exported as MP3),
+tagged the same way, 56 tunes. The search is as good on iPhone audio as on
+the good recorder: right tune first in 95 % of windows, top 5 in 98 %. But it
+has long breaks (34 minutes in all), and at 0.55 one chance match in the
+talking (≥ 0.55 in a single window) got through and stayed on screen until
+the next tune — an unplayed tune for 11 % of break time instead of 5 %:
+
+| release | session 1: right / breaks / to show | session 2 (iPhone): right / breaks / to show |
+|---|---|---|
+| 0.7, screen bias (before #117) | 88 % / 5 % / 10 s | 87 % / 5 % / 11 s |
+| 0.55 (#117) | 92 % / 5 % / 8 s | 88 % / 11 % / 8 s |
+| **0.6** | 91 % / 5 % / 9 s | 88 % / 5 % / 10 s |
+| 0.65 | 91 % / 5 % / 10 s | 87 % / 5 % / 10 s |
+
+Requiring two agreeing windows before an early release was tried and changed
+nothing at 0.6 (windows 2 s apart share most of their audio, so a chance
+match repeats). **Re-measure `CONFIRM_RELEASE_SCORE` on every new tagged
+session** — `scripts/bench_tagged_sessions.sh <folder>` scores them all.
+
+The second session's remaining wrong-tune time (4 %, the same under every
+rule) is near-twin tunes, not the release: *The Clogger's Quilt* on screen
+through most of *Lad O'Beirne's* (the search preferred Lad O'Beirne's 61 / 29 %,
+but once the Quilt was up the previous-tune bias kept it), and *The Green
+Fields of America* through *Jimmy O'Brien's* / *The Maid in the Meadow*.
+That is the next thing to look at.
+
+**Tagging conventions** the scorer understands: a marker per tune start;
+`break` where the music stops; `UNKNOWN` for a tune nobody could name (scored
+neither way; `--review` says what the search heard there); `ignore` for a
+stretch to leave out entirely (singing, someone trying an instrument). Names
+are matched against thesession's aliases, with or without a trailing tune
+type ("Cooley's Reel"). `--review` checks the TAGS rather than the app: per
+tag, what the search heard, short tags, names not found, and which unplayed
+tunes the live view showed in breaks and during tunes.
 
 **Window length** (`detect_sim --wav … 2 index.json <seconds>`), same rules:
 6 s 93 % right but an unplayed tune in 37 % of break time; 8 s 93 % / 17 %;
