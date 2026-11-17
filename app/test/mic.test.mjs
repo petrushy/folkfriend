@@ -316,6 +316,23 @@ await test('a healthy capture is left completely alone', async () => {
     await mic.stopContinuous();
 });
 
+await test('a continuous tap sees every chunk until removed, and a failing tap breaks nothing', async () => {
+    const { mic } = await loadMic();
+    await mic.startContinuous(10);
+    const seen = [];
+    mic.addContinuousTap(() => { throw new Error('broken listener'); });
+    const remove = mic.addContinuousTap((chunk, rate) => seen.push([chunk.length, rate]));
+    env.contexts[0].deliver(3);
+    assert.equal(seen.length, 3);
+    assert.ok(seen.every(([n, rate]) => n > 0 && rate > 0));
+    assert.equal(mic.getContinuousAudio().length, seen.reduce((n, [len]) => n + len, 0), 'the ring buffer still fills');
+    remove();
+    env.contexts[0].deliver(2);
+    assert.equal(seen.length, 3);
+    mic._continuousTaps.clear();
+    await mic.stopContinuous();
+});
+
 await test('no capture open: health check is a no-op and never opens the mic', async () => {
     const { mic } = await loadMic();
     assert.equal(await mic.ensureMicHealthy(), true);

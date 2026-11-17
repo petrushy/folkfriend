@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import {
     windowPosition, matchSpans, lineAtFraction, nextFollowLine, MIN_QUERY_LENGTH,
-    positionCandidates, trackPosition, followPoint, COAST_SECONDS,
+    positionCandidates, trackPosition, followPoint, COAST_SECONDS, RELOCK_MIN_SCORE, TRACK_MIN_SCORE,
     transposeContour, CONTOUR_ALPHABET,
 } from '../src/js/scorePosition.mjs';
 import { readFileSync } from 'node:fs';
@@ -310,12 +310,51 @@ test('if the tune comes back somewhere else after improvising, it re-aligns', ()
 test('a damaged window is believed where the music is expected, not out of nowhere', () => {
     const stored = contour(300, 81);
     const { state } = follow(performance(stored, 6).play(0, 180), stored, { to: 30 });
-    // The next 10 s, every fourth note wrong: a match score of about 0.5.
-    const damaged = stored.slice(138, 198).split('').map((c, i) => (i % 4 === 3 ? 'A' : c)).join('');
+    // The next 10 s, every third note far off ('V' is nowhere near this
+    // alphabet, so semitone tolerance does not soften it): score about 1/3,
+    // between the track floor and the relock floor.
+    const damaged = stored.slice(138, 198).split('').map((c, i) => (i % 3 === 2 ? 'V' : c)).join('');
     const tracked = trackPosition(state, POS(damaged, 33000), { storedContour: stored });
     assert.equal(tracked.reason, 'ok');
-    assert.ok(tracked.score < 0.6, `score ${tracked.score}`);
+    assert.ok(tracked.score < RELOCK_MIN_SCORE && tracked.score >= TRACK_MIN_SCORE, `score ${tracked.score}`);
     assert.equal(trackPosition(null, POS(damaged, 33000), { storedContour: stored }).reason, 'weak');
+});
+
+test('a window scoring about 0.5 finds the place from nothing (the old 0.6 floor left it blank)', () => {
+    // Measured: the right tune's windows score ~0.44 at the median on
+    // transcriber output, so a 0.6 relock floor showed no line for a third of
+    // the time whenever the stored setting differed from what was played.
+    const stored = contour(300, 81);
+    const damaged = stored.slice(138, 198).split('').map((c, i) => (i % 4 === 3 ? 'V' : c)).join('');
+    const fresh = trackPosition(null, POS(damaged, 33000), { storedContour: stored });
+    assert.equal(fresh.reason, 'ok');
+    assert.ok(Math.abs(fresh.main.pos % 300 - 198) <= 3, `at ${fresh.main.pos}`);
+});
+
+test('a window heard an octave away is the same place (tin whistle sounds an octave up)', () => {
+    // Middle of the range, so a shift either way stays representable.
+    const stored = contour(240, 31, 'mnopqrstuvwx');
+    const played = stored.slice(100, 150);
+    for (const shift of [12, -12]) {
+        const [best] = positionCandidates(transposeContour(played, shift), stored);
+        assert.ok(best && best.score > 0.95, `shift ${shift}: score ${best && best.score}`);
+        assert.equal(best.end, 150, `shift ${shift}`);
+    }
+    // A fifth away is NOT forgiven: that is a different key, i.e. not this setting.
+    const [fifth] = positionCandidates(transposeContour(played, 7), stored);
+    assert.ok(!fifth || fifth.score < 0.5, `fifth ${fifth && fifth.score}`);
+});
+
+test('a semitone slip costs less than a wrong note, for position only', () => {
+    const stored = contour(200, 23);
+    const slice = stored.slice(40, 80);
+    const semitone = slice.split('').map((c, i) => (i % 5 === 4 ? String.fromCharCode(c.charCodeAt(0) + 1) : c)).join('').replace(/\{/g, 'A');
+    const wrong = slice.split('').map((c, i) => (i % 5 === 4 ? 'V' : c)).join('');
+    const [s] = positionCandidates(semitone, stored);
+    const [w] = positionCandidates(wrong, stored);
+    assert.ok(s.score > w.score + 0.1, `semitone ${s.score} vs wrong ${w.score}`);
+    // The Rust-parity lattice is unchanged: a semitone slip is a plain mismatch there.
+    assert.equal(matchSpans(semitone, stored, 1)[0].score, matchSpans(wrong, stored, 1)[0].score);
 });
 
 test('wrong last notes in a window do not put the position behind the music', () => {

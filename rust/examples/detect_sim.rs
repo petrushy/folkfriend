@@ -13,6 +13,7 @@
 use folkfriend::FolkFriend;
 use serde_json::json;
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::sync::{Arc, Mutex};
 
 const SR: u32 = 44_100;
@@ -46,7 +47,9 @@ fn char_to_midi(c: char) -> Option<f32> {
 
 /// One tune played for `seconds`, looping its contour: per-quaver onsets,
 /// harmonic tone with vibrato, occasional wrong notes, slow tempo drift.
-fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>) {
+/// `starts` receives (sample offset, contour index) for every note played:
+/// the ground truth for measuring score-position tracking.
+fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>, starts: &mut Vec<(usize, usize)>) {
     let notes: Vec<f32> = contour.chars().filter_map(char_to_midi).collect();
     if notes.is_empty() { return; }
     let base_q = rng.range(0.17, 0.24);
@@ -58,7 +61,8 @@ fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>) {
     while out.len() - start < total {
         let progress = (out.len() - start) as f32 / total as f32;
         let q = base_q * (1.0 + 0.04 * (progress * 6.28).sin()) * (1.0 + 0.03 * rng.gauss());
-        let mut midi = notes[i % notes.len()];
+        starts.push((out.len(), i % notes.len()));
+        let mut midi = notes[i % notes.len()] + octave_shift();
         if rng.f() < wrong_note_rate() {
             // A wrong or varied note.
             midi += [-2.0, -1.0, 1.0, 2.0][rng.below(4)];
@@ -73,7 +77,9 @@ fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>) {
             phase += 2.0 * std::f32::consts::PI * freq * vib / SR as f32;
             let mut s = 0.0;
             for h in 1..=6 {
-                s += (phase * h as f32).sin() / h as f32;
+                // Whistle: mostly fundamental, weak upper partials.
+                let weight = if whistle() { [1.0, 0.25, 0.08, 0.03, 0.01, 0.0][h - 1] } else { 1.0 / h as f32 };
+                s += (phase * h as f32).sin() * weight;
             }
             out.push(0.25 * env * s);
         }
@@ -84,6 +90,10 @@ fn render_tune(contour: &str, seconds: f32, rng: &mut Rng, out: &mut Vec<f32>) {
 
 // DETECT_SIM_HARD=1: a noisier room and more wrong notes.
 fn hard() -> bool { std::env::var("DETECT_SIM_HARD").map(|v| v == "1").unwrap_or(false) }
+// DETECT_SIM_WHISTLE=1: sound an octave above the written pitch, as a D tin
+// whistle does, with a strong fundamental (a whistle is nearly a sine).
+fn whistle() -> bool { std::env::var("DETECT_SIM_WHISTLE").map(|v| v == "1").unwrap_or(false) }
+fn octave_shift() -> f32 { if whistle() { 12.0 } else { 0.0 } }
 fn contours_only() -> bool { std::env::var("DETECT_SIM_CONTOURS").map(|v| v == "1").unwrap_or(false) }
 fn wrong_note_rate() -> f32 { if hard() { 0.12 } else { 0.05 } }
 
@@ -130,8 +140,60 @@ fn transcribe_and_query(ff: &mut FolkFriend, pcm: &[f32]) -> serde_json::Value {
     json!({ "contourLength": contour.len(), "results": top })
 }
 
+/// `--wav file.wav [step]`: re-transcribe a real recording (a set Follow
+/// diagnosis capture) window by window, as the practice follower does: the
+/// trailing 10 s every `step` seconds (default 4, the practice step), first at
+/// `step`. JSON lines {t, contour, windowSeconds} for
+/// app/test/bench/replayFollowCapture.mjs --windows. 16-bit PCM WAV only.
+fn wav_windows(path: &str, step: usize) {
+    let bytes = std::fs::read(path).expect("read wav");
+    assert!(&bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE", "not a WAV file");
+    let (mut rate, mut channels, mut bits, mut data) = (0u32, 1u16, 16u16, &bytes[0..0]);
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let id = &bytes[at..at + 4];
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        let body = &bytes[at + 8..(at + 8 + size).min(bytes.len())];
+        if id == b"fmt " {
+            channels = u16::from_le_bytes([body[2], body[3]]);
+            rate = u32::from_le_bytes(body[4..8].try_into().unwrap());
+            bits = u16::from_le_bytes([body[14], body[15]]);
+        } else if id == b"data" {
+            data = body;
+        }
+        at += 8 + size + (size & 1);
+    }
+    assert!(bits == 16 && rate > 0, "only 16-bit PCM WAV is supported");
+    let frame = 2 * channels as usize;
+    let pcm: Vec<f32> = data.chunks_exact(frame)
+        .map(|f| i16::from_le_bytes([f[0], f[1]]) as f32 / 32768.0)
+        .collect();
+    let mut ff = FolkFriend::new();
+    ff.set_sample_rate(rate).unwrap();
+    let seconds = pcm.len() / rate as usize;
+    let mut t = step;
+    while t <= seconds {
+        let from = t.saturating_sub(WINDOW_SECONDS) * rate as usize;
+        let to = t * rate as usize;
+        ff.flush_pcm_buffer();
+        for chunk in pcm[from..to].chunks_exact(1024) {
+            let mut w = [0f32; 1024];
+            w.copy_from_slice(chunk);
+            ff.feed_single_pcm_window(w);
+        }
+        let contour = ff.transcribe_pcm_buffer().unwrap_or_default();
+        println!("{}", json!({ "t": t, "contour": contour, "windowSeconds": (to - from) as f32 / rate as f32 }));
+        t += step;
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() > 2 && args[1] == "--wav" {
+        let step = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
+        wav_windows(&args[2], step);
+        return;
+    }
     let index_path = &args[1];
     let sessions: usize = args[2].parse().unwrap();
     let seed: u64 = args[3].parse().unwrap();
@@ -186,10 +248,11 @@ fn main() {
                 let mut rng = Rng(seed.max(1));
                 let mut pcm = Vec::new();
                 let mut truth = Vec::new();
+                let mut starts: Vec<(usize, usize)> = Vec::new();
                 for (tid, sid, secs) in &parts {
                     let contour = settings["settings"][sid]["contour"].as_str().unwrap().to_string();
                     let start = pcm.len() as f32 / SR as f32;
-                    render_tune(&contour, *secs, &mut rng, &mut pcm);
+                    render_tune(&contour, *secs, &mut rng, &mut pcm, &mut starts);
                     truth.push(json!({ "tuneId": tid, "settingId": sid, "start": start, "end": pcm.len() as f32 / SR as f32 }));
                 }
                 add_noise(&mut pcm, snr, &mut rng);
@@ -200,6 +263,10 @@ fn main() {
                     let to = t * SR as usize;
                     let mut w = transcribe_and_query(&mut ff, &pcm[from..to]);
                     w["t"] = json!(t);
+                    // Contour index of the note sounding at the end of the window.
+                    if let Some(&(_, idx)) = starts.iter().take_while(|(at, _)| *at <= to).last() {
+                        w["pos"] = json!(idx);
+                    }
                     w["windowSeconds"] = json!((to - from) as f32 / SR as f32);
                     windows.push(w);
                 }

@@ -57,6 +57,23 @@ const MATCH = 2;
 const MISMATCH = -2;
 const GAP = -1;
 
+// SEMITONE-TOLERANT scoring, for POSITION only (`graded: true`). The most
+// common transcription error is a note one semitone off (measured: ~9 % of
+// notes on simulated playing, against ~1 % octave or tempo errors), and the
+// Rust lattice scores that exactly as harshly as a wrong tune's note. For "is
+// this the tune, and where" a semitone slip is nearly right. Costs are on a
+// doubled scale so the lattice stays in integers; the score is normalised back,
+// so 1 still means a perfect match. The default (Rust-exact) is untouched,
+// which is what the parity test with the Rust second pass checks.
+const GRADED_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV';
+const GRADED_INDEX = new Int16Array(128).fill(-1000);
+for (let i = 0; i < GRADED_ALPHABET.length; i++) GRADED_INDEX[GRADED_ALPHABET.charCodeAt(i)] = i;
+const GRADED_COST = [2 * MATCH, -1, -3]; // same note, one semitone, one tone
+function gradedSubstitution(a, b) {
+    const d = Math.abs(GRADED_INDEX[a & 127] - GRADED_INDEX[b & 127]);
+    return d < GRADED_COST.length ? GRADED_COST[d] : 2 * MISMATCH;
+}
+
 // The best few NON-OVERLAPPING places `query` aligns within `stored`, best
 // first: { start, end (exclusive), score }, offsets into `stored`.
 //
@@ -85,7 +102,7 @@ const GAP = -1;
 // Overlap is the wrong test for a POSITION: a phrase that repeats at a short
 // period matches perfectly at two places whose spans overlap, and only one
 // of them is where the music is.
-export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false, distinctEnds = 0 } = {}) {
+export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false, distinctEnds = 0, graded = false } = {}) {
     if (!query || !stored || query.length > stored.length || maxSpans <= 0) return [];
     const n = query.length;
     let prevH = new Int32Array(n + 1);
@@ -100,6 +117,8 @@ export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false, d
     const rowBest = new Int32Array(stored.length);
     const rowStart = new Int32Array(stored.length);
 
+    const gap = graded ? 2 * GAP : GAP;
+    const scale = graded ? 0.25 : 0.5;
     for (let row = 0; row < stored.length; row++) {
         const b = stored.charCodeAt(row);
         curH[0] = 0;
@@ -109,9 +128,10 @@ export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false, d
         for (let col = 1; col <= n; col++) {
             // A predecessor on the boundary means the alignment starts on
             // this row; anything else carries its own start forward.
-            const diag = prevH[col - 1] + (query.charCodeAt(col - 1) === b ? MATCH : MISMATCH);
-            const left = curH[col - 1] + GAP;
-            const up = prevH[col] + GAP;
+            const a = query.charCodeAt(col - 1);
+            const diag = prevH[col - 1] + (graded ? gradedSubstitution(a, b) : (a === b ? MATCH : MISMATCH));
+            const left = curH[col - 1] + gap;
+            const up = prevH[col] + gap;
             let h;
             let start;
             let trail;
@@ -163,7 +183,7 @@ export function matchSpans(query, stored, maxSpans = MAX_SPANS, { fit = false, d
             start,
             end: Math.min(stored.length, end + rowTrail[row]),
             matchedEnd: end,
-            score: (0.5 * raw) / n,
+            score: (scale * raw) / n,
         });
         if (spans.length >= maxSpans) break;
     }
@@ -224,10 +244,21 @@ export function lineAtFraction(timeline, fraction) {
 // growing across laps), so "how far apart" and "how fast" are plain
 // arithmetic; the score position is taken modulo the contour's length.
 
+// Measured (test/bench/replaySetFollow.mjs on transcriber output, November
+// 2026): windows of the RIGHT tune score about 0.44 at the median, so the old
+// 0.6 relock floor left the score with no line for a third of the time when the
+// stored setting differed from what was played. Lowered with the semitone-
+// tolerant scoring above; the existing per-window replay
+// (replayScorePosition.mjs) is no worse for it.
 // A candidate where the music is expected needs only this match score.
-export const TRACK_MIN_SCORE = 0.4;
-// A place the music is NOT expected to be needs this, as before.
-export const RELOCK_MIN_SCORE = POSITION_MIN_SCORE;
+export const TRACK_MIN_SCORE = 0.3;
+// With the place LOST, one window anywhere needs this to find it again.
+export const RELOCK_MIN_SCORE = 0.4;
+// While the place is still held, a window elsewhere needs this to start an
+// alternative (which a second agreeing window then confirms). Deliberately
+// the old, stricter floor: at 0.4 weak chance matches seeded alternatives
+// everywhere, and a single stray window then "confirmed" one of them.
+export const ALTERNATIVE_MIN_SCORE = POSITION_MIN_SCORE;
 // How far from the projection a candidate may land and still agree with it:
 // a fixed slack, plus a share of the distance projected since the last match
 // (tempo error accumulates).
@@ -264,13 +295,25 @@ function unwrapNear(end, near, length) {
 // up to its last note) against the stored contour looped once, so a window
 // spanning the end of one time through and the start of the next is found
 // too. Best first, distinct places only: { end, covered, score }.
+const OCTAVE_SHIFTS = [0, -12, 12];
+
 export function positionCandidates(query, stored, maxSpans = MAX_SPANS) {
     if (!query || !stored || query.length < MIN_QUERY_LENGTH || query.length > stored.length) return [];
     const length = stored.length;
     const looped = stored + stored.slice(0, query.length);
     // Ends kept apart, not spans: see matchSpans. Twice the slack of "the
     // same place", so near-identical neighbouring rows collapse into one.
-    const spans = matchSpans(query, looped, maxSpans * 2, { fit: true, distinctEnds: 2 * SAME_PLACE_QUAVERS + 1 });
+    // OCTAVE-INVARIANT: the transcriber decides the octave per window
+    // (rust/src/decode/octave.rs drops a window an octave only when 85 % of its
+    // notes are at or above E5), so a tin whistle — which sounds an octave
+    // above the written pitch, its low notes D5 and E5 right at that line —
+    // comes out at written pitch in some windows and an octave up in others,
+    // and an octave-up window scored 0 against every stored contour. The same
+    // melody an octave away is the same tune at the same place, so the window
+    // is matched as heard and an octave either way, best first.
+    const spans = OCTAVE_SHIFTS.flatMap(shift => matchSpans(shift ? transposeContour(query, shift) : query, looped,
+        maxSpans * 2, { fit: true, distinctEnds: 2 * SAME_PLACE_QUAVERS + 1, graded: true }))
+        .sort((a, b) => (b.score - a.score) || (a.end - b.end));
     const out = [];
     for (const s of spans) {
         const end = s.end > length ? s.end - length : s.end;
@@ -378,6 +421,7 @@ export function trackPosition(state, position, { storedContour, candidates = nul
     // Strong places this window that no hypothesis accounts for.
     const isClaimed = (c) => claimed.some(k => circularDistance(k.end, c.end, length) <= SAME_PLACE_QUAVERS);
     const fresh = found.filter(c => c.score >= RELOCK_MIN_SCORE && !isClaimed(c));
+    const freshAlternatives = () => fresh.filter(c => c.score >= ALTERNATIVE_MIN_SCORE);
 
     const confirmed = alts.filter(h => h.hits >= 2).sort((x, y) => y.score - x.score)[0];
     const lost = !main || main.misses >= MISSES_BEFORE_LOST || (t - main.lastHit) / 1000 > COAST_SECONDS;
@@ -413,7 +457,7 @@ export function trackPosition(state, position, { storedContour, candidates = nul
     // Anything strong nobody explains becomes an alternative, so the NEXT
     // window can confirm it.
     const near = main ? projected(main, t) : null;
-    for (const c of fresh) alts.push(seed(c, t, windowSeconds, length, near));
+    for (const c of freshAlternatives()) alts.push(seed(c, t, windowSeconds, length, near));
     // An alternative that has converged on the main hypothesis is the same.
     if (main) {
         const mainNow = projected(main, t);

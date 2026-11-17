@@ -225,6 +225,10 @@ class MicService {
         this._lastLevelAt = 0;
 
         this._ringBuffer = [];
+        // Listeners for every continuous-capture chunk (the Follow diagnostic
+        // capture). Held on the service, not the pipeline, so they survive a
+        // microphone recovery; a recovery shows up as a gap, not a stop.
+        this._continuousTaps = new Set();
         this._ringBufferMaxChunks = 0;
 
         // Retained PCM of the current manual recording, for optional WAV export
@@ -648,7 +652,11 @@ class MicService {
         }
 
         if (mode === 'continuous') {
-            this._ringBuffer.push(new Float32Array(channelData)); // copy
+            const copy = new Float32Array(channelData);
+            this._ringBuffer.push(copy);
+            for (const tap of this._continuousTaps) {
+                try { tap(copy, this.sampleRate || (this.audioCtx && this.audioCtx.sampleRate)); } catch (e) { console.warn('continuous tap failed', e); }
+            }
             if (this._ringBuffer.length > this._ringBufferMaxChunks) {
                 this._ringBuffer.shift();
             }
@@ -915,6 +923,10 @@ class MicService {
         }
         this._continuousTransition = null;
     }
+
+    // `tap(chunk, sampleRate)` for every continuous chunk until removed. The
+    // chunk is shared with the ring buffer: read it, never modify it.
+    addContinuousTap(tap) { this._continuousTaps.add(tap); return () => this._continuousTaps.delete(tap); }
 
     getContinuousAudio() {
         const chunks = this._ringBuffer || [];

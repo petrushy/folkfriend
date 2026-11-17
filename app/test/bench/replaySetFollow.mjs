@@ -67,27 +67,45 @@ function buildSet(session, variant) {
     return entries.map(e => ({ ...e, contour: settings[e.sid].contour }));
 }
 
+// A staff line is about four bars, in quavers. The played-out contour has the
+// repeats expanded, so the same written line occurs more than once; a line
+// holding the same notes as the true one counts as right.
+const LINE_QUAVERS = { reel: 32, hornpipe: 32, jig: 24, 'slip jig': 36, polka: 16 };
+const lineLength = entry => LINE_QUAVERS[settings[entry.sid].dance] || 32;
+function sameLine(entry, a, b) {
+    const L = lineLength(entry), c = entry.contour;
+    const la = Math.floor(a / L), lb = Math.floor(b / L);
+    return la === lb || c.slice(la * L, la * L + L) === c.slice(lb * L, lb * L + L);
+}
+// A timeline whose "line" is the contour index, so the follower reports the
+// index it would draw at; lines are derived from it above.
+const timelineFor = entry => ({ totalMs: entry.contour.length * 1000, lineCount: entry.contour.length,
+    events: Array.from(entry.contour, (_, i) => ({ milliseconds: i * 1000, line: i })) });
+
 function replay(session, entries, options) {
     const follower = new SetScoreFollower(entries.map((e, i) => ({ id: String(i), contour: e.contour })), options);
     const playedAt = t => session.truth.find(p => t >= p.start && t < p.end);
     const shownEvery = [];
     const windows = new Map(session.windows.map(w => [w.t, w]));
     const last = Math.floor(session.truth.at(-1).end);
-    let shown = 0;
+    const timelines = entries.map(timelineFor);
+    let shown = 0, line = null;
     for (let t = 1; t <= last; t++) {
-        if (t >= PRACTICE_FIRST_QUERY_SECONDS && (t - PRACTICE_FIRST_QUERY_SECONDS) % PRACTICE_STEP_SECONDS === 0) {
-            const w = windows.get(t);
-            const position = w && windowPosition(w.contour, { readAt: t * 1000, windowSeconds: Math.min(10, t) });
-            // A transcription takes a moment; the view reads it shortly after.
-            shown = follower.update({ position, timeline: () => null, nowMs: t * 1000 + 600 }).index;
-        }
-        shownEvery.push({ t, shown, played: playedAt(t - 0.5) });
+        const query = t >= PRACTICE_FIRST_QUERY_SECONDS && (t - PRACTICE_FIRST_QUERY_SECONDS) % PRACTICE_STEP_SECONDS === 0;
+        const w = windows.get(t);
+        const position = query && w ? windowPosition(w.contour, { readAt: t * 1000, windowSeconds: Math.min(10, t) }) : null;
+        // A transcription takes a moment; the view reads it shortly after.
+        // Between windows the view re-projects once a second, as the app does.
+        const result = follower.update({ position, timeline: i => timelines[i], nowMs: t * 1000 + 600 });
+        shown = result.index; line = result.line;
+        shownEvery.push({ t, shown, line, truePos: w?.pos, played: playedAt(t - 0.5) });
     }
     return shownEvery;
 }
 
 function measure(variant, options) {
     const latencies = []; let transitions = 0, missed = 0, total = 0, lag = 0, wrong = 0;
+    let rightTune = 0, rightLine = 0, noLine = 0;
     for (const session of sessions) {
         const entries = buildSet(session, variant);
         const trace = replay(session, entries, options);
@@ -95,7 +113,12 @@ function measure(variant, options) {
             if (!row.played) continue;
             total++;
             const shownTune = entries[row.shown].tuneId;
-            if (shownTune === row.played.tuneId) continue;
+            if (shownTune === row.played.tuneId) {
+                rightTune++;
+                if (row.line === null || row.line === undefined) noLine++;
+                else if (row.truePos !== undefined && sameLine(entries[row.shown], row.line, row.truePos)) rightLine++;
+                continue;
+            }
             // Behind (a tune already played) is a delay; anything else — a tune
             // not played yet, or one never played — is a wrong claim.
             const k = session.truth.indexOf(row.played);
@@ -111,15 +134,17 @@ function measure(variant, options) {
     latencies.sort((a, b) => a - b);
     const q = p => latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(p * latencies.length))].toFixed(1) : '—';
     return { median: q(0.5), p90: q(0.9), missed: `${(100 * missed / transitions).toFixed(1)}%`,
-             lagging: `${(100 * lag / total).toFixed(1)}%`, wrong: `${(100 * wrong / total).toFixed(2)}%` };
+             lagging: `${(100 * lag / total).toFixed(1)}%`, wrong: `${(100 * wrong / total).toFixed(2)}%`,
+             line: `${(100 * rightLine / rightTune).toFixed(0)}%`, noLine: `${(100 * noLine / rightTune).toFixed(0)}%`,
+             both: `${(100 * rightLine / total).toFixed(0)}%` };
 }
 
 const grid = process.env.GRID ? JSON.parse(process.env.GRID) : [{}];
 console.log(`${sessions.length} sessions, ${sessions.length * 2} tune changes per variant`);
-console.log('options | variant | switch after (median / p90 s) | never switched | time behind | time on a WRONG tune');
+console.log('options | variant | switch after (median / p90 s) | never switched | time behind | time on a WRONG tune | right line (when right tune) | no line | right tune AND line');
 for (const options of grid) {
     for (const variant of (process.env.VARIANTS || 'exact,other,skip,confusable').split(',')) {
         const m = measure(variant, options);
-        console.log(`${JSON.stringify(options)} | ${variant} | ${m.median} / ${m.p90} | ${m.missed} | ${m.lagging} | ${m.wrong}`);
+        console.log(`${JSON.stringify(options)} | ${variant} | ${m.median} / ${m.p90} | ${m.missed} | ${m.lagging} | ${m.wrong} | ${m.line} | ${m.noLine} | ${m.both}`);
     }
 }

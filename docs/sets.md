@@ -99,8 +99,29 @@ node ../app/test/bench/replaySetFollow.mjs /tmp/setsim.jsonl
 
 ⚠️ Synthetic audio says nothing absolute about a real whistle in a real room;
 it compares rules fairly. A setting stored very differently from how it is
-played (about one change in seven above) is still not followed and needs Next
+played (about one change in nine to seven) is still not followed and needs Next
 tune.
+
+The line shown follows the shared score tracker (see CLAUDE.md, "Measured on
+transcriber output, and an octave fix"): semitone-tolerant and octave-invariant
+matching, floors set to what the right tune actually scores.
+
+### Save the run for diagnosis
+
+A checkbox beside Follow my playing (remembered per device) records the run:
+the microphone at reduced quality plus a log of every analysed window, what was
+shown, Next-tune taps and manual scrolls. After stopping, **Share diagnosis**
+sends a WAV and a JSON file through the share sheet (download on desktop). It
+is kept only until leaving the set, and nothing is uploaded anywhere.
+
+```sh
+node app/test/bench/replayFollowCapture.mjs follow_x.json [--truth truth.json]
+cd rust && ./target/release/examples/detect_sim --wav follow_x.wav > w.jsonl   # re-transcribe
+node ../app/test/bench/replayFollowCapture.mjs follow_x.json --windows w.jsonl
+```
+
+`truth.json` is `[{ "entry": 0, "start": 0 }, { "entry": 1, "start": 52.5 }]`:
+which set entry was being played from when, in seconds of the WAV.
 
 Auto-scroll can be switched off independently. Touch/wheel browsing holds it
 for eight seconds; Resume scrolling restores it immediately. Editing, changing
