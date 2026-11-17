@@ -1412,7 +1412,9 @@ both in `js/liveCadence.mjs` (pure) and wired in `liveAnalysis._runLoop`:
   did at a 5 s step: on synthetic sessions the time spent showing a tune
   nobody played rose from 4.8 % to 6.6 %. `buildSessionDetections` now takes
   `confirmSpanSeconds` and holds a NEW tail tune back (the previous one stays
-  current) until its windows span that long, unless one scored ≥ 0.7.
+  current) until its windows span that long, unless one scored ≥
+  `CONFIRM_RELEASE_SCORE` (0.55; it was 0.7 — see "Measured on a real
+  session" below).
   `confirmSpanSeconds(configured, actual)` (`liveCadence.mjs`) is the
   configured step minus the measured one: **0 on a slow device, so it behaves
   exactly as before**, 3 s at a 2 s step. `_liveStepSeconds` is null until the
@@ -1451,6 +1453,88 @@ to show a new tune is ~0.5 s longer on a fast device (11.1 vs 10.6 s).
 ⚠️ Synthetic audio is cleaner and more regular than a pub; it compares
 cadences fairly but says nothing absolute about accuracy, and only DSP was
 measured, not ML.
+
+#### Measured on a real session, and what it changed (November 2026)
+
+The first measurement on a real recording: a 90-minute pub session (autumn
+2025, a good recorder rather than an iPhone) tagged by hand in
+Transcribe! — 37 tunes plus the breaks between sets. **The recording and its
+tags are private and never enter the repo** (see "Private recordings" below);
+only the numbers do.
+
+**To benchmark recordings: `scripts/bench_tagged_sessions.sh <folder>`.** The
+folder holds each recording beside its Transcribe! `.xsc` (or a
+`<name>.tags.json`); the script converts, transcribes, searches and scores
+every session in it, caching the slow part in `<folder>/bench/`, so re-scoring
+after a rule change takes seconds. Extra arguments go to the scorer
+(`-- --quiet`, `-- --bias-screen --hold-strong 0.7` for the old rules), and a
+second argument sets the window length. Underneath:
+`detect_sim --wav session.wav 2 thesession.json [window]` transcribes and
+searches the trailing window every 2 s, and
+`app/test/bench/scoreTaggedSession.mjs` scores that against the tags on two
+layers: the search alone, window by window, and the live view's own rules
+replayed over it (the real `buildLiveDetections`, bias and normalisation).
+It reads a Transcribe! `.xsc` directly; a marker named `break` is a stretch
+with no tune, scored separately (a NEW unplayed tune appearing there is the
+failure; the last tune staying up is fine).
+
+Findings, at a fast device's 2 s step:
+
+- **The search was already good: right tune first in 93 % of windows, top 5 in
+  97 %.** The live view showed the right tune only 88 % of the time — the loss
+  was in the rules deciding what to show, not in the search.
+- **The confirmation hold cost ~4 s on almost every tune** (released only at
+  0.7, which real windows of the right tune often do not reach), and **it fed
+  the previous-tune bias**: while a new tune was held back the old one was
+  still the tail of `detections`, the next window was biased back to it, the
+  new tune's run was broken, and it was never released. The Glen Cottage was
+  not shown for its whole 100 s. Fixed by biasing toward the tune HEARD
+  (`buildLiveDetections` → `heardTuneId`, `liveAnalysis._biasTargetTuneId`).
+- **The hold still earns its place in breaks**: without it an unplayed tune is
+  on screen for 19 % of break time instead of 5 %.
+
+| | right | previous tune still up | wrong | breaks: unplayed tune | median to show |
+|---|---|---|---|---|---|
+| before (screen bias, release 0.7) | 88 % | 9 % | 3 % | 5 % | 10 s |
+| now (heard bias, release 0.55) | 92 % | 8 % | 1 % | 5 % | 8 s |
+| no hold at all | 94 % | 5 % | 1 % | 19 % | 7 s |
+
+Release thresholds tried: 0.6 → 91 %, 0.5 → breaks 12 %, 0.45 → breaks 19 %.
+Both halves of the session improve (89 / 88 % → 90 / 93 %).
+
+**The synthetic sessions disagree on one point.** Same change, fast device:
+right 87.1 → 88.0 % (hard 85.3 → 86.2 %), median to show 8.4 → 6.6 s, but an
+unplayed tune 0.8 → 2.4 % (hard 1.7 → 3.4 %) — synthetic wrong matches are
+similar tunes scoring 0.55–0.7 on clean audio, which the real room did not
+produce. The real recording was taken as the better evidence (the synthetic
+set is also what justified the 0.7 hold that the recording showed costing
+4 s a tune). **Re-check `CONFIRM_RELEASE_SCORE` when a second tagged session
+exists.** `replayLiveCadence.mjs` and `scoreTaggedSession.mjs` both keep the
+old rules behind switches (`--bias-screen --hold-strong 0.7`) for that.
+
+**Window length** (`detect_sim --wav … 2 index.json <seconds>`), same rules:
+6 s 93 % right but an unplayed tune in 37 % of break time; 8 s 93 % / 17 %;
+**10 s 92 % / 5 %**; 12 s 89 %; 15 s 87 %. Longer windows search better
+(top-1 86 → 96 %) but switch later, and search time grows with the window
+(0.11 / 0.17 / 0.25 s per search at 6 / 10 / 15 s on an M-series Mac). 10 s
+stays. Unmeasured idea: a short window only to notice a change, the 10 s one
+to decide what to show — double the search work.
+
+**Downsampling to "iPhone quality" does not model the phone**: live detection
+never sees the recorded file, it reads the microphone's PCM. What differs on
+a phone is the microphone, its placement and the platform's audio processing.
+The useful iPhone measurement is the same evening recorded by the app on the
+phone (session recording on) beside a good recorder.
+
+#### Private recordings
+
+Session recordings record a room and are not ours to publish (this repo is
+public). They are kept outside git — locally in a folder excluded through
+`.git/info/exclude`, never `.gitignore`d by name in a committed file — and
+only benchmark numbers are committed. The clips in `rust/wavs/` are the
+maintainer playing alone and are fine to keep. If CI ever runs private
+audio, it must come from private storage via a read-only secret, and skip
+on fork PRs, which get no secrets.
 
 ### Played in sets with — set partners (November 2026)
 

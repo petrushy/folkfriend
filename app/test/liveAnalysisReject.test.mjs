@@ -185,12 +185,14 @@ await test('a fast step holds a new tune back until its windows span enough audi
     play(service, 1, 0, 4);
     // The loop has measured a 2 s step: windows now share most of their audio.
     service._liveStepSeconds = 2;
-    // Below the strong-single score, which would rightly need no confirmation.
-    service._windowMatches.push(match(2, 20, 0.6), match(2, 22, 0.6));
+    // Below the release score, which would rightly need no confirmation.
+    service._windowMatches.push(match(2, 20, 0.5), match(2, 22, 0.5));
     service._recluster();
     assert.deepEqual(service.detections.map(d => d.tuneId), [1],
         'two overlapping windows of a new tune are not yet a tune change');
-    service._windowMatches.push(match(2, 24, 0.6));
+    assert.equal(service._biasTargetTuneId(), 2,
+        'but the tune heard is the new one, and the next window is biased toward it, not toward the screen');
+    service._windowMatches.push(match(2, 24, 0.5));
     service._recluster();
     assert.deepEqual(service.detections.map(d => d.tuneId), [1, 2], 'spanning 4 s: it is');
 
@@ -198,7 +200,7 @@ await test('a fast step holds a new tune back until its windows span enough audi
     // old behaviour.
     service._liveStepSeconds = null;
     service._windowMatches = service._windowMatches.slice(0, 4);
-    service._windowMatches.push(match(3, 20, 0.6));
+    service._windowMatches.push(match(3, 20, 0.5));
     service._recluster();
     assert.deepEqual(service.detections.map(d => d.tuneId), [1, 3]);
 });

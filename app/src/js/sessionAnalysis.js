@@ -49,6 +49,16 @@ export const MIN_PAST_DETECTION_SECONDS = 15;
 // best wrong match typically sits ~0.3 lower.
 export const STRONG_SINGLE_DETECTION_SCORE = 0.7;
 
+// A new tune held back at the tail (see buildSessionDetections'
+// confirmSpanSeconds) is released at once when any of its windows scores this.
+// Measured on a real 90-minute session tagged by hand
+// (test/bench/scoreTaggedSession.mjs): at 0.7 the hold delayed nearly every
+// tune by ~4 s; at 0.55 the right tune is on screen 92 % of the time instead
+// of 90 %, with no more unplayed tunes shown during breaks (5 %). At 0.5 that
+// rose to 12 %, at 0.45 to 19 %, so 0.55 is close to the edge — re-measure
+// before lowering it.
+export const CONFIRM_RELEASE_SCORE = 0.55;
+
 /**
  * Drops short-lived detections from the *past* part of the list.
  *
@@ -472,7 +482,7 @@ export function mergeConsecutiveSameTune(detections) {
 //
 // `confirmSpanSeconds` holds back a NEW tune at the tail until its matching
 // windows span at least that long (first to last), unless one of them scored
-// STRONG_SINGLE_DETECTION_SCORE. The previous tune stays the current one
+// CONFIRM_RELEASE_SCORE. The previous tune stays the current one
 // meanwhile. Live listening sets it when it queries faster than the configured
 // step (js/liveCadence.mjs confirmSpanSeconds): windows two seconds apart share
 // eight of their ten seconds of audio, so one misleading passage produces two
@@ -481,18 +491,34 @@ export function mergeConsecutiveSameTune(detections) {
 // sessions (rust/examples/detect_sim.rs) that was the larger part of a rise in
 // time spent showing a tune nobody played. Not applied when `final`.
 export function buildSessionDetections(windowMatches, options, { final = false, confirmSpanSeconds = 0 } = {}) {
+    return buildLiveDetections(windowMatches, options, { final, confirmSpanSeconds }).detections;
+}
+
+// buildSessionDetections plus the tune the analysis HEARD most recently,
+// which differs from the tail of `detections` while a new tune is held back.
+//
+// Live listening biases each window toward that heard tune, not toward the
+// one on screen. Biasing toward the screen fed the hold: while a new tune was
+// held back the old one was still the tail, so the next window was promoted
+// back to the old tune, the new tune's run was broken, and it was never
+// released. On the real session (test/bench/scoreTaggedSession.mjs) that kept
+// a tune off screen for its whole length (The Glen Cottage, shown as nothing
+// for 100 s), and an unplayed tune was on screen 3 % of the time; biased
+// toward what was heard, 1 %.
+export function buildLiveDetections(windowMatches, options, { final = false, confirmSpanSeconds = 0 } = {}) {
     const filtered = filterShortPastDetections(
         clusterDetections(windowMatches, options),
         MIN_PAST_DETECTION_SECONDS,
         { keepLast: !final, options },
     );
     const merged = mergeConsecutiveSameTune(filtered);
-    if (final || !(confirmSpanSeconds > 0) || merged.length < 2) return merged;
+    const heardTuneId = merged.length ? merged[merged.length - 1].tuneId : null;
+    if (final || !(confirmSpanSeconds > 0) || merged.length < 2) return { detections: merged, heardTuneId };
     const tail = merged[merged.length - 1];
     // endSeconds is the last window's start plus a whole window.
     const span = tail.endSeconds - options.windowSeconds - tail.startSeconds;
-    if (span >= confirmSpanSeconds || tail.bestScore >= STRONG_SINGLE_DETECTION_SCORE) return merged;
-    return merged.slice(0, -1);
+    if (span >= confirmSpanSeconds || tail.bestScore >= CONFIRM_RELEASE_SCORE) return { detections: merged, heardTuneId };
+    return { detections: merged.slice(0, -1), heardTuneId };
 }
 
 export function normaliseQueryResults(results, options) {
