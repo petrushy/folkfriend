@@ -5,14 +5,15 @@
 //
 //   ffmpeg -i session.m4a -ac 1 -ar 44100 -c:a pcm_s16le session.wav
 //   rust/target/release/examples/detect_sim --wav session.wav 2 app/public/res/thesession.json > windows.jsonl
-//   node app/test/bench/scoreTaggedSession.mjs windows.jsonl tags.xsc [--index app/public/res/thesession.json] [--quiet]
+//   node app/test/bench/scoreTaggedSession.mjs windows.jsonl tags.xsc [--index app/public/res/thesession.json] [--quiet] [--review]
 //
 // Tags: a Transcribe! .xsc (its Markers section: name + start time; each tune
 // lasts until the next marker, the last until the end of the windows), or JSON
 // [{ "name": "...", "start": seconds, "tuneIds": ["52"] }]. Names are resolved
 // against the index's aliases; a marker named "break" (or "-", "chat",
 // "pause") marks a stretch with no tune, excluded from the tune scores and
-// reported on its own; a name matching several tunes accepts any of
+// reported on its own; "UNKNOWN" a tune nobody could name and "ignore" a
+// stretch to leave out (singing, tuning up), both scored neither way; a name matching several tunes accepts any of
 // them, and the report says which one the detector picked, so the tags can be
 // pinned with tuneIds.
 //
@@ -61,7 +62,7 @@ function readTags(file) {
         return { name: parts.slice(3, -2).join(','), start: seconds(parts[parts.length - 1]) };
     });
 }
-const norm = s => s.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
+const norm = s => s.replace(/[´’‘`]/g, "'").toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '')
     .trim().replace(/^(the) (.*)$/, '$2, $1').replace(/[^a-z0-9, ]/g, '').trim();
 const index = JSON.parse(readFileSync(indexFile, 'utf8'));
 const byName = new Map();
@@ -73,13 +74,25 @@ for (const [tuneId, names] of Object.entries(index.aliases)) {
     }
 }
 const BREAK = /^\s*(break|pause|chat|-+)\s*$/i;
+// A tune is being played but the tagger could not name it: scored as neither
+// right nor wrong, and --review shows what the search heard there.
+const UNKNOWN = /^\s*(unknown|\?+)\s*$/i;
+// A stretch to leave out of every score (singing, someone trying an
+// instrument): nothing shown there counts either way.
+const IGNORE = /^\s*(ignore|skip)\s*$/i;
+// "Cooley's Reel" is "Cooley's" on thesession: a trailing tune type is tried
+// without when the full name is not found.
+const TYPE_SUFFIX = / (reel|jig|slip jig|hop jig|polka|slide|hornpipe|waltz|march|mazurka|barndance|strathspey|air)$/;
+const namesFor = name => byName.get(norm(name)) || byName.get(norm(name).replace(TYPE_SUFFIX, '')) || [];
 const tags = readTags(tagsFile).sort((a, b) => a.start - b.start).map((tag, i, all) => ({
     ...tag,
     isBreak: BREAK.test(tag.name),
+    isUnknown: UNKNOWN.test(tag.name) || IGNORE.test(tag.name),
+    isIgnored: IGNORE.test(tag.name),
     end: i + 1 < all.length ? all[i + 1].start : end,
-    tuneIds: new Set(BREAK.test(tag.name) ? [] : (tag.tuneIds || [...(byName.get(norm(tag.name)) || [])]).map(String)),
+    tuneIds: new Set(BREAK.test(tag.name) || UNKNOWN.test(tag.name) || IGNORE.test(tag.name) ? [] : (tag.tuneIds || [...namesFor(tag.name)]).map(String)),
 }));
-const unresolved = tags.filter(t => !t.isBreak && !t.tuneIds.size);
+const unresolved = tags.filter(t => !t.isBreak && !t.isUnknown && !t.tuneIds.size);
 const tagAt = t => tags.find(p => t >= p.start && t < p.end) || null;
 
 // ---- detector layer ---------------------------------------------------------
@@ -155,12 +168,20 @@ const played = new Set(tags.flatMap(t => [...t.tuneIds]));
 let right = 0, wrong = 0, stale = 0, blank = 0, total = 0, breakSeconds = 0, breakShownNew = 0;
 const half = [{ right: 0, total: 0, wrong: 0 }, { right: 0, total: 0, wrong: 0 }];
 let lastTuneShown = null;
+const breakShows = new Map(); // "breakStart|tuneId" -> seconds on screen
+const wrongShows = new Map(); // "tagStart|tuneId" -> seconds a tune nobody played was on screen
+// While a tagged UNKNOWN tune plays, whatever is shown is neither right nor
+// wrong — but it must not count as "the last tune shown" for the next break.
 for (let s = 1; s <= end; s++) {
     const tag = tagAt(s - 0.5);
     if (tag && tag.isBreak) {
         // In a break the last tune staying up is fine; a NEW tune appearing is not.
         breakSeconds++;
-        if (shown.get(s) !== null && shown.get(s) !== lastTuneShown && !played.has(shown.get(s))) breakShownNew++;
+        if (shown.get(s) !== null && shown.get(s) !== lastTuneShown && !played.has(shown.get(s))) {
+            breakShownNew++;
+            const k = `${tag.start}|${shown.get(s)}`;
+            breakShows.set(k, (breakShows.get(k) || 0) + 1);
+        }
         continue;
     }
     if (shown.get(s) !== null) lastTuneShown = shown.get(s);
@@ -172,7 +193,11 @@ for (let s = 1; s <= end; s++) {
     if (on === null) blank++;
     else if (tag.tuneIds.has(on)) { right++; h.right++; }
     else if (played.has(on)) stale++;
-    else { wrong++; h.wrong++; }
+    else {
+        wrong++; h.wrong++;
+        const k = `${tag.start}|${on}`;
+        wrongShows.set(k, (wrongShows.get(k) || 0) + 1);
+    }
 }
 const latency = tag => {
     for (let s = Math.ceil(tag.start) + 1; s <= tag.end; s++) if (tag.tuneIds.has(shown.get(s))) return s - tag.start;
@@ -192,6 +217,7 @@ if (!quiet) {
     console.log('start  | tune                            | windows | top-1 | top-5 | med score right/wrong | shown after | picked id');
     for (const tag of tags) {
         if (tag.isBreak) { console.log(`${mmss(tag.start).padStart(6)} | (break)`); continue; }
+        if (tag.isUnknown) { console.log(`${mmss(tag.start).padStart(6)} | ${tag.isIgnored ? '(ignored)' : '(unknown tune)'}`); continue; }
         const s = perTag.get(tag);
         const lat = latency(tag);
         const dlat = detectorLatency(tag);
@@ -212,3 +238,65 @@ const dl = tags.filter(t => t.tuneIds.size).map(detectorLatency).filter(x => x !
 console.log(`Tunes shown at all: ${found.length}/${lats.length} · median time to show ${median(found)?.toFixed(0)} s (first right search result after ${median(dl)?.toFixed(0)} s)`);
 console.log(`By half: right ${pct(half[0].right, half[0].total)} / ${pct(half[1].right, half[1].total)} · wrong ${pct(half[0].wrong, half[0].total)} / ${pct(half[1].wrong, half[1].total)}`);
 console.log(`Saved list: ${tags.filter(t => t.tuneIds.size && finalIds.some(id => t.tuneIds.has(id))).length}/${lats.length} found, ${finalIds.filter(id => !played.has(id)).length} not tagged (of ${finalIds.length})`);
+
+// --review: for checking the TAGS rather than the app. For each tag, what the
+// search put first most often over the windows wholly inside it, and how
+// strongly — so a mistyped name, a wrong setting family, a boundary in the
+// wrong place or an UNKNOWN the search can name stands out.
+if (argv.includes('--review')) {
+    const nameOf = new Map();
+    console.log('\nReview of the tags — what the search heard inside each one');
+    console.log('start   end    | tag                             | search mostly heard (share of windows, median score) | verdict');
+    for (const tag of tags) {
+        if (tag.isBreak || tag.isIgnored) continue;
+        const inside = windows.filter(w => w.t - (w.windowSeconds || 10) >= tag.start - 0.01 && w.t <= tag.end + 0.01 && w.results && w.results.length);
+        const counts = new Map();
+        for (const w of inside) {
+            const top = w.results[0];
+            const id = String(top.tune_id);
+            nameOf.set(id, top.display_name);
+            if (!counts.has(id)) counts.set(id, []);
+            counts.get(id).push(top.score);
+        }
+        const ranked = [...counts.entries()].sort((a, b) => b[1].length - a[1].length);
+        const describe = ([id, scores]) => `${nameOf.get(id)} [${id}] ${pct(scores.length, inside.length)}, ${median(scores).toFixed(2)}`;
+        const heard = ranked.slice(0, 2).map(describe).join('; ') || '—';
+        const length = tag.end - tag.start;
+        let verdict;
+        const [bestId, bestScores] = ranked[0] || [null, []];
+        const share = inside.length ? bestScores.length / inside.length : 0;
+        if (length < 45) verdict = `SHORT (${length.toFixed(0)} s) — boundary?`;
+        else if (!inside.length) verdict = 'nothing heard';
+        else if (tag.isUnknown) verdict = share >= 0.4 && median(bestScores) >= 0.45 ? `maybe ${nameOf.get(bestId)}?` : 'search unsure too';
+        else if (!tag.tuneIds.size) verdict = 'NAME NOT FOUND in the index';
+        else if (tag.tuneIds.has(bestId)) verdict = share >= 0.5 ? 'agrees' : 'agrees, weakly';
+        else {
+            const rightShare = (counts.get([...tag.tuneIds].find(id => counts.has(id))) || []).length / inside.length;
+            verdict = share >= 0.4 && median(bestScores) >= 0.45
+                ? `DISAGREES — check (tagged tune top in ${pct(rightShare * inside.length, inside.length)})`
+                : `search unsure (tagged tune top in ${pct(rightShare * inside.length, inside.length)})`;
+        }
+        console.log(`${mmss(tag.start).padStart(7)} ${mmss(tag.end).padStart(7)} | ${tag.name.slice(0, 31).padEnd(31)} | ${heard.slice(0, 70).padEnd(70)} | ${verdict}`);
+    }
+}
+
+if (argv.includes('--review') && breakShows.size) {
+    const names = new Map();
+    for (const w of windows) for (const r of w.results || []) names.set(String(r.tune_id), r.display_name);
+    console.log('\nUnplayed tunes the live view put on screen during breaks (noodling, or an untagged tune?)');
+    for (const [k, secs] of [...breakShows.entries()].sort((a, b) => Number(a[0].split('|')[0]) - Number(b[0].split('|')[0]))) {
+        const [start, id] = k.split('|');
+        console.log(`  break from ${mmss(Number(start))}: ${names.get(id) || id} [${id}] for ${secs} s`);
+    }
+}
+
+if (argv.includes('--review') && wrongShows.size) {
+    const names = new Map();
+    for (const w of windows) for (const r of w.results || []) names.set(String(r.tune_id), r.display_name);
+    console.log('\nUnplayed tunes on screen while a tagged tune was playing (5 s or more)');
+    for (const [k, secs] of [...wrongShows.entries()].filter(([, n]) => n >= 5).sort((a, b) => Number(a[0].split('|')[0]) - Number(b[0].split('|')[0]))) {
+        const [start, id] = k.split('|');
+        const tag = tags.find(t => String(t.start) === start);
+        console.log(`  during ${tag ? tag.name : '?'} (${mmss(Number(start))}): ${names.get(id) || id} [${id}] for ${secs} s`);
+    }
+}

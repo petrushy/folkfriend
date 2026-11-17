@@ -224,6 +224,9 @@ function d(tuneId, startSeconds, endSeconds) {
     assert.deepEqual(run([m(2, 20, CONFIRM_RELEASE_SCORE)], 3), [1, 2],
         'a window at the release score needs no confirmation');
     assert.deepEqual(run([m(2, 20, CONFIRM_RELEASE_SCORE - 0.01)], 3), [1], 'just below it: held');
+    assert.equal(CONFIRM_RELEASE_SCORE, 0.6,
+        'measured on two tagged sessions: 0.55 let chance matches into breaks (11 % vs 5 %), 0.7 delayed every tune — '
+        + 're-measure with scripts/bench_tagged_sessions.sh before changing it');
     assert.ok(CONFIRM_RELEASE_SCORE < strong,
         'released below the strong-single score: at 0.7 the hold delayed nearly every real tune by ~4 s');
 
