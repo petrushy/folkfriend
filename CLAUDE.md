@@ -1462,6 +1462,13 @@ Transcribe! — 37 tunes plus the breaks between sets. **The recording and its
 tags are private and never enter the repo** (see "Private recordings" below);
 only the numbers do.
 
+**To benchmark recordings: `scripts/bench_tagged_sessions.sh <folder>`.** The
+folder holds each recording beside its Transcribe! `.xsc` (or a
+`<name>.tags.json`); the script converts, transcribes, searches and scores
+every session in it, caching the slow part in `<folder>/bench/`, so re-scoring
+after a rule change takes seconds. Extra arguments go to the scorer
+(`-- --quiet`, `-- --bias-screen --hold-strong 0.7` for the old rules), and a
+second argument sets the window length. Underneath:
 `detect_sim --wav session.wav 2 thesession.json [window]` transcribes and
 searches the trailing window every 2 s, and
 `app/test/bench/scoreTaggedSession.mjs` scores that against the tags on two
