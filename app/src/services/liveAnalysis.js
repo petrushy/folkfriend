@@ -4,7 +4,7 @@ import geoService from './geo.js';
 import store from './store.js';
 import sessionRecorder from './sessionRecorder.js';
 import {
-    normaliseQueryResults, buildSessionDetections, SESSION_ANALYSIS_DEFAULTS,
+    normaliseQueryResults, buildLiveDetections, SESSION_ANALYSIS_DEFAULTS,
 } from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import { detectionFreshness } from '@/js/detectionFreshness.mjs';
@@ -59,6 +59,12 @@ class LiveAnalysisService {
         this.elapsedSeconds = 0;
         this.options = null;
         this._windowMatches = [];
+        // The tune the analysis heard most recently: the tail of the
+        // clustered matches BEFORE a new tune is held back for confirmation,
+        // so it can be ahead of this.detections. Each window is biased toward
+        // it — see buildLiveDetections. Set by _recluster(), and only read
+        // while there are matches, so a reset cannot leave it stale.
+        this._heardTuneId = null;
         // The latest window's transcribed contour and when it ended, for the
         // follow view's auto-centre (js/scorePosition.mjs), which aligns it
         // against the setting on screen. Display-only and never persisted: it
@@ -554,10 +560,21 @@ class LiveAnalysisService {
         const confirm = this._liveStepSeconds === null || !this.options
             ? 0
             : confirmSpanSeconds(this.options.stepSeconds, this._liveStepSeconds);
-        this.detections = buildSessionDetections(this._windowMatches, this.options, {
+        const { detections, heardTuneId } = buildLiveDetections(this._windowMatches, this.options, {
             final,
             confirmSpanSeconds: confirm,
         });
+        this.detections = detections;
+        this._heardTuneId = heardTuneId;
+    }
+
+    // The tune each new window is biased toward (previousTuneBiasDelta): what
+    // was HEARD, not what is on screen. While a new tune is held back for
+    // confirmation the screen still shows the old one, and biasing toward it
+    // promoted the old tune again, so the new one was never released
+    // (buildLiveDetections).
+    _biasTargetTuneId() {
+        return this._windowMatches.length > 0 ? this._heardTuneId : null;
     }
 
     // The last window that actually produced an accepted match, or null.
@@ -778,9 +795,7 @@ class LiveAnalysisService {
                 }
 
                 if (this.isRunning && !this.isPaused && !response.error && usableResults.length > 0) {
-                    const previousTuneId = this.detections.length > 0
-                        ? this.detections[this.detections.length - 1].tuneId
-                        : null;
+                    const previousTuneId = this._biasTargetTuneId();
                     const biasedResults = biasResultsTowardPrevious(
                         usableResults,
                         previousTuneId,

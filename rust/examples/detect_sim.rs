@@ -145,7 +145,10 @@ fn transcribe_and_query(ff: &mut FolkFriend, pcm: &[f32]) -> serde_json::Value {
 /// trailing 10 s every `step` seconds (default 4, the practice step), first at
 /// `step`. JSON lines {t, contour, windowSeconds} for
 /// app/test/bench/replayFollowCapture.mjs --windows. 16-bit PCM WAV only.
-fn wav_windows(path: &str, step: usize) {
+/// `--wav file.wav step index.json` also searches each window and adds the
+/// top 20 `results`, for benchmarking a tagged real session; a fifth argument
+/// sets the window length in seconds (default 10).
+fn wav_windows(path: &str, step: usize, index: Option<&str>, window: usize) {
     let bytes = std::fs::read(path).expect("read wav");
     assert!(&bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WAVE", "not a WAV file");
     let (mut rate, mut channels, mut bits, mut data) = (0u32, 1u16, 16u16, &bytes[0..0]);
@@ -170,10 +173,12 @@ fn wav_windows(path: &str, step: usize) {
         .collect();
     let mut ff = FolkFriend::new();
     ff.set_sample_rate(rate).unwrap();
+    // With an index, every window is also searched, as the live session does.
+    if let Some(p) = index { ff.load_index_from_json_string(std::fs::read_to_string(p).expect("read index")); }
     let seconds = pcm.len() / rate as usize;
     let mut t = step;
     while t <= seconds {
-        let from = t.saturating_sub(WINDOW_SECONDS) * rate as usize;
+        let from = t.saturating_sub(window) * rate as usize;
         let to = t * rate as usize;
         ff.flush_pcm_buffer();
         for chunk in pcm[from..to].chunks_exact(1024) {
@@ -182,7 +187,17 @@ fn wav_windows(path: &str, step: usize) {
             ff.feed_single_pcm_window(w);
         }
         let contour = ff.transcribe_pcm_buffer().unwrap_or_default();
-        println!("{}", json!({ "t": t, "contour": contour, "windowSeconds": (to - from) as f32 / rate as f32 }));
+        let mut line = json!({ "t": t, "contour": contour, "windowSeconds": (to - from) as f32 / rate as f32 });
+        if index.is_some() && !contour.is_empty() {
+            let results = ff.run_transcription_query(&contour).unwrap_or_default();
+            line["results"] = json!(results.iter().take(20).map(|r| json!({
+                "setting_id": r.setting_id.parse::<i64>().unwrap_or(0),
+                "tune_id": r.setting.tune_id,
+                "display_name": r.display_name,
+                "score": r.score,
+            })).collect::<Vec<_>>());
+        }
+        println!("{}", line);
         t += step;
     }
 }
@@ -191,7 +206,8 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 2 && args[1] == "--wav" {
         let step = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(4);
-        wav_windows(&args[2], step);
+        let window = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(WINDOW_SECONDS);
+        wav_windows(&args[2], step, args.get(4).map(|s| s.as_str()), window);
         return;
     }
     let index_path = &args[1];

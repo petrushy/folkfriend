@@ -19,7 +19,7 @@ const src = path.join(here, '..', '..', 'src', 'js');
 const { biasResultsTowardPrevious } = await import(path.join(src, 'biasResults.mjs'));
 const { isPartialWindow, partialWindowUsable, confirmSpanSeconds } = await import(path.join(src, 'liveCadence.mjs'));
 const SA = await loadSessionAnalysisModule();
-const { normaliseQueryResults, buildSessionDetections, SESSION_ANALYSIS_DEFAULTS } = SA;
+const { normaliseQueryResults, buildSessionDetections, buildLiveDetections, SESSION_ANALYSIS_DEFAULTS } = SA;
 
 const SR = 44100;
 const WINDOW = 10;
@@ -37,6 +37,7 @@ function replay(session, { first, step }) {
     const total = session.windows.length;
     const matches = [];
     let detections = [];
+    let heardTuneId = null;
     const shownAt = new Array(total + 1).fill(null); // tail tune on screen at second s
     let shown = null;
     let next = first;
@@ -48,15 +49,23 @@ function replay(session, { first, step }) {
             const usable = !partial || partialWindowUsable({ contour: 'x'.repeat(w.contourLength || 0) }, options.minContourLength);
             const results = usable ? w.results : [];
             if (results.length) {
-                const prev = detections.length ? detections[detections.length - 1].tuneId : null;
+                const prev = BIAS_SCREEN ? (detections.length ? detections[detections.length - 1].tuneId : null) : heardTuneId;
                 const n = normaliseQueryResults(biasResultsTowardPrevious(results, prev, options.previousTuneBiasDelta), options);
                 if (n) {
                     matches.push({ startSeconds: s, audioSeconds: null, ...n });
                     // Exactly as liveAnalysis._recluster: the step is known
                     // once the first analysis has been timed.
-                    detections = buildSessionDetections(matches, options, {
-                        confirmSpanSeconds: IMPLEMENTED ? confirmSpanSeconds(options.stepSeconds, step) : 0,
-                    });
+                    const confirm = IMPLEMENTED ? confirmSpanSeconds(options.stepSeconds, step) : 0;
+                    if (RELEASE_AT === null) {
+                        ({ detections, heardTuneId } = buildLiveDetections(matches, options, { confirmSpanSeconds: confirm }));
+                    } else {
+                        // The hold as it was before November 2026: released at RELEASE_AT.
+                        const all = buildSessionDetections(matches, options);
+                        const last = all[all.length - 1];
+                        const span = all.length > 1 ? last.endSeconds - options.windowSeconds - last.startSeconds : Infinity;
+                        detections = (all.length > 1 && span < confirm && last.bestScore < RELEASE_AT) ? all.slice(0, -1) : all;
+                        heardTuneId = all.length ? last.tuneId : null;
+                    }
                     const tail = detections.length ? detections[detections.length - 1] : null;
                     if (!tail) shown = null;
                     else shown = tail.tuneId;
@@ -77,9 +86,12 @@ function truthAt(session, s) {
 }
 
 let IMPLEMENTED = false;
+let BIAS_SCREEN = false;
+let RELEASE_AT = null;
 const RULES = {
-    'without tail confirmation (as first shipped in #110)': () => { IMPLEMENTED = false; },
-    'with tail confirmation (current code)': () => { IMPLEMENTED = true; },
+    'without tail confirmation (as first shipped in #110)': () => { IMPLEMENTED = false; BIAS_SCREEN = true; RELEASE_AT = 0.7; },
+    'tail confirmation, biased toward the screen, released at 0.7 (until Nov 2026)': () => { IMPLEMENTED = true; BIAS_SCREEN = true; RELEASE_AT = 0.7; },
+    'tail confirmation, biased toward the tune heard, CONFIRM_RELEASE_SCORE (current code)': () => { IMPLEMENTED = true; BIAS_SCREEN = false; RELEASE_AT = null; },
 };
 const sessions = readFileSync(process.argv[2], 'utf8').trim().split('\n').map(l => JSON.parse(l));
 console.log(`${sessions.length} sessions, ${sessions.length * 3} tune performances\n`);
