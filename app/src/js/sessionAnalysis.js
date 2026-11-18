@@ -4,7 +4,13 @@ import { settingSourceUrl } from '@/js/source.mjs';
 // Shared by live listening and file analysis — the two must detect the same
 // way. Only the window/step differ, and those come from the caller.
 export const SESSION_ANALYSIS_DEFAULTS = {
-    minTopScore: 0.45,
+    // 0.45 until 1.5.0, when the search's gap penalty went from -1 to -1.5 and
+    // scores moved down (most for weak matches). Measured on the two tagged
+    // sessions: 0.40 is where the new search beats the old one on every live
+    // number (right tune shown, wrong tune, break false positives, tunes
+    // found); quantile-matching the old 0.45 would give 0.425. Lowering it on
+    // the OLD search instead raised break false positives from 5 % to 12 %.
+    minTopScore: 0.40,
     minClusterHits: 2,
     minContourLength: 12,
     maxAlternatives: 3,

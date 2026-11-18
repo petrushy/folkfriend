@@ -1144,6 +1144,73 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Search: a window may wrap across the repeat, and gaps cost more (November 2026 — 1.5.0)
+
+Two changes to the second pass (`rust/src/query/nw.rs`), chosen by measuring
+~25 variants of the search and the DSP transcriber against the two hand-tagged
+real sessions (3.3 h, 93 tunes):
+
+- **The stored contour is aligned with its own opening appended**
+  (`with_repeat_opening`: + 1.5 × query length, at most the whole contour).
+  A 10 s window that runs from the end of one time through into the start of
+  the next could only half-match before. This was the most consistent single
+  change: better on both sessions in ranking AND in separating tunes from
+  break chatter.
+- **Gap −1.5 on the old +2/−2 scale** (now +4/−4/−3, to stay in integers).
+  Cheap gaps let chance alignments skip their way to matches. −1 / −1.5 / −2 /
+  −2.5 gave 94.2 / 95.2 / 94.6 / 93.5 % right-tune-first.
+
+Per window, pooled: right tune first 94.3 → 95.5 %, top-5 97.8 → 98.0 %,
+median lead over the best other tune 0.22 → 0.26. Clean 12-clip corpus: 12/12
+at rank 1 (was 11; The Kid on the Mountain was 3rd). No measurable speed cost —
+the n-gram shortlist dominates.
+
+**Scores moved down, most for weak matches** (quantile map of top results:
+0.7 → 0.69, 0.6 → 0.58, 0.45 → 0.425, 0.3 → 0.25, 0.2 → 0.155), so every
+threshold that reads a search score was revisited:
+
+- `minTopScore` 0.45 → **0.40**, measured through the live rules
+  (`scoreTaggedSession.mjs`). Session 1: right tune on screen 91 → 93 %,
+  wrong 1 → 0 %, breaks 5 → 4 %, spurious saved tunes 2 → 0. Session 2
+  (iPhone): right 88 → 89 %, wrong 4 → 2 %, tunes found 52 → 55 of 56. Doing
+  the same on the OLD search raises break false positives 5 → 12 %, so the gain
+  is the scoring's, not the threshold's. ⚠️ 0.40 was picked on the same two
+  sessions; the quantile map alone would give 0.425 (also better than before).
+- `CONFIRM_RELEASE_SCORE` stays 0.6 (0.55 and 0.58 measured no better);
+  `STRONG_SINGLE_DETECTION_SCORE` 0.7 and `CLOSE_RIVAL_GAP` unchanged.
+- Remapped to the same share of windows, unmeasured beyond that:
+  `MUSIC_EVIDENCE_MIN_SCORE` 0.3 → 0.25 (so no more audio is deleted),
+  `GOOD_SCORE` 0.55 → 0.53, Results labels 0.65 / 0.5 / 0.2 → 0.63 / 0.47 / 0.15.
+- **Position tracking (`scorePosition.mjs`) keeps the old gap −1 on purpose**:
+  its floors were tuned against that scoring by the replay benches, and moving
+  it is a separate change to measure there. Its comments no longer claim exact
+  parity with the search.
+- The 12 audio integration floors were re-baselined at 90 % of the new scores.
+
+Tried and rejected on the same data (do not retry without new evidence):
+semitone-tolerant substitution (real audio has ~1 % semitone slips — the
+synthetic `detect_sim` assumes far more, which is why it looked good there);
+cheaper gaps for duration errors; querying ±12 as well (3× cost, no gain);
+normalising by query length; per-window contrast scores (top minus the
+window's background separated breaks WORSE than the raw score); and every DSP
+constant tried — pitch-model weight, `MIN_NOTE_DURATION` 4,
+`RETAINED_FEATURES_PER_FRAME` 3/8, no feature octave fix, a 1-BPM tempo grid,
+`MIN_NOTE_POWER` 0.05/0.2. The original tuning holds up.
+
+**Not yet done, and the most promising next step:** `beam_search.rs` does not
+backtrace — it takes each frame's best cumulative state, which is not the
+Viterbi path. A real backtrace on top of this change found 56/56 tunes on
+session 2 and cut breaks to 1 % on session 1, but its per-window effect went
+opposite ways on the two sessions, so it waits for more tagged sessions.
+
+**Tools:** `rust/examples/transcribe_windows.rs` transcribes a WAV's windows in
+parallel (~8 s per session; `TW_ML=1` for the ML path) and
+`rust/examples/requery.rs` re-runs the search over cached contours with
+`RQ_*` scoring knobs (~1 min per session). `requery` with no knobs reproduces
+the library bit-for-bit (`RQ_LIB=1` runs the library itself; 0 of 3,468
+windows differ), so a scoring idea can be scored in minutes instead of a
+20-minute `bench_tagged_sessions.sh` run.
+
 ### A window of short blips no longer panics the decoder (November 2026 — 1.4.2)
 
 `correct_contour_octave` indexed `pitches[0]` without checking for an empty
@@ -3634,7 +3701,7 @@ here reappears on its own once it has accumulated enough span.
 The filter originally ran only in live mode; file analysis never called it.
 `buildSessionDetections` (`sessionAnalysis.js`) is now the single path for both
 — cluster → filter → `mergeConsecutiveSameTune` — and `SESSION_ANALYSIS_DEFAULTS`
-the single set of options (`minTopScore` 0.45, previous-tune bias 0.15, no
+the single set of options (`minTopScore` 0.45 — 0.40 since 1.5.0, previous-tune bias 0.15, no
 silence gate). Rules, as decided by the user:
 
 - **A merged row keeps its EARLIEST start**, and consecutive same-tune rows

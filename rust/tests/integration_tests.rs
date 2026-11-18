@@ -336,7 +336,7 @@ fn audio_farewell_to_ireland_detected() {
         &["33", "4403", "4571"],
         "Farewell To Ireland",
         5,
-        0.856, // 90% of measured 0.9510
+        0.798, // 90% of measured 0.8873 (1.5.0 scoring; was 0.9510)
     );
 }
 
@@ -347,7 +347,7 @@ fn audio_farewell_to_whalley_range_detected() {
         &["2410"],
         "Farewell To Whalley Range",
         5,
-        0.859, // 90% of measured 0.9545
+        0.848, // 90% of measured 0.9432 (1.5.0 scoring; was 0.9545)
     );
 }
 
@@ -358,7 +358,7 @@ fn audio_hut_on_staffin_island_detected() {
         &["2067"],
         "Hut On Staffin Island",
         5,
-        0.675, // 90% of measured 0.7500
+        0.649, // 90% of measured 0.7212 (1.5.0 scoring; was 0.7500)
     );
 }
 
@@ -369,7 +369,7 @@ fn audio_naspolskan_detected() {
         &["56869501", "767879601"],
         "Nåspolskan",
         5,
-        0.549, // 90% of measured 0.6098
+        0.476, // 90% of measured 0.5298 (1.5.0 scoring; was 0.6098)
     );
 }
 
@@ -380,7 +380,7 @@ fn audio_the_arra_mountains_detected() {
         &["1901"],
         "The Arra Mountains",
         5,
-        0.787, // 90% of measured 0.8750
+        0.758, // 90% of measured 0.8424 (1.5.0 scoring; was 0.8750)
     );
 }
 
@@ -391,7 +391,7 @@ fn audio_the_cock_and_the_hen_detected() {
         &["23405", "93"],
         "The Cock And The Hen",
         5,
-        0.881, // 90% of measured 0.9792
+        0.871, // 90% of measured 0.9688 (1.5.0 scoring; was 0.9792)
     );
 }
 
@@ -402,7 +402,7 @@ fn audio_the_golden_keyboard_detected() {
         &["36"],
         "The Golden Keyboard",
         5,
-        0.651, // 90% of measured 0.7232
+        0.687, // 90% of measured 0.7636 (1.5.0 scoring; was 0.7232)
     );
 }
 
@@ -413,7 +413,7 @@ fn audio_the_kerfunten_detected() {
         &["139"],
         "The Kerfunten",
         5,
-        0.398, // 90% of measured 0.4419
+        0.465, // 90% of measured 0.5174 (1.5.0 scoring; was 0.4419)
     );
 }
 
@@ -424,7 +424,7 @@ fn audio_the_kid_on_the_mountain_detected() {
         &["52"],
         "The Kid On The Mountain",
         5,
-        0.450, // 90% of measured 0.5000
+        0.393, // 90% of measured 0.4375 (1.5.0 scoring; was 0.5000)
     );
 }
 
@@ -435,7 +435,7 @@ fn audio_the_lounge_bar_detected() {
         &["8853"],
         "The Lounge Bar",
         5,
-        0.804, // 90% of measured 0.8936
+        0.794, // 90% of measured 0.8830 (1.5.0 scoring; was 0.8936)
     );
 }
 
@@ -446,7 +446,7 @@ fn audio_the_musical_priest_detected() {
         &["17606", "73", "9214"],
         "The Musical Priest",
         5,
-        0.791, // 90% of measured 0.8793
+        0.849, // 90% of measured 0.9434 (1.5.0 scoring; was 0.8793)
     );
 }
 
@@ -457,7 +457,7 @@ fn audio_windbroke_detected() {
         &["910"],
         "Windbroke",
         5,
-        0.750, // 90% of measured 0.8333
+        0.728, // 90% of measured 0.8095 (1.5.0 scoring; was 0.8333)
     );
 }
 
