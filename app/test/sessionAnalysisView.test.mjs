@@ -47,6 +47,7 @@ const FAKE_STORE = `
 export const state = { indexLoaded: false, sessionAnalysis: null };
 export const __liveSessions = [];
 export const __favourites = [];
+export const __tuneSets = [];
 export const __calls = [];
 export let __failEdit = false;
 export function __setFailEdit(value) { __failEdit = value; }
@@ -60,6 +61,7 @@ export default {
     async getLiveSessions() { return __liveSessions.slice(); },
     async getNamedLiveSessions() { return __liveSessions.slice(); },
     async getFavourites() { return __favourites.slice(); },
+    async getTuneSets() { return __tuneSets.slice(); },
     async upsertLiveSession(session) {
         __calls.push({ op: 'upsert', session });
         const i = __liveSessions.findIndex(s => s.id === session.id);
@@ -89,6 +91,7 @@ export default {
 export function __reset() {
     __liveSessions.length = 0;
     __favourites.length = 0;
+    __tuneSets.length = 0;
     __calls.length = 0;
     state.sessionAnalysis = null;
     state.sessionWorkspace = null;
@@ -98,8 +101,9 @@ export function __reset() {
 
 const FAKE_EVENTBUS = `
 export const __handlers = {};
+export const __emitted = [];
 export default {
-    $emit() {},
+    $emit(name, ...args) { __emitted.push([name, ...args]); },
     $on(name, fn) { (__handlers[name] = __handlers[name] || []).push(fn); },
     $off(name, fn) {
         if (!__handlers[name]) return;
@@ -112,7 +116,7 @@ export function __fire(name, ...args) {
     // second one silently undefined.
     for (const fn of (__handlers[name] || []).slice()) fn(...args);
 }
-export function __reset() { for (const k of Object.keys(__handlers)) delete __handlers[k]; }
+export function __reset() { for (const k of Object.keys(__handlers)) delete __handlers[k]; __emitted.length = 0; }
 `;
 
 // Scriptable stand-in for the live service. __failNextStart makes the
@@ -248,6 +252,8 @@ export default { async settingsFromTuneID() { return []; } };
 
 const FAKE_MDI = `
 export const mdiOpenInNew = 'open-in-new';
+export const mdiClose = 'close';
+export const mdiPlaylistPlus = 'playlist-plus';
 export const mdiMicrophone = 'microphone';
 export const mdiMusicClefTreble = 'clef';
 export const mdiStar = 'star';
@@ -369,6 +375,10 @@ export function sessionConflictMessage() { return __state.conflict; }
         // The pure helper is used for real: its date and name rules are what
         // the form is pre-filled with, and faking them would test nothing.
         ["from '@/js/sessionImport.mjs'", `from '${path.join(srcDir, 'js', 'sessionImport.mjs')}'`],
+        // Making sets: the run and selection rules are pure, and the point of
+        // the cases below is that the view uses them, so they are real too.
+        ["from '@/js/sessionSets.mjs'", `from '${path.join(srcDir, 'js', 'sessionSets.mjs')}'`],
+        ["from '@/js/setMembership.mjs'", `from '${path.join(srcDir, 'js', 'setMembership.mjs')}'`],
     ];
     for (const [from, to] of replacements) {
         assert.ok(source.includes(from), `expected to find ${JSON.stringify(from)} in the SFC`);
@@ -1500,6 +1510,133 @@ await test('choosing another file starts the form again', async () => {
     vm.setAudioFile({ name: 'another.mp3', size: 10 });
     assert.equal(vm.importSave.savedSessionId, null);
     assert.equal(vm.importSave.name, '');
+});
+
+console.log('\nmaking sets from the tune list');
+
+// Two sets, the second after a break the session was PAUSED through: on the
+// listening clock the tunes are back to back; only the wall clock shows it.
+const T = 1_700_000_000_000;
+const pausedEvening = () => ({ id: 'eve', name: 'Last Sunday', startedAt: 1000, tunes: [
+    { tuneId: 1, settingId: '10', title: 'Kesh, The', startSeconds: 0, endSeconds: 130, startedAtMs: T, endedAtMs: T + 120000 },
+    { tuneId: 2, settingId: '20', title: 'Silver Spear, The', startSeconds: 131, endSeconds: 260, startedAtMs: T + 131000, endedAtMs: T + 250000 },
+    { tuneId: 3, settingId: '30', title: 'Butterfly, The', startSeconds: 261, endSeconds: 390, startedAtMs: T + 900000, endedAtMs: T + 1020000 },
+    { tuneId: 4, settingId: '40', title: 'Morning Dew, The', startSeconds: 391, endSeconds: 520, startedAtMs: T + 1031000, endedAtMs: T + 1150000 },
+] });
+
+await test('a saved session is split into its sets, and a run opens the dialog in played order', async () => {
+    const { vm, settle, store, bus } = await mountView({ indexLoaded: true });
+    await settle();
+    store.__liveSessions.push(pausedEvening());
+    await vm.refreshPastSessions();
+    vm.selectSession('eve');
+    const runs = vm.detectionRuns;
+    assert.deepEqual(runs.map(r => r.rows.map(x => x.title)),
+        [['Kesh, The', 'Silver Spear, The'], ['Butterfly, The', 'Morning Dew, The']]);
+    assert.deepEqual(runs.map(r => r.number), [1, 2]);
+    vm.makeSetFromRun(runs[1]);
+    const [name, payload] = bus.__emitted.find(e => e[0] === 'showAddToSet');
+    assert.equal(name, 'showAddToSet');
+    assert.deepEqual(payload.tunes.map(t => [t.tuneID, t.settingID]), [[3, '30'], [4, '40']]);
+    assert.equal(payload.name, 'Last Sunday · set 2');
+    assert.equal(payload.notes, 'From the session Last Sunday.');
+});
+
+await test('ticked rows go to the dialog in played order, whatever order they were ticked in', async () => {
+    const { vm, settle, store, bus } = await mountView({ indexLoaded: true });
+    await settle();
+    store.__liveSessions.push(pausedEvening());
+    await vm.refreshPastSessions();
+    vm.selectSession('eve');
+    const rows = vm.activeDetections;
+    vm.toggleRowSelected(rows[3]);
+    vm.toggleRowSelected(rows[0]);
+    vm.toggleRowSelected(rows[2]);
+    vm.toggleRowSelected(rows[2]);
+    assert.equal(vm.selectedRows.length, 2);
+    vm.makeSetFromSelection();
+    const payload = bus.__emitted.find(e => e[0] === 'showAddToSet')[1];
+    assert.deepEqual(payload.tunes.map(t => t.title), ['Kesh, The', 'Morning Dew, The']);
+    assert.equal(payload.name, 'Last Sunday', 'a hand-picked set is not numbered');
+    // A run header toggles its own rows only.
+    vm.toggleRunSelected(vm.detectionRuns[1]);
+    assert.equal(vm.runSelectionState(vm.detectionRuns[1]), 'all');
+    assert.equal(vm.runSelectionState(vm.detectionRuns[0]), 'some');
+});
+
+await test('a tune with no score available cannot be ticked, and select-all skips it', async () => {
+    const { vm, settle, store } = await mountView({ indexLoaded: false });
+    await settle();
+    store.__favourites.push({ result: { settingID: '20', displayName: 'Silver Spear, The',
+                                        setting: { tune_id: 2, setting_id: '20', abc: 'X:1' } } });
+    store.__liveSessions.push(pausedEvening());
+    await vm.refreshPastSessions();
+    vm.selectSession('eve');
+    assert.deepEqual(vm.activeDetections.map(vm.canUseInSet), [false, true, false, false],
+        'with no index loaded only the starred tune has a score');
+    vm.toggleSelectAllRows();
+    assert.deepEqual(vm.selectedRows.map(r => r.title), ['Silver Spear, The']);
+    assert.equal(vm.allSelectableSelected, true);
+});
+
+await test('a live tick survives a re-cluster that renumbers the rows, and goes with its row', async () => {
+    const { vm, settle, bus, component } = await mountView({ running: true, indexLoaded: true, detections: [
+        { id: '1-0-0', tuneId: 1, title: 'Kesh, The', startSeconds: 0, endSeconds: 120 },
+        { id: '2-1-118', tuneId: 2, title: 'Silver Spear, The', startSeconds: 118, endSeconds: 240 },
+    ] });
+    await settle();
+    vm.viewMode = 'live';
+    vm._syncLiveFromService();
+    vm.toggleRowSelected(vm.activeDetections[1]);
+    // The next cycle renumbers the row (an earlier blip dropped, a merge).
+    bus.__fire('liveAnalysisUpdate', [
+        { id: '1-0-0-m', tuneId: 1, title: 'Kesh, The', startSeconds: 0, endSeconds: 120 },
+        { id: '2-0-118', tuneId: 2, title: 'Silver Spear, The', startSeconds: 118, endSeconds: 250 },
+    ]);
+    component.watch.activeDetections.call(vm, vm.activeDetections);
+    assert.deepEqual(vm.selectedRows.map(r => r.title), ['Silver Spear, The']);
+    // The row disappears: the tick is dropped rather than coming back later.
+    bus.__fire('liveAnalysisUpdate', [
+        { id: '1-0-0', tuneId: 1, title: 'Kesh, The', startSeconds: 0, endSeconds: 250 },
+    ]);
+    component.watch.activeDetections.call(vm, vm.activeDetections);
+    assert.deepEqual(vm.selectedRowKeys, []);
+});
+
+await test('switching sessions or modes clears the ticks', async () => {
+    const { vm, settle, component } = await mountView({ indexLoaded: true });
+    await settle();
+    vm.selectedRowKeys = ['0'];
+    component.watch.viewMode.call(vm, 'history');
+    assert.deepEqual(vm.selectedRowKeys, []);
+    vm.selectedRowKeys = ['0'];
+    component.watch['activeSession.id'].call(vm, 'other');
+    assert.deepEqual(vm.selectedRowKeys, []);
+});
+
+await test('editing a saved session keeps each tune\'s wall-clock span', async () => {
+    const { vm, settle, store } = await mountView({ indexLoaded: true });
+    await settle();
+    store.__liveSessions.push(pausedEvening());
+    await vm.refreshPastSessions();
+    vm.selectSession('eve');
+    await vm.removeDetection(vm.activeDetections[0].id);
+    const tunes = store.__liveSessions[0].tunes;
+    assert.equal(tunes.length, 3);
+    assert.equal(tunes[1].startedAtMs, T + 900000, 'or the session would stop splitting into sets after one edit');
+    assert.equal(tunes[1].endedAtMs, T + 1020000);
+});
+
+await test('a row shows the sets that already hold ANY setting of its tune', async () => {
+    const { vm, settle, store } = await mountView({ indexLoaded: true });
+    await settle();
+    store.__tuneSets.push({ id: 's1', name: 'Reels', entries: [{ result: { settingID: '99', setting: { tune_id: 1 } } }] });
+    await vm.loadTuneSets();
+    store.__liveSessions.push(pausedEvening());
+    await vm.refreshPastSessions();
+    vm.selectSession('eve');
+    assert.deepEqual(vm.setsForRow(vm.activeDetections[0]), [{ id: 's1', name: 'Reels' }]);
+    assert.deepEqual(vm.setsForRow(vm.activeDetections[1]), []);
 });
 
 await rm(tmpDir, { recursive: true, force: true });

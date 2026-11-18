@@ -476,7 +476,36 @@
                 </div>
             </div>
 
-            <v-simple-table class="mt-4 session-results">
+            <!-- Making sets: tick tunes (or take a whole run below) and add
+                 them to a set in played order. Same dialog, and the same
+                 rules, as Favourites' "Add to set". -->
+            <div class="d-flex flex-wrap align-center mt-3 setSelectBar" style="gap: 4px 8px;">
+                <v-simple-checkbox
+                    :value="allSelectableSelected"
+                    :indeterminate="someSelected && !allSelectableSelected"
+                    :disabled="!selectableRows.length"
+                    aria-label="Select every tune for a set"
+                    @input="toggleSelectAllRows"
+                />
+                <span class="caption text--secondary">
+                    {{ allSelectableSelected ? 'Deselect all' : 'Select all' }}<template v-if="selectedRows.length"> ({{ selectedRows.length }})</template>
+                </span>
+                <v-btn
+                    v-if="selectedRows.length"
+                    small
+                    text
+                    color="primary"
+                    title="Make a set from the selected tunes, in the order they were played"
+                    @click="makeSetFromSelection"
+                >
+                    <v-icon small left>
+                        {{ icons.addToSet }}
+                    </v-icon>
+                    Make set ({{ selectedRows.length }})
+                </v-btn>
+            </div>
+
+            <v-simple-table class="mt-2 session-results">
                 <template #default>
                     <thead>
                         <tr>
@@ -495,81 +524,155 @@
                         </tr>
                     </thead>
                     <tbody>
-                        <tr v-for="detection in activeDetections" :key="detection.id">
-                            <td v-if="viewMode === 'file'" class="start-cell">
-                                <v-text-field
-                                    v-model="detection.editableTime"
-                                    aria-label="Tune start time"
-                                    dense
-                                    hide-details
-                                    solo
-                                    :disabled="isFileAnalyzing"
-                                />
-                            </td>
-                            <td>
-                                <v-select
-                                    v-model="detection.selectedTuneKey"
-                                    aria-label="Tune"
-                                    :items="detection.tuneOptions"
-                                    item-text="text"
-                                    item-value="value"
-                                    dense
-                                    hide-details
-                                    solo
-                                    :disabled="workspaceBusy || (viewMode === 'file' && isFileAnalyzing)"
-                                    @change="onTuneChange(detection)"
-                                />
-                                <!-- A near-twin the search rated almost as
-                                     highly (closeRivalOf); one tap picks it,
-                                     exactly as the dropdown would. -->
-                                <button
-                                    v-if="rivalOptionFor(detection)"
-                                    class="rivalHint"
-                                    :disabled="workspaceBusy || (viewMode === 'file' && isFileAnalyzing)"
-                                    @click="takeRival(detection)"
-                                >
-                                    or: {{ rivalOptionFor(detection).title }}
-                                </button>
-                            </td>
-                            <td class="duration-cell">
-                                {{ formatSecondsAsDuration(detection.endSeconds - detection.startSeconds) }}
-                            </td>
-                            <td>
-                                <div class="d-flex align-center" style="gap: 8px;">
-                                    <v-btn
-                                        v-if="hasAudioFor(detection)"
-                                        icon
-                                        small
-                                        :aria-label="isPlayingDetection(detection) ? 'Pause the recording' : 'Listen to this tune in the recording'"
-                                        :color="isCurrentDetection(detection) ? 'primary' : undefined"
-                                        @click="playDetection(detection)"
+                        <template v-for="run in detectionRuns">
+                            <!-- A run of tunes played back to back is a set the
+                                 session already suggests (sessionSets.mjs). -->
+                            <tr
+                                v-if="run.rows.length > 1"
+                                :key="'run-' + run.key"
+                                class="runHeader"
+                            >
+                                <td :colspan="viewMode === 'file' ? 4 : 3">
+                                    <div class="d-flex flex-wrap align-center" style="gap: 4px 8px;">
+                                        <v-simple-checkbox
+                                            :value="runSelectionState(run) === 'all'"
+                                            :indeterminate="runSelectionState(run) === 'some'"
+                                            :disabled="!run.rows.some(canUseInSet)"
+                                            :aria-label="'Select set ' + run.number + ' for a set'"
+                                            @input="toggleRunSelected(run)"
+                                        />
+                                        <span class="caption font-weight-medium">Set {{ run.number }} · {{ run.rows.length }} tunes</span>
+                                        <v-btn
+                                            x-small
+                                            text
+                                            color="primary"
+                                            :disabled="!run.rows.some(canUseInSet)"
+                                            @click="makeSetFromRun(run)"
+                                        >
+                                            <v-icon x-small left>
+                                                {{ icons.addToSet }}
+                                            </v-icon>
+                                            Save as set
+                                        </v-btn>
+                                    </div>
+                                </td>
+                            </tr>
+                            <tr
+                                v-for="detection in run.rows"
+                                :key="detection.id"
+                                :class="{ inRun: run.rows.length > 1 }"
+                            >
+                                <td v-if="viewMode === 'file'" class="start-cell">
+                                    <v-text-field
+                                        v-model="detection.editableTime"
+                                        aria-label="Tune start time"
+                                        dense
+                                        hide-details
+                                        solo
+                                        :disabled="isFileAnalyzing"
+                                    />
+                                </td>
+                                <td>
+                                    <div class="d-flex align-center">
+                                        <v-simple-checkbox
+                                            :value="isRowSelected(detection)"
+                                            :disabled="!canUseInSet(detection)"
+                                            :aria-label="'Select ' + (detection.selectedTitle || detection.title) + ' for a set'"
+                                            :title="canUseInSet(detection) ? 'Select for a set' : 'No score for this tune yet: load the tune database or star a setting of it'"
+                                            class="mr-1"
+                                            @input="toggleRowSelected(detection)"
+                                        />
+                                        <v-select
+                                            v-model="detection.selectedTuneKey"
+                                            aria-label="Tune"
+                                            :items="detection.tuneOptions"
+                                            item-text="text"
+                                            item-value="value"
+                                            dense
+                                            hide-details
+                                            solo
+                                            :disabled="workspaceBusy || (viewMode === 'file' && isFileAnalyzing)"
+                                            @change="onTuneChange(detection)"
+                                        />
+                                    </div>
+                                    <!-- A near-twin the search rated almost as
+                                         highly (closeRivalOf); one tap picks it,
+                                         exactly as the dropdown would. -->
+                                    <button
+                                        v-if="rivalOptionFor(detection)"
+                                        class="rivalHint"
+                                        :disabled="workspaceBusy || (viewMode === 'file' && isFileAnalyzing)"
+                                        @click="takeRival(detection)"
                                     >
-                                        <v-icon small>
-                                            {{ isPlayingDetection(detection) ? icons.pause : icons.play }}
-                                        </v-icon>
-                                    </v-btn>
-                                    <v-btn icon small :aria-label="isTuneFavourited(detection) ? 'Remove favourite' : 'Add favourite'"
-                                           @click="toggleFavourite(detection)">
-                                        <v-icon small :color="isTuneFavourited(detection) ? 'amber darken-2' : 'grey'">
-                                            {{ isTuneFavourited(detection) ? icons.star : icons.starOutline }}
-                                        </v-icon>
-                                    </v-btn>
-                                    <v-btn
-                                        icon
-                                        small
-                                        :to="tuneLinkForDetection(detection)"
-                                        aria-label="Open tune"
+                                        or: {{ rivalOptionFor(detection).title }}
+                                    </button>
+                                    <div
+                                        v-if="setsForRow(detection).length"
+                                        class="d-flex flex-wrap align-center mt-1"
+                                        style="gap: 4px;"
+                                        aria-label="Sets that already contain this tune"
                                     >
-                                        <v-icon small>
-                                            {{ icons.openInNew }}
-                                        </v-icon>
-                                    </v-btn>
-                                    <v-btn text small color="secondary" :disabled="workspaceBusy" @click="removeDetection(detection.id)">
-                                        Remove
-                                    </v-btn>
-                                </div>
-                            </td>
-                        </tr>
+                                        <span class="caption text--secondary">In sets:</span>
+                                        <v-chip
+                                            v-for="set in setsForRow(detection)"
+                                            :key="set.id"
+                                            x-small
+                                            outlined
+                                            :to="{ name: 'sets', query: { setID: set.id } }"
+                                        >
+                                            {{ set.name }}
+                                        </v-chip>
+                                    </div>
+                                </td>
+                                <td class="duration-cell">
+                                    {{ formatSecondsAsDuration(detection.endSeconds - detection.startSeconds) }}
+                                </td>
+                                <td>
+                                    <div class="d-flex align-center" style="gap: 8px;">
+                                        <v-btn
+                                            v-if="hasAudioFor(detection)"
+                                            icon
+                                            small
+                                            :aria-label="isPlayingDetection(detection) ? 'Pause the recording' : 'Listen to this tune in the recording'"
+                                            :color="isCurrentDetection(detection) ? 'primary' : undefined"
+                                            @click="playDetection(detection)"
+                                        >
+                                            <v-icon small>
+                                                {{ isPlayingDetection(detection) ? icons.pause : icons.play }}
+                                            </v-icon>
+                                        </v-btn>
+                                        <v-btn icon small :aria-label="isTuneFavourited(detection) ? 'Remove favourite' : 'Add favourite'"
+                                               @click="toggleFavourite(detection)">
+                                            <v-icon small :color="isTuneFavourited(detection) ? 'amber darken-2' : 'grey'">
+                                                {{ isTuneFavourited(detection) ? icons.star : icons.starOutline }}
+                                            </v-icon>
+                                        </v-btn>
+                                        <v-btn
+                                            icon
+                                            small
+                                            :to="tuneLinkForDetection(detection)"
+                                            aria-label="Open tune"
+                                        >
+                                            <v-icon small>
+                                                {{ icons.openInNew }}
+                                            </v-icon>
+                                        </v-btn>
+                                        <v-btn
+                                            icon
+                                            small
+                                            :disabled="workspaceBusy"
+                                            aria-label="Remove from the tune list"
+                                            title="Remove from the tune list"
+                                            @click="removeDetection(detection.id)"
+                                        >
+                                            <v-icon small>
+                                                {{ icons.close }}
+                                            </v-icon>
+                                        </v-btn>
+                                    </div>
+                                </td>
+                            </tr>
+                        </template>
                     </tbody>
                 </template>
             </v-simple-table>
@@ -684,7 +787,7 @@
 import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
 import {
-    mdiOpenInNew, mdiMicrophone, mdiMusicClefTreble, mdiStar, mdiStarOutline, mdiPlay, mdiPause,
+    mdiOpenInNew, mdiMicrophone, mdiClose, mdiPlaylistPlus, mdiMusicClefTreble, mdiStar, mdiStarOutline, mdiPlay, mdiPause,
 } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
@@ -698,6 +801,8 @@ import sessionRecorder from '@/services/sessionRecorder.js';
 import { listManifests, playbackReadManifest, reclaimOrphans } from '@/services/sessionAudioStore.js';
 import { clearLastShown } from '@/js/liveScoreFollow.mjs';
 import { saveImportedSession } from '@/services/sessionImport.js';
+import { groupIntoRuns, selectionKey, setNameFromSession } from '@/js/sessionSets.mjs';
+import { indexSetsByTune } from '@/js/setMembership.mjs';
 import {
     defaultImportStart, fromDateTimeLocal, nameFromFileName, toDateTimeLocal,
 } from '@/js/sessionImport.mjs';
@@ -806,7 +911,16 @@ export default {
             pendingSessionPatch: null,
             // settingIDs of favourited tunes, for the stars in Past Sessions.
             favouriteSettingIDs: [],
+            // Tune ids with a starred setting: such a tune can go into a set
+            // even with no index loaded, since the favourite carries its ABC.
+            favouriteTuneIDs: [],
+            // Rows ticked for a set, by selectionKey — which survives a live
+            // re-cluster, where a row's id does not.
+            selectedRowKeys: [],
+            tuneSets: [],
             icons: {
+                close: mdiClose,
+                addToSet: mdiPlaylistPlus,
                 openInNew: mdiOpenInNew,
                 microphone: mdiMicrophone,
                 clef: mdiMusicClefTreble,
@@ -858,7 +972,17 @@ export default {
         // figure and offers ▶ on rows whose audio is not there.
         audioSessionId() { this.refreshAudioSessions(); this.storagePanel = undefined; },
         sessionNeedsReview(value) { if (value) this.storagePanel = 0; },
+        // A ticked row that has gone (removed, merged into its neighbour by a
+        // re-cluster) is dropped rather than resurfacing later.
+        activeDetections(rows) {
+            if (!this.selectedRowKeys.length) return;
+            const present = new Set(rows.map(selectionKey));
+            const kept = this.selectedRowKeys.filter(key => present.has(key));
+            if (kept.length !== this.selectedRowKeys.length) this.selectedRowKeys = kept;
+        },
+        'activeSession.id'() { this.selectedRowKeys = []; },
         viewMode(newVal) {
+            this.selectedRowKeys = [];
             if (newVal !== 'file') this.lastSessionView = newVal;
             if (newVal !== 'live') this.followMode = false;
             if (newVal === 'history') this.refreshPastSessions();
@@ -872,6 +996,29 @@ export default {
             if (this.viewMode === 'history') return this.savedDetections;
             return this.viewMode === 'file' ? this.file.detections : this.live.detections;
         },
+        // The list split into the sets it was played in. Runs of one tune
+        // get no header and no number.
+        detectionRuns() {
+            const rows = this.activeDetections;
+            const windowSeconds = this.viewMode === 'history' ? 10 : (Number(this.analysisSettings.windowSeconds) || 10);
+            let number = 0;
+            return groupIntoRuns(rows, { windowSeconds }).map(run => {
+                const runRows = rows.slice(run.start, run.end + 1);
+                return { key: selectionKey(runRows[0]), rows: runRows,
+                         number: runRows.length > 1 ? ++number : null };
+            });
+        },
+        selectableRows() { return this.activeDetections.filter(this.canUseInSet); },
+        selectedRows() {
+            const keys = new Set(this.selectedRowKeys);
+            return this.activeDetections.filter(row => keys.has(selectionKey(row)));
+        },
+        someSelected() { return this.selectedRows.length > 0; },
+        allSelectableSelected() {
+            const keys = new Set(this.selectedRowKeys);
+            return this.selectableRows.length > 0 && this.selectableRows.every(row => keys.has(selectionKey(row)));
+        },
+        setsByTune() { return indexSetsByTune(this.tuneSets); },
         activeSession() {
             if (this.viewMode === 'history') return this.selectedSession;
             if (!this.live.hasSession) return null;
@@ -1078,6 +1225,8 @@ export default {
         eventBus.$on('liveAnalysisMicState', this._onLiveMicState);
         eventBus.$on('liveAnalysisSaveState', this._onLiveSaveState);
         eventBus.$on('liveSessionsChanged', this._onLiveSessionsChanged);
+        eventBus.$on('tuneSetsChanged', this.loadTuneSets);
+        this.loadTuneSets();
         eventBus.$on('sessionAudioState', this._onAudioState);
         eventBus.$on('fileAnalysisStage', this._onFileStage);
         eventBus.$on('fileAnalysisOptions', this._onFileOptions);
@@ -1142,6 +1291,7 @@ export default {
         eventBus.$off('liveAnalysisMicState', this._onLiveMicState);
         eventBus.$off('liveAnalysisSaveState', this._onLiveSaveState);
         eventBus.$off('liveSessionsChanged', this._onLiveSessionsChanged);
+        eventBus.$off('tuneSetsChanged', this.loadTuneSets);
         eventBus.$off('sessionAudioState', this._onAudioState);
         eventBus.$off('fileAnalysisStage', this._onFileStage);
         eventBus.$off('fileAnalysisOptions', this._onFileOptions);
@@ -1734,6 +1884,8 @@ export default {
                 audioStartSeconds: typeof d.audioStartSeconds === 'number' ? d.audioStartSeconds : null,
                 audioEndSeconds: typeof d.audioEndSeconds === 'number' ? d.audioEndSeconds : null,
                 audioAnchorSeconds: typeof d.audioAnchorSeconds === 'number' ? d.audioAnchorSeconds : null,
+                startedAtMs: typeof d.startedAtMs === 'number' ? d.startedAtMs : null,
+                endedAtMs: typeof d.endedAtMs === 'number' ? d.endedAtMs : null,
                 alternatives: d.alternatives || [],
             }));
         },
@@ -1944,6 +2096,7 @@ export default {
                 ]);
                 this.pastSessions = sessions.slice().sort((a, b) => b.startedAt - a.startedAt);
                 this.favouriteSettingIDs = favourites.map(f => String(f.result.settingID));
+                this.favouriteTuneIDs = this._favouriteTuneIDs(favourites);
             } catch (e) { this.workspaceError = `Could not load sessions: ${e.message}`; }
         },
         isOpenSession(session) {
@@ -2020,6 +2173,80 @@ export default {
             }
             const favourites = await store.getFavourites();
             this.favouriteSettingIDs = favourites.map(f => String(f.result.settingID));
+            this.favouriteTuneIDs = this._favouriteTuneIDs(favourites);
+        },
+        _favouriteTuneIDs(favourites) {
+            return favourites
+                .filter(f => f.result && f.result.setting && f.result.setting.abc && f.result.setting.tune_id != null)
+                .map(f => String(f.result.setting.tune_id));
+        },
+
+        // ---- making sets from the tune list -------------------------------
+
+        // A set entry has to carry its score, which comes from the loaded
+        // index or from a starred setting. The dialog checks properly and
+        // names anything it had to leave out; this only greys out the rows
+        // that certainly cannot go in.
+        canUseInSet(row) {
+            const tuneID = row.selectedTuneId || row.tuneId;
+            if (!tuneID) return false;
+            return this.indexLoaded || this.favouriteTuneIDs.includes(String(tuneID));
+        },
+        isRowSelected(row) { return this.selectedRowKeys.includes(selectionKey(row)); },
+        toggleRowSelected(row) {
+            const key = selectionKey(row);
+            this.selectedRowKeys = this.selectedRowKeys.includes(key)
+                ? this.selectedRowKeys.filter(k => k !== key)
+                : [...this.selectedRowKeys, key];
+        },
+        toggleSelectAllRows() {
+            this.selectedRowKeys = this.allSelectableSelected ? [] : this.selectableRows.map(selectionKey);
+        },
+        runSelectionState(run) {
+            const usable = run.rows.filter(this.canUseInSet);
+            const picked = usable.filter(this.isRowSelected).length;
+            if (!usable.length || !picked) return 'none';
+            return picked === usable.length ? 'all' : 'some';
+        },
+        toggleRunSelected(run) {
+            const keys = run.rows.filter(this.canUseInSet).map(selectionKey);
+            const rest = this.selectedRowKeys.filter(k => !keys.includes(k));
+            this.selectedRowKeys = this.runSelectionState(run) === 'all' ? rest : [...rest, ...keys];
+        },
+        setsForRow(row) {
+            const tuneID = row.selectedTuneId || row.tuneId;
+            return (tuneID && this.setsByTune[String(tuneID)]) || [];
+        },
+        async loadTuneSets() {
+            try { this.tuneSets = await store.getTuneSets(); }
+            catch (e) { this.tuneSets = []; }
+        },
+        _setSourceLabel() {
+            if (this.viewMode === 'file') {
+                const name = (this.audioFile && this.audioFile.name) || '';
+                return name.replace(/\.[^.]+$/, '') || 'Recording';
+            }
+            return this.activeSession ? this.sessionLabel(this.activeSession) : 'Session';
+        },
+        makeSetFromSelection() { this._openMakeSet(this.selectedRows, null); },
+        makeSetFromRun(run) { this._openMakeSet(run.rows, run.number); },
+        // Opens the shared Add-to-set dialog with the rows in played order.
+        // The rows name TUNES; the dialog picks each one's setting (a starred
+        // one first) and lets it be changed.
+        _openMakeSet(rows, runNumber) {
+            const usable = rows.filter(this.canUseInSet);
+            if (!usable.length) return;
+            const label = this._setSourceLabel();
+            eventBus.$emit('showAddToSet', {
+                title: usable.length === 1 ? (usable[0].selectedTitle || usable[0].title) : `${usable.length} tunes`,
+                tunes: usable.map(row => ({
+                    tuneID: row.selectedTuneId || row.tuneId,
+                    title: row.selectedTitle || row.title,
+                    settingID: row.selectedSettingId || row.settingId || null,
+                })),
+                name: setNameFromSession(label, runNumber),
+                notes: this.viewMode === 'file' ? `From the recording ${label}.` : `From the session ${label}.`,
+            });
         },
         // ---- file export ----------------------------------------------------
 
@@ -2124,6 +2351,17 @@ export default {
     text-transform: uppercase;
     color: #5f6b77;
     margin-bottom: 8px;
+}
+
+.runHeader td {
+    background: rgba(5, 85, 129, 0.05);
+    height: auto !important;
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+}
+
+.inRun td:first-child {
+    border-left: 3px solid rgba(5, 85, 129, 0.35);
 }
 
 .rivalHint {

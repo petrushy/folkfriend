@@ -102,13 +102,13 @@ try {
     await send('Page.navigate', { url: `${origin}/session-analysis` });
     await until(() => evaluate(`document.body && document.body.textContent.includes('Past sessions')`), 'workspace');
     await openSaved('Sunday session 239');
-    assert.equal(await evaluate(`document.querySelectorAll('tbody tr').length`), 4, 'Only the selected session is rendered');
+    assert.equal(await evaluate(`document.querySelectorAll('tbody tr:not(.runHeader)').length`), 4, 'Only the selected session is rendered');
     console.log('✓ Search 240 sessions and open one shared editor');
     await click('Import recording');
     await until(() => evaluate(`!![...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Choose Audio')`), 'file view');
     await click('Sessions');
     await until(() => evaluate(`document.querySelector('input[maxlength="160"]')?.value === 'Sunday session 239'`), 'return to selected session');
-    assert.equal(await evaluate(`document.querySelectorAll('tbody tr').length`), 4);
+    assert.equal(await evaluate(`document.querySelectorAll('tbody tr:not(.runHeader)').length`), 4);
     console.log('✓ Switching to file analysis and back preserves the selected session');
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: true });
     await sleep(300);
@@ -126,7 +126,8 @@ try {
     const exported = readFileSync(path.join(work, readdirSync(work).find(n => n.endsWith('-tunes.txt'))), 'utf8');
     assert.ok(exported.includes('Fixture tune 0') && exported.includes('Fixture tune 3'));
     console.log('✓ Export contains the selected historical tune list');
-    await click('Remove');
+    // Remove is an icon now, beside the play/star/open icons.
+    await evaluate(`document.querySelector('button[aria-label="Remove from the tune list"]').click()`);
     await until(async () => (await records()).find(s => s.id === 'session-239').tunes.length === 3, 'row removal');
     await click('Session actions');
     await click('Clear tune list');
@@ -142,6 +143,57 @@ try {
     await until(async () => !(await records()).some(s => s.id === 'session-239'), 'delete session');
     assert.equal((await records()).length, 239);
     console.log('✓ Reload preserves edits; Delete removes only the selected session');
+
+    // Making sets from a session. Two sets, the second after a break the
+    // session was PAUSED through — invisible on the listening clock, seen on
+    // the wall clock. No tune database is loaded, so the tunes are starred:
+    // a favourite carries the score a set entry needs.
+    await evaluate(`(async () => {
+        const T = 1757000000000;
+        const tune = (n, start, at) => ({ tuneId: 900 + n, settingId: String(9000 + n), title: 'Set tune ' + n,
+            startSeconds: start, endSeconds: start + 130, startedAtMs: at, endedAtMs: at + 120000, bestScore: 0.9 });
+        const evening = { id: 'set-evening', name: 'Set evening', customName: true, startedAt: T, listenedSeconds: 520,
+            endedAt: T + 1200000, tunes: [tune(1, 0, T), tune(2, 131, T + 131000), tune(3, 262, T + 900000), tune(4, 393, T + 1031000)] };
+        const favourites = [1, 2, 3, 4].map(n => ({ timestamp: T, result: { settingID: 9000 + n, displayName: 'Set tune ' + n,
+            setting: { tune_id: 900 + n, setting_id: 9000 + n, mode: 'Dmajor', dance: 'reel', abc: 'X:1\\nK:D\\nABcd|' } } }));
+        await new Promise((resolve, reject) => {
+            const r = indexedDB.open('keyval-store');
+            r.onsuccess = () => { const db = r.result; const tx = db.transaction('keyval', 'readwrite'); const st = tx.objectStore('keyval');
+                const q = st.get('liveSessions');
+                q.onsuccess = () => { st.put([...(q.result || []), evening], 'liveSessions'); st.put(favourites, 'favouriteItems'); };
+                tx.oncomplete = () => { db.close(); resolve(); }; tx.onerror = reject;
+            }; r.onerror = reject;
+        });
+    })()`);
+    await send('Page.reload');
+    await until(() => evaluate(`document.body && document.body.textContent.includes('Past sessions')`), 'sets reload');
+    await openSaved('Set evening');
+    await until(() => evaluate(`document.querySelectorAll('tr.runHeader').length === 2`), 'two suggested sets');
+    assert.deepEqual(await evaluate(`[...document.querySelectorAll('tr.runHeader')].map(r => r.textContent.replace(/\\s+/g, ' ').trim())`),
+        ['Set 1 · 2 tunes Save as set', 'Set 2 · 2 tunes Save as set']);
+    assert.ok(await evaluate(`document.documentElement.scrollWidth <= window.innerWidth`), 'Set rows fit mobile width');
+    const setsShot = await send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(path.join(tmpdir(), 'folkfriend-session-sets-mobile.png'), Buffer.from(setsShot.data, 'base64'));
+    await evaluate(`[...document.querySelectorAll('tr.runHeader')][1].querySelector('button').click()`);
+    await until(() => evaluate(`[...document.querySelectorAll('.v-dialog--active input')].some(i => i.value === 'Set evening · set 2')`),
+        'dialog prefilled with the session name');
+    assert.deepEqual(await evaluate(`[...document.querySelectorAll('.v-dialog--active [aria-label="Selected tunes in set order"] .v-list-item__title')].map(e => e.textContent.trim())`),
+        ['1. Set Tune 3', '2. Set Tune 4']);
+    const dialogShot = await send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(path.join(tmpdir(), 'folkfriend-session-sets-dialog.png'), Buffer.from(dialogShot.data, 'base64'));
+    await evaluate(`[...document.querySelectorAll('.v-dialog--active button')].find(b => b.textContent.trim() === 'Add to set').click()`);
+    const readSets = `new Promise((resolve, reject) => { const r = indexedDB.open('keyval-store'); r.onsuccess = () => { const db = r.result; const q = db.transaction('keyval').objectStore('keyval').get('tuneSets'); q.onsuccess = () => { resolve(q.result || []); db.close(); }; q.onerror = reject; }; r.onerror = reject; })`;
+    await until(async () => (await evaluate(readSets)).some(set => set.name === 'Set evening · set 2'), 'set saved');
+    const saved = (await evaluate(readSets)).find(set => set.name === 'Set evening · set 2');
+    assert.deepEqual(saved.entries.map(e => String(e.result.settingID)), ['9003', '9004']);
+    assert.equal(saved.notes, 'From the session Set evening.');
+    await until(() => evaluate(`[...document.querySelectorAll('[aria-label="Sets that already contain this tune"]')].length === 2`),
+        'membership chips on the two tunes');
+    // Tick across the two sets, in reverse, and the button counts them.
+    await evaluate(`(() => { const rows = [...document.querySelectorAll('tbody tr:not(.runHeader)')];
+        for (const i of [3, 0]) rows[i].querySelector('.v-simple-checkbox .v-input--selection-controls__input').dispatchEvent(new MouseEvent('click', { bubbles: true })); })()`);
+    await until(() => evaluate(`[...document.querySelectorAll('button')].some(b => b.textContent.trim() === 'Make set (2)')`), 'make set button');
+    console.log('✓ A session splits into its sets; one is saved as a set in played order; ticks count across sets');
     // A cloud-only session with an expired token still plays previously cached
     // audio. Seed a real WAV so this exercises browser decoding, not a fake URL.
     await evaluate(`(async () => {
