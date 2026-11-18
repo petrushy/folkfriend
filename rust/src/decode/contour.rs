@@ -125,6 +125,15 @@ pub(crate) fn contour_from_notes_fps(
         contour.extend(vec![q_note.pitch; q_note.quavers_quant]);
     }
 
+    // Every note can quantise to zero quavers: a window holding only a few
+    // short blips does, because at the slowest tempo they all fall under
+    // MIN_NOTE_DURATION_REL and a zero-length note scores as the most likely
+    // length. Nothing was heard, so say so, rather than hand an empty contour
+    // to the octave correction (which indexed it and panicked) and the query.
+    if contour.is_empty() {
+        return Err(DecoderError);
+    }
+
     return Ok(contour);
 }
 

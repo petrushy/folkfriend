@@ -1144,6 +1144,25 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### A window of short blips no longer panics the decoder (November 2026 — 1.4.2)
+
+`correct_contour_octave` indexed `pitches[0]` without checking for an empty
+contour, and the tempo quantiser could hand it one: when every surviving note
+is only 3–4 frames long, the slowest tempo gives them all zero quavers, and a
+zero-length note scores as the *most* likely length, so that tempo wins with
+an empty contour. Both transcribers reach it (ML shares the quantiser). In
+WASM a panic inside a `&mut self` method can leave wasm-bindgen's borrow flag
+held, i.e. every later transcription and search failing until a reload.
+
+`contour_from_notes_fps` now returns `DecoderError` (the existing "Could not
+detect any notes") for an empty contour, and the octave step tolerates one
+anyway. Two tests in `decode/mod.rs`; both panicked before. Re-transcribing
+both tagged sessions gives identical contours on all 6,936 windows.
+
+Not changed, and worth knowing: the zero-quaver note scoring best is itself a
+quirk of `score_quantised_notes` (`3.0 - 0.5 * 0`), and `notes_from_lattice_path`
+never pushes the last note of a window.
+
 ### Making sets from a session's tune list (November 2026)
 
 The Session Tools tune table (live, saved and imported alike) has a checkbox
