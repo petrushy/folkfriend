@@ -11,6 +11,9 @@ pub fn correct_contour_octave(contour: &mut Contour) {
     const SHRILL_THRESHOLD_PITCH: u32 = 76;
     const SHRILL_THRESHOLD_ENERGY: f32 = 0.85;
 
+    if contour.is_empty() {
+        return;
+    }
     let mut pitches = contour.clone();
     pitches.sort();
     let decision_index = (contour.len() as f32 * (1. - SHRILL_THRESHOLD_ENERGY)).round();
