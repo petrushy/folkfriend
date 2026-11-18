@@ -393,6 +393,8 @@ function mergeAdjacentDetections(detections, options) {
         previous.audioStartSeconds = minDefined(previous.audioStartSeconds, detection.audioStartSeconds);
         previous.audioAnchorSeconds = minDefined(previous.audioAnchorSeconds, detection.audioAnchorSeconds);
         previous.audioEndSeconds = maxDefined(previous.audioEndSeconds, detection.audioEndSeconds);
+        previous.startedAtMs = minDefined(previous.startedAtMs, detection.startedAtMs);
+        previous.endedAtMs = maxDefined(previous.endedAtMs, detection.endedAtMs);
         previous.hits += detection.hits;
         previous.bestScore = Math.max(previous.bestScore, detection.bestScore);
         previous.averageScore = (previous.averageScore + detection.averageScore) / 2;
@@ -482,6 +484,15 @@ export function clusterDetections(windowMatches, options) {
                 audioAnchorSeconds: stamped.length
                     ? Math.max(0, stamped[0].audioSeconds - options.windowSeconds / 2)
                     : null,
+                // Wall-clock span, in ms since the epoch, of the windows that
+                // matched. The listening clock above STOPS while a session is
+                // paused, so a break the user paused through leaves no gap in
+                // it; this one does, which is what splits a session into the
+                // sets it was played in (sessionSets.mjs). Null for file
+                // analysis and for anything recorded before it existed.
+                startedAtMs: typeof cluster.hits[0].atMs === 'number' ? cluster.hits[0].atMs : null,
+                endedAtMs: typeof cluster.hits[cluster.hits.length - 1].atMs === 'number'
+                    ? cluster.hits[cluster.hits.length - 1].atMs : null,
                 bestScore: bestHit.score,
                 averageScore,
                 hits: cluster.hits.length,
@@ -521,6 +532,8 @@ export function mergeConsecutiveSameTune(detections) {
         prev.audioStartSeconds = minDefined(prev.audioStartSeconds, det.audioStartSeconds);
         prev.audioEndSeconds = maxDefined(prev.audioEndSeconds, det.audioEndSeconds);
         prev.audioAnchorSeconds = minDefined(prev.audioAnchorSeconds, det.audioAnchorSeconds);
+        prev.startedAtMs = minDefined(prev.startedAtMs, det.startedAtMs);
+        prev.endedAtMs = maxDefined(prev.endedAtMs, det.endedAtMs);
         prev.averageScore = ((prev.averageScore ?? prev.bestScore) * prevHits +
             (det.averageScore ?? det.bestScore) * detHits) / (prevHits + detHits);
         prev.hits = prevHits + detHits;

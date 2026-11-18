@@ -1144,6 +1144,53 @@ There are **two transcribers** (audio → contour). The query/index backend is s
 
 ## Recent changes
 
+### Making sets from a session's tune list (November 2026)
+
+The Session Tools tune table (live, saved and imported alike) has a checkbox
+per tune, a select-all and **Make set (n)**, and splits itself into the sets
+it was played in: a header row per run of two or more tunes, "Set 2 · 3 tunes",
+with its own checkbox and **Save as set**. Both open the shared
+`AddToSetDialog`, in played order, with the name ("<session> · set 2") and
+notes ("From the session …") prefilled. Rows show the sets that already hold
+the tune. Remove is an × icon now, to make room. Pure rules in
+`js/sessionSets.mjs`.
+
+- **A row names a TUNE, not a setting.** Its setting is whichever scored best in
+  that window — near arbitrary for a tune with dozens — so the dialog takes a
+  `tunes` batch, resolves each via `settingsForSetTune`, picks **a starred
+  setting first**, then the detected one (`pickSetting`), and gives every row a
+  setting picker. A tune with no score anywhere (index not loaded, not starred)
+  is left out and named; the table greys out rows that certainly cannot go in.
+  Membership chips are by tune for the same reason (`indexSetsByTune`).
+- **Ticks are keyed on the row's rounded start** (`selectionKey`), because a
+  live row's id carries its position and changes on every re-cluster that drops
+  or merges an earlier row; a correction changes the tune. Ticks on a row that
+  has gone are dropped; switching session or mode clears them.
+- **Runs split on a gap of 45 s (`SET_BREAK_SECONDS`), measured on the WALL
+  clock as well as the listening one.** The listening clock stops while
+  paused, and pausing through the break between sets is what people do — so
+  each window match is stamped `atMs`, clusters carry `startedAtMs`/`endedAtMs`,
+  and **both merge paths combine them with `minDefined`/`maxDefined`** (an
+  unstamped earlier cluster, i.e. a session resumed from an older build, must
+  not wipe a stamped one). They are persisted on each tune; `savedTunes()` in
+  the view must list them or one edit stops the session splitting. The rules
+  accept any tune list, so no rules deploy is needed.
+- **An unrecognised tune mid-set leaves a gap like a break and splits the run.**
+  Runs are a suggestion; ticking across runs is the way round it.
+
+Tests: `sessionSets.test.mjs` (10), `addToSetDialog.test.mjs` (6), 7 cases in
+`sessionAnalysisView.test.mjs`, wall-clock merges in `sessionAnalysis.test.mjs`,
+`indexSetsByTune` in `setMembership.test.mjs`, and a real-browser step in
+`e2e/session-workspace.mjs`. Verified by mutation: no favourite priority,
+listening clock only, keying ticks by row id, `savedTunes` dropping the span,
+either merge dropping it, no tick pruning, and adding a scoreless tune as a
+stub each fail. ⚠️ The 45 s is a guess, not measured on the tagged sessions;
+`scoreTaggedSession.mjs` has the break tags to calibrate it against.
+
+⚠️ `e2e/session-workspace.mjs` (not in `test:e2e`) fails at its Dropbox step,
+independently of this: its fixture caches audio as `blob`, which
+`dropbox.js` has refused since September (only `data` bytes are trusted).
+
 ### Whole-session export as one MP3 (November 2026)
 
 Reported from the field: one evening exported as **23 files**, because the

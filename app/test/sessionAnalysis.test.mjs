@@ -278,6 +278,46 @@ function d(tuneId, startSeconds, endSeconds) {
         'final: the ordinary short-detection rule applies, not this one');
 }
 
+// --- wall-clock span (startedAtMs / endedAtMs) ---------------------------------
+//
+// The listening clock stops while paused; the wall clock is what shows a break
+// the user paused through, and so what splits a session into its sets. Both
+// merge paths must combine it, or a merged row loses the stretch it came from.
+{
+    const { buildSessionDetections, getAnalysisOptions } = await loadSessionAnalysisModule();
+    const options = getAnalysisOptions(120);
+    const m = (tuneId, startSeconds, atMs, score = 0.6) => ({
+        tuneId, startSeconds, atMs, settingId: String(tuneId * 10), displayName: `tune-${tuneId}`, score, alternatives: [],
+    });
+    const T = 1_700_000_000_000;
+    const matches = [
+        m(1, 0, T), m(1, 5, T + 5000), m(1, 10, T + 10000),
+        // The same tune again after a gap (mergeConsecutiveSameTune).
+        m(1, 60, T + 600000), m(1, 65, T + 605000),
+        m(2, 80, T + 620000), m(2, 85, T + 625000),
+    ];
+    for (const opts of [options, { ...options, mergeGapSeconds: 120 }]) {
+        const rows = buildSessionDetections(matches, opts, { final: true });
+        assert.deepEqual(rows.map(r => r.tuneId), [1, 2]);
+        assert.equal(rows[0].startedAtMs, T, 'a merged row keeps the earliest wall-clock start');
+        assert.equal(rows[0].endedAtMs, T + 605000, 'and the latest wall-clock end');
+        assert.equal(rows[1].startedAtMs, T + 620000);
+    }
+    // A session resumed from an older build: its earlier windows carry no
+    // stamp, the later ones do. The merged row must take the later stamp
+    // rather than keep the earlier cluster's null.
+    const mixed = matches.map((x, i) => (i < 3 ? (({ atMs, ...rest }) => rest)(x) : x));
+    for (const opts of [options, { ...options, mergeGapSeconds: 120 }]) {
+        const rows = buildSessionDetections(mixed, opts, { final: true });
+        assert.equal(rows[0].startedAtMs, T + 600000, 'an unstamped cluster does not wipe a stamped one');
+        assert.equal(rows[0].endedAtMs, T + 605000);
+    }
+    // Matches without a stamp (file analysis, older sessions) give null, not NaN.
+    const unstamped = buildSessionDetections(matches.map(({ atMs, ...rest }) => rest), options, { final: true });
+    assert.equal(unstamped[0].startedAtMs, null);
+    assert.equal(unstamped[0].endedAtMs, null);
+}
+
 await rm(sessionAnalysisTmpDir, { recursive: true, force: true });
 
 console.log('sessionAnalysis.test.mjs passed');

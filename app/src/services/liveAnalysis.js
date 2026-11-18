@@ -810,6 +810,9 @@ class LiveAnalysisService {
                             // recorder's own clock, never derived from
                             // elapsedSeconds — see sessionRecorder.
                             audioSeconds,
+                            // Wall clock, for the gaps between sets: see
+                            // startedAtMs in sessionAnalysis.js.
+                            atMs: readAt,
                             tuneId: normalized.tuneId,
                             settingId: normalized.settingId,
                             sourceUrl: normalized.sourceUrl,
@@ -1244,6 +1247,8 @@ class LiveAnalysisService {
                 audioStartSeconds: typeof d.audioStartSeconds === 'number' ? d.audioStartSeconds : null,
                 audioEndSeconds: typeof d.audioEndSeconds === 'number' ? d.audioEndSeconds : null,
                 audioAnchorSeconds: typeof d.audioAnchorSeconds === 'number' ? d.audioAnchorSeconds : null,
+                startedAtMs: typeof d.startedAtMs === 'number' ? d.startedAtMs : null,
+                endedAtMs: typeof d.endedAtMs === 'number' ? d.endedAtMs : null,
                 bestScore: d.bestScore,
                 alternatives: d.alternatives || [],
             })),

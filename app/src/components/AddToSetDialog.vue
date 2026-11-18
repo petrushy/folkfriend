@@ -22,13 +22,29 @@
                         aria-label="Loading tune settings"
                     />
                     <template v-else>
-                        <p v-if="!settings.length && !batch.length">
+                        <p v-if="!settings.length && !batch.length && !skipped.length">
                             No saved or downloaded settings are available for this tune. Enable its database in Settings.
+                        </p>
+                        <p
+                            v-if="skipped.length"
+                            class="caption warning--text"
+                        >
+                            Not added, because no score is available (enable its database in Settings, or star a setting of it):
+                            {{ skipped.map(displayName).join(', ') }}.
                         </p>
                         <template v-if="batch.length === 1">
                             <p class="caption mb-2">
                                 {{ settingLabel(batch[0]) }}
                             </p>
+                            <v-select
+                                v-if="batchOptions(batch[0]).length > 1"
+                                :value="String(batch[0].setting_id)"
+                                :items="batchOptions(batch[0])"
+                                label="Key and setting"
+                                dense
+                                :disabled="saving"
+                                @change="chooseBatchSetting(0, $event)"
+                            />
                         </template>
                         <v-list
                             v-if="batch.length > 1"
@@ -48,7 +64,20 @@
                                             {{ i + 1 }}. {{ displayName(entry.display_name) }}
                                         </router-link>
                                     </v-list-item-title>
-                                    <v-list-item-subtitle>{{ settingLabel(entry) }}</v-list-item-subtitle>
+                                    <v-select
+                                        v-if="batchOptions(entry).length > 1"
+                                        :value="String(entry.setting_id)"
+                                        :items="batchOptions(entry)"
+                                        :aria-label="'Key and setting for ' + displayName(entry.display_name)"
+                                        dense
+                                        hide-details
+                                        class="mt-0 pt-0 batchSetting"
+                                        :disabled="saving"
+                                        @change="chooseBatchSetting(i, $event)"
+                                    />
+                                    <v-list-item-subtitle v-else>
+                                        {{ settingLabel(entry) }}
+                                    </v-list-item-subtitle>
                                 </v-list-item-content>
                                 <v-list-item-action
                                     v-if="batch.length > 1"
@@ -206,13 +235,17 @@ import { settingsForSetTune } from '@/services/setSearch.mjs';
 import { keyLabel, typeLabel } from '@/js/favouriteFacets.mjs';
 import utils from '@/js/utils.js';
 import { indexSetsBySetting } from '@/js/setMembership.mjs';
+import { pickSetting } from '@/js/sessionSets.mjs';
+
+const optionText = r => `${r.favourite ? '★ ' : ''}${r.setting.mode ? keyLabel(r.setting.mode) : 'Key unknown'} · ${r.setting.dance ? typeLabel(r.setting.dance) : 'Type unknown'} · Setting ${r.setting_id}`;
 
 export default {
     name: 'AddToSetDialog',
     data: () => ({
         open: false, loading: false, saving: false, error: '', title: '',
         batch: [], icons: { up: mdiArrowUp, down: mdiArrowDown },
-        settings: [], sets: [], selectedID: null, destination: null, name: '', draftTarget: null,
+        settings: [], sets: [], selectedID: null, destination: null, name: '', notes: '', draftTarget: null,
+        skipped: [],
         noticeOpen: false, notice: '', noticeSetID: null,
     }),
     computed: {
@@ -227,8 +260,7 @@ export default {
                 .filter(set => !seen.has(set.id) && seen.add(set.id));
         },
         settingOptions() {
-            return this.settings.map(r => ({ value: String(r.setting_id), text:
-                `${r.favourite ? '★ ' : ''}${r.setting.mode ? keyLabel(r.setting.mode) : 'Key unknown'} · ${r.setting.dance ? typeLabel(r.setting.dance) : 'Type unknown'} · Setting ${r.setting_id}` }));
+            return this.settings.map(r => ({ value: String(r.setting_id), text: optionText(r) }));
         },
         destinations() {
             // From the set editor the only sensible target is the draft being
@@ -259,30 +291,69 @@ export default {
         settingLabel(entry) {
             return `${entry.setting.mode ? keyLabel(entry.setting.mode) : 'Key unknown'} · ${entry.setting.dance ? typeLabel(entry.setting.dance) : 'Type unknown'} · Setting ${entry.setting_id}`;
         },
+        // A batch row made from a TUNE (a session's list) carries every
+        // setting of it, so the one chosen for it can be changed here, as for
+        // a single tune. A row made from a favourite is that exact setting.
+        batchOptions(entry) {
+            return (entry.options || []).map(r => ({ value: String(r.setting_id), text: optionText(r) }));
+        },
+        chooseBatchSetting(index, settingID) {
+            const entry = this.batch[index];
+            const option = (entry.options || []).find(r => String(r.setting_id) === String(settingID));
+            if (!option) return;
+            this.batch.splice(index, 1, { ...entry, setting_id: option.setting_id, setting: option.setting,
+                                          display_name: option.display_name });
+        },
         move(index, offset) {
             const entry = this.batch.splice(index, 1)[0];
             this.batch.splice(index + offset, 0, entry);
         },
         displayName: value => utils.parseDisplayableName(value || ''),
-        async show({ tuneID, title, draftTarget = null, entries = null, preferredSettingID = null }) {
+        // `tunes` ([{ tuneID, title, settingID }], in order) is a batch named by
+        // tune rather than by setting — a session's tune list. Each is resolved
+        // to its settings here, starred first (pickSetting), and a tune with no
+        // score anywhere is left out and named. `name` and `notes` prefill a
+        // new set, and with a name the new set is the preselected destination.
+        async show(payload) {
+            const { tuneID, title, draftTarget = null, entries = null, preferredSettingID = null,
+                    tunes = null, name = '', notes = '' } = payload;
             if (this.saving) return;
             const request = (this._request || 0) + 1;
             this._request = request;
             this.open = true; this.loading = true; this.error = ''; this.title = title;
             this.batch = entries ? JSON.parse(JSON.stringify(entries)) : [];
-            this.settings = []; this.sets = []; this.selectedID = null; this.name = '';
+            this.settings = []; this.sets = []; this.selectedID = null; this.name = name || '';
+            this.notes = notes || ''; this.skipped = [];
             this.draftTarget = draftTarget;
             this.destination = draftTarget ? 'draft' : 'new';
             this.noticeOpen = false; this.noticeSetID = null;
             try {
                 const [favourites, sets] = await Promise.all([store.getFavourites(), store.getTuneSets()]);
-                const settings = entries ? [] : await settingsForSetTune(ffBackend, tuneID, title, favourites);
+                let resolved = null;
+                if (tunes) {
+                    resolved = await Promise.all(tunes.map(async tune => {
+                        let options = [];
+                        try { options = await settingsForSetTune(ffBackend, tune.tuneID, tune.title, favourites); }
+                        catch (e) { options = []; }
+                        options = options.filter(r => r.setting && typeof r.setting.abc === 'string' && r.setting.abc.trim());
+                        const chosen = pickSetting(options, tune.settingID);
+                        return { tune, chosen, options };
+                    }));
+                }
+                const settings = entries || tunes ? [] : await settingsForSetTune(ffBackend, tuneID, title, favourites);
                 if (request !== this._request || !this.open) return;
+                if (resolved) {
+                    this.batch = resolved.filter(r => r.chosen).map(r => ({
+                        setting_id: r.chosen.setting_id, setting: r.chosen.setting,
+                        display_name: r.chosen.display_name || r.tune.title, options: r.options,
+                    }));
+                    this.skipped = resolved.filter(r => !r.chosen).map(r => r.tune.title);
+                }
                 this.sets = sets.sort((a, b) => b.updatedAt - a.updatedAt);
                 this.settings = settings;
                 // No preselected set: one tap must never add to whichever set
                 // was touched last. With no sets yet, creating one is the only choice.
-                if (!draftTarget && sets.length) this.destination = null;
+                if (!draftTarget && sets.length && !this.name) this.destination = null;
                 if (!entries && preferredSettingID != null && settings.some(r => String(r.setting_id) === String(preferredSettingID))) this.selectedID = String(preferredSettingID);
                 else if (!entries && (settings.length === 1 || settings[0]?.favourite)) this.selectedID = String(settings[0].setting_id);
             } catch (e) { if (request === this._request) this.error = e.message; }
@@ -302,7 +373,7 @@ export default {
                     const existing = this.sets.find(s => s.id === this.destination);
                     if (this.destination !== 'new' && !existing) throw new Error('Choose a set to add this tune to.');
                     const draft = existing ? JSON.parse(JSON.stringify(existing)) : {
-                        id: globalThis.crypto.randomUUID(), name: this.name.trim(), tags: [], notes: '', entries: [],
+                        id: globalThis.crypto.randomUUID(), name: this.name.trim(), tags: [], notes: this.notes, entries: [],
                     };
                     draft.entries.push(...selected.map(entry => ({ id: globalThis.crypto.randomUUID(), repetitions: 2, result: {
                         settingID: entry.setting_id, setting: entry.setting, displayName: entry.display_name,
