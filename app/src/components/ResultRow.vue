@@ -207,11 +207,14 @@ export default {
             return div.innerHTML;
         },
         scoreLabel: function () {
-            if (this.score > 0.65) {
+            // 0.65 / 0.5 / 0.2 until 1.5.0's search scoring (gap -1.5) moved
+            // scores down; these give the same share of top results each label
+            // on the two tagged sessions.
+            if (this.score > 0.63) {
                 return 'Very Close';
-            } else if (this.score > 0.5) {
+            } else if (this.score > 0.47) {
                 return 'Close';
-            } else if (this.score > 0.2) {
+            } else if (this.score > 0.15) {
                 return 'Possible';
             } else if (this.score > 0) {
                 return 'Unlikely';

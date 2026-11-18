@@ -5,7 +5,8 @@
 /// `QUERY_REPASS_SIZE` (2000) candidates scored by distinct matched query n-grams.
 ///
 /// **Pass 2 — Needleman-Wunsch (`nw.rs`):** Semi-global sequence alignment on
-/// the shortlist only.  Accurate but O(m×n) per candidate; feasible only because
+/// the shortlist only, against each contour with its opening appended so a
+/// window across the repeat can match.  Accurate but O(m×n) per candidate; feasible only because
 /// pass 1 has already eliminated ~97% of the index.
 ///
 /// Results are deduplicated by `tune_id` (highest-scoring setting wins) and
@@ -126,9 +127,14 @@ impl QueryEngine {
                 // Second pass: slow, but accurate. Re-scores the shortlist.
                 let mut second_search: Vec<(SettingID, f32)> = Vec::new();
                 for (setting_id, _) in &first_search {
+                    // Aligned against the contour followed by its own opening,
+                    // so a window across the repeat matches (see nw.rs).
                     let score = nw::needleman_wunsch(
                         contour,
-                        &tune_index.settings[setting_id].contour,
+                        &nw::with_repeat_opening(
+                            &tune_index.settings[setting_id].contour,
+                            contour.len(),
+                        ),
                     );
                     second_search.push((setting_id.clone(), score));
                 }

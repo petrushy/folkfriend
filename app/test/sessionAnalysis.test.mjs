@@ -154,8 +154,8 @@ function d(tuneId, startSeconds, endSeconds) {
         tuneId, startSeconds, settingId: String(tuneId * 10), displayName: `tune-${tuneId}`, score, alternatives: [],
     });
 
-    assert.equal(SESSION_ANALYSIS_DEFAULTS.minTopScore, 0.45);
-    assert.equal(options.minTopScore, 0.45);
+    assert.equal(SESSION_ANALYSIS_DEFAULTS.minTopScore, 0.40);
+    assert.equal(options.minTopScore, 0.40);
     assert.equal(options.previousTuneBiasDelta, 0.15);
     assert.equal('minRms' in options, false, 'no silence gate: live has none');
 

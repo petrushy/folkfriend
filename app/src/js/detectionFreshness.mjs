@@ -23,7 +23,8 @@
 // A match at or above this is "the app is sure". Below it the light is held at
 // amber however recent the match is: something matched, but not well enough to
 // say the tune on screen is definitely the tune in the room.
-export const GOOD_SCORE = 0.55;
+// 0.55 until 1.5.0's search scoring; 0.53 is the same share of windows.
+export const GOOD_SCORE = 0.53;
 
 /**
  * How long a match stays green / amber, in seconds, derived from the analysis

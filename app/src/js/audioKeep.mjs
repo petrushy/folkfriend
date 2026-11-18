@@ -45,10 +45,12 @@ export const KEEP_BEFORE_SECONDS = 20;
 export const KEEP_AFTER_SECONDS = 20;
 
 // The bar for "this window sounded like a tune". The listed-detection bar
-// (SESSION_ANALYSIS_DEFAULTS.minTopScore) is 0.45. Lower is the safe
+// (SESSION_ANALYSIS_DEFAULTS.minTopScore) is 0.40. Lower is the safe
 // direction: a false "music" keeps three minutes of conversation, a false
 // "break" deletes a tune for good. Not calibrated against recorded speech yet.
-export const MUSIC_EVIDENCE_MIN_SCORE = 0.3;
+// 0.3 until 1.5.0's search scoring moved weak matches down; 0.25 is the same
+// share of windows on the two tagged sessions, so no more audio is deleted.
+export const MUSIC_EVIDENCE_MIN_SCORE = 0.25;
 
 // Windows closer together than this count as continuous analysis. The live
 // loop steps every few seconds and a slow backend cycle stretches that; a gap

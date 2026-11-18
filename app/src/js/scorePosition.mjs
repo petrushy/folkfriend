@@ -49,10 +49,15 @@ export function windowPosition(contour, { readAt, windowSeconds }) {
     return { contour, readAt, windowSeconds };
 }
 
-// Scoring, normalisation and boundaries exactly as the Rust second pass
-// (rust/src/query/nw.rs): match +2, mismatch -2, gap -1, zero top and left
-// boundary, best cell anywhere, score = 0.5 × raw / len(query). So the best
-// span's score is the match score the tune itself would get for this setting.
+// Scoring, normalisation and boundaries as the Rust second pass
+// (rust/src/query/nw.rs) had them before 1.5.0: match +2, mismatch -2, gap -1,
+// zero top and left boundary, best cell anywhere, score = 0.5 × raw /
+// len(query). The SEARCH moved to gap -1.5 in 1.5.0 (wrong tunes score lower,
+// the right one barely moves); position tracking deliberately did not: its
+// floors (TRACK_MIN_SCORE, RELOCK_MIN_SCORE, POSITION_MIN_SCORE) were tuned
+// against this scoring by replayScorePosition / replaySetFollow, and moving it
+// is a separate change to measure there. So a span's score is close to, but no
+// longer exactly, the score the search gives that setting.
 const MATCH = 2;
 const MISMATCH = -2;
 const GAP = -1;
@@ -63,8 +68,8 @@ const GAP = -1;
 // Rust lattice scores that exactly as harshly as a wrong tune's note. For "is
 // this the tune, and where" a semitone slip is nearly right. Costs are on a
 // doubled scale so the lattice stays in integers; the score is normalised back,
-// so 1 still means a perfect match. The default (Rust-exact) is untouched,
-// which is what the parity test with the Rust second pass checks.
+// so 1 still means a perfect match. The default (the pre-1.5.0 Rust scoring)
+// is untouched, which is what the parity test checks.
 const GRADED_ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUV';
 const GRADED_INDEX = new Int16Array(128).fill(-1000);
 for (let i = 0; i < GRADED_ALPHABET.length; i++) GRADED_INDEX[GRADED_ALPHABET.charCodeAt(i)] = i;

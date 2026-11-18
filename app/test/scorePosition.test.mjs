@@ -43,7 +43,8 @@ function contour(length, seed = 1, alphabet = 'opqrstuvwxyz') {
     return out;
 }
 
-// The second pass's score as Rust computes it (rust/src/query/nw.rs): the best
+// The second pass's score as Rust computed it before 1.5.0 (rust/src/query/nw.rs,
+// gap -1; position tracking keeps that scoring, see scorePosition.mjs): the best
 // cell of the same lattice. matchSpans must report exactly this as its best.
 function needlemanWunsch(a, b) {
     if (!a.length || !b.length) return 0;
