@@ -10,9 +10,6 @@
         />
         <v-snackbar :value="!!liveView.error" :timeout="8000" bottom @input="onSnackbar">
             {{ liveView.error }}
-            <template #action="{ attrs }">
-                <v-btn text small v-bind="attrs" @click="openSessionTools">Session Tools</v-btn>
-            </template>
         </v-snackbar>
     </div>
 </template>
@@ -32,43 +29,35 @@ export default {
         detections: [],
     }),
     watch: {
-        // Opening reads the service's list as it is NOW: the update events
-        // that arrived while the view was closed were not kept.
+        // Opening reads the listener's list as it is NOW: updates that
+        // arrived while the view was closed were not kept here.
         'liveView.open'(open) {
-            if (open) this._refresh(liveAnalysisService.detections);
+            if (open) this._refresh(liveAnalysisService.liveDetections);
         },
     },
     created() {
+        // The live view's OWN list, fed whenever anything is listening —
+        // never the session's, which a paused capture stops feeding.
         this._onUpdate = detections => this._refresh(detections);
-        // A score with no microphone behind it claims to be following
-        // something it cannot hear: Pause closes it, as it always has.
-        this._onStopped = () => closeLiveView();
-        this._onFinished = () => { this.detections = []; };
-        eventBus.$on('liveAnalysisUpdate', this._onUpdate);
-        eventBus.$on('liveAnalysisRestored', this._onUpdate);
-        eventBus.$on('liveAnalysisStopped', this._onStopped);
-        eventBus.$on('liveAnalysisFinished', this._onFinished);
+        // The listener stopped under the view (the loop failed): a score with
+        // no microphone behind it claims to follow something it cannot hear.
+        this._onListeningStopped = () => { liveView.open = false; };
+        eventBus.$on('liveViewUpdate', this._onUpdate);
+        eventBus.$on('liveListeningStopped', this._onListeningStopped);
     },
     beforeDestroy() {
-        eventBus.$off('liveAnalysisUpdate', this._onUpdate);
-        eventBus.$off('liveAnalysisRestored', this._onUpdate);
-        eventBus.$off('liveAnalysisStopped', this._onStopped);
-        eventBus.$off('liveAnalysisFinished', this._onFinished);
+        eventBus.$off('liveViewUpdate', this._onUpdate);
+        eventBus.$off('liveListeningStopped', this._onListeningStopped);
     },
     methods: {
         _refresh(detections) {
             this.detections = (detections || []).map(buildDetectionRow);
         },
         close() {
-            closeLiveView();
+            return closeLiveView();
         },
         onSnackbar(visible) {
             if (!visible) liveView.error = '';
-        },
-        openSessionTools() {
-            liveView.error = '';
-            if (this.$route && this.$route.name === 'session-analysis') return;
-            this.$router.push({ name: 'session-analysis', query: { live: '1' } }).catch(() => {});
         },
     },
 };

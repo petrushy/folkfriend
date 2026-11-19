@@ -121,6 +121,10 @@ async function loadService() {
     service.detections = [];
     service.elapsedSeconds = 0;
     service._rejectedTunes.clear();
+    service._liveMatches = [];
+    service.liveDetections = [];
+    service.listenSeconds = 0;
+    service.isListening = false;
 
     return { service, bus };
 }
@@ -144,10 +148,16 @@ function play(service, tuneId, fromSeconds, windowCount, score = 0.7) {
     for (let i = 0; i < windowCount; i++) {
         service._windowMatches.push(
             match(tuneId, fromSeconds + i * service.options.stepSeconds, score));
+        // While capturing, every window reaches the live view's list too, on
+        // the listener's clock — here the two clocks run together.
+        service._liveMatches.push(
+            match(tuneId, fromSeconds + i * service.options.stepSeconds, score));
     }
     service.elapsedSeconds =
         fromSeconds + (windowCount - 1) * service.options.stepSeconds;
+    service.listenSeconds = service.elapsedSeconds;
     service._recluster();
+    service._reclusterLive();
 }
 
 await mkdir(tmpDir, { recursive: true });
@@ -250,7 +260,9 @@ await test('the rejection lapses, so the tune is findable later in the evening',
     const results = [{ setting: { tune_id: 2 }, setting_id: 20, score: 0.8, display_name: 'tune-2' }];
     assert.equal(service._withoutRejectedTunes(results).length, 0);
 
-    service.elapsedSeconds += 200;
+    // On the wall clock, so it lapses whether or not a session is counting.
+    const rejectedAt = service._nowMs();
+    service._nowMs = () => rejectedAt + 200_000;
     assert.equal(service._withoutRejectedTunes(results).length, 1,
         'after the cooldown a genuine performance of that tune must be detectable');
     assert.equal(service._rejectedTunes.size, 0, 'and the lapsed entry is dropped');
@@ -329,8 +341,9 @@ await test('a null tuneId is ignored', async () => {
 await test('the LED follows the last accepted window match', async () => {
     const { service } = await loadService();
     service.isRunning = true;
+    service.isListening = true;
     play(service, 1, 0, 6);
-    service.elapsedSeconds = 30;
+    service.listenSeconds = 30;
 
     const led = service.detectionFreshness();
     assert.equal(led.level, 'green');
@@ -340,9 +353,10 @@ await test('the LED follows the last accepted window match', async () => {
 await test('silence after the last match takes the LED to red', async () => {
     const { service } = await loadService();
     service.isRunning = true;
+    service.isListening = true;
     play(service, 1, 0, 6);
     // Twenty minutes of talking, with the loop finding nothing to accept.
-    service.elapsedSeconds = 30 + 20 * 60;
+    service.listenSeconds = 30 + 20 * 60;
 
     assert.equal(service.detectionFreshness().level, 'red');
 });
@@ -353,16 +367,18 @@ await test('rejecting the tune takes its matches — and the LED — with it', a
     // just told the app was wrong.
     const { service } = await loadService();
     service.isRunning = true;
+    service.isListening = true;
     play(service, 1, 0, 6);
-    service.elapsedSeconds = 30;
+    service.listenSeconds = 30;
     assert.equal(service.detectionFreshness().level, 'green');
 
     service.rejectTune(1);
     assert.equal(service.lastWindowMatch(), null);
+    assert.deepEqual(service.liveDetections, [], 'gone from the live view\'s list too');
     assert.equal(service.detectionFreshness().level, 'idle');
 });
 
-await test('a paused session shows the LED off rather than red', async () => {
+await test('with nothing listening the LED is off rather than red', async () => {
     const { service } = await loadService();
     service.isRunning = false;
     play(service, 1, 0, 6);

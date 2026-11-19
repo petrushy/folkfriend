@@ -80,8 +80,9 @@ const FAKE_EVENTBUS = `export default { $emit() {}, $on() {}, $off() {} };`;
 const FAKE_LIVE_ANALYSIS = `
 export const __rejected = [];
 const service = {
-    elapsedSeconds: 0,
-    detections: [],
+    listenSeconds: 0,
+    // The live view's own list (the listener's), not the session's.
+    liveDetections: [],
     // Where the last window matched (js/scorePosition.mjs windowPositions()).
     scorePosition: null,
     rejectTune(tuneId) { __rejected.push(tuneId); },
@@ -171,7 +172,7 @@ async function loadOverlay({ initialDetections = null } = {}) {
     const live = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
     backend.__reset();
     live.__rejected.length = 0;
-    live.default.detections = [];
+    live.default.liveDetections = [];
     live.default.scorePosition = null;
     live.default.isRunning = true;
     live.default.tuneCapture = null;
@@ -332,7 +333,7 @@ await test('rejecting hands the tune to the service and falls back to the previo
     assert.equal(vm.target.tuneId, 2);
 
     // What the real service leaves behind once the rejected tune is dropped.
-    live.default.detections = [det(1, 10, 'The Kesh', 0.71)];
+    live.default.liveDetections = [det(1, 10, 'The Kesh', 0.71)];
     vm.rejectTune();
     await Promise.resolve();
     await Promise.resolve();
@@ -411,7 +412,7 @@ await test('rejecting a frozen tune unfreezes, or nothing could move', async () 
     vm.toggleFrozen();
     assert.equal(vm.frozen, true);
 
-    live.default.detections = [det(1, 10, 'The Kesh', 0.71)];
+    live.default.liveDetections = [det(1, 10, 'The Kesh', 0.71)];
     vm.rejectTune();
     await Promise.resolve();
 
