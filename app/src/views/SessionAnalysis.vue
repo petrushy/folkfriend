@@ -233,7 +233,7 @@
 
         <v-card v-if="viewMode === 'live' && live.capturing" class="pa-5 my-3">
             <div class="d-flex flex-wrap align-center" style="gap: 12px;">
-                <v-btn color="primary" @click="followMode = true">
+                <v-btn color="primary" @click="openFollow">
                     <v-icon left small>{{ icons.clef }}</v-icon>
                     Follow Score
                 </v-btn>
@@ -774,12 +774,6 @@
             <h2 class="text-h6">No tunes in this session yet</h2>
             <p class="mb-0 text--secondary">{{ viewMode === 'live' ? 'The session is saved. Recognised tunes will appear here while listening.' : 'The session is saved with an empty tune list.' }}</p>
         </v-card>
-
-        <LiveScoreFollow
-            v-if="followMode"
-            :detections="live.detections"
-            @close="followMode = false"
-        />
     </v-container>
 </template>
 
@@ -793,13 +787,13 @@ import ffBackend from '@/services/backend.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
-import LiveScoreFollow from '@/components/LiveScoreFollow.vue';
 import DropboxBackup from '@/components/DropboxBackup.vue';
 import { playerHost, sessionPlayer, showPlayerIn, parkPlayer } from '@/services/sessionPlayerHost.js';
 import { backupStatus, sessionConflictMessage } from '@/services/dropbox.js';
 import sessionRecorder from '@/services/sessionRecorder.js';
 import { listManifests, playbackReadManifest, reclaimOrphans } from '@/services/sessionAudioStore.js';
 import { clearLastShown } from '@/js/liveScoreFollow.mjs';
+import { openLiveView } from '@/services/liveView.js';
 import { saveImportedSession } from '@/services/sessionImport.js';
 import { groupIntoRuns, selectionKey, setNameFromSession } from '@/js/sessionSets.mjs';
 import { indexSetsByTune } from '@/js/setMembership.mjs';
@@ -807,14 +801,13 @@ import {
     defaultImportStart, fromDateTimeLocal, nameFromFileName, toDateTimeLocal,
 } from '@/js/sessionImport.mjs';
 import {
+    buildDetectionRow,
     buildTuneListText,
-    buildTuneOptions,
     buildUpdatedXsc,
     formatSecondsAsClock,
     formatSecondsAsDuration,
     parseClockTime,
     parseXscMetadata,
-    tuneOptionValue,
     MIN_PAST_DETECTION_SECONDS,
 } from '@/js/sessionAnalysis.js';
 
@@ -870,7 +863,7 @@ const emptyLiveState = () => ({
 
 export default {
     name: 'SessionAnalysisView',
-    components: { VolumeMeter, LiveScoreFollow, DropboxBackup },
+    components: { VolumeMeter, DropboxBackup },
     data() {
         return {
             dragActive: false,
@@ -900,7 +893,6 @@ export default {
             file: emptyFileState(),
             importSave: emptyImportSave(),
             live: emptyLiveState(),
-            followMode: false,
             pastSessions: [],
             selectedSession: null,
             savedDetections: [],
@@ -984,7 +976,6 @@ export default {
         viewMode(newVal) {
             this.selectedRowKeys = [];
             if (newVal !== 'file') this.lastSessionView = newVal;
-            if (newVal !== 'live') this.followMode = false;
             if (newVal === 'history') this.refreshPastSessions();
         },
     },
@@ -1152,7 +1143,6 @@ export default {
         this._onLiveTimerTick = (secs) => { this.live.elapsedSeconds = secs; };
         this._onLiveStopped = () => {
             this.live.capturing = false;
-            this.followMode = false;
             this.live.hasSession = !!liveAnalysisService.sessionId;
         };
         this._onLiveFinished = () => {
@@ -1318,7 +1308,7 @@ export default {
                 // user to start by hand — the whole point of the shortcut is
                 // that it takes one tap from "what is this tune" to the dots.
                 if (this._routeWantsFollow()) {
-                    if (this.live.capturing) this.followMode = true;
+                    if (this.live.capturing) openLiveView();
                     else {
                         this._autoFollowPending = true;
                         this.$nextTick(() => this._runPendingAutoFollow());
@@ -1667,7 +1657,10 @@ export default {
 
             // Only on success: opening a full-screen overlay over a microphone
             // that never opened would hide the error explaining why.
-            if (this.live.capturing) this.followMode = true;
+            if (this.live.capturing) openLiveView();
+        },
+        openFollow() {
+            openLiveView();
         },
         resumeLive() {
             return this.startLiveAnalysis();
@@ -1717,24 +1710,7 @@ export default {
         // ---- shared detection table ---------------------------------------
 
         _buildDetectionRow(detection) {
-            const tuneOptions = buildTuneOptions(detection);
-            const selectedTuneKey = tuneOptionValue({
-                tuneId: detection.tuneId,
-                settingId: detection.settingId,
-                sourceUrl: detection.sourceUrl,
-                title: detection.title,
-            });
-            const selected = tuneOptions.find(o => o.value === selectedTuneKey) || tuneOptions[0] || null;
-            return {
-                ...detection,
-                editableTime: formatSecondsAsClock(detection.startSeconds),
-                selectedTuneKey,
-                tuneOptions,
-                selectedTuneId: selected ? selected.tuneId : detection.tuneId,
-                selectedSettingId: selected ? selected.settingId : (detection.settingId ? String(detection.settingId) : ''),
-                selectedSourceUrl: selected ? (selected.sourceUrl || '') : (detection.sourceUrl || ''),
-                selectedTitle: selected ? selected.title : (detection.title || ''),
-            };
+            return buildDetectionRow(detection);
         },
         _routeWantsLive() {
             if (!this.$route) return false;
@@ -1751,7 +1727,7 @@ export default {
             if (liveAnalysisService.isRunning) {
                 this._autoFollowPending = false;
                 this._syncLiveFromService();
-                this.followMode = true;
+                openLiveView();
                 return;
             }
             if (!this.indexLoaded || this.live.starting) return;

@@ -1131,6 +1131,25 @@ sessions, not on the clean clips.
 
 ## Recent changes
 
+### The live view is app-wide (November 2026)
+
+The follow-score overlay (`LiveScoreFollow`) used to be mounted inside
+Session Tools only, so the score could be reached only by routing there, and
+Search's "Follow session" was a route change to `?live=1&follow=1`. It is now
+mounted once, by `components/LiveViewHost.vue` in `App.vue`, and opened through
+`services/liveView.js`: `openLiveView()` shows it, `startLiveView()` is the
+one-tap entry point (restore an unfinished session first, wait on
+`indexReady()`, `startForFollow`, open only if the microphone opened — errors
+go to the host's snackbar). Search opens it in place; Session Tools' Follow
+Score, Listen & Follow and `?follow=1` call `openLiveView()`. The host builds
+rows with `buildDetectionRow` (`js/sessionAnalysis.js`, shared with the tune
+table), closes on `liveAnalysisStopped` as before, and closing it never stops
+listening. Tests: `liveView.test.mjs` (15).
+
+This is step 1 of separating listening from the session; listening still
+always creates or resumes a session. Next: session-optional listening with a
+retroactive "Save to Past Sessions" switch.
+
 ### Search: a window may wrap across the repeat, and gaps cost more (November 2026 — 1.5.0)
 
 Two changes to the second pass (`rust/src/query/nw.rs`), chosen by measuring

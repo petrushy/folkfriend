@@ -63,10 +63,11 @@
                 <v-icon left small>{{ searchState === 'listening' || searchState === 'working' ? icons.microphoneOff : icons.microphone }}</v-icon>
                 {{ searchState === 'listening' || searchState === 'working' ? 'Stop monitoring' : 'Monitor' }}
             </v-btn>
-            <!-- One tap from here to "show me what is playing": follow=1 makes
-                 Session Analysis reach the score whatever it finds — starting a
-                 session, resuming a recently paused one, or simply showing the
-                 score of one already running.
+            <!-- One tap from here to "show me what is playing": opens the
+                 live view in place (it is mounted app-wide, see
+                 services/liveView.js) and reaches the score whatever it finds —
+                 starting a session, resuming a recently paused one, or simply
+                 showing the score of one already running.
 
                  Never disabled. It used to be greyed out while monitoring or
                  recording, which is the state someone is most likely to be in
@@ -76,7 +77,8 @@
                 small
                 text
                 color="grey darken-1"
-                :to="{ name: 'session-analysis', query: { live: '1', follow: '1' } }"
+                :loading="liveView.starting"
+                @click="openLive"
             >
                 <v-icon left small>{{ icons.clef }}</v-icon>
                 Follow session
@@ -164,6 +166,7 @@ import eventBus from '@/eventBus';
 import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiMusicClefTreble } from '@mdi/js';
 import micService from '@/services/mic';
 import liveAnalysisService from '@/services/liveAnalysis.js';
+import { liveView, startLiveView } from '@/services/liveView.js';
 import { datasetDisplayName } from '@/js/source.mjs';
 
 export default {
@@ -174,6 +177,7 @@ export default {
     },
     data: function () {
         return {
+            liveView,
             snackbar: null,
             snackbarText: null,
 
@@ -281,6 +285,9 @@ export default {
         eventBus.$off('micRecovered', this._onMicRecovered);
     },
     methods: {
+        openLive() {
+            return startLiveView();
+        },
         async _loadDatasetManifests(ids) {
             const unknown = ids.filter(id => !(id in this.datasetManifests));
             if (!unknown.length) return;

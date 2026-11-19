@@ -270,6 +270,8 @@
         <!-- Same pattern: "Often played with…", opened from any tune. -->
         <SetPartnersDialog />
         <AddToSetDialog />
+        <!-- The live view (follow score), openable from any page. -->
+        <LiveViewHost />
     </v-app>
 </template>
 
@@ -309,12 +311,13 @@ import TuneBackgroundDialog from '@/components/TuneBackgroundDialog.vue';
 import AddToSetDialog from '@/components/AddToSetDialog.vue';
 import SetPartnersDialog from '@/components/SetPartnersDialog.vue';
 import SessionStatusBar from '@/components/SessionStatusBar.vue';
+import LiveViewHost from '@/components/LiveViewHost.vue';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
 import { playerHost, registerPlayer } from '@/services/sessionPlayerHost.js';
 
 export default {
     name: 'App',
-    components: { TuneBackgroundDialog, SetPartnersDialog, AddToSetDialog, SessionStatusBar, SessionAudioPlayer },
+    components: { TuneBackgroundDialog, SetPartnersDialog, AddToSetDialog, SessionStatusBar, SessionAudioPlayer, LiveViewHost },
     data: () => ({
         drawer: null,
         menu: null,
