@@ -1172,11 +1172,27 @@ Rules each pinned by a test (verified by mutation):
   bar's Resume and the card's are on screen at once, and the card's chip went
   stale without it (found by the browser check).
 
+**After iOS discards the app** (a phone left asleep mid-session reloads as a
+fresh page), `App.vue` calls `restoreOnLaunch()` at startup — not only Session
+Tools — so the session bar shows the session on whatever page opens. It is
+**resumed automatically only if the page died while CAPTURING and was active
+within 30 min** (`AUTO_RESUME_WINDOW_MS`), after `indexReady()`. The resume
+state carries `capturing: this.isRunning`; a Pause writes false, so a session
+the user paused never comes back on its own, and resume state from an older
+build (no flag) never auto-resumes. A refused microphone (iOS may want a tap)
+leaves it paused and a snackbar says to tap Resume; a successful auto-resume
+is announced too (`liveAnalysisAutoResumed`). `restoreOpenSession()` is
+single-flight, because App and Session Tools both call it on the same launch
+and a second restore landing after the first had resumed rewound it to paused
+(caught only once the test made the second read slow). A lock-and-unlock
+without a discard needs none of this: the capture never stopped, and
+`mic.js`'s visibility handler reopens the microphone.
+
 **Session Tools → Session Capture card** is the one place a session is
 started, paused, resumed and closed ("Close session" = `finish()`, which
 replaced the "New session" link), with the record-audio switch beside it and a
 status chip (Not capturing / Capturing / Paused / Mic unavailable). A restored
-session comes back paused, never resumed on its own. The "Record this tune"
+session comes back paused unless the rule above resumes it. The "Record this tune"
 button in the live view is unavailable without a running capture.
 
 The live view overlay is mounted once in `App.vue` (`LiveViewHost`) and

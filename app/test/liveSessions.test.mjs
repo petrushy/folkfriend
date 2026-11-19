@@ -1496,6 +1496,112 @@ async function run() {
         assert.equal(store.__sessions.length, 1, 'still one session, not a second one');
     });
 
+    // ---- app launch: restore, and resume a capture iOS discarded ---------
+
+    // A capture that is RUNNING when the page dies: its last checkpoint says
+    // so, and nothing else is written (no Pause ran).
+    async function dieWhileCapturing() {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        const sessionId = service.sessionId;
+        // The page is gone: stop the old instance's loop WITHOUT a Pause.
+        service.isRunning = false;
+        await service._stopListening();
+        return sessionId;
+    }
+
+    await test('a capture iOS discarded mid-session is resumed at launch', async () => {
+        const sessionId = await dieWhileCapturing();
+        const fresh = await loadService({ keepStore: true });
+        const result = await fresh.service.restoreOnLaunch({ indexReady: async () => true });
+        assert.deepEqual(result, { restored: true, resumed: true });
+        assert.equal(fresh.service.sessionId, sessionId, 'the same session carries on');
+        assert.equal(fresh.service.isRunning, true);
+        assert.equal(fresh.service.detections.length, 1, 'with its tune list');
+        assert.ok(fresh.bus.__emits.some(e => e.name === 'liveAnalysisAutoResumed'), 'and it says so');
+        await fresh.service.stop();
+    });
+
+    await test('a session the user paused is restored but stays paused', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        play(service, 1, 0, 6);
+        await service._maybeSaveSessionSnapshot();
+        await service.pause();
+
+        const fresh = await loadService({ keepStore: true });
+        fresh.mic.__resetCalls();
+        const result = await fresh.service.restoreOnLaunch({ indexReady: async () => true });
+        assert.deepEqual(result, { restored: true, resumed: false });
+        assert.equal(fresh.service.isRunning, false);
+        assert.equal(fresh.mic.__startCalls, 0, 'a Pause is the user\'s answer, and it stands');
+    });
+
+    await test('a capture that died long ago is restored but not resumed', async () => {
+        await dieWhileCapturing();
+        const fresh = await loadService({ keepStore: true });
+        fresh.store.__openSession.lastActiveAt = Date.now() - 31 * 60 * 1000;
+        const result = await fresh.service.restoreOnLaunch({ indexReady: async () => true });
+        assert.deepEqual(result, { restored: true, resumed: false });
+        assert.equal(fresh.service.isRunning, false);
+    });
+
+    await test('resume state from an older build (no capturing flag) is never auto-resumed', async () => {
+        await dieWhileCapturing();
+        const fresh = await loadService({ keepStore: true });
+        delete fresh.store.__openSession.capturing;
+        const result = await fresh.service.restoreOnLaunch({ indexReady: async () => true });
+        assert.equal(result.resumed, false);
+    });
+
+    await test('no usable tune index: restored, left paused', async () => {
+        await dieWhileCapturing();
+        const fresh = await loadService({ keepStore: true });
+        const result = await fresh.service.restoreOnLaunch({ indexReady: async () => false });
+        assert.deepEqual(result, { restored: true, resumed: false });
+        assert.equal(fresh.service.isRunning, false);
+    });
+
+    await test('a microphone refused at launch leaves the session paused, with the reason', async () => {
+        const sessionId = await dieWhileCapturing();
+        const fresh = await loadService({ keepStore: true });
+        const original = fresh.mic.default.startContinuous;
+        fresh.mic.default.startContinuous = async () => { throw new Error('NotAllowedError'); };
+        const result = await fresh.service.restoreOnLaunch({ indexReady: async () => true });
+        fresh.mic.default.startContinuous = original;
+        assert.equal(result.resumed, false);
+        assert.match(result.error, /NotAllowed/);
+        assert.equal(fresh.service.sessionId, sessionId, 'the session is kept');
+        assert.equal(fresh.service.isRunning, false);
+    });
+
+    await test('App and Session Tools restoring at once cannot rewind a resumed capture', async () => {
+        await dieWhileCapturing();
+        const fresh = await loadService({ keepStore: true });
+        // The second reader is slow, so without single-flight its restore lands
+        // AFTER the first has already resumed — and rewinds it to paused.
+        const strict = fresh.store.default.getLiveSessionsStrict;
+        let reads = 0;
+        fresh.store.default.getLiveSessionsStrict = async function () {
+            reads++;
+            if (reads === 2) await new Promise(r => setTimeout(r, 60));
+            return strict.call(this);
+        };
+        // Both callers on the same tick, as on a launch straight into Session Tools.
+        const [launch, view] = await Promise.all([
+            fresh.service.restoreOnLaunch({ indexReady: async () => true }),
+            fresh.service.restoreOpenSession(),
+        ]);
+        assert.equal(launch.resumed, true);
+        assert.equal(view, true);
+        await new Promise(r => setTimeout(r, 100));
+        fresh.store.default.getLiveSessionsStrict = strict;
+        assert.equal(fresh.service.isRunning, true, 'the second restore did not reset it to paused');
+        await fresh.service.stop();
+    });
+
     await test('resuming a restored session appends to it rather than starting a second', async () => {
         const { service } = await loadService();
         await service.start(10, 5);
