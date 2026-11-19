@@ -63,16 +63,12 @@
                 <v-icon left small>{{ searchState === 'listening' || searchState === 'working' ? icons.microphoneOff : icons.microphone }}</v-icon>
                 {{ searchState === 'listening' || searchState === 'working' ? 'Stop monitoring' : 'Monitor' }}
             </v-btn>
-            <!-- One tap from here to "show me what is playing": opens the
-                 live view in place (it is mounted app-wide, see
-                 services/liveView.js) and reaches the score whatever it finds —
-                 starting a session, resuming a recently paused one, or simply
-                 showing the score of one already running.
+            <!-- One tap from here to "show me what is playing": the live view
+                 (follow score), opened in place. It only listens — it never
+                 starts or resumes a session; Session Capture does that.
 
-                 Never disabled. It used to be greyed out while monitoring or
-                 recording, which is the state someone is most likely to be in
-                 when they decide they want the dots — and the whole promise of
-                 the button is that it is always one tap away. -->
+                 Never disabled: someone monitoring or recording is exactly who
+                 decides they want the dots. -->
             <v-btn
                 small
                 text
@@ -81,7 +77,7 @@
                 @click="openLive"
             >
                 <v-icon left small>{{ icons.clef }}</v-icon>
-                Follow session
+                Live view
             </v-btn>
         </v-row>
         <input
@@ -166,7 +162,7 @@ import eventBus from '@/eventBus';
 import { mdiMagnify, mdiMicrophone, mdiMicrophoneOff, mdiWaveform, mdiMusicClefTreble } from '@mdi/js';
 import micService from '@/services/mic';
 import liveAnalysisService from '@/services/liveAnalysis.js';
-import { liveView, startLiveView } from '@/services/liveView.js';
+import { liveView, openLiveView } from '@/services/liveView.js';
 import { datasetDisplayName } from '@/js/source.mjs';
 
 export default {
@@ -286,7 +282,7 @@ export default {
     },
     methods: {
         openLive() {
-            return startLiveView();
+            return openLiveView();
         },
         async _loadDatasetManifests(ids) {
             const unknown = ids.filter(id => !(id in this.datasetManifests));

@@ -289,7 +289,8 @@ export default {
             selectedTuneKey: lastShown.target ? this._optionKeyFor(lastShown.target) : null,
             loading: false,
             loadError: '',
-            elapsedSeconds: liveAnalysisService.elapsedSeconds,
+            // The listener's clock: the live view runs with no session too.
+            elapsedSeconds: liveAnalysisService.listenSeconds,
             freshness: liveAnalysisService.detectionFreshness(),
             favourited: lastShown.favourited,
             // Deliberately not seeded from lastShown: freezing lasts "until
@@ -391,7 +392,7 @@ export default {
             // projected forward from where the last window ended.
             this._updateFollowPosition();
         };
-        eventBus.$on('liveAnalysisTimerTick', this._onTimerTick);
+        eventBus.$on('liveListenTick', this._onTimerTick);
 
         this._onScorePosition = () => this._updateFollowPosition();
         eventBus.$on('liveScorePosition', this._onScorePosition);
@@ -418,7 +419,7 @@ export default {
     beforeDestroy() {
         document.removeEventListener('keydown', this._onKeyDown);
         document.removeEventListener('visibilitychange', this._onVisibilityChange);
-        eventBus.$off('liveAnalysisTimerTick', this._onTimerTick);
+        eventBus.$off('liveListenTick', this._onTimerTick);
         eventBus.$off('liveScorePosition', this._onScorePosition);
         eventBus.$off('liveAnalysisCaptureState', this._onCaptureState);
         clearTimeout(this._captureNoteTimer);
@@ -472,7 +473,7 @@ export default {
             // user telling us the pinned tune is wrong, so it has to move. Read
             // the service's own list directly and resolve from that.
             this.frozen = false;
-            this._resolveFromDetections(liveAnalysisService.detections);
+            this._resolveFromDetections(liveAnalysisService.liveDetections);
         },
         // ~8 times a second while listening: fast enough to move with the
         // music. It has to run whenever the session is listening, not only

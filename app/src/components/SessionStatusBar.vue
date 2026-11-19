@@ -266,12 +266,16 @@ export default {
         };
 
         for (const name of [
-            'liveAnalysisStopped', 'liveAnalysisFinished', 'liveAnalysisRestored',
+            'liveAnalysisStarted', 'liveAnalysisStopped', 'liveAnalysisFinished', 'liveAnalysisRestored',
             'liveAnalysisMicState', 'liveAnalysisSaveState',
         ]) {
             eventBus.$on(name, this._sync);
         }
         eventBus.$on('liveAnalysisTimerTick', this._onTick);
+        // The LED is about the room, so it follows the LISTENER's clock —
+        // which keeps running for the live view while the capture is paused.
+        this._onListenTick = () => { this.freshness = liveAnalysisService.detectionFreshness(); };
+        eventBus.$on('liveListenTick', this._onListenTick);
         eventBus.$on('liveAnalysisUpdate', this._onUpdate);
         eventBus.$on('indexLoaded', this._onIndexLoaded);
         eventBus.$on('sessionAudioState', this._onAudioState);
@@ -284,12 +288,13 @@ export default {
     },
     beforeDestroy() {
         for (const name of [
-            'liveAnalysisStopped', 'liveAnalysisFinished', 'liveAnalysisRestored',
+            'liveAnalysisStarted', 'liveAnalysisStopped', 'liveAnalysisFinished', 'liveAnalysisRestored',
             'liveAnalysisMicState', 'liveAnalysisSaveState',
         ]) {
             eventBus.$off(name, this._sync);
         }
         eventBus.$off('liveAnalysisTimerTick', this._onTick);
+        eventBus.$off('liveListenTick', this._onListenTick);
         eventBus.$off('liveAnalysisUpdate', this._onUpdate);
         eventBus.$off('indexLoaded', this._onIndexLoaded);
         eventBus.$off('sessionAudioState', this._onAudioState);

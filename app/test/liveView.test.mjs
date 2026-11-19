@@ -3,15 +3,14 @@
 //
 // Run with:  node app/test/liveView.test.mjs
 //
-// What matters is what the old route-based entry point already guaranteed,
-// now reachable without a route change:
+// The live view is independent of the session: it only LISTENS. What matters:
 //
-//   1. It always ends on the score when it can, and never over a microphone
-//      that did not open — a full-screen score would hide the reason.
-//   2. An unfinished session from a previous run is restored BEFORE anything
-//      starts, and a failed read refuses rather than starting a second one.
-//   3. A double tap opens one microphone.
-//   4. Pause closes the overlay, and opening it shows the list as it is now.
+//   1. Opening it never creates, resumes or saves a session.
+//   2. It opens only over a microphone that opened — a full-screen score
+//      would hide the reason — and a double tap opens one microphone.
+//   3. Closing it hands the microphone back (the service keeps it if a
+//      Session Capture is running).
+//   4. It shows the LISTENER's list, and opening shows that list as it is now.
 //
 // Same approach as sessionAnalysisView.test.mjs: rewrite imports to fakes and
 // drive the module / the component's options object with no Vue runtime.
@@ -44,32 +43,25 @@ const FAKE_VUE = `export default { observable(o) { return o; } };`;
 
 const FAKE_LIVE = `
 export const __calls = [];
-export const __next = { restoreThrows: false, restorable: null, startThrows: false, startResult: { ok: true }, startGate: null };
+export const __next = { activateThrows: false, gate: null };
 const service = {
+    isListening: false,
     isRunning: false,
     sessionId: null,
-    options: null,
+    liveDetections: [],
     detections: [],
-    async restoreOpenSession() {
-        __calls.push('restore');
-        if (__next.restoreThrows) throw new Error('read failed');
-        if (__next.restorable) { Object.assign(this, __next.restorable); return true; }
-        return false;
-    },
-    async startForFollow(w, s) {
-        __calls.push(['startForFollow', w, s]);
-        if (__next.startGate) await __next.startGate;
-        if (__next.startThrows) throw new Error('NotAllowedError');
-        if (!__next.startResult.ok) return __next.startResult;
-        if (!this.sessionId) this.sessionId = 'session-new';
-        this.isRunning = true;
-        return { ok: true };
+    async setLiveViewActive(active) {
+        __calls.push(['setLiveViewActive', active]);
+        if (!active) { if (!this.isRunning) this.isListening = false; return; }
+        if (__next.gate) await __next.gate;
+        if (__next.activateThrows) throw new Error('NotAllowedError');
+        this.isListening = true;
     },
 };
 export function __reset() {
     __calls.length = 0;
-    Object.assign(__next, { restoreThrows: false, restorable: null, startThrows: false, startResult: { ok: true }, startGate: null });
-    Object.assign(service, { isRunning: false, sessionId: null, options: null, detections: [] });
+    Object.assign(__next, { activateThrows: false, gate: null });
+    Object.assign(service, { isListening: false, isRunning: false, sessionId: null, liveDetections: [], detections: [] });
 }
 export default service;
 `;
@@ -136,99 +128,83 @@ const bus = await import(path.join(tmpDir, 'fake-eventbus.mjs'));
 
 function reset() {
     live.__reset();
+    for (const k of Object.keys(bus.__handlers)) delete bus.__handlers[k];
     backend.__state.ready = true;
     follow.__state.cleared = 0;
     Object.assign(view.liveView, { open: false, starting: false, error: '' });
 }
 const starts = () => live.__calls.filter(c => Array.isArray(c) && c[0] === 'startForFollow');
 
-console.log('\nstartLiveView — one tap from anywhere');
+console.log('\nopenLiveView — one tap from anywhere, listening only');
 
-await test('nothing open: starts listening and opens the score', async () => {
+const activations = () => live.__calls.filter(c => c[0] === 'setLiveViewActive' && c[1] === true);
+
+await test('opens the score over a listener, and never touches a session', async () => {
     reset();
-    await view.startLiveView();
-    assert.equal(starts().length, 1);
-    assert.deepEqual(starts()[0], ['startForFollow', 10, 5]);
+    await view.openLiveView();
+    assert.equal(activations().length, 1);
     assert.equal(view.liveView.open, true);
     assert.equal(view.liveView.starting, false);
-    assert.equal(follow.__state.cleared, 1, 'a fresh session forgets what the overlay last showed');
+    assert.equal(live.default.sessionId, null, 'no session was created');
+    assert.equal(follow.__state.cleared, 1, 'a fresh listening run forgets what the overlay last showed');
 });
 
-await test('already listening: just opens the score', async () => {
+await test('joining a listener that is already running keeps the overlay state', async () => {
     reset();
+    live.default.isListening = true;
     live.default.isRunning = true;
-    live.default.sessionId = 'session-running';
-    await view.startLiveView();
-    assert.equal(starts().length, 0);
-    assert.ok(!live.__calls.includes('restore'));
+    live.default.sessionId = 'session-capturing';
+    await view.openLiveView();
     assert.equal(view.liveView.open, true);
+    assert.equal(follow.__state.cleared, 0);
+    assert.equal(live.default.sessionId, 'session-capturing', 'the capture is left exactly as it was');
 });
 
-await test('an unfinished session is restored before anything starts', async () => {
-    reset();
-    live.__next.restorable = { sessionId: 'session-last-night', options: { windowSeconds: 12, stepSeconds: 4 } };
-    await view.startLiveView();
-    assert.deepEqual(live.__calls[0], 'restore');
-    assert.deepEqual(starts()[0], ['startForFollow', 12, 4], 'resumed with the window it was recorded with');
-    assert.equal(live.default.sessionId, 'session-last-night', 'continued, not replaced');
-    assert.equal(follow.__state.cleared, 0, 'a resumed session keeps its overlay state');
-    assert.equal(view.liveView.open, true);
-});
-
-await test('a failed restore read refuses rather than starting a second session', async () => {
-    reset();
-    live.__next.restoreThrows = true;
-    await view.startLiveView();
-    assert.equal(starts().length, 0);
-    assert.equal(view.liveView.open, false);
-    assert.ok(view.liveView.error);
-});
-
-await test('no usable tune index: says so, starts nothing', async () => {
+await test('no usable tune index: says so, listens to nothing', async () => {
     reset();
     backend.__state.ready = false;
-    await view.startLiveView();
-    assert.equal(starts().length, 0);
+    await view.openLiveView();
+    assert.equal(activations().length, 0);
     assert.equal(view.liveView.open, false);
     assert.ok(view.liveView.error);
 });
 
 await test('a refused microphone shows the error instead of an empty score', async () => {
     reset();
-    live.__next.startThrows = true;
-    await view.startLiveView();
+    live.__next.activateThrows = true;
+    await view.openLiveView();
     assert.equal(view.liveView.open, false);
     assert.match(view.liveView.error, /microphone/i);
     assert.equal(view.liveView.starting, false);
 });
 
-await test('a stale session that cannot be saved blocks the new one', async () => {
-    reset();
-    live.__next.startResult = { ok: false, error: 'quota exceeded' };
-    await view.startLiveView();
-    assert.equal(view.liveView.open, false);
-    assert.match(view.liveView.error, /quota exceeded/);
-});
-
 await test('a double tap opens one microphone', async () => {
     reset();
     let release;
-    live.__next.startGate = new Promise(r => { release = r; });
-    const first = view.startLiveView();
-    const second = view.startLiveView();
+    live.__next.gate = new Promise(r => { release = r; });
+    const first = view.openLiveView();
+    const second = view.openLiveView();
     await new Promise(r => setTimeout(r, 0));
     release();
     await Promise.all([first, second]);
-    assert.equal(starts().length, 1);
+    assert.equal(activations().length, 1);
     assert.equal(view.liveView.open, true);
+});
+
+await test('closing hands the microphone back', async () => {
+    reset();
+    await view.openLiveView();
+    await view.closeLiveView();
+    assert.equal(view.liveView.open, false);
+    assert.deepEqual(live.__calls[live.__calls.length - 1], ['setLiveViewActive', false]);
+    assert.equal(live.default.isListening, false);
 });
 
 await test('opening clears an earlier error', async () => {
     reset();
     view.liveView.error = 'old';
-    view.openLiveView();
+    await view.openLiveView();
     assert.equal(view.liveView.error, '');
-    assert.equal(view.liveView.open, true);
 });
 
 console.log('\nLiveViewHost — the one overlay');
@@ -249,7 +225,7 @@ const DETECTION = { id: 'd1', tuneId: 7, settingId: 70, title: 'The Kesh', start
 await test('updates become rows with selectable options, as in the tune table', async () => {
     reset();
     const { vm } = await mountHost();
-    bus.__fire('liveAnalysisUpdate', [DETECTION]);
+    bus.__fire('liveViewUpdate', [DETECTION]);
     assert.equal(vm.detections.length, 1);
     assert.equal(vm.detections[0].tuneOptions.length, 1, 'the follow view reads tuneOptions');
     assert.equal(vm.detections[0].selectedTuneId, 7);
@@ -258,45 +234,45 @@ await test('updates become rows with selectable options, as in the tune table', 
 await test('opening reads the list as it is now, not the last update it saw', async () => {
     reset();
     const { vm, component } = await mountHost();
-    live.default.detections = [DETECTION];
+    live.default.liveDetections = [DETECTION];
+    live.default.detections = [];
     component.watch['liveView.open'].call(vm, true);
+    assert.equal(vm.detections.length, 1, 'the listener\'s list, not the session\'s');
     assert.equal(vm.detections.length, 1);
 });
 
-await test('Pause closes the overlay', async () => {
+await test('the listener stopping under it closes the overlay', async () => {
     reset();
     await mountHost();
-    view.openLiveView();
-    bus.__fire('liveAnalysisStopped');
+    view.liveView.open = true;
+    bus.__fire('liveListeningStopped');
     assert.equal(view.liveView.open, false);
 });
 
-await test('closing does not stop listening', async () => {
+await test('a session Pause does not close it', async () => {
     reset();
-    live.default.isRunning = true;
+    await mountHost();
+    view.liveView.open = true;
+    bus.__fire('liveAnalysisStopped');
+    assert.equal(view.liveView.open, true, 'the live view is independent of the capture');
+});
+
+await test('the close button releases the listener', async () => {
+    reset();
     const { vm } = await mountHost();
-    view.openLiveView();
-    vm.close();
+    await view.openLiveView();
+    await vm.close();
     assert.equal(view.liveView.open, false);
-    assert.equal(live.default.isRunning, true);
+    assert.equal(live.default.isListening, false);
 });
 
 await test('leaving the app unsubscribes', async () => {
     reset();
     const { vm, component } = await mountHost();
     component.beforeDestroy.call(vm);
-    for (const name of ['liveAnalysisUpdate', 'liveAnalysisRestored', 'liveAnalysisStopped', 'liveAnalysisFinished']) {
+    for (const name of ['liveViewUpdate', 'liveListeningStopped']) {
         assert.equal((bus.__handlers[name] || []).length, 0, name);
     }
-});
-
-await test('the error snackbar leads to Session Tools', async () => {
-    reset();
-    const { vm } = await mountHost();
-    view.liveView.error = 'Could not access the microphone.';
-    vm.openSessionTools();
-    assert.equal(view.liveView.error, '');
-    assert.equal(vm.pushed[0].name, 'session-analysis');
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

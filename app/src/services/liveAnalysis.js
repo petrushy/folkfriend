@@ -51,9 +51,56 @@ const CHECKPOINT_MAX_WAIT_MS = 60_000;
 // not cover coming back the following week, which is the case this app is for.
 const RESUME_WINDOW_MS = 6 * 60 * 60 * 1000;
 
+// How much the live view's own tune list remembers. It is a display, not a
+// log: it only has to cover the tune being played and a little before it, and
+// pruning keeps re-clustering cheap through an evening of listening.
+const LIVE_HISTORY_SECONDS = 30 * 60;
+
+// The options the listener uses when the live view starts it with no session
+// to take them from — the same defaults Session Tools starts a capture with.
+function defaultLiveOptions(windowSeconds = 10, stepSeconds = 5) {
+    return {
+        ...SESSION_ANALYSIS_DEFAULTS,
+        windowSeconds,
+        stepSeconds,
+        mergeGapSeconds: windowSeconds,
+    };
+}
+
+// Two layers share one microphone and one analysis loop:
+//
+//   LISTENING  isListening — the microphone is open and every window is
+//              transcribed and searched. Wanted by the live view (follow
+//              score) and by a session capture; runs while EITHER wants it.
+//              Feeds the live view's own short-lived list (liveDetections).
+//   CAPTURE    isRunning — the open session is logging: windows are also
+//              appended to the session's matches, saved, geo-tagged and,
+//              if the switch is on, recorded. Pause stops only this.
+//
+// They are independent on purpose. The live view never creates or resumes
+// a session, and pausing a capture leaves the live view following the music.
+// `isRunning` keeps its old name and meaning ("the session is capturing")
+// because the session bar, the recorder and Session Tools all read it.
 class LiveAnalysisService {
     constructor() {
         this.isRunning = false;
+        // The listener. See the comment above the class.
+        this.isListening = false;
+        this._liveViewActive = false;
+        // Listening time, for the live view and the detection LED. Separate
+        // from elapsedSeconds, which is the SESSION's listening time and stops
+        // while a capture is paused.
+        this.listenSeconds = 0;
+        this._liveMatches = [];
+        this.liveDetections = [];
+        this._liveHeardTuneId = null;
+        this._listenStartPromise = null;
+        this._listenStopPromise = null;
+        // Bumped whenever a capture starts or stops. A window read while
+        // capturing whose result lands after a Pause (or a Finish and a new
+        // session) must not reach the session — the loop itself keeps running
+        // for the live view, so the loop generation cannot be what decides.
+        this._captureGeneration = 0;
         this.isPaused = false;
         this.detections = [];   // raw clustered detections from clusterDetections()
         this.elapsedSeconds = 0;
@@ -82,7 +129,9 @@ class LiveAnalysisService {
         this._stopPromise = null;
         // Last tuneId written to the sightings log — see _recordSighting().
         this._lastSightingTuneId = null;
-        // tuneId (as a string) -> elapsedSeconds at which the user rejected it.
+        // tuneId (as a string) -> wall-clock ms at which the user rejected it.
+        // Wall clock rather than a listening clock: a rejection made in the
+        // live view must lapse whether or not a session is counting time.
         this._rejectedTunes = new Map();
 
         // Non-null while a session is open — i.e. resumable, whether currently
@@ -162,13 +211,13 @@ class LiveAnalysisService {
         // to notice. This keeps micHealthy the SINGLE source of truth — the UI
         // reads the service, never the microphone, so the two cannot disagree.
         eventBus.$on('micLost', ({ reason } = {}) => {
-            if (!this.isRunning) return;
+            if (!this.isListening) return;
             this.micHealthy = false;
             this.micIssue = reason || '';
             eventBus.$emit('liveAnalysisMicState', { healthy: false, reason: this.micIssue });
         });
         eventBus.$on('micRecovered', () => {
-            if (!this.isRunning) return;
+            if (!this.isListening) return;
             this.micHealthy = true;
             this.micIssue = '';
             eventBus.$emit('liveAnalysisMicState', { healthy: true, reason: '' });
@@ -193,13 +242,10 @@ class LiveAnalysisService {
         if (this._stopPromise) await this._stopPromise;
         if (this.isRunning) return;
 
-        const options = {
-            ...SESSION_ANALYSIS_DEFAULTS,
-            windowSeconds,
-            stepSeconds,
-            mergeGapSeconds: windowSeconds,
-        };
-        this.options = options;
+        const options = defaultLiveOptions(windowSeconds, stepSeconds);
+        // A listener already running for the live view keeps its options: the
+        // loop is analysing with them, and clustering must agree.
+        if (!this.isListening || !this.options) this.options = options;
 
         if (!this.sessionId) {
             // Fresh session — no open session to resume. Reset everything and
@@ -225,7 +271,8 @@ class LiveAnalysisService {
 
         this.isRunning = true;
         this.isPaused = false;
-        this.micHealthy = true;
+        // Windows from before this moment belong to nobody's session.
+        this._captureGeneration++;
 
         // Warms one location fix for the whole session. Not awaited: the
         // session must start on the microphone, never on the radio. By the time
@@ -243,7 +290,7 @@ class LiveAnalysisService {
         this._persistSession();
 
         try {
-            await micService.startContinuous(windowSeconds);
+            await this._ensureListening(this.options);
         } catch (e) {
             this.isRunning = false;
             // The session itself survives a microphone that would not open —
@@ -256,22 +303,111 @@ class LiveAnalysisService {
         }
 
         if (!this.isRunning) return;
-        this._sampleRate = micService.audioCtx ? micService.audioCtx.sampleRate : 48000;
+
+        // Every view showing the capture must hear that it started, whichever
+        // of them started it — the session bar's Resume and the Session
+        // Capture card's are both on screen at once.
+        eventBus.$emit('liveAnalysisStarted');
 
         // Opened after the microphone, because the recorder attaches to that
         // stream, and never awaited for anything the session depends on:
         // recording is the expendable half. A browser that cannot encode, or a
         // disk with no room, must still let the user log their tunes.
         await this._syncRecorderToSetting({ resuming: true });
+    }
 
-        this._startTimer();
+    // Opens the microphone and starts the analysis loop, unless it is already
+    // running. Shared by a capture and the live view; whichever asks first
+    // opens it, and it stays open while either wants it (_maybeStopListening).
+    _ensureListening(options) {
+        if (this.isListening) return Promise.resolve();
+        if (this._listenStartPromise) return this._listenStartPromise;
+        this._listenStartPromise = (async () => {
+            if (this._listenStopPromise) await this._listenStopPromise;
+            this.isListening = true;
+            this.micHealthy = true;
+            this.listenSeconds = 0;
+            this._liveMatches = [];
+            this.liveDetections = [];
+            this._liveHeardTuneId = null;
+            try {
+                await micService.startContinuous(options.windowSeconds);
+            } catch (e) {
+                this.isListening = false;
+                throw e;
+            }
+            // Released again while the microphone was opening.
+            if (!this.isListening) return;
+            this._sampleRate = micService.audioCtx ? micService.audioCtx.sampleRate : 48000;
+            this._startTimer();
 
-        const generation = ++this._generation;
-        // Fire-and-forget: loop runs independently of any Vue component
-        this._runLoop(options, false, generation).catch(e => {
-            console.error('Live analysis loop error:', e);
-            if (generation === this._generation) this.stop();
-        });
+            const generation = ++this._generation;
+            // Fire-and-forget: loop runs independently of any Vue component
+            this._runLoop(options, false, generation).catch(e => {
+                console.error('Live analysis loop error:', e);
+                if (generation !== this._generation) return;
+                this._liveViewActive = false;
+                if (this.isRunning) this.stop();
+                else this._stopListening();
+            });
+        })().finally(() => { this._listenStartPromise = null; });
+        return this._listenStartPromise;
+    }
+
+    // Releases the microphone once nothing wants it any more.
+    _maybeStopListening() {
+        if (this.isRunning || this._liveViewActive) return Promise.resolve();
+        return this._stopListening();
+    }
+
+    _stopListening() {
+        if (!this.isListening) return this._listenStopPromise || Promise.resolve();
+        this.isListening = false;
+        // Ends the run: any transcription still in flight resolves into a loop
+        // that no longer owns the microphone and must not touch anything.
+        this._generation++;
+        if (this._cancelSleep) { this._cancelSleep(); this._cancelSleep = null; }
+        this._stopTimer();
+        this.scorePosition = null;
+        this._liveMatches = [];
+        this.liveDetections = [];
+        this._liveHeardTuneId = null;
+        this._listenStopPromise = (async () => {
+            try {
+                await micService.stopContinuous();
+            } finally {
+                this._listenStopPromise = null;
+                eventBus.$emit('liveListeningStopped');
+            }
+        })();
+        return this._listenStopPromise;
+    }
+
+    // The live view (follow score) opening or closing. It only ever LISTENS:
+    // it never creates, resumes or pauses a session. Throws when the
+    // microphone will not open, so the view can say why instead of opening.
+    //
+    // `windowSeconds`/`stepSeconds` apply only when nothing is listening yet;
+    // a listener already running keeps the options it is analysing with.
+    async setLiveViewActive(active, { windowSeconds, stepSeconds } = {}) {
+        if (!active) {
+            this._liveViewActive = false;
+            await this._maybeStopListening();
+            return;
+        }
+        this._liveViewActive = true;
+        const options = this.isListening && this.options
+            ? this.options
+            : (windowSeconds || stepSeconds
+                ? defaultLiveOptions(windowSeconds || 10, stepSeconds || 5)
+                : (this.options || defaultLiveOptions()));
+        try {
+            await this._ensureListening(options);
+        } catch (e) {
+            this._liveViewActive = false;
+            throw e;
+        }
+        if (!this.options) this.options = options;
     }
 
     // Releases the microphone and keeps the session open. Resuming is just
@@ -310,7 +446,7 @@ class LiveAnalysisService {
     async _finishSession() {
         if (!this.sessionId) return { ok: true };
         await this.stop();
-        this._generation++;
+        this._captureGeneration++;
 
         // Nothing is playing any more, so a short last tune is a fluke like
         // any other and does not belong in the saved session.
@@ -344,7 +480,7 @@ class LiveAnalysisService {
         // abandoned for any other reason keeps whatever it recorded.
         await sessionRecorder.end()
             .catch(e => console.warn('Could not close session recording:', e && e.message));
-        this._generation++;
+        this._captureGeneration++;
         this._cancelCheckpoint();
         await this._clearResumeState();
         this._resetSessionState();
@@ -378,21 +514,14 @@ class LiveAnalysisService {
     }
 
     async clearTunes() {
-        this._generation++;
+        // The transcription in flight must not repopulate the cleared list.
+        // The loop itself carries on: the live view may be using it.
+        this._captureGeneration++;
         this._windowMatches = [];
-        this.scorePosition = null;
         this.detections = [];
         this._lastSavedTuneId = null;
         this._lastSightingTuneId = null;
         this._rejectedTunes.clear();
-        // The old transcription must not repopulate the cleared list.
-        if (this._cancelSleep) this._cancelSleep();
-        if (this.isRunning) {
-            const generation = this._generation;
-            this._runLoop(this.options, false, generation).catch(() => {
-                if (generation === this._generation) this.stop();
-            });
-        }
         eventBus.$emit('liveAnalysisUpdate', this.detections);
         return this._persistSession();
     }
@@ -420,7 +549,7 @@ class LiveAnalysisService {
     // and wrong here — during a backoff window the button would do nothing at
     // all, which reads as broken.
     async retryMicrophone() {
-        if (!this.isRunning) return false;
+        if (!this.isListening) return false;
         const healthy = await micService.ensureMicHealthy({ force: true });
         this.micHealthy = healthy;
         eventBus.$emit('liveAnalysisMicState', { healthy });
@@ -498,7 +627,7 @@ class LiveAnalysisService {
     rejectTune(tuneId) {
         if (tuneId == null) return;
         const key = String(tuneId);
-        this._rejectedTunes.set(key, this.elapsedSeconds);
+        this._rejectedTunes.set(key, this._nowMs());
         // The user is saying the NAME was wrong, not that the music stopped:
         // the room is still playing whatever made them press record. Unbind
         // the capture so it adopts the next tune recognised, with a fresh
@@ -514,6 +643,18 @@ class LiveAnalysisService {
         // but if anything is left the overlay would sit on the same wrong tune
         // and the button would look broken. Anything with a different tune
         // after it stays: an earlier hearing is a separate claim.
+        // The live view's own list, always: that is what it is showing.
+        this._rejectFromLiveList(key);
+
+        // The session's list only while it is capturing (or, with nothing
+        // listening, for a caller editing the session directly). Rejecting in
+        // a live view while the capture is paused must not edit a session
+        // that was not listening — its last tune may be a correct hearing.
+        if (this.isListening && !this.isRunning) {
+            eventBus.$emit('liveViewUpdate', this.liveDetections);
+            return;
+        }
+
         let removedAny = false;
         while (this.detections.length) {
             const tail = this.detections[this.detections.length - 1];
@@ -530,6 +671,29 @@ class LiveAnalysisService {
         // the suppression above is still wanted, so tell the view either way.
         if (!removedAny) eventBus.$emit('liveAnalysisUpdate', this.detections);
         else this._scheduleCheckpoint();
+        eventBus.$emit('liveViewUpdate', this.liveDetections);
+    }
+
+    // rejectTune's loop, over the live view's list: every trailing cluster of
+    // the tune goes, an earlier hearing with another tune after it stays.
+    _rejectFromLiveList(key) {
+        const epsilon = 1e-6;
+        while (this.liveDetections.length) {
+            const tail = this.liveDetections[this.liveDetections.length - 1];
+            if (String(tail.tuneId) !== key) break;
+            const before = this._liveMatches.length;
+            this._liveMatches = this._liveMatches.filter(match => !(
+                match.tuneId === tail.tuneId &&
+                match.startSeconds >= tail.startSeconds - epsilon &&
+                match.startSeconds <= tail.endSeconds + epsilon
+            ));
+            this._reclusterLive();
+            if (this._liveMatches.length === before) break;
+        }
+    }
+
+    _nowMs() {
+        return Date.now();
     }
 
     // Results for tunes the user has rejected, while the rejection still holds.
@@ -544,7 +708,7 @@ class LiveAnalysisService {
             if (tuneId == null) return true;
             const rejectedAt = this._rejectedTunes.get(String(tuneId));
             if (rejectedAt == null) return true;
-            if (this.elapsedSeconds - rejectedAt >= REJECT_COOLDOWN_SECONDS) {
+            if (this._nowMs() - rejectedAt >= REJECT_COOLDOWN_SECONDS * 1000) {
                 this._rejectedTunes.delete(String(tuneId));
                 return true;
             }
@@ -568,12 +732,31 @@ class LiveAnalysisService {
         this._heardTuneId = heardTuneId;
     }
 
+    // The live view's list: the same pipeline over what the listener heard,
+    // never final — the last entry is always the tune being played now.
+    _reclusterLive() {
+        const confirm = this._liveStepSeconds === null || !this.options
+            ? 0
+            : confirmSpanSeconds(this.options.stepSeconds, this._liveStepSeconds);
+        const { detections, heardTuneId } = buildLiveDetections(this._liveMatches, this.options, {
+            final: false,
+            confirmSpanSeconds: confirm,
+        });
+        this.liveDetections = detections;
+        this._liveHeardTuneId = heardTuneId;
+    }
+
     // The tune each new window is biased toward (previousTuneBiasDelta): what
     // was HEARD, not what is on screen. While a new tune is held back for
     // confirmation the screen still shows the old one, and biasing toward it
     // promoted the old tune again, so the new one was never released
     // (buildLiveDetections).
     _biasTargetTuneId() {
+        // Same rule as rejectTune: the session's list unless only the live
+        // view is listening, in which case it is the only list being fed.
+        if (this.isListening && !this.isRunning) {
+            return this._liveMatches.length > 0 ? this._liveHeardTuneId : null;
+        }
         return this._windowMatches.length > 0 ? this._heardTuneId : null;
     }
 
@@ -595,12 +778,15 @@ class LiveAnalysisService {
     // CLOCK as much as with the matches (the whole point is that it goes red
     // while nothing at all is happening), so there is no event to hang it on
     // and every reader already ticks once a second.
+    //
+    // It is about the ROOM, so it reads the listener — the live view's list
+    // and clock — which is fed whenever anything is listening, capture or not.
     detectionFreshness() {
-        const match = this.lastWindowMatch();
+        const match = this._liveMatches.length ? this._liveMatches[this._liveMatches.length - 1] : null;
         return detectionFreshness({
-            listening: this.isRunning,
+            listening: this.isListening,
             micHealthy: this.micHealthy,
-            elapsedSeconds: this.elapsedSeconds,
+            elapsedSeconds: this.listenSeconds,
             lastMatchSeconds: match ? match.startSeconds : null,
             lastMatchScore: match ? match.score : null,
             options: this.options,
@@ -614,19 +800,17 @@ class LiveAnalysisService {
         if (!this.isRunning) return this._stopPromise || Promise.resolve();
         this.isRunning = false;
         this.isPaused = false;
-        this._stopTimer();
         this._cancelCheckpoint();
-        this.scorePosition = null;
         // A Pause ends a capture. Resuming must never silently start recording
         // again on the strength of a tap made before the break: the tune it was
         // for is over, and whatever is played after the break is the user's to
         // decide about. The recorder itself is paused below as usual and is
         // closed by the reconcile that Resume runs.
         if (this.tuneCapture) this._clearTuneCapture('paused');
-        // Ends the run: any transcription still in flight resolves into a loop
-        // that no longer owns the microphone and must not touch anything.
-        this._generation++;
-        if (this._cancelSleep) { this._cancelSleep(); this._cancelSleep = null; }
+        // Any transcription still in flight belongs to the capture that has
+        // just ended. The loop may carry on for the live view; this is what
+        // keeps its next result out of the session.
+        this._captureGeneration++;
         this._stopPromise = (async () => {
             try {
                 // Before the microphone, because the recorder's final chunk —
@@ -638,11 +822,12 @@ class LiveAnalysisService {
                     await sessionRecorder.stop()
                         .catch(e => console.warn('Could not stop session recording:', e && e.message));
                 }
-                // The microphone is released FIRST. Pause is a direct response
-                // to a tap — often "stop listening to me" — and making it wait
-                // on a storage write means slow or failing storage holds the
-                // microphone open for as long as it takes.
-                await micService.stopContinuous();
+                // The microphone is released FIRST — unless the live view is
+                // still using it. Pause is a direct response to a tap — often
+                // "stop listening to me" — and making it wait on a storage
+                // write means slow or failing storage holds the microphone
+                // open for as long as it takes.
+                await this._maybeStopListening();
                 // Flushes the tail tune's up-to-date endSeconds —
                 // _maybeSaveSessionSnapshot() only saves on a tune CHANGE, so
                 // without this the last tune's duration in IndexedDB could be
@@ -668,8 +853,13 @@ class LiveAnalysisService {
     _startTimer() {
         if (this._timerInterval) return;
         this._timerInterval = setInterval(() => {
-            this.elapsedSeconds++;
-            eventBus.$emit('liveAnalysisTimerTick', this.elapsedSeconds);
+            // The listener's clock always; the session's only while capturing.
+            this.listenSeconds++;
+            eventBus.$emit('liveListenTick', this.listenSeconds);
+            if (this.isRunning) {
+                this.elapsedSeconds++;
+                eventBus.$emit('liveAnalysisTimerTick', this.elapsedSeconds);
+            }
         }, 1000);
     }
 
@@ -698,7 +888,7 @@ class LiveAnalysisService {
         let latencyMs = null;
         this._liveStepSeconds = null;
 
-        while (this.isRunning && !this.isPaused && current()) {
+        while (this.isListening && current()) {
             const cycleStart = Date.now();
             // Capture can die under us mid-session: the AudioContext suspends
             // (backgrounded tab, or a browser power-saving heuristic), or the
@@ -724,8 +914,12 @@ class LiveAnalysisService {
             // not delay detection.
             // Before the recorder sync, so a capture that has just ended is
             // stopped by that same reconcile.
-            this._checkTuneCapture();
-            if (healthy) this._syncRecorderToSetting();
+            // Capture only: with the session paused nothing is recorded, and
+            // a reconcile here would restart the recorder behind the Pause.
+            if (this.isRunning) {
+                this._checkTuneCapture();
+                if (healthy) this._syncRecorderToSetting();
+            }
 
             // A capture that could not be reacquired leaves the ring buffer
             // frozen on the last seconds it managed to record. Analysing those
@@ -742,6 +936,9 @@ class LiveAnalysisService {
             // Same moment, on the wall clock: the follow view projects the
             // position forward from where this window ENDED.
             const readAt = Date.now();
+            // Whether THIS window belongs to the session: decided when its
+            // audio was read, and re-checked when its result lands.
+            const captureGeneration = this.isRunning ? this._captureGeneration : null;
 
             if (pcm.length > 0) {
                 const sampleRate = micService.sampleRate || this._sampleRate;
@@ -794,7 +991,7 @@ class LiveAnalysisService {
                     this._publishScorePosition(response.contour, readAt, pcm.length / sampleRate);
                 }
 
-                if (this.isRunning && !this.isPaused && !response.error && usableResults.length > 0) {
+                if (this.isListening && !response.error && usableResults.length > 0) {
                     const previousTuneId = this._biasTargetTuneId();
                     const biasedResults = biasResultsTowardPrevious(
                         usableResults,
@@ -803,13 +1000,7 @@ class LiveAnalysisService {
                     );
                     const normalized = normaliseQueryResults(biasedResults, options);
                     if (normalized) {
-                        this._windowMatches.push({
-                            startSeconds: this.elapsedSeconds,
-                            // Where this window sits in the recording, or null
-                            // when nothing is being recorded. From the
-                            // recorder's own clock, never derived from
-                            // elapsedSeconds — see sessionRecorder.
-                            audioSeconds,
+                        const heard = {
                             // Wall clock, for the gaps between sets: see
                             // startedAtMs in sessionAnalysis.js.
                             atMs: readAt,
@@ -820,21 +1011,45 @@ class LiveAnalysisService {
                             displayName: normalized.displayName,
                             score: normalized.score,
                             alternatives: normalized.alternatives,
-                        });
-                        this._recluster();
-                        this._recordSighting();
-                        this._maybeSaveSessionSnapshot();
-                        // Even when the tail tune has not changed, the tune's
-                        // duration, the elapsed time and the resume state have
-                        // — so a tune played for twenty minutes would
-                        // otherwise store nothing after its first cycle.
-                        this._scheduleCheckpoint();
-                        eventBus.$emit('liveAnalysisUpdate', this.detections);
+                        };
+
+                        // The live view's list hears everything.
+                        this._liveMatches.push({ ...heard, startSeconds: this.listenSeconds, audioSeconds: null });
+                        const horizon = this.listenSeconds - LIVE_HISTORY_SECONDS;
+                        if (this._liveMatches[0].startSeconds < horizon) {
+                            this._liveMatches = this._liveMatches.filter(m => m.startSeconds >= horizon);
+                        }
+                        this._reclusterLive();
+
+                        // The session only what was heard while it captured.
+                        if (captureGeneration !== null && this.isRunning &&
+                            captureGeneration === this._captureGeneration) {
+                            this._windowMatches.push({
+                                ...heard,
+                                startSeconds: this.elapsedSeconds,
+                                // Where this window sits in the recording, or
+                                // null when nothing is being recorded. From the
+                                // recorder's own clock, never derived from
+                                // elapsedSeconds — see sessionRecorder.
+                                audioSeconds,
+                            });
+                            this._recluster();
+                            this._recordSighting();
+                            this._maybeSaveSessionSnapshot();
+                            // Even when the tail tune has not changed, the
+                            // tune's duration, the elapsed time and the resume
+                            // state have — so a tune played for twenty minutes
+                            // would otherwise store nothing after its first
+                            // cycle.
+                            this._scheduleCheckpoint();
+                            eventBus.$emit('liveAnalysisUpdate', this.detections);
+                        }
+                        eventBus.$emit('liveViewUpdate', this.liveDetections);
                     }
                 }
             }
 
-            if (!this.isRunning || this.isPaused || !current()) break;
+            if (!this.isListening || !current()) break;
             // Subtract the time already spent analysing so the effective step
             // stays close to its target regardless of backend latency. The
             // target is the configured step on a slow device and shorter on a
@@ -1075,6 +1290,10 @@ class LiveAnalysisService {
                 .catch(e => console.warn('Could not stop session recording:', e && e.message));
             return;
         }
+
+        // Never START recording behind a paused capture: the microphone may be
+        // open for the live view alone, and the session is not listening.
+        if (!this.isRunning) return;
 
         if (sessionRecorder.isActive && !resuming) {
             sessionRecorder.ensureRecording();
