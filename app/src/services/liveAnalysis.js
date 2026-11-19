@@ -51,6 +51,15 @@ const CHECKPOINT_MAX_WAIT_MS = 60_000;
 // not cover coming back the following week, which is the case this app is for.
 const RESUME_WINDOW_MS = 6 * 60 * 60 * 1000;
 
+// How recently a session must have been CAPTURING for the app to pick it back
+// up by itself after a reload. iOS discards a sleeping web app, so a phone
+// left locked mid-session comes back as a fresh page; within this window that
+// is the same evening carrying on, and making the user find Session Tools and
+// tap Resume loses every tune played until they notice. Beyond it, a session
+// coming back on its own would be a surprise, so it stays paused. Checkpoints
+// land at least every CHECKPOINT_MAX_WAIT_MS, so lastActiveAt is fresh.
+const AUTO_RESUME_WINDOW_MS = 30 * 60 * 1000;
+
 // How much the live view's own tune list remembers. It is a display, not a
 // log: it only has to cover the tune being played and a little before it, and
 // pruning keeps re-clustering cheap through an evening of listening.
@@ -101,6 +110,10 @@ class LiveAnalysisService {
         // session) must not reach the session — the loop itself keeps running
         // for the live view, so the loop generation cannot be what decides.
         this._captureGeneration = 0;
+        // Set by a restore: whether the page died while this session was
+        // capturing (see restoreOnLaunch). Only ever read straight after one.
+        this._diedCapturing = false;
+        this._restorePromise = null;
         this.isPaused = false;
         this.detections = [];   // raw clustered detections from clusterDetections()
         this.elapsedSeconds = 0;
@@ -505,6 +518,7 @@ class LiveAnalysisService {
         this.tuneCapture = null;
         this.saveState = 'idle';
         this.saveError = null;
+        this._diedCapturing = false;
     }
 
     async rename(name) {
@@ -1526,6 +1540,11 @@ class LiveAnalysisService {
             lastSavedTuneId: this._lastSavedTuneId,
             lastActiveAt: this._lastActiveAt,
             fix: this._sessionFix,
+            // Whether the capture was RUNNING when this was written, i.e.
+            // whether a page that dies now died mid-capture. A Pause writes
+            // false (stop() flushes after clearing isRunning), which is what
+            // keeps a session the user paused from coming back on its own.
+            capturing: this.isRunning,
         });
     }
 
@@ -1537,8 +1556,20 @@ class LiveAnalysisService {
     // Restores an unfinished session left behind by a reload, WITHOUT opening
     // the microphone. The user is offered Resume and Finish; listening again
     // is always a deliberate act, never something a page load does on its own.
-    async restoreOpenSession() {
-        if (this.sessionId) return !!this.sessionId;
+    //
+    // Single-flight: App.vue restores at launch and Session Tools does too on
+    // its first load, often in the same tick. Two overlapping restores would
+    // both assign the saved state, and the later one could land after the
+    // first had already resumed — rewinding a running capture.
+    restoreOpenSession() {
+        if (this.sessionId) return Promise.resolve(true);
+        if (this._restorePromise) return this._restorePromise;
+        this._restorePromise = this._restoreOpenSession()
+            .finally(() => { this._restorePromise = null; });
+        return this._restorePromise;
+    }
+
+    async _restoreOpenSession() {
         const saved = await store.getOpenLiveSession();
         if (!saved || !saved.sessionId) return false;
 
@@ -1575,6 +1606,7 @@ class LiveAnalysisService {
         this._hasPersisted = true;
         this.isRunning = false;
         this.isPaused = true;
+        this._diedCapturing = saved.capturing === true;
 
         // Re-cluster from the matches where possible so a resumed session
         // keeps appending to the same rows. With no options (a session saved
@@ -1595,6 +1627,48 @@ class LiveAnalysisService {
 
         eventBus.$emit('liveAnalysisRestored', this.detections);
         return true;
+    }
+
+    // App launch. Brings an unfinished session back so the session bar shows
+    // it on every page, and — only when the app died MID-CAPTURE, recently —
+    // resumes it, because that is a phone that went to sleep during a session
+    // and was discarded by iOS, not a user who stopped.
+    //
+    // Returns { restored, resumed, error }. Never throws: a failed restore or
+    // a refused microphone leaves the session paused, which the bar offers
+    // to resume with one tap.
+    //
+    // `indexReady` resolves true once the tune index can answer queries;
+    // resuming against an index that never loads would capture nothing the
+    // user can see, so it stays paused instead.
+    async restoreOnLaunch({ indexReady = null } = {}) {
+        let restored = false;
+        try {
+            restored = await this.restoreOpenSession();
+        } catch (e) {
+            console.warn('Could not check for an unfinished session:', e && e.message);
+            return { restored: false, resumed: false, error: (e && e.message) || String(e) };
+        }
+        if (!restored || this.isRunning) return { restored, resumed: false };
+        if (!this._diedCapturing || !this.canResume()) return { restored, resumed: false };
+        if (Date.now() - (this._lastActiveAt || 0) > AUTO_RESUME_WINDOW_MS) {
+            return { restored, resumed: false };
+        }
+
+        const sessionId = this.sessionId;
+        if (indexReady && !(await indexReady())) return { restored, resumed: false };
+        // The user may have closed, deleted or resumed it while we waited.
+        if (this.sessionId !== sessionId || this.isRunning) return { restored, resumed: false };
+
+        try {
+            await this.start(this.options.windowSeconds, this.options.stepSeconds);
+        } catch (e) {
+            // On iOS a microphone may not open without a tap. The session is
+            // kept, paused, exactly as a manual Resume failure leaves it.
+            return { restored, resumed: false, error: (e && e.message) || String(e) };
+        }
+        eventBus.$emit('liveAnalysisAutoResumed', { sessionId });
+        return { restored, resumed: true };
     }
 
     // Whether the open session is recent enough that continuing it is what the
