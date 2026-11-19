@@ -166,7 +166,6 @@ export class FolkFriendWASM {
         __wasm.loaded = indexData;
     }
     set_sample_rate() { return true; }
-    set_use_ml() {}
     async run_name_query() {
         return JSON.stringify(Object.keys((__wasm.loaded || {}).aliases || {})
             .slice(0, 3).map(id => ({ tune_id: id })));

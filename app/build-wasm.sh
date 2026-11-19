@@ -4,8 +4,8 @@
 # Runs automatically before `npm run build` via the "prebuild" script, so the
 # bundled/deployed WASM is never stale relative to the Rust source. This matters
 # because app/src/wasm/ is gitignored — the compiled artifact is otherwise only
-# updated by hand and is very easy to forget (which shipped an old, weaker ML
-# transcriber to the field once).
+# updated by hand and is very easy to forget (which once shipped an old build
+# of the transcriber to the field).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

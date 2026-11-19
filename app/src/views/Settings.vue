@@ -46,15 +46,6 @@
                     @change="settingsChanged"
                 />
             </v-row>
-            <v-row>
-                <v-switch
-                    v-model="userSettings.useMlTranscriber"
-                    inset
-                    label="Experimental: ML transcription (better for polyphonic/percussive audio, e.g. banjo sessions)"
-                    class="my-0 pl-2"
-                    @change="onMlTranscriberChanged"
-                />
-            </v-row>
             <v-row
                 align="center"
                 class="pl-2 pr-4 mt-2"
@@ -1697,13 +1688,6 @@ export default {
             store.resetAiUsage();
             this.aiUsage = store.getAiUsage();
             this.aiMessage = 'Usage counters reset.';
-        },
-        onMlTranscriberChanged() {
-            store.updateUserSettings(this.userSettings);
-            // Push to the worker/WASM now (and pre-build the model) so the next
-            // recording uses the selected transcriber.
-            ffBackend.setUseMlTranscriber(this.userSettings.useMlTranscriber)
-                .catch(e => console.warn('Could not switch transcriber', e));
         },
         onRecordingLimitChanged() {
             const v = Math.round(this.userSettings.recordingTimeLimitSecs);

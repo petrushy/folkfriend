@@ -25,6 +25,15 @@ function canonicalRecord(value) {
     return JSON.stringify(value);
 }
 
+// Settings that no longer exist. Dropped from saved settings on load and from
+// imported backups, so a removed feature leaves nothing behind in localStorage
+// or in the next exported backup. `useMlTranscriber`: the ML transcriber,
+// removed in 1.6.0.
+const RETIRED_USER_SETTINGS = ['useMlTranscriber'];
+function dropRetiredSettings(userSettings) {
+    for (const key of RETIRED_USER_SETTINGS) delete userSettings[key];
+}
+
 // TODO load from local storage or similar
 const USER_SETTING_DEFAULTS = {
     advancedMode: false,
@@ -32,7 +41,6 @@ const USER_SETTING_DEFAULTS = {
     showAbcText: false,
     microphoneChoice: null,
     recordingTimeLimitSecs: 10,
-    useMlTranscriber: false, // opt-in experimental basic-pitch ML transcription
     autoGainControl: false, // let the OS auto-boost quiet mic input at capture
     autoUpdateTuneData: true, // check for a newer tune index on startup
     aiSummariesEnabled: false, // show the (i) tune-background button; needs an API key
@@ -296,6 +304,7 @@ class Store {
             ...USER_SETTING_DEFAULTS,
             ...(storedSettings || {}),
         };
+        dropRetiredSettings(this.userSettings);
         this.userSettings.tuneDatasets = sanitiseDatasets(
             _datasetsFor(storedSettings, this.userSettings.tuneDatasets));
         // A retired model ID becomes its replacement, so Settings shows what is
@@ -357,6 +366,7 @@ class Store {
         for (const [key, value] of Object.entries(USER_SETTING_DEFAULTS)) {
             if (userSettings[key] === undefined) userSettings[key] = value;
         }
+        dropRetiredSettings(userSettings);
         userSettings.tuneDatasets = sanitiseDatasets(
             incomingDatasets === undefined ? userSettings.tuneDatasets : incomingDatasets);
         userSettings.aiSummaryModel = resolveAiModel(userSettings.aiSummaryModel);

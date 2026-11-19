@@ -1,14 +1,17 @@
-// Reproduce the APP's WASM ML path in Node: same calls the worker makes
-// (set_use_ml, set_sample_rate, feed_single_pcm_window per 1024, transcribe,
-// run_transcription_query) on a saved clip. Tells us if the WASM path itself
+// Reproduce the APP's WASM path in Node: same calls the worker makes
+// (set_sample_rate, feed_single_pcm_window per 1024, transcribe,
+// run_transcription_query) on a saved clip.
+//
+//   cd rust && wasm-pack build --target nodejs --out-dir pkg-node
+//   node rust/test_wasm_path.js <clip.wav> <expected tune id> Tells us if the WASM path itself
 // finds the tune — isolating wasm/wiring bugs from mic-capture bugs.
 const fs = require('fs');
 const path = require('path');
 const wasm = require('./pkg-node/folkfriend.js');
 
 const INDEX = path.join(__dirname, '../app/public/res/folkfriend-non-user-data.json');
-const WAV = process.argv[2] || path.join(__dirname, 'wavs/Brännvinslåt_terrible_quality.wav');
-const EXPECT = process.argv[3] || '1525005401';
+const WAV = process.argv[2] || path.join(__dirname, 'wavs/the_musical_priest.wav');
+const EXPECT = process.argv[3] || '73';
 
 function readWavMonoF32(file) {
     const buf = fs.readFileSync(file);
@@ -43,7 +46,6 @@ ff.load_index_from_json_obj(raw);
 const { pcm, rate, channels } = readWavMonoF32(WAV);
 console.log(`wav: rate=${rate} channels=${channels} samples=${pcm.length} (~${(pcm.length / rate).toFixed(1)}s)`);
 
-ff.set_use_ml(true);
 ff.set_sample_rate(rate);
 
 // Feed exactly like the worker: 1024-sample windows via the reusable buffer,
@@ -58,7 +60,7 @@ for (let i = 0; i < nWin; i++) {
 }
 
 const contour = ff.transcribe_pcm_buffer();
-console.log(`\nML contour (len ${contour.length}): ${contour}`);
+console.log(`\ncontour (len ${contour.length}): ${contour}`);
 
 const results = JSON.parse(ff.run_transcription_query(contour));
 console.log('\nTop 5 results:');

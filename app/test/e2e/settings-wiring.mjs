@@ -99,7 +99,7 @@ try {
         };
         const vm = find(root);
         if (!vm) return { error: 'SettingsView not mounted' };
-        const names = ['signIn','signOut','settingsChanged','onMlTranscriberChanged',
+        const names = ['signIn','signOut','settingsChanged',
                        'onRecordingLimitChanged','saveOfflineCopy','downloadUserData',
                        'restoreUserData','importFromTheSession','onApiKeyChanged',
                        'confirmClearAiSummaries','clearAiSummaries','resetAiUsage',

@@ -284,6 +284,25 @@ await test('an explicit selection always wins, in both directions', async () => 
         'an explicit empty selection is an honest answer and is honoured');
 });
 
+await test('a retired setting is dropped on load, on save and from a restored backup', async () => {
+    // useMlTranscriber went with the ML transcriber in 1.6.0. An install that
+    // had it saved must not carry it into localStorage or the next backup.
+    const { store } = await loadStore({ storedSettings: { useMlTranscriber: true, advancedMode: true } });
+    assert.equal('useMlTranscriber' in store.userSettings, false);
+    assert.equal(store.userSettings.advancedMode, true, 'the rest of the stored settings survive');
+    await store.updateUserSettings(store.userSettings);
+    assert.equal('useMlTranscriber' in JSON.parse(globalThis.localStorage.getItem('userSettings')), false);
+
+    await store.importUserData(JSON.stringify({
+        version: 1,
+        userSettings: { useMlTranscriber: true, advancedMode: false },
+        favouriteItems: [],
+        historyItems: [],
+    }));
+    assert.equal('useMlTranscriber' in store.userSettings, false);
+    assert.equal(store.userSettings.advancedMode, false);
+});
+
 await test('turning folkwiki back on sticks across a reload', async () => {
     const { store } = await loadStore();
     store.userSettings.tuneDatasets = ['thesession', 'folkwiki'];

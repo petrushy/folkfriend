@@ -43,10 +43,11 @@ module.exports = {
             // WITHOUT THIS THE APP DOES NOT WORK OFFLINE AT ALL.
             //
             // Workbox precaches nothing larger than 2 MiB by default, and the
-            // WASM module is ~14 MB (tract, the ONNX runtime for the ML
-            // transcriber, dominates it). So the single executable the whole
-            // app runs on was being dropped from the precache manifest, with
-            // only a build-log line to say so:
+            // WASM module was ~14 MB while it carried the ML transcriber (tract,
+            // its ONNX runtime, was nearly all of it; removed in 1.6.0, the
+            // module is now ~0.45 MB). So the single executable the whole app
+            // runs on was being dropped from the precache manifest, with only a
+            // build-log line to say so:
             //
             //   /<hash>.module.wasm is 13.9 MB, and won't be precached.
             //
@@ -59,7 +60,10 @@ module.exports = {
             // read. Exactly the failure the offline work exists to prevent,
             // hiding behind the layer below it.
             //
-            // 20 MB leaves headroom for the WASM to grow.
+            // The limit stays at 20 MB although nothing precached is near 2 MiB
+            // any more: it costs nothing, and an asset that grows past the
+            // default would otherwise vanish from the precache as silently as
+            // the WASM did. CI asserts the WASM is in the manifest either way.
             //
             // It used to double as the guard keeping the tune index out of the
             // precache, on the reasoning "20 MB is well below the 42 MB

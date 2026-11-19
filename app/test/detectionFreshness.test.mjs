@@ -5,9 +5,9 @@
 // The property worth pinning is not "it returns a colour" — it is WHICH of the
 // two inputs is allowed to make it red. Age must, because that is the question
 // the user asked for ("when chitchatting for a while it should go red, the
-// tune is likely ended"); the score must not, because scores are not
-// comparable across transcribers and a score-driven red would be permanently
-// on under the ML one while meaning nothing about the room.
+// tune is likely ended"); the score must not, because a low score says the
+// match is uncertain, not that the room has stopped playing — and the score
+// scale moves whenever detection is retuned.
 //
 // The other half is that the red is a claim about the ROOM, so a session that
 // is not listening at all must not make it.
@@ -102,9 +102,8 @@ test('a weak but recent match is amber, not green', () => {
 });
 
 test('a very weak match is still only amber, however bad the score', () => {
-    // ML-transcribed scores run systematically lower than DSP ones. A
-    // score-driven red would be permanently on for those users while saying
-    // nothing at all about whether the tune is still being played.
+    // A weak match is uncertainty about WHICH tune, not evidence that the
+    // tune has ended. A score-driven red would say the latter.
     assert.equal(afterSilence(2, 0.01).level, 'amber');
 });
 

@@ -36,8 +36,8 @@ node test/e2e/settings-wiring.mjs
 Guards a failure mode Vue 2 makes easy and silent: a template that names a
 handler which no longer exists. Nothing throws — the click is simply dropped,
 which looks identical to a broken feature. (This is exactly how a refactor of
-the Tune Data card removed `signIn`, `settingsChanged`, `onMlTranscriberChanged`
-and `onRecordingLimitChanged`, and Google sign-in stopped responding.)
+the Tune Data card removed `signIn`, `settingsChanged`, `onRecordingLimitChanged`
+and another handler, and Google sign-in stopped responding.)
 
 Asserts every handler named in the template resolves on the component, that
 clicking "Sign in with Google" really enters `signIn()` (observing `signingIn`

@@ -11,10 +11,9 @@
 // guessing; no match for two minutes means the tune ended, whatever score the
 // last one had. So age decides the level and the score can only hold it back
 // from green — it can never, on its own, turn the light red. That asymmetry is
-// deliberate: ML-transcribed scores run systematically lower than DSP ones
-// (see the transcriber notes in CLAUDE.md), so a score-driven red would be
-// permanently on for anyone using the experimental transcriber, while the
-// age-driven one means the same thing under both.
+// deliberate: a low score says the match is uncertain, not that the music
+// stopped, and scores shift whenever the transcriber or the search scoring is
+// retuned (1.5.0 moved them down), while age means the same thing throughout.
 //
 // Pure: no Vue, no service, no clock of its own. The caller passes the
 // session's own elapsed seconds, which is listening time — it stops while

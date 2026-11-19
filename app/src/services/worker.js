@@ -1523,14 +1523,6 @@ class FolkFriendWASMWrapper {
         this.autoUpdateEnabled = !!enabled;
     }
 
-    async setUseMlTranscriber(useMl) {
-        // Opt-in basic-pitch ML transcriber (default off = DSP path). The WASM
-        // side lazily builds the model on first enable and falls back to DSP if
-        // it can't. Safe to call repeatedly.
-        await this.loadedWASM;
-        this.folkfriendWASM.set_use_ml(!!useMl);
-    }
-
     async feedEntirePCMSignal(PCMSignal) {
         const windowSize = ffConfig.SPEC_WINDOW_SIZE;
         const frames = Math.floor(PCMSignal.length / windowSize);

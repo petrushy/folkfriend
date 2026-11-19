@@ -1,5 +1,12 @@
 # Tune Detection v2.0 — Progress Log
 
+> **Retired (November 2026, 1.6.0): the ML transcriber described here has been
+> removed from the app.** On real session recordings it found the right tune
+> first in 66.6 % of windows against 95.5 % for DSP, and it was ~96 % of the
+> WASM download. This log is kept as the record of what was tried; the code is
+> at the git tag `last-with-ml`. See "The ML transcriber — removed in 1.6.0" in
+> CLAUDE.md.
+
 Living scratchpad so work can resume after an interruption. Newest findings at
 the top of each section. Full design: `~/.claude/plans/how-can-tune-detection-whimsical-cascade.md`.
 

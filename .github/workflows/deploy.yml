@@ -40,8 +40,7 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      # Caches ~/.cargo and rust/target. Without this every run recompiles
-      # tract + the ONNX stack, which dominates the build.
+      # Caches ~/.cargo and rust/target, so a run only recompiles what changed.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: rust
