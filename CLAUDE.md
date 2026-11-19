@@ -1781,6 +1781,66 @@ maintainer playing alone and are fine to keep. If CI ever runs private
 audio, it must come from private storage via a read-only secret, and skip
 on fork PRs, which get no secrets.
 
+#### Single-tune clips: Swedish folk music (November 2026)
+
+There are no tagged Swedish sessions, so the first measurement of Swedish
+music is a folder of 50 single-tune recordings: course "melodi" clips and
+older learning recordings, mostly solo fiddle, named after the tune and kept
+private like the sessions.
+
+**To benchmark clips: `scripts/bench_tune_clips.sh <folder> [dataset ...]`.**
+The folder holds the recordings plus a `tunes.json` naming each one's tune ids
+(format in `app/test/bench/scoreTuneClips.mjs`). Each id says how it was
+established: `name`, `other-name` (the search's pick, identified as the same
+tune by composer, origin or contour), or `absent`/`harmony`, which measure
+false positives. Every clip is a fresh session scored by the live rules
+(`scoreTaggedSession.mjs --json`). The datasets default to all four the data
+repo builds, so a run can be repeated with only the ones the app offers. One
+minute the first time, 20 s after that.
+
+**Use the saved list, not "shown most", for single clips.** Once anything is on
+screen it stays there, and a fresh session has no previous tune to fall back
+on. One strong early window can therefore "show" a tune for a whole clip that
+never matches again: Gås-Anders reads 96 % right on screen with an empty
+saved list. In a session that stickiness is the point; here it inflates.
+
+| datasets searched | clips whose tune is in them | in the saved list |
+|---|---|---|
+| thesession (a fresh install's default) | 5 | 4 |
+| + folkwiki (everything published) | 23 | 19 |
+| + spillefolk | 27 | 23 |
+| + norbeck (all four) | 29 | 24 |
+
+With all four: right tune first in 72 % of windows, top 5 in 79 %. The right
+tune is on screen 81 % of the time and the median time to show it is 12 s.
+The scores are lower than on Irish sessions: the right tune's median is 0.59,
+with p10 at 0.37, just under `minTopScore`.
+
+- **Key is not the problem.** The search compares absolute pitch, so the
+  obvious suspect for a miss was a tune played in another key than written.
+  Every window was searched again transposed ±1…±6 semitones: no clip is found
+  in any other key, and every hit is at the pitch played. A key-invariant
+  search would cost 13× and gain nothing on this corpus.
+- **The misses are name collisions.** Annell, Rörospols, Gås-Anders vals and
+  Schottis från Skillingmark match tunes of the right name that are evidently
+  other tunes (Annell's notebook has several pollonesser; there are six
+  rörospolsar). No window matches any of them. Ears are needed to say whether
+  the recorded tune is in a dataset at all.
+- **"Other name" is common, and the search is right about it.** Frigglåten is
+  Tuolpagorni (Ankarblom), and the halling by Magnus Samuelsson is "Bussen".
+  Griv Juga's polska is also spillefolk's "Orsa polska" and folkwiki's
+  "Enkelreprisen" (their contours align at 0.8–0.9). Four more were accepted
+  on origin and window share alone and are marked *probable* in `tunes.json`.
+- **False positives.** Of 21 clips whose tune is in no dataset, 29 % of
+  windows score ≥ 0.40, and 6 clips leave a wrong tune in the saved list (7 in
+  all). The best wrong score has a median of 0.33 and a p90 of 0.51.
+  Harmony parts (andra-/tredje-/fjärdestämma) claim 29–70 % of windows but
+  save nothing, since their matches scatter.
+
+⚠️ The ground truth is partly inferred: identity by name, composer and
+contour, not by listening. And the corpus is solo, clean audio, so it says
+nothing about a Swedish *session*.
+
 ### Played in sets with — set partners (November 2026)
 
 A **"Played in sets with"** chip on the Tune view, and a playlist icon in the

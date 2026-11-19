@@ -42,7 +42,10 @@ if (!windowsFile || !tagsFile) {
     console.error('usage: scoreTaggedSession.mjs windows.jsonl tags.(xsc|json) [--index thesession.json] [--quiet]');
     process.exit(2);
 }
-const quiet = argv.includes('--quiet');
+// --json: one machine-readable summary line instead of the report (what
+// scoreTuneClips.mjs aggregates, one clip at a time).
+const asJson = argv.includes('--json');
+const quiet = argv.includes('--quiet') || asJson;
 const indexFile = opt('--index') || path.join(here, '..', '..', 'public', 'res', 'thesession.json');
 
 const windows = readFileSync(windowsFile, 'utf8').trim().split('\n').map(l => JSON.parse(l));
@@ -226,6 +229,18 @@ if (!quiet) {
         console.log(`${mmss(tag.start).padStart(6)} | ${tag.name.slice(0, 31).padEnd(31)} | ${String(s.windows).padStart(7)} | ${pct(s.top1, s.windows).padStart(5)} | ${pct(s.top5, s.windows).padStart(5)} | ${ms(median(s.scores))} / ${ms(median(s.wrongScores))}           | ${(lat === null ? 'never' : `${lat.toFixed(0)} s`).padStart(6)}${(dlat === null ? '' : ` (${dlat.toFixed(0)})`).padStart(5)} | ${tag.tuneIds.size ? picked : 'NOT IN INDEX?'}`);
     }
     console.log('');
+}
+if (asJson) {
+    const shownIds = new Map();
+    for (const id of shown.values()) if (id !== null) shownIds.set(id, (shownIds.get(id) || 0) + 1);
+    console.log(JSON.stringify({
+        windows: scored, top1, top5, empty, seconds: total, right, wrong, stale, blank,
+        breakSeconds, breakShownNew,
+        latency: median(tags.filter(t => t.tuneIds.size).map(latency).filter(x => x !== null)),
+        finalIds, mostShown: [...shownIds.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null,
+        rightScores: tags.flatMap(t => perTag.get(t).scores), wrongScores: tags.flatMap(t => perTag.get(t).wrongScores),
+    }));
+    process.exit(0);
 }
 if (unresolved.length) console.log(`Names not found in the index (not scored): ${unresolved.map(t => t.name).join(', ')}`);
 const lats = tags.filter(t => t.tuneIds.size).map(latency);
