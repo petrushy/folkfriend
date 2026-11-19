@@ -4,8 +4,8 @@
 // phone is holding watchPosition() open with high accuracy — the navigation-app
 // pattern. A *single* fix, even a high-accuracy one, is a few seconds of radio
 // and is not measurable next to what this app already does during a session
-// (microphone open, AudioContext running, every window through DSP or a 14 MB
-// ONNX model). So: never watch, and take at most one fix per session.
+// (microphone open, AudioContext running, every window through the
+// transcriber). So: never watch, and take at most one fix per session.
 //
 // High accuracy is on deliberately, reversing the obvious instinct to save
 // power with a coarse fix. The feature is "which pub", and a network-derived

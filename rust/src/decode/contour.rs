@@ -4,19 +4,13 @@ use crate::feature::types::Features;
 use crate::ff_config;
 
 #[derive(Debug)]
-pub(crate) struct Note {
-    pub(crate) pitch: Pitch,
-    pub(crate) duration: usize,
+struct Note {
+    pitch: Pitch,
+    duration: usize,
     // Power = total energy / duration
-    pub(crate) power: f32,
+    power: f32,
 }
-pub(crate) type Notes = Vec<Note>;
-
-impl Note {
-    pub(crate) fn new(pitch: Pitch, duration: usize, power: f32) -> Note {
-        Note { pitch, duration, power }
-    }
-}
+type Notes = Vec<Note>;
 
 #[derive(Debug)]
 struct QuantisedNote {
@@ -71,18 +65,6 @@ fn notes_from_lattice_path(
 }
 
 fn contour_from_notes(notes: &mut Notes, sample_rate: u32) -> Result<Contour, DecoderError> {
-    // DSP feature frames run at sample_rate / SPEC_WINDOW_SIZE fps.
-    let frames_per_sec = sample_rate as f32 / ff_config::SPEC_WINDOW_SIZE as f32;
-    contour_from_notes_fps(notes, frames_per_sec)
-}
-
-/// Tempo-quantise a sequence of notes whose `duration` is measured in feature
-/// frames at `frames_per_sec` fps, producing a contour (one pitch per quaver).
-/// Shared by the DSP path (≈46 fps) and the ML path (basic-pitch, ≈86 fps).
-pub(crate) fn contour_from_notes_fps(
-    notes: &mut Notes,
-    frames_per_sec: f32,
-) -> Result<Contour, DecoderError> {
     // Filter out very short events and very weak events.
     notes.retain(|note| {
         note.power > ff_config::MIN_NOTE_POWER && note.duration >= ff_config::MIN_NOTE_DURATION
@@ -111,7 +93,7 @@ pub(crate) fn contour_from_notes_fps(
         (low_bpm, -f32::INFINITY, QuantisedNotes::new());
 
     for bpm in (low_bpm..high_bpm).step_by(5) {
-        let frames_per_quaver = bpm_to_num_frames_fps(bpm, frames_per_sec);
+        let frames_per_quaver = bpm_to_num_frames(bpm, sample_rate);
         let quantised_notes = quantise_notes(&notes, frames_per_quaver)?;
         let score = score_quantised_notes(&quantised_notes, &notes, frames_per_quaver);
         if score > best_tempo.1 {
@@ -206,15 +188,11 @@ fn score_quantised_notes(
 }
 
 pub fn bpm_to_num_frames(bpm: u32, sample_rate: u32) -> f32 {
-    let frames_per_sec = sample_rate as f32 / ff_config::SPEC_WINDOW_SIZE as f32;
-    bpm_to_num_frames_fps(bpm, frames_per_sec)
-}
-
-pub(crate) fn bpm_to_num_frames_fps(bpm: u32, frames_per_sec: f32) -> f32 {
-    // Convert a BPM tempo into a float number of frames per quaver.
+    // Convert a BPM tempo into a float of frames per quaver
     let bps = bpm as f32 / 60.;
     let quavers_per_sec = bps * 2.0; // Quaver = half a crotchet
-    frames_per_sec / quavers_per_sec
+    let frames_per_sec = sample_rate as f32 / ff_config::SPEC_WINDOW_SIZE as f32;
+    return frames_per_sec / quavers_per_sec; // Frames per quaver
 }
 
 pub fn lattice_ind_to_pitch(li: &LatticeIndex) -> Pitch {

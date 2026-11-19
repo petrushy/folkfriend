@@ -45,8 +45,6 @@ fn main() {
             || {
                 let mut ff = FolkFriend::new();
                 ff.set_sample_rate(rate).unwrap();
-                // TW_ML=1: the opt-in ML (basic-pitch) transcriber instead of DSP.
-                ff.set_use_ml(std::env::var("TW_ML").map(|v| v == "1").unwrap_or(false));
                 ff
             },
             |ff, &t| {

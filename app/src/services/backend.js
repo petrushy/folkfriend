@@ -221,11 +221,6 @@ class FFBackend {
         // carries analytics. This keeps a single code path for readiness.
         store.logAnalyticsEvent('tune_index_init', analyticsData).then();
 
-        // Independent of the index: apply the persisted ML-transcriber
-        // preference now that the worker is up.
-        this.setUseMlTranscriber(store.userSettings.useMlTranscriber || false).catch(e =>
-            console.warn('Could not set ML transcriber preference', e));
-
         if (analyticsData.error) {
             console.error('Tune index setup failed:', analyticsData.error);
             return;
@@ -268,20 +263,7 @@ class FFBackend {
         await this.setSampleRate(sampleRate);
     }
 
-    async setUseMlTranscriber(useMl) {
-        // Push the opt-in ML-transcriber setting to the worker/WASM. Must be set
-        // before PCM is fed (the feed path branches on it), so we call this on
-        // startup and whenever the Settings toggle changes — not per-recording.
-        await this.folkfriendWorker.setUseMlTranscriber(!!useMl);
-    }
-
     async feedEntirePCMSignal(PCMSignal) {
-        // Assert the transcriber mode from the current setting BEFORE feeding —
-        // the WASM feed path branches on it. This guarantees the ML toggle
-        // applies to file upload, live session and ring-buffer analysis (all of
-        // which feed a whole signal through here), independent of when the
-        // setting was last pushed.
-        await this.setUseMlTranscriber(store.userSettings.useMlTranscriber || false);
         await this.folkfriendWorker.feedEntirePCMSignal(PCMSignal);
     }
 

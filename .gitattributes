@@ -7,6 +7,5 @@
 *.gz binary
 *.bin binary
 *.wasm binary
-*.onnx binary
 *.wav binary
 *.mp3 binary

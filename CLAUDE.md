@@ -101,7 +101,8 @@ After installing, the service worker caches all assets (including WASM) so the a
   moment its clip is restored. `scripts/run_benchmark.py` already skips missing
   files. **Until then there is no real-audio regression coverage**, and the v2.0
   ML-vs-DSP benchmark figures rest on that damaged corpus — treat them as
-  unverified.
+  unverified. (A clean 12-clip corpus has since replaced it, and the ML
+  transcriber was removed in 1.6.0.)
 
   See `rust/wavs/README.md` for how to add recordings back, including the
   clone-and-compare check that would have caught this.
@@ -112,8 +113,9 @@ After installing, the service worker caches all assets (including WASM) so the a
   while `text` is in effect git compares the *filtered* working copy against the
   blob, so a pristine local file looks identical to a mangled stored one.
 
-  Audited 2026-07-26: only `.wav` was affected. `rust/models/nmp.onnx`, the
-  WASM, PNGs, SVGs, icons and archives are intact.
+  Audited 2026-07-26: only `.wav` was affected. The ML model then in
+  `rust/models/` (removed in 1.6.0), the WASM, PNGs, SVGs, icons and archives
+  are intact.
 
 - `rust/wavs/soup_dragon.wav` (now removed) additionally had a non-standard
   78-byte header — a LIST/INFO chunk from Lavf60.16.100 between fmt and data —
@@ -664,8 +666,9 @@ must be treated as sacred:
   soundfonts. This is the app shell and it must be complete for offline start.
 - **`maximumFileSizeToCacheInBytes: 20 * 1024 * 1024` — without it the app does
   not work offline at all** (found August 2026). Workbox precaches nothing over
-  **2 MiB** by default, and the WASM module is ~14 MB (tract, the ONNX runtime
-  behind the ML transcriber, dominates it). So the one executable the entire app
+  **2 MiB** by default, and the WASM module was then ~14 MB (tract, the ONNX
+  runtime behind the ML transcriber, was nearly all of it; since 1.6.0 removed
+  ML it is ~0.45 MB, and the limit is kept as headroom). So the one executable the entire app
   runs on was being dropped from the precache manifest, announced only by a
   build-log line:
 
@@ -1033,18 +1036,25 @@ await signInWithPopup(this.auth, provider, browserPopupRedirectResolver);
 
 - Tune dataset date derived from `store.state.tuneIndexVersion` (set in `backend.js` after `setupTuneIndex`). The version `v` is days since 2020-01-01; convert with `new Date((1577836800 + v * 86400) * 1000)`.
 
-## Tune detection v2.0 (ML transcriber) — architecture, gotchas & debugging
+## Tune detection — architecture, gotchas & debugging
 
-There are **two transcribers** (audio → contour). The query/index backend is shared.
+One transcriber (audio → contour) and one search, both in Rust:
 
-- **DSP** (default): `feature/` autocorrelation → `decode/beam_search` + `decode/contour`. Level-robust (normalises per frame), forgiving of noisy/degraded audio.
-- **ML** (opt-in): Spotify **basic-pitch** ONNX (`rust/models/nmp.onnx`, embedded via `include_bytes!`) run with **tract** (pure Rust, native + wasm). `decode/ml.rs` (`BasicPitch`) + `decode/note_events.rs` (note-creation port + monophonic melody selection) → reuses the same tempo quantiser (`contour_from_notes_fps`). Toggle: Settings → "Experimental: ML transcription" (`userSettings.useMlTranscriber`, default off).
-- Full history/rationale: `docs/v2-detection/PROGRESS.md`. Design: `~/.claude/plans/how-can-tune-detection-*.md`.
+- **Transcribe (DSP):** `feature/` enhanced autocorrelation per 1024-sample
+  frame (top 5 pitches kept) → `decode/beam_search` lattice → `decode/contour`
+  tempo quantiser (one letter per quaver) → `decode/octave` window-level octave
+  fix. Level-robust (normalises per window), forgiving of noisy rooms.
+- **Search:** `query/heuristic` 4-gram shortlist (2000) → `query/nw`
+  alignment against each contour with its opening appended, best setting per
+  tune.
+- Measure changes on real recordings with `scripts/bench_tagged_sessions.sh`,
+  or faster with `rust/examples/transcribe_windows.rs` + `requery.rs` (see
+  "Search: a window may wrap across the repeat" under Recent changes).
 
 ### Gotchas that bit us (don't repeat)
 
-1. **`app/src/wasm/` is gitignored** — it's the *compiled* Rust. Pulling source updates the JS + Rust source but NOT the WASM, so deploys silently shipped stale ML. **Now automated:** `npm run build` runs a `prebuild` hook (`app/build-wasm.sh`) that rebuilds + copies the WASM. Never hand-deploy without it. After deploy, the **PWA service worker caches the WASM hard** — a clean reinstall (delete app + Settings→Safari→clear Website Data + re-add) is the reliable cache-buster.
-2. **Verify the live build on-device:** `ff_config::VERSION` (e.g. `1.4.1-ml`) shows on the **Help/About** page. **Bump it whenever you ship a behaviour change** so you can confirm which build is actually running (this is how we proved "stale WASM" vs "real bug"). Keep `ff_config.rs` VERSION and `Cargo.toml` version in sync.
+1. **`app/src/wasm/` is gitignored** — it's the *compiled* Rust. Pulling source updates the JS + Rust source but NOT the WASM, so deploys silently shipped a stale engine. **Now automated:** `npm run build` runs a `prebuild` hook (`app/build-wasm.sh`) that rebuilds + copies the WASM. Never hand-deploy without it. After deploy, the **PWA service worker caches the WASM hard** — a clean reinstall (delete app + Settings→Safari→clear Website Data + re-add) is the reliable cache-buster.
+2. **Verify the live build on-device:** `ff_config::VERSION` (e.g. `1.6.0`) shows on the **Help/About** page. **Bump it whenever you ship a behaviour change** so you can confirm which build is actually running (this is how we proved "stale WASM" vs "real bug"). Keep `ff_config.rs` VERSION and `Cargo.toml` version in sync. (Builds up to 1.5.0 carried a `-ml` suffix while the ML transcriber was in them.)
 3. **Query must be deterministic — twice over.** *Membership* and *order*.
 
    *Order (fixed July 2026):* `sort_by` is stable, so tied entries keep their
@@ -1057,90 +1067,67 @@ There are **two transcribers** (audio → contour). The query/index backend is s
    a total order. The name-query path had always done this (ties broken by
    alias length). **Any new sort over query results needs a tiebreak.**
 
-   *Membership:* `query/heuristic.rs` shortlists the top `QUERY_REPASS_SIZE` candidates for the NW pass. It iterates a `HashMap` (random seed), so **never truncate mid-tie** — include the whole boundary tie group (capped at `QUERY_REPASS_MAX`). Splitting a tie made shortlist membership depend on HashMap order, so the same audio randomly found/missed a borderline tune (worst on weak ML/poor-audio contours). Any HashMap-order-dependent selection here is a bug.
-4. **ML vs DSP, re-measured on the clean corpus (July 2026).** The earlier
-   finding that ML is "far less robust than DSP" was measured on the corrupted
-   fixtures and does **not** hold on clean audio — they are equal on rank:
+   *Membership:* `query/heuristic.rs` shortlists the top `QUERY_REPASS_SIZE` candidates for the NW pass. It iterates a `HashMap` (random seed), so **never truncate mid-tie** — include the whole boundary tie group (capped at `QUERY_REPASS_MAX`). Splitting a tie made shortlist membership depend on HashMap order, so the same audio randomly found/missed a borderline tune (worst on weak, poor-audio contours). Any HashMap-order-dependent selection here is a bug.
+4. **The app and the CLI feed audio differently, and DSP does not care.** The
+   app feeds 1024-sample windows and drops the trailing partial one; the CLI and
+   `scripts/run_benchmark.py` feed the whole signal. DSP gives identical
+   contours either way (measured across trims of the corpus), so the benchmark
+   measures what ships. Any new transcriber has to be checked for this — the ML
+   one was not immune (below).
 
-   | | top-1 | top-5 | top-10 |
-   |---|---|---|---|
-   | DSP | 11/12 | 12/12 | 12/12 |
-   | ML  | 11/12 | 11/12 | 12/12 |
+### The ML transcriber — removed in 1.6.0 (November 2026)
 
-   Each wins some: ML gets `the_kid_on_the_mountain` to rank 1 where DSP manages
-   only 4, and scores `the_kerfunten` higher; DSP is much stronger on
-   `nåspolskan` (rank 1 vs 9). ML scores are systematically lower in absolute
-   terms, but scores are not comparable across transcribers — only rank is.
+From v2.0 (May 2026) there was a second, opt-in transcriber: Spotify's
+**basic-pitch** ONNX model (`rust/models/nmp.onnx`) run by **tract**, with a
+Rust port of its note creation and a monophonic melody pick
+(`decode/ml.rs`, `decode/note_events.rs`; Settings → "Experimental: ML
+transcription", `userSettings.useMlTranscriber`). It was removed because it
+was much worse where the app is used, and it was nearly all of the download.
 
-   **Still untested:** the original claim was specifically about *degraded /
-   speaker-re-recorded* audio, and the current corpus is all clean recordings.
-   That claim is unverified, not disproven. Worth capturing some deliberately
-   poor clips via the Results page "Save clip" button.
+**Measured on the two tagged real sessions** (3.3 h, 93 tunes; one good
+recorder, one iPhone), both transcribers through the same 1.5.0 search, every
+2 s:
 
-   Note `scripts/run_benchmark.py` names its output by commit, so a DSP run and
-   an ML run at the same commit overwrite each other — copy the JSON aside
-   between runs when comparing.
+| | DSP | ML |
+|---|---|---|
+| right tune first, per window | 95.5 % | 66.6 % |
+| right tune in top 5 | 98.0 % | 74.7 % |
+| live: right tune on screen (S1 / S2) | 93 / 89 % | 73 / 63 % |
+| live: unplayed tune during breaks | 4 / 5 % | 55 / 44 % |
+| tunes found (S1 / S2) | 37/37, 55/56 | 32/37, 40/56 |
 
-   **ML scores are NOT rescaled, deliberately.** They run systematically lower
-   than DSP (median 0.660 vs 0.854 on the correct match), which makes the app's
-   confidence labels read pessimistically under ML. Scaling them up looks like
-   the obvious fix and is a trap: ML's *separation* is narrower, not just its
-   scale (correct − best-wrong: DSP 0.348, ML 0.235), and a uniform rescale
-   multiplies both sides. Measured over the corpus, every factor that improved
-   label agreement also multiplied wrong tunes shown as "Very Close":
+No threshold could rescue it: break chatter scored HIGH under ML (only 14 % of
+right-ranked ML windows above the 95th percentile of break windows, against
+91 % for DSP). ML also wrote a run of ≥ 8 identical quavers in 12.9 % of
+windows (DSP 5.0 %). Likely cause, inferred: basic-pitch is polyphonic and the
+melody pick latched onto drones and accompaniment. On the 12 clean solo clips
+the two were equal (11/12 top-1 each), which is why it looked viable — **clean
+clips do not predict a pub**. Its contour was also unstable to input length (a
+128-sample trim could flip the tempo winner and rewrite the whole contour),
+unlike DSP.
 
-   | k | labels matching DSP | wrong tune shown "Very Close" |
-   |---|---|---|
-   | 1.00 (current) | 6/12 | 0 |
-   | 1.29 (equalises medians) | 6/12 | 3 |
-   | 1.40 (best agreement) | 8/12 | 4 |
+**Size:** tract was ~96 % of the WASM. 11.25 MB raw / 2.35 MB gzip with ML,
+0.44 MB / 0.16 MB without — ~2.2 MB less per app update, ~11 MB less in each
+device's service-worker cache (the same origin quota the offline tune index
+lives in), and far less for iOS to compile at every launch.
 
-   DSP's own baseline is 1. Scaling thresholds down instead is mathematically
-   identical to scaling scores up — no free lunch. The residual disagreements
-   are real per-clip differences, not calibration error (ML scores
-   `the_arra_mountains` 0.272 vs DSP 0.875, but `the_kid_on_the_mountain` 0.676
-   vs DSP 0.500), and no constant fixes those.
+Removed with it: the `tract-onnx` dependency and its `getrandom` wasm
+workaround, the model, `FolkFriend::set_use_ml` / the WASM export,
+`FF_TRANSCRIBER=ml` in the CLI, the two `ml_app_path_*` tests,
+`scripts/compare_transcribers.py`, the `spikes/` feasibility crate, the
+Settings switch and `backend`/`worker` `setUseMlTranscriber`. A saved
+`useMlTranscriber` is dropped from settings on load and from restored backups
+(`RETIRED_USER_SETTINGS`, store.js). The code is in git history (tag
+`last-with-ml`); its design log is `docs/v2-detection/PROGRESS.md`. Anyone
+reviving it should start from the melody selection and measure on the tagged
+sessions, not on the clean clips.
 
-   `scripts/compare_transcribers.py` regenerates this analysis. Re-run it as the
-   corpus grows — 12 clips is too few to calibrate on, and the question is worth
-   revisiting once there is degraded audio in the set.
+### Debugging playbook (app vs CLI)
 
-5. **The ML contour is unstable w.r.t. input length; the app and CLI feed
-   different lengths (July 2026).** `contour_from_notes_fps` picks a tempo by
-   argmax over a coarse 5-BPM grid. Candidates routinely score within a hair of
-   each other, so a perturbation as small as **128 samples (2.9 ms)** flips the
-   winner — and since the winner sets every note's quaver count, the *whole*
-   contour changes, from its first symbol. Measured: `the_lounge_bar` went 43 →
-   49 characters and its match score 0.721 → 0.612. **DSP is immune** (identical
-   output across the same trims), which is why DSP holds up in the field and ML
-   does not.
-
-   The app feeds 1024-sample windows and drops the trailing partial one; the CLI
-   and `scripts/run_benchmark.py` feed the whole signal. So **the benchmark has
-   never measured what the app runs** — 4 of 6 clips produce different contours
-   between the two paths.
-
-   Two fixes were tried and both made matching *worse* on the corpus, so neither
-   was kept:
-   - epsilon tie-break preferring the faster tempo: 2 clips down, 0 up
-   - excluding the final note from tempo scoring (its duration is set by where
-     recording stopped, not by the music): 5 down, 1 up, one by 0.196
-
-   `ml_app_path_finds_tunes` now drives the app's windowed feed over every
-   fixture and asserts the tune is still found — a real guard on the path that
-   ships. It deliberately does NOT assert contour equality with the CLI, because
-   that does not hold; the old `ml_app_path_matches_direct_path` asserted
-   equality on a single clip that happened to agree, which is how this stayed
-   hidden.
-
-6. **The CLI and the app use different ML entry points** — keep them equivalent. CLI/`bin.rs` (`FF_TRANSCRIBER=ml`) calls `BasicPitch::transcribe_contour` **directly**; the app/WASM goes `FolkFriend::feed_* → transcribe_pcm_buffer`. Guarded by test `ml_app_path_matches_direct_path`. ML is normalised internally, so it's far **less robust to degraded/playback audio than DSP** — clean clips can pass while field/speaker re-recordings fail.
-
-### Debugging playbook (app-vs-CLI ML differences)
-
-- **A/B benchmark:** `python3 scripts/run_benchmark.py` (DSP) vs `FF_TRANSCRIBER=ml python3 scripts/run_benchmark.py` (ML). Cases in `rust/bench/tunes.json`, WAVs in `rust/wavs/`.
+- **Benchmark the clean corpus:** `python3 scripts/run_benchmark.py`. Cases in `rust/bench/tunes.json`, WAVs in `rust/wavs/`.
 - **Capture field data:** the Results page has a **"Save clip"** button (manual recordings) → WAV via the iOS Share sheet. Add the clip to `rust/wavs/` + a `tunes.json` entry to make a failure measurable.
-- **Reproduce the exact WASM path in Node:** `cd rust && wasm-pack build --target nodejs --out-dir pkg-node` then `node rust/test_wasm_path.js <wav>`. Drives the app's exact WASM calls (`feed_single_pcm_window` → `transcribe_pcm_buffer` → `run_transcription_query`). If this matches the CLI but the app fails, it's stale WASM/cache; if it differs from the CLI, it's a real wasm-vs-native bug.
-- The Results page shows a small debug line: transcriber (ML/DSP) + the contour string — compare against the CLI's `transcribe` output for the same clip.
+- **Reproduce the exact WASM path in Node:** `cd rust && wasm-pack build --target nodejs --out-dir pkg-node` then `node rust/test_wasm_path.js <wav> <tune id>`. Drives the app's exact WASM calls (`feed_single_pcm_window` → `transcribe_pcm_buffer` → `run_transcription_query`). If this matches the CLI but the app fails, it's stale WASM/cache; if it differs from the CLI, it's a real wasm-vs-native bug.
+- The Results page shows a small debug line with the contour string — compare against the CLI's `transcribe` output for the same clip.
 
 ## Recent changes
 
@@ -1204,7 +1191,7 @@ session 2 and cut breaks to 1 % on session 1, but its per-window effect went
 opposite ways on the two sessions, so it waits for more tagged sessions.
 
 **Tools:** `rust/examples/transcribe_windows.rs` transcribes a WAV's windows in
-parallel (~8 s per session; `TW_ML=1` for the ML path) and
+parallel (~8 s per session) and
 `rust/examples/requery.rs` re-runs the search over cached contours with
 `RQ_*` scoring knobs (~1 min per session). `requery` with no knobs reproduces
 the library bit-for-bit (`RQ_LIB=1` runs the library itself; 0 of 3,468
@@ -1217,7 +1204,7 @@ windows differ), so a scoring idea can be scored in minutes instead of a
 contour, and the tempo quantiser could hand it one: when every surviving note
 is only 3–4 frames long, the slowest tempo gives them all zero quavers, and a
 zero-length note scores as the *most* likely length, so that tempo wins with
-an empty contour. Both transcribers reach it (ML shares the quantiser). In
+an empty contour. (The ML transcriber, since removed, shared the quantiser and reached it too.) In
 WASM a panic inside a `&mut self` method can leave wasm-bindgen's borrow flag
 held, i.e. every later transcription and search failing until a reload.
 
@@ -1584,8 +1571,7 @@ November 2026, 60 sessions × 3 tunes, normal / hard:
 The one cost against the old cadence: on the hard set the 90th-percentile time
 to show a new tune is ~0.5 s longer on a fast device (11.1 vs 10.6 s).
 ⚠️ Synthetic audio is cleaner and more regular than a pub; it compares
-cadences fairly but says nothing absolute about accuracy, and only DSP was
-measured, not ML.
+cadences fairly but says nothing absolute about accuracy.
 
 #### Measured on a real session, and what it changed (November 2026)
 
@@ -1988,9 +1974,9 @@ Four things decide whether this is useful or noise:
 1. **Age decides the level; the score may only hold it back from green.** That
    asymmetry is the design. "Time since the last good detection" is the
    parameter the user asked for and the one that answers "has the tune ended",
-   whereas a score-driven red would be permanently lit for anyone on the ML
-   transcriber — its scores run systematically lower than DSP's and are **not
-   comparable across transcribers** (see the ML-vs-DSP notes above). So a weak
+   whereas a low score says the match is uncertain, not that the music has
+   stopped — and the score scale moves whenever detection is retuned (it moved
+   when the ML transcriber existed, and again in 1.5.0). So a weak
    recent match is amber and labelled *Weak match*; it is never red, however
    bad. Verified by mutation: letting the score reach red fails 2 tests.
 
@@ -3976,7 +3962,7 @@ lets the platform skip the radio entirely when it already knows where it is —
 that is the real saving.
 
 Set against what the app already does during a session (microphone open,
-AudioContext running, every window through DSP or a 14 MB ONNX model), one fix
+AudioContext running, every window through the transcriber), one fix
 an evening is not measurable.
 
 #### Rules the tests pin (each verified by reinstating the bug)

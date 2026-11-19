@@ -51,7 +51,7 @@ export const MIN_PAST_DETECTION_SECONDS = 15;
 
 // A single window this confident survives the minimum-duration rule when the
 // scan does not overlap windows (step >= window) — see filterShortPastDetections.
-// For scale: correct matches score a median ~0.85 (DSP) / ~0.66 (ML), while the
+// For scale: correct matches score a median ~0.85 on clean audio, while the
 // best wrong match typically sits ~0.3 lower.
 export const STRONG_SINGLE_DETECTION_SCORE = 0.7;
 

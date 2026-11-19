@@ -21,7 +21,7 @@
             </v-btn>
         </div>
         <div class="debugLine">
-            {{ mlEnabled ? 'ML' : 'DSP' }} · contour (len {{ contour.length }}): {{ contour || '(empty)' }}
+            contour (len {{ contour.length }}): {{ contour || '(empty)' }}
         </div>
         <v-list class="resultsTable">
             <ResultRow
@@ -63,7 +63,6 @@ export default {
             lastResults: store.state.lastResults,
             hasRecording: !!store.state.lastRecordedPcm,
             contour: store.state.lastContour || '',
-            mlEnabled: !!store.userSettings.useMlTranscriber,
             mdiContentSave,
             snackbar: false,
             snackbarText: '',
