@@ -30,8 +30,10 @@ const practiceFollow = new PracticeFollow({
         transcribePCMSignal: (pcm, rate) => ffBackend.transcribePCMSignal(pcm, rate),
     },
     live: {
-        get isRunning() { return liveAnalysisService.isRunning; },
-        get isPaused() { return liveAnalysisService.isPaused; },
+        // The LISTENER, not the session capture: the live view listens with no
+        // session at all, and its windows are just as usable here.
+        get isRunning() { return liveAnalysisService.isListening; },
+        get isPaused() { return false; },
         get scorePosition() { return liveAnalysisService.scorePosition; },
     },
     emit: (event, payload) => eventBus.$emit(event, payload),

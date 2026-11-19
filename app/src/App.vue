@@ -258,6 +258,12 @@
             </template>
         </v-snackbar>
 
+        <!-- Session Capture picked back up (or not) after the app reloaded:
+             the microphone reopening by itself must never go unannounced. -->
+        <v-snackbar v-model="captureRestoreSnackbar" :timeout="8000" bottom>
+            {{ captureRestoreText }}
+        </v-snackbar>
+
         <!-- Transient banner for Firestore sync errors -->
         <v-snackbar v-model="syncErrorSnackbar" :timeout="5000" bottom>
             {{ syncErrorText }}
@@ -270,6 +276,8 @@
         <!-- Same pattern: "Often played with…", opened from any tune. -->
         <SetPartnersDialog />
         <AddToSetDialog />
+        <!-- The live view (follow score), openable from any page. -->
+        <LiveViewHost />
     </v-app>
 </template>
 
@@ -309,12 +317,14 @@ import TuneBackgroundDialog from '@/components/TuneBackgroundDialog.vue';
 import AddToSetDialog from '@/components/AddToSetDialog.vue';
 import SetPartnersDialog from '@/components/SetPartnersDialog.vue';
 import SessionStatusBar from '@/components/SessionStatusBar.vue';
+import liveAnalysisService from '@/services/liveAnalysis.js';
+import LiveViewHost from '@/components/LiveViewHost.vue';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
 import { playerHost, registerPlayer } from '@/services/sessionPlayerHost.js';
 
 export default {
     name: 'App',
-    components: { TuneBackgroundDialog, SetPartnersDialog, AddToSetDialog, SessionStatusBar, SessionAudioPlayer },
+    components: { TuneBackgroundDialog, SetPartnersDialog, AddToSetDialog, SessionStatusBar, SessionAudioPlayer, LiveViewHost },
     data: () => ({
         drawer: null,
         menu: null,
@@ -329,6 +339,8 @@ export default {
         // actually apply the update (see reloadApp).
         swRegistration: null,
         syncErrorSnackbar: false,
+        captureRestoreSnackbar: false,
+        captureRestoreText: '',
         syncErrorText: '',
         playerHost,
         // The mini player appears once something has played, and stays
@@ -362,6 +374,7 @@ export default {
     mounted: function () {
         registerPlayer(this.$refs.sessionPlayer, this.$refs.playerHome);
         initSetup().then();
+        this.restoreSessionCapture();
 
         // We cannot interrupt long running queries in WASM so we prevent the
         //  user from navigating to different pages in the app whilst recording
@@ -419,6 +432,22 @@ export default {
         });
     },
     methods: {
+        // An unfinished session is restored at launch, not only when Session
+        // Tools opens, so the session bar offers it on whatever page the app
+        // reopens on. If iOS discarded the app mid-capture (a phone left
+        // asleep in a session), it is resumed — see restoreOnLaunch().
+        async restoreSessionCapture() {
+            const result = await liveAnalysisService.restoreOnLaunch({
+                indexReady: () => ffBackend.indexReady(),
+            });
+            if (result.resumed) {
+                this.captureRestoreText = 'Session Capture resumed after the app restarted.';
+                this.captureRestoreSnackbar = true;
+            } else if (result.restored && result.error) {
+                this.captureRestoreText = 'Your session is paused — the microphone could not reopen by itself. Tap Resume.';
+                this.captureRestoreSnackbar = true;
+            }
+        },
         toggleSessionPlayback() {
             const player = this.$refs.sessionPlayer;
             if (player) player.togglePlay();

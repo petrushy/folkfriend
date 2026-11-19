@@ -279,6 +279,30 @@ export function buildTuneOptions(detection) {
     return options;
 }
 
+// One detection as a tune-list row: its selectable candidates and which of
+// them is chosen. Shared by the Session Tools table and the live view, which
+// is mounted app-wide and so cannot borrow the table's rows.
+export function buildDetectionRow(detection) {
+    const tuneOptions = buildTuneOptions(detection);
+    const selectedTuneKey = tuneOptionValue({
+        tuneId: detection.tuneId,
+        settingId: detection.settingId,
+        sourceUrl: detection.sourceUrl,
+        title: detection.title,
+    });
+    const selected = tuneOptions.find(o => o.value === selectedTuneKey) || tuneOptions[0] || null;
+    return {
+        ...detection,
+        editableTime: formatSecondsAsClock(detection.startSeconds),
+        selectedTuneKey,
+        tuneOptions,
+        selectedTuneId: selected ? selected.tuneId : detection.tuneId,
+        selectedSettingId: selected ? selected.settingId : (detection.settingId ? String(detection.settingId) : ''),
+        selectedSourceUrl: selected ? (selected.sourceUrl || '') : (detection.sourceUrl || ''),
+        selectedTitle: selected ? selected.title : (detection.title || ''),
+    };
+}
+
 // A "close rival": another tune the search rates almost as highly as the
 // detected one, window after window — a near-twin a listener may not be able
 // to tell apart by ear either (Jimmy O'Brien's / The Maid in the Meadow, Lad

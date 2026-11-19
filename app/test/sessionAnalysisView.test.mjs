@@ -262,11 +262,13 @@ export const mdiPause = 'pause';
 export const mdiPlay = 'play';
 export const mdiRecordCircleOutline = 'record';
 export const mdiAlertCircleOutline = 'alert';
+export const mdiStop = 'stop';
 `;
 
 const FAKE_SESSION_ANALYSIS = `
 export function buildTuneListText(rows) { return rows.map(r => r.title).join(' / '); }
 export function buildTuneOptions() { return []; }
+export function buildDetectionRow(d) { return { ...d, tuneOptions: [], selectedTuneKey: '' }; }
 export function buildUpdatedXsc() { return ''; }
 export function formatSecondsAsClock(s) { return String(s); }
 export function formatSecondsAsDuration(s) { return String(s); }
@@ -281,6 +283,15 @@ export let __clearLastShownCalls = 0;
 export function clearLastShown() { __clearLastShownCalls++; }
 export function __reset() { __clearLastShownCalls = 0; }
 `;
+// The live view is mounted app-wide now (LiveViewHost); the view only asks
+// for it to open. State on globalThis so every fresh import of the view shares it.
+const FAKE_LIVE_VIEW = `
+globalThis.__liveView = globalThis.__liveView || { open: false };
+export const liveView = globalThis.__liveView;
+globalThis.__liveViewOpens = globalThis.__liveViewOpens || { n: 0 };
+export async function openLiveView() { globalThis.__liveViewOpens.n++; liveView.open = true; }
+export function closeLiveView() { liveView.open = false; }
+`;
 const FAKE_VUE_COMPONENT = `export default { name: 'stub' };`;
 
 async function writeFakes() {
@@ -294,6 +305,7 @@ async function writeFakes() {
     await writeFile(path.join(tmpDir, 'fake-session-analysis.mjs'), FAKE_SESSION_ANALYSIS);
     await writeFile(path.join(tmpDir, 'fake-follow.mjs'), FAKE_FOLLOW);
     await writeFile(path.join(tmpDir, 'fake-component.mjs'), FAKE_VUE_COMPONENT);
+    await writeFile(path.join(tmpDir, 'fake-live-view.mjs'), FAKE_LIVE_VIEW);
     await writeFile(path.join(tmpDir, 'fake-session-import.mjs'), `
 import store from './fake-store.mjs';
 export const __calls = [];
@@ -363,12 +375,11 @@ export function sessionConflictMessage() { return __state.conflict; }
         ["from '@/services/liveAnalysis.js'", "from './fake-live-analysis.mjs'"],
         ["from '@/services/fileSessionAnalysis.js'", "from './fake-file-analysis.mjs'"],
         ["from '@/components/VolumeMeter.vue'", "from './fake-component.mjs'"],
-        ["from '@/components/LiveScoreFollow.vue'", "from './fake-component.mjs'"],
+        ["from '@/services/liveView.js'", "from './fake-live-view.mjs'"],
         ["from '@/components/DropboxBackup.vue'", "from './fake-component.mjs'"],
         ["from '@/services/sessionPlayerHost.js'", "from './fake-player-host.mjs'"],
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from '@/services/sessionRecorder.js'", "from './fake-recorder.mjs'"],
-        ["from '@/js/liveScoreFollow.mjs'", "from './fake-follow.mjs'"],
         ["from '@/js/sessionAnalysis.js'", "from './fake-session-analysis.mjs'"],
         ["from '@/services/dropbox.js'", "from './fake-dropbox.mjs'"],
         ["from '@/services/sessionImport.js'", "from './fake-session-import.mjs'"],
@@ -414,6 +425,9 @@ async function mountView({
     // synchronously on its first tick, so a flag set afterwards is too late.
     if (restoreThrows) live.__setRestoreThrows(true);
 
+    globalThis.__liveView = globalThis.__liveView || { open: false };
+    globalThis.__liveView.open = false;
+    globalThis.__liveViewOpens = { n: 0 };
     const mod = await import(`${path.join(tmpDir, 'view.mjs')}?v=${Math.random()}`);
     const component = mod.default;
 
@@ -493,81 +507,125 @@ await test('a saved state with no file and no detections leaves live mode alone'
     assert.equal(vm.viewMode, 'live');
 });
 
-console.log('\n?follow=1 — one tap to "show me what is playing"');
+console.log('\n?follow=1 — opens the live view, which never starts a session');
 
-await test('starts listening and opens the score, with no further taps', async () => {
+const opens = () => globalThis.__liveViewOpens.n;
+
+await test('opens the live view once the page is on screen, and starts no capture', async () => {
+    const { settle, live } = await mountView({ query: { live: '1', follow: '1' }, indexLoaded: true });
+    assert.equal(opens(), 0, 'not before the view is on screen');
+    await settle();
+    assert.equal(opens(), 1);
+    assert.equal(live.__starts.length, 0, 'the live view only listens');
+    assert.equal(live.default.sessionId, null);
+});
+
+await test('a paused session is left paused', async () => {
     const { vm, settle, live } = await mountView({
-        query: { live: '1', follow: '1' }, indexLoaded: true,
-    });
-    assert.equal(live.__starts.length, 0, 'not before the view is on screen');
-
-    await settle();
-    assert.equal(live.__starts.length, 1, 'listening starts on its own');
-    assert.equal(vm.live.capturing, true);
-    assert.equal(vm.followMode, true, 'and the score opens on its own');
-});
-
-await test('waits for the tune index rather than dropping the request', async () => {
-    const { vm, settle, bus, live } = await mountView({
-        query: { live: '1', follow: '1' }, indexLoaded: false,
-    });
-
-    await settle();
-    assert.equal(live.__starts.length, 0, 'cannot start against an unusable index');
-    assert.equal(vm.followMode, false);
-
-    bus.__fire('indexLoaded');
-    await settle();
-    assert.equal(live.__starts.length, 1, 'the request is retried when the index arrives');
-    assert.equal(vm.followMode, true);
-});
-
-await test('the index arriving twice does not open two microphones', async () => {
-    const { settle, bus, live } = await mountView({
-        query: { live: '1', follow: '1' }, indexLoaded: false,
+        query: { live: '1', follow: '1' }, indexLoaded: true, running: false, sessionId: 'session-paused',
     });
     await settle();
-    bus.__fire('indexLoaded');
-    await settle();
-    bus.__fire('indexLoaded');
-    await settle();
-    assert.equal(live.__starts.length, 1);
-});
-
-await test('leaving the view withdraws a pending auto-start', async () => {
-    const { vm, component, settle, bus, live } = await mountView({
-        query: { live: '1', follow: '1' }, indexLoaded: false,
-    });
-    await settle();
-    component.beforeDestroy.call(vm);
-    bus.__fire('indexLoaded');
-    await settle();
-    assert.equal(live.__starts.length, 0,
-        'a late index must not open a microphone for a screen nobody is looking at');
-});
-
-await test('a refused microphone shows the error instead of an empty score', async () => {
-    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
-    const { vm, settle } = await mountView({
-        query: { live: '1', follow: '1' }, indexLoaded: true,
-    });
-    liveMod.__setFailNextStart(true);
-
-    await settle();
+    assert.equal(opens(), 1);
+    assert.equal(live.__starts.length, 0, 'resuming a capture is a deliberate act on its own card');
+    assert.ok(!live.__calls.includes('startForFollow'));
     assert.equal(vm.live.capturing, false);
-    assert.equal(vm.followMode, false,
-        'a full-screen score over a microphone that never opened hides the reason');
-    assert.ok(vm.live.micError, 'and the reason is shown');
+    assert.equal(vm.captureStatus.label, 'Paused');
 });
 
-await test('an already-running session just opens the score', async () => {
+await test('a session restored after a reload is shown paused, not continued or filed away', async () => {
     const { vm, settle, live } = await mountView({
-        query: { live: '1', follow: '1' }, indexLoaded: true, running: true,
+        query: { live: '1', follow: '1' },
+        indexLoaded: true,
+        restorable: {
+            sessionId: 'restored-follow', isRunning: false, _options: {},
+            detections: [{ id: 'r1', tuneId: 1, settingId: '10', title: 'Earlier', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
+            elapsedSeconds: 120,
+        },
     });
     await settle();
-    assert.equal(live.__starts.length, 0, 'nothing to start');
-    assert.equal(vm.followMode, true);
+    assert.equal(live.default.sessionId, 'restored-follow');
+    assert.equal(live.__starts.length, 0);
+    assert.ok(!live.__calls.includes('finish'));
+    assert.equal(vm.live.capturing, false);
+    assert.equal(opens(), 1);
+});
+
+await test('leaving the view before it is on screen withdraws the open', async () => {
+    const { vm, component, settle } = await mountView({ query: { live: '1', follow: '1' }, indexLoaded: true });
+    component.beforeDestroy.call(vm);
+    await settle();
+    assert.equal(opens(), 0, 'no microphone for a screen nobody is looking at');
+});
+
+console.log('\nSession Capture');
+
+await test('Start session capture starts a capture, and the card says so', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true });
+    await settle();
+    assert.equal(vm.captureStatus.label, 'Not capturing');
+    assert.equal(vm.canStartLive, true);
+    await vm.startLiveAnalysis();
+    assert.equal(live.__starts.length, 1);
     assert.equal(vm.live.capturing, true);
+    assert.equal(vm.captureStatus.label, 'Capturing');
+    assert.equal(opens(), 0, 'starting a capture does not open the live view');
+});
+
+await test('Pause and Resume keep the same session', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true, running: true });
+    await settle();
+    const id = live.default.sessionId;
+    await vm.pauseLive();
+    assert.equal(vm.captureStatus.label, 'Paused');
+    await vm.resumeLive();
+    assert.equal(live.default.sessionId, id);
+    assert.equal(vm.captureStatus.label, 'Capturing');
+});
+
+await test('Close session files it away and the card is back to Start', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true, running: true });
+    await settle();
+    await vm.closeSession();
+    assert.ok(live.__calls.includes('finish'));
+    assert.equal(live.default.sessionId, null);
+    assert.equal(vm.captureStatus.label, 'Not capturing');
+    assert.equal(vm.closingSession, false);
+});
+
+await test('Close session keeps the session, and says so, if saving it fails', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true, running: true });
+    await settle();
+    live.__setFailNextFinish(true);
+    await vm.closeSession();
+    assert.ok(live.default.sessionId, 'the in-memory copy is the only one, and it stays');
+    assert.match(vm.workspaceError, /quota exceeded/);
+});
+
+await test('a capture with unsaved table edits is not closed', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true, running: true });
+    await settle();
+    vm.pendingSessionPatch = { tunes: [] };
+    await vm.closeSession();
+    assert.ok(!live.__calls.includes('finish'));
+    assert.ok(vm.workspaceError);
+});
+
+await test('a capture resumed from the session bar shows on the card', async () => {
+    const { vm, settle, bus, live } = await mountView({ indexLoaded: true, running: false, sessionId: 'session-paused' });
+    await settle();
+    assert.equal(vm.captureStatus.label, 'Paused');
+    // The bar calls the service directly; the card only hears the event.
+    await live.default.start(10, 5);
+    bus.__fire('liveAnalysisStarted');
+    assert.equal(vm.captureStatus.label, 'Capturing');
+});
+
+await test('the Live view button opens the live view without touching the capture', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true, running: false, sessionId: 'session-paused' });
+    await settle();
+    await vm.openLive();
+    assert.equal(opens(), 1);
+    assert.equal(live.__starts.length, 0);
 });
 
 console.log('\nlistening is not a mode');
@@ -685,14 +743,6 @@ await test('a save failure is surfaced and can be retried', async () => {
     assert.ok(live.__calls.includes('persist'), 'retrying actually writes again');
 });
 
-await test('New session preserves the previous session if saving it fails', async () => {
-    const { vm, settle, live } = await mountView({ indexLoaded: true, running: true });
-    await settle();
-    live.__setFailNextFinish(true);
-    await vm.newSession();
-    assert.equal(live.__starts.length, 0, 'no new session may replace an unsaved one');
-});
-
 await test('a selected historical session deletes independently', async () => {
     const { vm, settle, store } = await mountView({ indexLoaded: true });
     await settle();
@@ -739,119 +789,7 @@ await test('correcting a file row persists locally instead', async () => {
         'file analysis has nothing to do with the live service');
 });
 
-console.log('\nFollow session always ends on the score');
-
-await test('a paused session is resumed rather than left for the user to start', async () => {
-    const detections = [{ id: 'a', tuneId: 1, settingId: '10', title: 'Earlier', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }];
-    const { vm, settle, live } = await mountView({
-        query: { live: '1', follow: '1' },
-        indexLoaded: true,
-        running: false,
-        sessionId: 'session-paused',
-        detections,
-    });
-    await settle();
-
-    assert.ok(live.__calls.includes('startForFollow'));
-    assert.equal(live.default.sessionId, 'session-paused', 'the same session, continued');
-    assert.equal(vm.live.capturing, true);
-    assert.equal(vm.followMode, true, 'and the score is on screen without another tap');
-    assert.ok(!live.__calls.includes('finish'), 'a recent session is not filed away');
-});
-
-await test('a session already listening just shows the score', async () => {
-    const { vm, settle, live } = await mountView({
-        query: { live: '1', follow: '1' }, indexLoaded: true, running: true,
-    });
-    await settle();
-
-    assert.equal(live.__starts.length, 0, 'nothing to start');
-    assert.equal(vm.followMode, true);
-});
-
-await test('a session from another day is filed away and a fresh one started', async () => {
-    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
-    const detections = [{ id: 'a', tuneId: 1, settingId: '10', title: 'Tuesday', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }];
-    const { vm, settle, live } = await mountView({
-        query: { live: '1', follow: '1' },
-        indexLoaded: true,
-        running: false,
-        sessionId: 'session-tuesday',
-        detections,
-    });
-    liveMod.__setRecentEnough(false);
-    await settle();
-
-    assert.ok(live.__calls.includes('finish'),
-        'Wednesday must not be appended to a record named and placed as Tuesday');
-    assert.notEqual(live.default.sessionId, 'session-tuesday');
-    assert.ok(live.default.sessionId, 'a separate session is listening now');
-    assert.equal(vm.followMode, true, 'and it still ends on the score');
-});
-
-await test('a stale session that cannot be saved blocks the new one', async () => {
-    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
-    const { vm, settle, live } = await mountView({
-        query: { live: '1', follow: '1' },
-        indexLoaded: true,
-        running: false,
-        sessionId: 'session-tuesday',
-        detections: [{ id: 'a', tuneId: 1, settingId: '10', title: 'Tuesday', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
-    });
-    liveMod.__setRecentEnough(false);
-    liveMod.__setFailNextFinish(true);
-    await settle();
-
-    // Starting a replacement on top of a session that failed to save is the
-    // one way to actually lose it.
-    assert.equal(live.default.sessionId, 'session-tuesday', 'the unsaved session is still here');
-    assert.equal(live.__starts.length, 0, 'and nothing replaced it');
-    assert.equal(vm.followMode, false);
-});
-
-await test('a recent session restored after a reload is resumed by ?follow=1', async () => {
-    const { vm, settle, live } = await mountView({
-        query: { live: '1', follow: '1' },
-        indexLoaded: true,
-        restorable: {
-            sessionId: 'restored-follow',
-            isRunning: false,
-            _options: {},
-            detections: [{ id: 'r1', tuneId: 1, settingId: '10', title: 'Earlier tonight', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
-            elapsedSeconds: 120,
-        },
-    });
-    await settle();
-
-    // Reopening the app mid-evening and tapping Follow is the same intent as
-    // tapping Resume: carry on. It must not land on a paused screen needing
-    // another tap.
-    assert.equal(live.default.sessionId, 'restored-follow', 'the same session, continued');
-    assert.equal(vm.live.capturing, true);
-    assert.equal(vm.followMode, true);
-    assert.ok(!live.__calls.includes('finish'));
-});
-
-await test('a stale session restored after a reload is not continued', async () => {
-    const liveMod = await import(path.join(tmpDir, 'fake-live-analysis.mjs'));
-    const { vm, settle, live } = await mountView({
-        query: { live: '1', follow: '1' },
-        indexLoaded: true,
-        restorable: {
-            sessionId: 'restored-tuesday',
-            isRunning: false,
-            _options: {},
-            detections: [{ id: 'r1', tuneId: 1, settingId: '10', title: 'Tuesday', startSeconds: 0, endSeconds: 30, bestScore: 0.9 }],
-            elapsedSeconds: 120,
-        },
-    });
-    liveMod.__setRecentEnough(false);
-    await settle();
-
-    assert.ok(live.__calls.includes('finish'), 'last week\'s session is filed away, not extended');
-    assert.notEqual(live.default.sessionId, 'restored-tuesday');
-    assert.equal(vm.followMode, true, 'and Follow still ends on the score');
-});
+console.log('\nreload recovery');
 
 await test('a restore that fails does not silently start a new session', async () => {
     const { vm, settle, live } = await mountView({ indexLoaded: true, restoreThrows: true });

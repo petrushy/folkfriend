@@ -1131,6 +1131,75 @@ sessions, not on the clean clips.
 
 ## Recent changes
 
+### Live view and Session Capture are independent (November 2026)
+
+**Two layers share one microphone and one analysis loop**
+(`services/liveAnalysis.js`, comment above the class):
+
+- **Listening** (`isListening`) — microphone open, every window transcribed
+  and searched. Wanted by the live view and/or a capture; runs while EITHER
+  wants it (`_ensureListening` / `_maybeStopListening`). Feeds the live view's
+  own short list (`liveDetections`, from `_liveMatches`, last 30 min, on the
+  listener's clock `listenSeconds`, event `liveViewUpdate`, tick
+  `liveListenTick`).
+- **Session Capture** (`isRunning`, name kept because the session bar, the
+  recorder and Session Tools read it) — the open session logs: windows also
+  go to `_windowMatches`, saved, geo-tagged, recorded if the switch is on.
+  `start()` / `pause()` / `finish()` are capture operations; Pause releases
+  the microphone only if the live view is closed.
+
+Rules each pinned by a test (verified by mutation):
+
+- **The live view never creates, resumes or saves a session**
+  (`setLiveViewActive`, `services/liveView.js` `openLiveView`). Search's
+  "Live view", Session Tools' "Live view" and `?follow=1` all just open it.
+  `startForFollow` and its 6-hour rule are no longer called from the UI.
+- **A capture starts from now**: windows the live view heard earlier are not
+  added.
+- **A window belongs to the session only if it was READ while capturing and
+  the capture is the same one when its result lands** (`_captureGeneration`).
+  The loop generation cannot decide this any more — with the live view open
+  the loop never stops, so a transcription in flight across Pause → Resume
+  would otherwise reach the resumed capture.
+- **Nothing records behind a paused capture**: `_reconcileRecorder` refuses to
+  start the recorder unless `isRunning`, and the loop only reconciles while
+  capturing (the second is redundant with the first, deliberately).
+- **The reject cooldown is on the wall clock** (`_nowMs`) and the **detection
+  LED reads the listener** (its list and clock): both must work during
+  live-only listening, when no session clock runs. Rejecting in the live view
+  edits the session's list only while capturing.
+- **`liveAnalysisStarted`** is emitted on every capture start: the session
+  bar's Resume and the card's are on screen at once, and the card's chip went
+  stale without it (found by the browser check).
+
+**After iOS discards the app** (a phone left asleep mid-session reloads as a
+fresh page), `App.vue` calls `restoreOnLaunch()` at startup — not only Session
+Tools — so the session bar shows the session on whatever page opens. It is
+**resumed automatically only if the page died while CAPTURING and was active
+within 30 min** (`AUTO_RESUME_WINDOW_MS`), after `indexReady()`. The resume
+state carries `capturing: this.isRunning`; a Pause writes false, so a session
+the user paused never comes back on its own, and resume state from an older
+build (no flag) never auto-resumes. A refused microphone (iOS may want a tap)
+leaves it paused and a snackbar says to tap Resume; a successful auto-resume
+is announced too (`liveAnalysisAutoResumed`). `restoreOpenSession()` is
+single-flight, because App and Session Tools both call it on the same launch
+and a second restore landing after the first had resumed rewound it to paused
+(caught only once the test made the second read slow). A lock-and-unlock
+without a discard needs none of this: the capture never stopped, and
+`mic.js`'s visibility handler reopens the microphone.
+
+**Session Tools → Session Capture card** is the one place a session is
+started, paused, resumed and closed ("Close session" = `finish()`, which
+replaced the "New session" link), with the record-audio switch beside it and a
+status chip (Not capturing / Capturing / Paused / Mic unavailable). A restored
+session comes back paused unless the rule above resumes it. The "Record this tune"
+button in the live view is unavailable without a running capture.
+
+The live view overlay is mounted once in `App.vue` (`LiveViewHost`) and
+survives navigation. Tests: `liveView.test.mjs` (13), 9 listener/capture cases
+in `liveSessions.test.mjs`, Session Capture cases in
+`sessionAnalysisView.test.mjs`. ⚠️ Not yet tried on an iPhone.
+
 ### Search: a window may wrap across the repeat, and gaps cost more (November 2026 — 1.5.0)
 
 Two changes to the second pass (`rust/src/query/nw.rs`), chosen by measuring
