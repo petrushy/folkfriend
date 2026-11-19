@@ -267,6 +267,7 @@ export const mdiAlertCircleOutline = 'alert';
 const FAKE_SESSION_ANALYSIS = `
 export function buildTuneListText(rows) { return rows.map(r => r.title).join(' / '); }
 export function buildTuneOptions() { return []; }
+export function buildDetectionRow(d) { return { ...d, tuneOptions: [], selectedTuneKey: '' }; }
 export function buildUpdatedXsc() { return ''; }
 export function formatSecondsAsClock(s) { return String(s); }
 export function formatSecondsAsDuration(s) { return String(s); }
@@ -281,6 +282,14 @@ export let __clearLastShownCalls = 0;
 export function clearLastShown() { __clearLastShownCalls++; }
 export function __reset() { __clearLastShownCalls = 0; }
 `;
+// The live view is mounted app-wide now (LiveViewHost); the view only asks
+// for it to open. State on globalThis so every fresh import of the view shares it.
+const FAKE_LIVE_VIEW = `
+globalThis.__liveView = globalThis.__liveView || { open: false };
+export const liveView = globalThis.__liveView;
+export function openLiveView() { liveView.open = true; }
+export function closeLiveView() { liveView.open = false; }
+`;
 const FAKE_VUE_COMPONENT = `export default { name: 'stub' };`;
 
 async function writeFakes() {
@@ -294,6 +303,7 @@ async function writeFakes() {
     await writeFile(path.join(tmpDir, 'fake-session-analysis.mjs'), FAKE_SESSION_ANALYSIS);
     await writeFile(path.join(tmpDir, 'fake-follow.mjs'), FAKE_FOLLOW);
     await writeFile(path.join(tmpDir, 'fake-component.mjs'), FAKE_VUE_COMPONENT);
+    await writeFile(path.join(tmpDir, 'fake-live-view.mjs'), FAKE_LIVE_VIEW);
     await writeFile(path.join(tmpDir, 'fake-session-import.mjs'), `
 import store from './fake-store.mjs';
 export const __calls = [];
@@ -363,7 +373,7 @@ export function sessionConflictMessage() { return __state.conflict; }
         ["from '@/services/liveAnalysis.js'", "from './fake-live-analysis.mjs'"],
         ["from '@/services/fileSessionAnalysis.js'", "from './fake-file-analysis.mjs'"],
         ["from '@/components/VolumeMeter.vue'", "from './fake-component.mjs'"],
-        ["from '@/components/LiveScoreFollow.vue'", "from './fake-component.mjs'"],
+        ["from '@/services/liveView.js'", "from './fake-live-view.mjs'"],
         ["from '@/components/DropboxBackup.vue'", "from './fake-component.mjs'"],
         ["from '@/services/sessionPlayerHost.js'", "from './fake-player-host.mjs'"],
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
@@ -414,6 +424,8 @@ async function mountView({
     // synchronously on its first tick, so a flag set afterwards is too late.
     if (restoreThrows) live.__setRestoreThrows(true);
 
+    globalThis.__liveView = globalThis.__liveView || { open: false };
+    globalThis.__liveView.open = false;
     const mod = await import(`${path.join(tmpDir, 'view.mjs')}?v=${Math.random()}`);
     const component = mod.default;
 
@@ -504,7 +516,7 @@ await test('starts listening and opens the score, with no further taps', async (
     await settle();
     assert.equal(live.__starts.length, 1, 'listening starts on its own');
     assert.equal(vm.live.capturing, true);
-    assert.equal(vm.followMode, true, 'and the score opens on its own');
+    assert.equal(globalThis.__liveView.open, true, 'and the score opens on its own');
 });
 
 await test('waits for the tune index rather than dropping the request', async () => {
@@ -514,12 +526,12 @@ await test('waits for the tune index rather than dropping the request', async ()
 
     await settle();
     assert.equal(live.__starts.length, 0, 'cannot start against an unusable index');
-    assert.equal(vm.followMode, false);
+    assert.equal(globalThis.__liveView.open, false);
 
     bus.__fire('indexLoaded');
     await settle();
     assert.equal(live.__starts.length, 1, 'the request is retried when the index arrives');
-    assert.equal(vm.followMode, true);
+    assert.equal(globalThis.__liveView.open, true);
 });
 
 await test('the index arriving twice does not open two microphones', async () => {
@@ -555,7 +567,7 @@ await test('a refused microphone shows the error instead of an empty score', asy
 
     await settle();
     assert.equal(vm.live.capturing, false);
-    assert.equal(vm.followMode, false,
+    assert.equal(globalThis.__liveView.open, false,
         'a full-screen score over a microphone that never opened hides the reason');
     assert.ok(vm.live.micError, 'and the reason is shown');
 });
@@ -566,7 +578,7 @@ await test('an already-running session just opens the score', async () => {
     });
     await settle();
     assert.equal(live.__starts.length, 0, 'nothing to start');
-    assert.equal(vm.followMode, true);
+    assert.equal(globalThis.__liveView.open, true);
     assert.equal(vm.live.capturing, true);
 });
 
@@ -755,7 +767,7 @@ await test('a paused session is resumed rather than left for the user to start',
     assert.ok(live.__calls.includes('startForFollow'));
     assert.equal(live.default.sessionId, 'session-paused', 'the same session, continued');
     assert.equal(vm.live.capturing, true);
-    assert.equal(vm.followMode, true, 'and the score is on screen without another tap');
+    assert.equal(globalThis.__liveView.open, true, 'and the score is on screen without another tap');
     assert.ok(!live.__calls.includes('finish'), 'a recent session is not filed away');
 });
 
@@ -766,7 +778,7 @@ await test('a session already listening just shows the score', async () => {
     await settle();
 
     assert.equal(live.__starts.length, 0, 'nothing to start');
-    assert.equal(vm.followMode, true);
+    assert.equal(globalThis.__liveView.open, true);
 });
 
 await test('a session from another day is filed away and a fresh one started', async () => {
@@ -786,7 +798,7 @@ await test('a session from another day is filed away and a fresh one started', a
         'Wednesday must not be appended to a record named and placed as Tuesday');
     assert.notEqual(live.default.sessionId, 'session-tuesday');
     assert.ok(live.default.sessionId, 'a separate session is listening now');
-    assert.equal(vm.followMode, true, 'and it still ends on the score');
+    assert.equal(globalThis.__liveView.open, true, 'and it still ends on the score');
 });
 
 await test('a stale session that cannot be saved blocks the new one', async () => {
@@ -806,7 +818,7 @@ await test('a stale session that cannot be saved blocks the new one', async () =
     // one way to actually lose it.
     assert.equal(live.default.sessionId, 'session-tuesday', 'the unsaved session is still here');
     assert.equal(live.__starts.length, 0, 'and nothing replaced it');
-    assert.equal(vm.followMode, false);
+    assert.equal(globalThis.__liveView.open, false);
 });
 
 await test('a recent session restored after a reload is resumed by ?follow=1', async () => {
@@ -828,7 +840,7 @@ await test('a recent session restored after a reload is resumed by ?follow=1', a
     // another tap.
     assert.equal(live.default.sessionId, 'restored-follow', 'the same session, continued');
     assert.equal(vm.live.capturing, true);
-    assert.equal(vm.followMode, true);
+    assert.equal(globalThis.__liveView.open, true);
     assert.ok(!live.__calls.includes('finish'));
 });
 
@@ -850,7 +862,7 @@ await test('a stale session restored after a reload is not continued', async () 
 
     assert.ok(live.__calls.includes('finish'), 'last week\'s session is filed away, not extended');
     assert.notEqual(live.default.sessionId, 'restored-tuesday');
-    assert.equal(vm.followMode, true, 'and Follow still ends on the score');
+    assert.equal(globalThis.__liveView.open, true, 'and Follow still ends on the score');
 });
 
 await test('a restore that fails does not silently start a new session', async () => {
