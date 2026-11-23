@@ -59,7 +59,7 @@
         <template v-if="!draft && !viewedSet">
             <v-text-field
                 v-model="filter"
-                label="Find a set by name or tag"
+                label="Find a set by name, tune or tag"
                 clearable
             />
             <div
@@ -95,13 +95,15 @@
             >
                 Create a set, then search for tunes and add them in the order you want to play them. One-tune drafts are welcome.
             </v-card>
-            <p v-else-if="!visibleSets.length">
+            <p v-else-if="!visibleMatches.length">
                 No sets match this filter.
             </p>
             <SetRow
-                v-for="set in visibleSets"
+                v-for="{ set, tunes, tags } in visibleMatches"
                 :key="set.id"
                 :set="set"
+                :matched-tunes="tunes"
+                :matched-tags="tags"
                 :all-tags="allTags"
                 @view="openSet(set)"
                 @edit="edit(set)"
@@ -352,6 +354,7 @@
 <script>
 import '@/assets/sets.css';
 import { searchSetSettings } from '@/services/setSearch.mjs';
+import { matchSets, indexFavouriteTags } from '@/js/setFilter.mjs';
 import store from '@/services/store';
 import ffBackend from '@/services/backend';
 import eventBus from '@/eventBus';
@@ -379,15 +382,18 @@ export default {
     },
     data: () => ({
         viewID: null, activeTags: [],
-        sets: [], loading: true, filter: '', draft: null, original: '', version: null,
+        sets: [], favouriteTags: null, loading: true, filter: '', draft: null, original: '', version: null,
         query: '', results: [], searching: false, searched: false, expanded: {},
         busy: false, error: '', signedIn: !!store.currentUser,
         icons: { up: mdiArrowUp, down: mdiArrowDown, close: mdiClose, star: mdiStar, more: mdiDotsVertical },
     }),
     computed: {
-        visibleSets() {
-            const q = (this.filter || '').toLocaleLowerCase();
-            return this.sets.filter(s => [s.name, ...s.tags].some(t => t.toLocaleLowerCase().includes(q)) && this.activeTags.every(t => s.tags.includes(t)));
+        // Set name first, then tune names, then tags (the set's own and the
+        // favourite tags of its tunes) — js/setFilter.mjs.
+        visibleMatches() {
+            return matchSets(this.sets, this.filter, {
+                tagIndex: this.favouriteTags, activeTags: this.activeTags, displayName: utils.parseDisplayableName,
+            });
         },
         viewedSet() { return this.sets.find(s => s.id === this.viewID) || null; },
         allTags() { return [...new Set(this.sets.flatMap(s => s.tags))].sort(); },
@@ -403,12 +409,15 @@ export default {
         this._changed = () => this.refresh();
         this._auth = user => { this.signedIn = !!user; };
         this._unload = e => { if (this.dirty) { e.preventDefault(); e.returnValue = ''; } };
+        this._favouritesChanged = () => this.refreshFavouriteTags();
         eventBus.$on('tuneSetsChanged', this._changed);
+        eventBus.$on('syncComplete', this._favouritesChanged);
         eventBus.$on('authStateChanged', this._auth);
         window.addEventListener('beforeunload', this._unload);
     },
     beforeDestroy() {
         eventBus.$off('tuneSetsChanged', this._changed);
+        eventBus.$off('syncComplete', this._favouritesChanged);
         eventBus.$off('authStateChanged', this._auth);
         window.removeEventListener('beforeunload', this._unload);
     },
@@ -417,7 +426,14 @@ export default {
         type: value => value ? typeLabel(value) : 'Type unknown',
         title: value => utils.parseDisplayableName(value),
         id() { return globalThis.crypto.randomUUID(); },
+        // Only feeds the filter, so a failed read just means tune tags are
+        // not searchable this time — never an error over the set list.
+        async refreshFavouriteTags() {
+            try { this.favouriteTags = indexFavouriteTags(await store.getFavourites()); }
+            catch (e) { this.favouriteTags = null; }
+        },
         async refresh() {
+            this.refreshFavouriteTags();
             try {
                 this.sets = (await store.getTuneSets()).sort((a, b) => b.updatedAt - a.updatedAt);
                 this.activeTags = this.activeTags.filter(t => this.sets.some(s => s.tags.includes(t)));
