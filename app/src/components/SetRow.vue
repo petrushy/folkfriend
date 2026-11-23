@@ -19,6 +19,12 @@
             <p class="caption mb-1 set-sequence">
                 {{ sequence || 'Empty draft' }}
             </p>
+            <p
+                v-if="matchNote"
+                class="caption mb-1 primary--text set-match"
+            >
+                {{ matchNote }}
+            </p>
             <div
                 v-if="set.tags.length"
                 @click.stop
@@ -117,10 +123,25 @@ import utils from '@/js/utils.js';
 export default {
     name: 'SetRow',
     components: { SetScorePreview },
-    props: { set: { type: Object, required: true }, allTags: { type: Array, default: () => [] } },
+    props: {
+        set: { type: Object, required: true },
+        allTags: { type: Array, default: () => [] },
+        // From the list's search (js/setFilter.mjs): why this set is listed.
+        matchedTunes: { type: Array, default: () => [] },
+        matchedTags: { type: Array, default: () => [] },
+    },
     data: () => ({ tagMenu: false, tagInput: null, rowWidth: 0, icons: { tag: mdiTagPlusOutline, more: mdiDotsVertical } }),
     computed: {
         sequence() { return this.set.entries.map(e => `${utils.parseDisplayableName(e.result.displayName)} (${keyLabel(e.result.setting.mode || '')}, ${typeLabel(e.result.setting.dance || '')})`).join(' → '); },
+        // Set tags already show as chips below, so only name the tags that
+        // came from the tunes.
+        matchNote() {
+            const tuneTags = this.matchedTags.filter(t => !this.set.tags.includes(t));
+            const parts = [];
+            if (this.matchedTunes.length) parts.push('Tune: ' + this.matchedTunes.join(', '));
+            if (tuneTags.length) parts.push('Tune tag: ' + tuneTags.join(', '));
+            return parts.join(' · ');
+        },
         previewWidth() { return Math.min(480, Math.max(220, Math.floor((this.rowWidth - 300) * 0.7))); },
     },
     mounted() {

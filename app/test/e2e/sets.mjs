@@ -291,7 +291,7 @@ try {
     const tagFilter = await evaluate(`(() => {
         const vm = window.findVM('SetsView');
         vm.toggleTagFilter('Session test');
-        return { count: vm.visibleSets.length, id: vm.visibleSets[0].id };
+        return { count: vm.visibleMatches.length, id: vm.visibleMatches[0].set.id };
     })()`);
     check('quick tagging and tag filters work for sets', tagFilter.count === 1 && tagFilter.id === quickTags);
     await evaluate(`window.findVM('SetsView').activeTags = [];`);
