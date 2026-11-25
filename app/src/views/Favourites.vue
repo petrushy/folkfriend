@@ -257,7 +257,7 @@
                 </v-btn>
                 <v-spacer />
                 <v-btn
-                    v-if="allTags.length > 0"
+                    v-if="tagVocabulary.length > 0"
                     x-small
                     text
                     color="grey"
@@ -328,7 +328,7 @@
                 >
                     <v-combobox
                         v-model="bulkTagInput"
-                        :items="allTags"
+                        :items="tagVocabulary"
                         label="Add tag to selected"
                         dense
                         solo
@@ -367,7 +367,7 @@
                     :selected="selectedIDs.has(row.settingID)"
                     :sets="row.sets"
                     :tags="row.tags"
-                    :all-tags="allTags"
+                    :all-tags="tagVocabulary"
                     :setting="row.setting"
                     :tune-i-d="row.tuneID"
                     :source-url="row.sourceUrl"
@@ -431,7 +431,7 @@
                             :selected="selectedIDs.has(row.settingID)"
                             :sets="row.sets"
                             :tags="row.tags"
-                            :all-tags="allTags"
+                            :all-tags="tagVocabulary"
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
                             :recording-count="recordingCount(row.tuneID)"
@@ -490,7 +490,7 @@
                             :selected="selectedIDs.has(row.settingID)"
                             :sets="row.sets"
                             :tags="row.tags"
-                            :all-tags="allTags"
+                            :all-tags="tagVocabulary"
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
                             :recording-count="recordingCount(row.tuneID)"
@@ -552,7 +552,7 @@
                             :selected="selectedIDs.has(row.settingID)"
                             :sets="row.sets"
                             :tags="row.tags"
-                            :all-tags="allTags"
+                            :all-tags="tagVocabulary"
                             :tune-i-d="row.tuneID"
                             :source-url="row.sourceUrl"
                             :recording-count="recordingCount(row.tuneID)"
@@ -640,7 +640,7 @@
                 <v-card-title>Manage tags</v-card-title>
                 <v-list dense>
                     <v-list-item
-                        v-for="tag in allTags"
+                        v-for="tag in tagVocabulary"
                         :key="tag"
                     >
                         <v-list-item-content>
@@ -671,7 +671,7 @@
                             </v-btn>
                         </v-list-item-action>
                     </v-list-item>
-                    <v-list-item v-if="allTags.length === 0">
+                    <v-list-item v-if="tagVocabulary.length === 0">
                         <v-list-item-content class="grey--text">
                             No tags yet.
                         </v-list-item-content>
@@ -965,9 +965,19 @@ export default {
         keyFilterOptions() {
             return scopedOptions(this._filterItems(this.activeTypes, []), keyOptions, this.activeKeys, this.favouriteItems);
         },
+        // Tags on the favourites in the current view: the filter chips and
+        // tag grouping, which describe what is on screen.
         allTags() {
             const tags = new Set();
             this.filteredItems.forEach(item => (item.tags || []).forEach(t => tags.add(t)));
+            return [...tags].sort();
+        },
+        // Every tag in use, whatever is filtered: what can be ADDED to a
+        // favourite, renamed or deleted. Reading this from the filtered view
+        // emptied the add-tag dropdown whenever the name filter was in use.
+        tagVocabulary() {
+            const tags = new Set();
+            this.favouriteItems.forEach(item => (item.tags || []).forEach(t => tags.add(t)));
             return [...tags].sort();
         },
         allRows() {
