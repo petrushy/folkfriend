@@ -274,5 +274,5 @@ try {
     chrome.kill();
     server.close();
     await sleep(300);
-    rmSync(work, { recursive: true, force: true });
+    try { rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); } catch (e) { /* Chrome still exiting */ }
 }
