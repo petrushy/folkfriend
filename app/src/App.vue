@@ -203,6 +203,26 @@
                 center
                 contain
             />
+            <!-- The live view, one tap from any page. Opening it only listens;
+                 it never starts or resumes a session (services/liveView.js). -->
+            <v-progress-circular
+                v-if="liveView.starting"
+                indeterminate
+                size="20"
+                width="2"
+                color="primary"
+                class="mr-4"
+            />
+            <v-icon
+                v-else
+                color="primary"
+                class="mr-4"
+                aria-label="Open live view"
+                title="Live view"
+                @click="openLiveView"
+            >
+                {{ icons.clef }}
+            </v-icon>
             <v-icon
                 color="primary"
                 @click="clickSearch($event)"
@@ -305,6 +325,7 @@ import {
     mdiMapMarker,
     mdiMenu,
     mdiMicrophone,
+    mdiMusicClefTreble,
     mdiMusicNote,
     mdiPause,
     mdiPlay,
@@ -319,6 +340,7 @@ import SetPartnersDialog from '@/components/SetPartnersDialog.vue';
 import SessionStatusBar from '@/components/SessionStatusBar.vue';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import LiveViewHost from '@/components/LiveViewHost.vue';
+import { liveView, openLiveView } from '@/services/liveView.js';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
 import { playerHost, registerPlayer } from '@/services/sessionPlayerHost.js';
 
@@ -343,11 +365,13 @@ export default {
         captureRestoreText: '',
         syncErrorText: '',
         playerHost,
+        liveView,
         // The mini player appears once something has played, and stays
         // (paused or not) until closed, so a pause is never a dead end.
         miniPlayerOpen: false,
         icons: {
             chevronLeft: mdiChevronLeft,
+            clef: mdiMusicClefTreble,
             cog: mdiCog,
             close: mdiClose,
             download: mdiDownload,
@@ -432,6 +456,7 @@ export default {
         });
     },
     methods: {
+        openLiveView() { return openLiveView(); },
         // An unfinished session is restored at launch, not only when Session
         // Tools opens, so the session bar offers it on whatever page the app
         // reopens on. If iOS discarded the app mid-capture (a phone left
