@@ -22,67 +22,6 @@
                         </v-list-item-content>
                     </v-list-item>
                 </router-link>
-
-                <router-link to="/notes">
-                    <v-list-item @click="0">
-                        <v-list-item-action>
-                            <v-icon medium>
-                                {{ icons.musicNote }}
-                            </v-icon>
-                        </v-list-item-action>
-                        <v-list-item-content>
-                            <v-list-item-title class="navBarEntry">
-                                Notes
-                            </v-list-item-title>
-                        </v-list-item-content>
-                    </v-list-item>
-                </router-link>
-
-                <router-link to="/results">
-                    <v-list-item @click="0">
-                        <v-list-item-action>
-                            <v-icon medium>
-                                {{ icons.formatListBulleted }}
-                            </v-icon>
-                        </v-list-item-action>
-                        <v-list-item-content>
-                            <v-list-item-title class="navBarEntry">
-                                Results
-                            </v-list-item-title>
-                        </v-list-item-content>
-                    </v-list-item>
-                </router-link>
-
-                <router-link to="/session-analysis">
-                    <v-list-item @click="0">
-                        <v-list-item-action>
-                            <v-icon medium>
-                                {{ icons.waveform }}
-                            </v-icon>
-                        </v-list-item-action>
-                        <v-list-item-content>
-                            <v-list-item-title class="navBarEntry">
-                                Session Tools
-                            </v-list-item-title>
-                        </v-list-item-content>
-                    </v-list-item>
-                </router-link>
-
-                <router-link to="/history">
-                    <v-list-item @click="0">
-                        <v-list-item-action>
-                            <v-icon medium>
-                                {{ icons.history }}
-                            </v-icon>
-                        </v-list-item-action>
-                        <v-list-item-content>
-                            <v-list-item-title class="navBarEntry">
-                                History
-                            </v-list-item-title>
-                        </v-list-item-content>
-                    </v-list-item>
-                </router-link>
-
                 <router-link to="/favourites">
                     <v-list-item @click="0">
                         <v-list-item-action>
@@ -92,19 +31,31 @@
                         </v-list-item-action>
                         <v-list-item-content>
                             <v-list-item-title class="navBarEntry">
-                                Favorite Tunes
+                                Favourites
                             </v-list-item-title>
                         </v-list-item-content>
                     </v-list-item>
                 </router-link>
-
                 <router-link to="/sets">
                     <v-list-item @click="0">
                         <v-list-item-action><v-icon medium>{{ icons.formatListBulleted }}</v-icon></v-list-item-action>
                         <v-list-item-content><v-list-item-title class="navBarEntry">Sets</v-list-item-title></v-list-item-content>
                     </v-list-item>
                 </router-link>
-
+                <router-link to="/session-analysis">
+                    <v-list-item @click="0">
+                        <v-list-item-action>
+                            <v-icon medium>
+                                {{ icons.waveform }}
+                            </v-icon>
+                        </v-list-item-action>
+                        <v-list-item-content>
+                            <v-list-item-title class="navBarEntry">
+                                Sessions
+                            </v-list-item-title>
+                        </v-list-item-content>
+                    </v-list-item>
+                </router-link>
                 <router-link to="/places">
                     <v-list-item @click="0">
                         <v-list-item-action>
@@ -119,7 +70,6 @@
                         </v-list-item-content>
                     </v-list-item>
                 </router-link>
-
                 <router-link to="/settings">
                     <v-list-item @click="0">
                         <v-list-item-action>
@@ -134,7 +84,6 @@
                         </v-list-item-content>
                     </v-list-item>
                 </router-link>
-
                 <router-link to="/help">
                     <v-list-item @click="0">
                         <v-list-item-action>
@@ -149,8 +98,7 @@
                         </v-list-item-content>
                     </v-list-item>
                 </router-link>
-
-                <a href="https://donorbox.org/help-support-development-of-folkfriend" target="_blank" rel="noopener noreferrer">
+                <router-link to="/donate">
                     <v-list-item @click="0">
                         <v-list-item-action>
                             <v-icon medium>
@@ -159,11 +107,11 @@
                         </v-list-item-action>
                         <v-list-item-content>
                             <v-list-item-title class="navBarEntry">
-                                Donate
+                                Donate to original FolkFriend
                             </v-list-item-title>
                         </v-list-item-content>
                     </v-list-item>
-                </a>
+                </router-link>
             </v-list>
         </v-navigation-drawer>
 
@@ -296,6 +244,7 @@
         <!-- Same pattern: "Often played with…", opened from any tune. -->
         <SetPartnersDialog />
         <AddToSetDialog />
+        <AddToSessionDialog />
         <!-- The live view (follow score), openable from any page. -->
         <LiveViewHost />
     </v-app>
@@ -336,6 +285,7 @@ import {
 import utils from '@/js/utils.js';
 import TuneBackgroundDialog from '@/components/TuneBackgroundDialog.vue';
 import AddToSetDialog from '@/components/AddToSetDialog.vue';
+import AddToSessionDialog from '@/components/AddToSessionDialog.vue';
 import SetPartnersDialog from '@/components/SetPartnersDialog.vue';
 import SessionStatusBar from '@/components/SessionStatusBar.vue';
 import liveAnalysisService from '@/services/liveAnalysis.js';
@@ -346,7 +296,7 @@ import { playerHost, registerPlayer } from '@/services/sessionPlayerHost.js';
 
 export default {
     name: 'App',
-    components: { TuneBackgroundDialog, SetPartnersDialog, AddToSetDialog, SessionStatusBar, SessionAudioPlayer, LiveViewHost },
+    components: { TuneBackgroundDialog, SetPartnersDialog, AddToSetDialog, AddToSessionDialog, SessionStatusBar, SessionAudioPlayer, LiveViewHost },
     data: () => ({
         drawer: null,
         menu: null,

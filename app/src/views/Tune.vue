@@ -150,6 +150,9 @@
                                 <v-list-item @click="addSettingToSet(settingData)">
                                     <v-list-item-title>Add to a set…</v-list-item-title>
                                 </v-list-item>
+                                <v-list-item @click="addSettingToSession(settingData)">
+                                    <v-list-item-title>Add to a session plan…</v-list-item-title>
+                                </v-list-item>
                             </v-list>
                         </v-menu>
                         <v-menu
@@ -645,6 +648,12 @@ export default {
         },
         setsForSetting(id) { return this.setMemberships[String(id)] || []; },
         // The exact setting on screen, so the dialog does not ask for a key.
+        addSettingToSession(settingData) {
+            eventBus.$emit('showAddToSession', { tunes: [{
+                tuneID: this.tuneID, settingID: settingData.setting_id,
+                title: this.displayName || this.name, dataset: settingData.dataset, setting: settingData,
+            }] });
+        },
         addSettingToSet(settingData) {
             const displayName = this.name || this.displayName;
             const entry = { setting_id: settingData.setting_id, setting: settingData, display_name: this.displayName || displayName };

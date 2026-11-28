@@ -1,34 +1,93 @@
 <template>
     <v-container class="viewContainerWrapper session-analysis">
         <h1 class="my-2">
-            Session Tools
+            Sessions
         </h1>
 
-        <!-- Three modes do not fit on one phone row, and v-btn-toggle does not
-             wrap on its own — it just overflows the viewport. -->
-        <v-btn-toggle
-            :value="viewMode === 'file' ? 'file' : 'session'"
-            @change="viewMode = $event === 'file' ? 'file' : lastSessionView"
-            mandatory
-            dense
-            rounded
-            class="mb-4 mode-toggle"
-        >
-            <v-btn value="file" small>
-                Import recording
+        <!-- One row of actions, most used first. A session is one thing
+             whether it starts with a plan or with capturing, so there is one
+             way to make one: New session, which then asks which. Import is a
+             different page, reached and left like one. Wraps on a phone. -->
+        <div class="d-flex flex-wrap align-center mb-4 session-actions" style="gap: 8px;">
+            <v-btn v-if="viewMode === 'file'" outlined color="primary" @click="viewMode = lastSessionView">
+                <v-icon left small>{{ icons.back }}</v-icon>
+                Back to sessions
             </v-btn>
-            <v-btn value="session" small>
-                <v-icon left small>{{ icons.microphone }}</v-icon>
-                Sessions
-            </v-btn>
-        </v-btn-toggle>
-        <v-btn text color="primary" class="mb-4" @click="openSessionPicker">Past sessions</v-btn>
+            <template v-else>
+                <v-btn :small="$vuetify.breakpoint.xsOnly" color="primary" depressed @click="openNewSession">
+                    <v-icon left small>{{ icons.plus }}</v-icon>
+                    New session
+                </v-btn>
+                <v-btn :small="$vuetify.breakpoint.xsOnly" outlined color="primary" @click="openSessionPicker">
+                    <v-icon left small>{{ icons.open }}</v-icon>
+                    Open a session
+                </v-btn>
+                <v-btn :small="$vuetify.breakpoint.xsOnly" outlined color="primary" @click="viewMode = 'file'">
+                    <v-icon left small>{{ icons.import }}</v-icon>
+                    Import recording
+                </v-btn>
+            </template>
+        </div>
+
+        <v-dialog v-model="newSession.open" max-width="480" :persistent="newSession.busy">
+            <v-card>
+                <v-card-title>New session</v-card-title>
+                <v-card-text>
+                    <v-text-field
+                        v-model="newSession.name"
+                        label="Name"
+                        :placeholder="'e.g. Thursday at The Crown'"
+                        maxlength="160"
+                        autofocus
+                        :disabled="newSession.busy"
+                        hint="Optional if you start now — it is named by its date and place."
+                        persistent-hint
+                    />
+                    <p class="caption text--secondary mt-4 mb-1">
+                        <strong>Start capturing now</strong> logs every tune recognised from here on.
+                        <strong>Plan first</strong> keeps it for later: build its plan, and start it when the music starts.
+                    </p>
+                    <p v-if="live.hasSession" class="caption warning--text mb-1">
+                        Starting now closes {{ live.sessionName || 'the current session' }} first. It is saved in Past Sessions.
+                    </p>
+                    <p v-if="!indexLoaded" class="caption text--secondary mb-1">
+                        Capturing needs the tune index ({{ indexStatusText }}). You can plan meanwhile.
+                    </p>
+                    <v-alert v-if="newSession.error" type="error" dense text class="mt-2 mb-0">
+                        {{ newSession.error }}
+                    </v-alert>
+                </v-card-text>
+                <v-card-actions class="flex-wrap">
+                    <v-btn text :disabled="newSession.busy" @click="newSession.open = false">Cancel</v-btn>
+                    <v-spacer />
+                    <v-btn
+                        outlined
+                        color="primary"
+                        :disabled="newSession.busy || !newSession.name.trim()"
+                        :title="newSession.name.trim() ? '' : 'A plan needs a name — it is all it has to go by until it starts'"
+                        @click="createNewSession(false)"
+                    >
+                        Plan first
+                    </v-btn>
+                    <v-btn
+                        color="primary"
+                        depressed
+                        :disabled="newSession.busy || !canStartLive"
+                        :loading="newSession.busy"
+                        @click="createNewSession(true)"
+                    >
+                        <v-icon left small>{{ icons.record }}</v-icon>
+                        Start capturing now
+                    </v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
 
         <v-dialog v-model="sessionPicker" max-width="640">
             <v-card class="pa-5">
                 <h2 class="text-h6 mb-3">Open a session</h2>
                 <v-autocomplete v-if="sessionPicker"
-                                :items="pastSessions" item-value="id" :item-text="sessionLabel" :filter="filterSession"
+                                :items="pastSessions" item-value="id" :item-text="pickerLabel" :filter="filterSession"
                                 label="Search by name, date or place" clearable autofocus
                                 :loading="pickerLoading" :menu-props="{ maxHeight: 320 }"
                                 no-data-text="No saved sessions" @change="selectSession"
@@ -64,16 +123,24 @@
                 its audio, if you turn that on. The live view follows the music without it.
             </p>
             <div class="d-flex flex-wrap align-center" style="gap: 8px;">
-                <v-btn
-                    v-if="!live.hasSession"
-                    color="primary"
-                    :disabled="!canStartLive"
-                    :loading="live.starting"
-                    @click="startLiveAnalysis"
-                >
-                    <v-icon left small>{{ icons.record }}</v-icon>
-                    Start session capture
-                </v-btn>
+                <template v-if="!live.hasSession">
+                    <!-- A session planned ahead is captured INTO, not beside:
+                         its plan is what the evening is crossed off against. -->
+                    <v-btn
+                        v-for="planned in plannedToStart"
+                        :key="planned.id"
+                        color="primary"
+                        :disabled="!canStartLive"
+                        :loading="live.starting"
+                        @click="startPlannedSession(planned)"
+                    >
+                        <v-icon left small>{{ icons.record }}</v-icon>
+                        {{ plannedToStart.length === 1 && viewMode === 'history' ? 'Start this session' : `Start ‘${sessionLabel(planned)}’` }}
+                    </v-btn>
+                    <span v-if="!plannedToStart.length" class="text--secondary">
+                        Nothing is being captured. Use <strong>New session</strong> above to start.
+                    </span>
+                </template>
                 <template v-else>
                     <v-btn v-if="live.capturing" color="secondary" @click="pauseLive">
                         <v-icon left small>{{ icons.pause }}</v-icon>
@@ -135,7 +202,11 @@
         <v-card v-if="viewMode !== 'file' && activeSession" class="pa-5 my-3">
             <v-text-field :value="activeSession.name || sessionLabel(activeSession)" label="Session name"
                           maxlength="160" hide-details class="mb-3" :disabled="workspaceBusy" @change="renameSession" />
-            <p class="caption text--secondary">
+            <p v-if="activeSession.planned" class="caption text--secondary">
+                Planned session. Build the plan below, then start capturing it when the music starts —
+                that is when it gets its date, time and place. Changes are saved automatically.
+            </p>
+            <p v-else class="caption text--secondary">
                 {{ formatSessionDate(activeSession.startedAt) }} · {{ formatSecondsAsDuration(activeListenedSeconds) }} listened.
                 Changes are saved automatically.
             </p>
@@ -156,6 +227,12 @@
                 </v-menu>
             </div>
         </v-card>
+        <SessionPlan
+            v-if="viewMode !== 'file' && activeSession && activeSession.id"
+            :key="activeSession.id"
+            :session-id="activeSession.id"
+            :played="activeDetections"
+        />
         <v-alert v-if="workspaceError" type="error" dense text>
             {{ workspaceError }}
             <v-btn v-if="pendingSessionPatch" small text @click="retrySessionEdit">Retry save</v-btn>
@@ -786,13 +863,15 @@ import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
 import {
     mdiOpenInNew, mdiMicrophone, mdiClose, mdiPlaylistPlus, mdiMusicClefTreble, mdiStar, mdiStarOutline, mdiPlay, mdiPause,
-    mdiRecordCircleOutline, mdiStop, mdiAlertCircleOutline,
+    mdiRecordCircleOutline, mdiStop, mdiAlertCircleOutline, mdiCalendarPlus, mdiPlus, mdiFolderOpenOutline,
+    mdiFileUploadOutline, mdiArrowLeft,
 } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import fileSessionAnalysisService from '@/services/fileSessionAnalysis.js';
 import VolumeMeter from '@/components/VolumeMeter.vue';
 import DropboxBackup from '@/components/DropboxBackup.vue';
+import SessionPlan from '@/components/SessionPlan.vue';
 import { playerHost, sessionPlayer, showPlayerIn, parkPlayer } from '@/services/sessionPlayerHost.js';
 import { backupStatus, sessionConflictMessage } from '@/services/dropbox.js';
 import sessionRecorder from '@/services/sessionRecorder.js';
@@ -867,7 +946,7 @@ const emptyLiveState = () => ({
 
 export default {
     name: 'SessionAnalysisView',
-    components: { VolumeMeter, DropboxBackup },
+    components: { VolumeMeter, DropboxBackup, SessionPlan },
     data() {
         return {
             dragActive: false,
@@ -890,6 +969,7 @@ export default {
             // below switches back to it when there are saved file results.
             viewMode: 'live', // 'file' | 'live' | 'history'
             lastSessionView: 'live',
+            newSession: { open: false, name: '', busy: false, error: '' },
             // The two analyses keep their own results, progress and errors.
             // They used to share one set of fields, so starting one wiped the
             // other's results and the "stage" of whichever ran last decided
@@ -915,6 +995,11 @@ export default {
             selectedRowKeys: [],
             tuneSets: [],
             icons: {
+                plan: mdiCalendarPlus,
+                plus: mdiPlus,
+                open: mdiFolderOpenOutline,
+                import: mdiFileUploadOutline,
+                back: mdiArrowLeft,
                 close: mdiClose,
                 addToSet: mdiPlaylistPlus,
                 openInNew: mdiOpenInNew,
@@ -959,6 +1044,11 @@ export default {
         };
     },
     watch: {
+        // A `?session=` link followed while this page is already open (the
+        // "Open" on the add-to-session notice): the view is not remounted.
+        '$route.query.session'(id) {
+            if (id && !this._destroyed) this.openSessionById(String(id));
+        },
         // Switching tabs is navigation, not a lifecycle event. It never stops
         // the microphone and never touches either set of results — the live
         // session carries on exactly as it does when the user navigates to a
@@ -1025,6 +1115,17 @@ export default {
                 id: this.live.sessionId, name: this.live.sessionName,
                 startedAt: this.live.startedAt, listenedSeconds: this.live.elapsedSeconds,
             };
+        },
+        // Planned sessions the capture card offers to start: the one open on
+        // screen, else the two planned most recently. A plan has no date of
+        // its own (it gets one when started), so recency is all there is.
+        plannedToStart() {
+            if (this.live.hasSession) return [];
+            if (this.viewMode === 'history') {
+                return this.selectedSession && this.selectedSession.planned ? [this.selectedSession] : [];
+            }
+            return this.pastSessions.filter(p => p.planned)
+                .sort((a, b) => b.startedAt - a.startedAt).slice(0, 2);
         },
         activeListenedSeconds() {
             return this.activeSession ? this.listenedSeconds(this.activeSession) : 0;
@@ -1176,8 +1277,15 @@ export default {
         };
         // Past Sessions
         this._onLiveSessionsChanged = () => {
-            if (this.viewMode === 'history') this.refreshPastSessions();
+            // With no capture running, too: a session planned elsewhere has
+            // to appear on the Start card. Not during a capture, whose every
+            // checkpoint is a change.
+            if (this.viewMode === 'history' || !this.live.hasSession) this.refreshPastSessions();
         };
+        this._onPlanSaved = ({ sessionID, created }) => {
+            if (created && !this._destroyed) this.openSessionById(sessionID);
+        };
+        eventBus.$on('sessionPlanSaved', this._onPlanSaved);
 
         // A live session's recording becomes playable once its first segment is
         // on disk (three minutes in), and then grows: EVERY segment extends how
@@ -1293,6 +1401,7 @@ export default {
         eventBus.$off('liveAnalysisMicState', this._onLiveMicState);
         eventBus.$off('liveAnalysisSaveState', this._onLiveSaveState);
         eventBus.$off('liveSessionsChanged', this._onLiveSessionsChanged);
+        eventBus.$off('sessionPlanSaved', this._onPlanSaved);
         eventBus.$off('tuneSetsChanged', this.loadTuneSets);
         eventBus.$off('sessionAudioState', this._onAudioState);
         eventBus.$off('fileAnalysisStage', this._onFileStage);
@@ -1316,6 +1425,11 @@ export default {
                 this.$nextTick(() => { if (!this._destroyed) openLiveView(); });
             }
 
+            const wanted = this.$route && this.$route.query.session;
+            if (wanted && !this._routeWantsLive()) {
+                this._syncLiveFromService();
+                if (await this.openSessionById(String(wanted))) return;
+            }
             if (this.selectedSession && !this._routeWantsLive()) {
                 this.viewMode = 'history';
                 this._syncLiveFromService();
@@ -1404,7 +1518,7 @@ export default {
             if (!saved) return;
             if (saved.version !== SESSION_ANALYSIS_STATE_VERSION) {
                 store.clearSessionAnalysisState();
-                this.file.error = 'Saved Session Tools results were from an older format and have been cleared. Please run the analysis again.';
+                this.file.error = 'Saved Sessions results were from an older format and have been cleared. Please run the analysis again.';
                 return;
             }
 
@@ -1757,6 +1871,88 @@ export default {
             });
         },
 
+        pickerLabel(session) {
+            return session.planned ? `Planned · ${this.sessionLabel(session)}` : this.sessionLabel(session);
+        },
+        openNewSession() {
+            if (this.pendingSessionPatch) {
+                this.workspaceError = 'Save your pending changes before starting another session.';
+                return;
+            }
+            this.newSession = { open: true, name: '', busy: false, error: '' };
+        },
+        // One way to make a session, two ways for it to begin. Planning
+        // creates the record and opens it; starting now captures straight
+        // away — into a named record when a name was given, so the name sticks.
+        async createNewSession(startNow) {
+            const form = this.newSession;
+            if (form.busy) return;
+            const name = form.name.trim();
+            form.busy = true;
+            form.error = '';
+            try {
+                if (!startNow) {
+                    const created = await store.createPlannedSession({ name });
+                    form.open = false;
+                    await this.openSessionById(created.id);
+                    return;
+                }
+                if (liveAnalysisService.sessionId) {
+                    const result = await liveAnalysisService.finish();
+                    this._syncLiveFromService();
+                    if (!result.ok) {
+                        throw new Error(`Could not close the current session${result.error ? `: ${result.error}` : ''}. It is kept; nothing new was started.`);
+                    }
+                }
+                form.open = false;
+                this.selectedSession = null;
+                this.viewMode = 'live';
+                if (name) await this.startPlannedSession(await store.createPlannedSession({ name }));
+                else await this.startLiveAnalysis();
+            } catch (e) {
+                form.error = e.message || String(e);
+                form.open = true;
+            } finally {
+                form.busy = false;
+            }
+        },
+        // Opens a session by id (a `?session=` link, or a session just
+        // planned), once the list it is picked from is fresh.
+        async openSessionById(id) {
+            if (!id) return false;
+            await this.refreshPastSessions();
+            if (this._destroyed || !this.pastSessions.some(p => p.id === id)) return false;
+            this.selectSession(id);
+            return true;
+        },
+        async startPlannedSession(session) {
+            if (this.pendingSessionPatch) {
+                this.workspaceError = 'Save your pending changes before starting the session.';
+                return;
+            }
+            this.live.micError = '';
+            this.workspaceError = '';
+            this.live.starting = true;
+            const windowSeconds = Number(this.analysisSettings.windowSeconds) || 10;
+            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 5;
+            try {
+                await liveAnalysisService.start(windowSeconds, stepSeconds, { plannedSession: session });
+                this.selectedSession = null;
+                this.savedDetections = [];
+                this.viewMode = 'live';
+                this.refreshPastSessions();
+            } catch (e) {
+                if (liveAnalysisService.sessionId === session.id) {
+                    this.viewMode = 'live';
+                    this.live.micError = `Could not access microphone: ${e.message || 'please check permissions'}. Your session is kept; use Resume to retry.`;
+                } else {
+                    this.workspaceError = e.message || String(e);
+                }
+            } finally {
+                this.live.starting = false;
+                this._syncLiveFromService();
+            }
+        },
         sessionLabel(session) {
             const date = this.formatSessionDate(session.startedAt);
             return session.name || (session.placeName ? `${date} · ${session.placeName}` : date);

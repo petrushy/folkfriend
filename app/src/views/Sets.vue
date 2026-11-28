@@ -108,6 +108,7 @@
                 @view="openSet(set)"
                 @edit="edit(set)"
                 @duplicate="duplicate(set)"
+                @add-to-session="addToSession(set)"
                 @delete="deleteSet(set)"
                 @tags="updateSetTags(set, $event)"
                 @filter-tag="toggleTagFilter"
@@ -149,6 +150,9 @@
                         </v-btn>
                     </template>
                     <v-list dense>
+                        <v-list-item @click="addToSession(viewedSet)">
+                            <v-list-item-title>Add to a session…</v-list-item-title>
+                        </v-list-item>
                         <v-list-item @click="duplicate(viewedSet)">
                             <v-list-item-title>Duplicate</v-list-item-title>
                         </v-list-item>
@@ -501,6 +505,10 @@ export default {
             this.version = set.updatedAt || null;
             this.original = JSON.stringify(this.draft);
             this.results = []; this.query = ''; this.searched = false; this.expanded = {}; this.error = '';
+        },
+        // The whole set goes into the plan as one block.
+        addToSession(set) {
+            if (set) eventBus.$emit('showAddToSession', { sets: [set] });
         },
         duplicate(set) {
             this._startEditing({ ...set, id: this.id(), name: (set.name.slice(0, 190) + ' (copy)'), updatedAt: undefined,

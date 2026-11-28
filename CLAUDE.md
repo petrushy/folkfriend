@@ -1131,6 +1131,56 @@ sessions, not on the clean clips.
 
 ## Recent changes
 
+### Sessions: planning and leading from a plan (November 2026)
+
+"Session Tools" is now **Sessions** (label only; the route is still
+`/session-analysis`). A session is ONE record however it begins: the page's single **New session**
+action asks for a name, then **Start capturing now** or **Plan first** (the
+header is one action row: New session · Open a session · Import recording).
+A session can be **planned ahead** (Plan first,
+`store.createPlannedSession`): a `liveSessions` record with `planned: true`,
+`tunes: []`, and only a NAME — its date, time and place are taken when capture
+starts (`startedAt` holds when it was planned until then, for sorting and the
+rules). It carries an ordered
+`plan` of tunes and set blocks (`js/sessionPlan.mjs`), filled from Favourites
+(tag → select all → *Add to session*), Sets, a tune's sets menu and search
+results, all through the one `AddToSessionDialog` (`showAddToSession`).
+"Start this session" captures INTO the planned record
+(`liveAnalysisService.start(w, s, { plannedSession })`: same id and name,
+`startedAt` = now, `planned: false`).
+
+- **The plan is not the live service's.** `_persistSession` rebuilds the
+  record from the fields it owns, and `upsertLiveSession` used to replace the
+  stored record, so a plan would vanish at the first checkpoint, on every
+  device. `upsertLiveSession` now keeps the stored `plan` when the incoming
+  record has none (merged inside the write queue, and the MERGED record is
+  what is pushed). Plan edits go through `store.updateSessionPlan(id, fn)`,
+  applied to the stored plan. Verified by mutation in `recordSync.test.mjs`.
+- **Crossed off is derived, never stored** (`planProgress`): from the
+  session's own tune list on every render, so rejecting or correcting a
+  detection un-crosses it. Only the user's tap (`done: true|false`) is stored.
+  A tune counts once heard for `userSettings.planMinPlayedSeconds` (default
+  45 s, Settings → Sessions), summed over its rows.
+- **Same tune, not same id**: same tune id, or a normalised name match
+  (`js/tuneNames.mjs`: case, accents, "The", apostrophes, a trailing tune
+  type) against aliases captured when the item was added. Names that are only
+  a tune type ("Polska") never match. Tune ids never match across datasets,
+  so this is what crosses off a Norbeck copy of a planned thesession tune.
+- The plan is a list to pick from, not a queue: there is no "next" — the
+  evening decides the order.
+- The plan card filters by name, type and tag (display only; reordering is
+  hidden while filtered). Tags are the user's own from Favourites and Sets,
+  read at display time and never stored on the plan. There is deliberately
+  no add-by-name box on the card: choosing a tune needs its score or its star,
+  so adding is from Favourites, Sets, a tune's page or search results.
+- Items store key, meter and type (not the ABC); previews look the ABC up
+  (favourites, then the index) and share `js/abcPreview.mjs` with Favourites.
+- No Firestore rules change was needed (`isValidLiveSession` checks only id,
+  startedAt and tunes).
+
+Tests: `sessionPlan.test.mjs` (15), 2 in `recordSync.test.mjs`, 2 in
+`liveSessions.test.mjs`. ⚠️ Not yet tried on a device.
+
 ### Live view and Session Capture are independent (November 2026)
 
 **Two layers share one microphone and one analysis loop**

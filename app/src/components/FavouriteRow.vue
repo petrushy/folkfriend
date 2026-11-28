@@ -169,6 +169,7 @@
 import { mdiStar, mdiPlaylistPlus, mdiTagPlusOutline, mdiPlayCircleOutline, mdiPauseCircleOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
 import utils from '@/js/utils';
+import { previewAbc, previewBars, previewRenderOptions } from '@/js/abcPreview.mjs';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 
 // Minimum row width (px) before the ABC preview is shown.
@@ -249,52 +250,9 @@ export default {
         },
         abcSvg() {
             if (!this.setting || !this.setting.abc) return '';
-            const lines = [];
-            if (this.setting.mode) lines.push(`K:${this.setting.mode}`);
-            if (this.setting.meter) lines.push(`M:${this.setting.meter}`);
-            if (!/^L:/m.test(this.setting.abc)) lines.push('L:1/8');
-            // Strip chord annotations and tempo — chords add vertical whitespace above the staff.
-            let body = this.setting.abc;
-            body = body.replace(/^Q:[^\n]*/gm, '');
-            body = body.replace(/"[^"]*"/g, '');
-            // Strip multi-voice ABC — keep only V:1 content so only one staff renders.
-            if (/^V:/m.test(body)) {
-                const filtered = [];
-                let inV1 = true; // before any V: marker, include content
-                for (const line of body.split('\n')) {
-                    if (/^V:1/.test(line)) { inV1 = true; continue; }
-                    if (/^V:/.test(line))  { inV1 = false; continue; }
-                    if (inV1) filtered.push(line);
-                }
-                body = filtered.join('\n');
-            }
-            // Show more bars when more space is available.
-            // Each bar is roughly 110px at scale 0.65, so derive bar count from width.
-            // +1 to account for the leading |: repeat marker which counts as a pipe but isn't a bar.
-            const maxBars = this.abcPreviewDisplayWidth < 300 ? 2
-                : this.abcPreviewDisplayWidth < 390 ? 3
-                    : 4;
-            const targetPipes = maxBars + 1;
-            let count = 0;
-            let cutAt = body.length;
-            for (let i = 0; i < body.length; i++) {
-                if (body[i] === '|' && ++count >= targetPipes) { cutAt = i + 1; break; }
-            }
-            lines.push(body.slice(0, cutAt));
-
+            const width = this.abcPreviewDisplayWidth;
             const div = document.createElement('div');
-            ABCJS.renderAbc(div, lines.join('\n'), {
-                // Render at actual display width so no CSS scaling is needed.
-                // scale zooms note size (1.0 = default); 0.65 gives compact but readable notation.
-                staffwidth: this.abcPreviewDisplayWidth,
-                scale: 0.65,
-                paddingtop: 0,
-                paddingbottom: 0,
-                paddingleft: 0,
-                paddingright: 0,
-                // Force everything onto one line regardless of time signature width
-                wrap: { minSpacing: 1, maxSpacing: 3, preferredMeasuresPerLine: 8 },
-            });
+            ABCJS.renderAbc(div, previewAbc(this.setting, previewBars(width)), previewRenderOptions(width));
             return div.innerHTML;
         },
     },

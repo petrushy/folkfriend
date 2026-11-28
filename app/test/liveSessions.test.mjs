@@ -674,6 +674,28 @@ async function run() {
         await service.stop();
     });
 
+    await test('starting a planned session captures INTO it: same id and name, no longer planned', async () => {
+        const { service, store } = await loadService();
+        const planned = { id: 'session-planned-1', startedAt: 5, name: 'Thursday at The Crown', customName: true, planned: true };
+        await service.start(10, 5, { plannedSession: planned });
+        assert.equal(service.sessionId, planned.id, 'no second record beside the planned one');
+        await service._saveChain;
+        const saved = store.__sessions.find(s => s.id === planned.id);
+        assert.ok(saved);
+        assert.equal(saved.name, 'Thursday at The Crown');
+        assert.equal(saved.planned, false);
+        assert.ok(saved.startedAt > 5, 'the session starts now, not at the planned time');
+        assert.equal('plan' in saved, false, 'the plan is the store\'s to keep, not the service\'s to write');
+        await service.stop();
+    });
+
+    await test('a planned session is refused while another session is open', async () => {
+        const { service } = await loadService();
+        await service.start(10, 5);
+        await assert.rejects(service.start(10, 5, { plannedSession: { id: 'other', startedAt: 1 } }), /Close the current session/);
+        await service.stop();
+    });
+
     await test('the session saves on each tune change, not on a repeat of the same tail tune', async () => {
         const { service, store } = await loadService();
         await service.start(10, 5);

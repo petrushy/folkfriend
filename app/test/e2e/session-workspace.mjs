@@ -51,7 +51,7 @@ async function click(text) {
 const readSessions = `new Promise((resolve, reject) => { const r = indexedDB.open('keyval-store'); r.onsuccess = () => { const db = r.result; const q = db.transaction('keyval').objectStore('keyval').get('liveSessions'); q.onsuccess = () => { resolve(q.result); db.close(); }; q.onerror = reject; }; r.onerror = reject; })`;
 async function records() { return evaluate(readSessions); }
 async function openSaved(name) {
-    await click('Past sessions');
+    await click('Open a session');
     await until(() => evaluate(`!!document.querySelector('.v-dialog .v-autocomplete input')`), 'session picker');
     await evaluate(`document.querySelector('.v-dialog .v-autocomplete input').focus()`);
     await send('Input.insertText', { text: name });
@@ -100,13 +100,13 @@ try {
         });
     })()`);
     await send('Page.navigate', { url: `${origin}/session-analysis` });
-    await until(() => evaluate(`document.body && document.body.textContent.includes('Past sessions')`), 'workspace');
+    await until(() => evaluate(`document.body && document.body.textContent.includes('Open a session')`), 'workspace');
     await openSaved('Sunday session 239');
     assert.equal(await evaluate(`document.querySelectorAll('tbody tr:not(.runHeader)').length`), 4, 'Only the selected session is rendered');
     console.log('✓ Search 240 sessions and open one shared editor');
     await click('Import recording');
     await until(() => evaluate(`!![...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Choose Audio')`), 'file view');
-    await click('Sessions');
+    await click('Back to sessions');
     await until(() => evaluate(`document.querySelector('input[maxlength="160"]')?.value === 'Sunday session 239'`), 'return to selected session');
     assert.equal(await evaluate(`document.querySelectorAll('tbody tr:not(.runHeader)').length`), 4);
     console.log('✓ Switching to file analysis and back preserves the selected session');
@@ -135,7 +135,7 @@ try {
     assert.equal((await records()).length, 240);
     console.log('✓ Remove and Clear persist while keeping the session');
     await send('Page.reload');
-    await until(() => evaluate(`document.body && document.body.textContent.includes('Past sessions')`), 'reload');
+    await until(() => evaluate(`document.body && document.body.textContent.includes('Open a session')`), 'reload');
     await openSaved('Renamed evening');
     assert.ok(await evaluate(`document.body.textContent.includes('No tunes in this session yet')`));
     await click('Session actions');
@@ -166,7 +166,7 @@ try {
         });
     })()`);
     await send('Page.reload');
-    await until(() => evaluate(`document.body && document.body.textContent.includes('Past sessions')`), 'sets reload');
+    await until(() => evaluate(`document.body && document.body.textContent.includes('Open a session')`), 'sets reload');
     await openSaved('Set evening');
     await until(() => evaluate(`document.querySelectorAll('tr.runHeader').length === 2`), 'two suggested sets');
     assert.deepEqual(await evaluate(`[...document.querySelectorAll('tr.runHeader')].map(r => r.textContent.replace(/\\s+/g, ' ').trim())`),
@@ -226,7 +226,7 @@ try {
         });
     })()`);
     await send('Page.reload');
-    await until(() => evaluate(`document.body && document.body.textContent.includes('Past sessions')`), 'Dropbox reload');
+    await until(() => evaluate(`document.body && document.body.textContent.includes('Open a session')`), 'Dropbox reload');
     await openSaved('Offline Dropbox evening');
     await until(() => evaluate(`!!document.querySelector('.sessionAudioPlayer audio')`), 'remote manifest player');
     assert.ok(await evaluate(`document.body.textContent.includes('Reconnect required')`));

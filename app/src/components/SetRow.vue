@@ -103,6 +103,9 @@
                 <v-list-item @click="$emit('edit')">
                     <v-list-item-title>Edit set</v-list-item-title>
                 </v-list-item>
+                <v-list-item @click="$emit('add-to-session')">
+                    <v-list-item-title>Add to a session…</v-list-item-title>
+                </v-list-item>
                 <v-list-item @click="$emit('duplicate')">
                     <v-list-item-title>Duplicate</v-list-item-title>
                 </v-list-item>
