@@ -8,6 +8,21 @@
                   Guess otherwise vuetify thinks it's not clickable?
                   The 0 is insignificant I just needed any valid javascript-->
             <v-list dense>
+                <!-- An action, not a page: the live view opens over whatever
+                     page is showing (the same as the app-bar button). -->
+                <v-list-item class="navLiveView" @click="drawer = false; openLiveView()">
+                    <v-list-item-action>
+                        <v-icon medium>
+                            {{ icons.clef }}
+                        </v-icon>
+                    </v-list-item-action>
+                    <v-list-item-content>
+                        <v-list-item-title class="navBarEntry">
+                            Live view
+                        </v-list-item-title>
+                    </v-list-item-content>
+                </v-list-item>
+
                 <router-link to="/">
                     <v-list-item @click="0">
                         <v-list-item-action>

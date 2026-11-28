@@ -267,6 +267,8 @@ export const mdiPlus = 'plus';
 export const mdiFolderOpenOutline = 'folder-open';
 export const mdiFileUploadOutline = 'file-upload';
 export const mdiArrowLeft = 'arrow-left';
+export const mdiDotsVertical = 'dots-vertical';
+export const mdiChevronRight = 'chevron-right';
 export const mdiStop = 'stop';
 `;
 
@@ -373,6 +375,8 @@ export function sessionConflictMessage() { return __state.conflict; }
     let source = sfc.slice(open + '<script>'.length, close);
 
     const replacements = [
+        ["from '@/js/dateFormat.mjs'", `from '${path.join(srcDir, 'js', 'dateFormat.mjs')}'`],
+        ["from '@/js/sessionPlan.mjs'", `from '${path.join(srcDir, 'js', 'sessionPlan.mjs')}'`],
         ["from '@/services/store.js'", "from './fake-store.mjs'"],
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from '@mdi/js'", "from './fake-mdi.mjs'"],
@@ -759,6 +763,31 @@ await test('a selected historical session deletes independently', async () => {
     try { await vm.deleteSelectedSession(); } finally { delete globalThis.window; }
     assert.ok(store.__calls.some(c => c.op === 'delete' && c.id === 'old-session'));
     assert.equal(store.__liveSessions.length, 0);
+});
+
+await test('the strip\'s × closes a past session back to the list, and touches nothing', async () => {
+    const { vm, settle, store } = await mountView({ indexLoaded: true });
+    await settle();
+    store.__liveSessions.push({ id: 'old-session', startedAt: 1, tunes: [] });
+    await vm.refreshPastSessions();
+    vm.selectSession('old-session');
+    assert.equal(vm.viewMode, 'history');
+    await vm.closeViewer();
+    assert.equal(vm.selectedSession, null);
+    assert.equal(vm.viewMode, 'live');
+    assert.equal(vm.activeSession, null, 'no session open: the list is shown');
+    assert.equal(store.__liveSessions.length, 1, 'closing the view deletes nothing');
+});
+
+await test('the strip\'s × on a capturing session asks first, and a no keeps it capturing', async () => {
+    const { vm, settle, live } = await mountView({ indexLoaded: true, running: true });
+    await settle();
+    globalThis.window = { confirm: () => false };
+    try { await vm.closeViewer(); } finally { delete globalThis.window; }
+    assert.ok(!live.__calls.includes('finish'), 'not closed');
+    globalThis.window = { confirm: () => true };
+    try { await vm.closeViewer(); } finally { delete globalThis.window; }
+    assert.ok(live.__calls.includes('finish'), 'closed after a yes');
 });
 
 console.log('\ncorrections and reload recovery');
@@ -1554,7 +1583,7 @@ await test('switching sessions or modes clears the ticks', async () => {
     component.watch.viewMode.call(vm, 'history');
     assert.deepEqual(vm.selectedRowKeys, []);
     vm.selectedRowKeys = ['0'];
-    component.watch['activeSession.id'].call(vm, 'other');
+    component.watch['activeSession.id'].handler.call(vm, 'other');
     assert.deepEqual(vm.selectedRowKeys, []);
 });
 

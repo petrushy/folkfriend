@@ -104,6 +104,13 @@ test('a set is done only when every tune in it is', () => {
     assert.equal(p.byId.get(set.id).done, true);
 });
 
+test('a favourite planned under the user\'s own name is crossed off by the database name', () => {
+    const plan = [makeTuneItem({ tuneID: 9, title: 'Annas vals', aliases: ['The Kesh'] })];
+    // A copy in another dataset, recognised by its database name.
+    assert.equal(planProgress(plan, [played(2000000009, 'The Kesh')]).byId.get(plan[0].id).done, true);
+    assert.equal(planProgress(plan, [played(2000000009, 'Annas Vals')]).byId.get(plan[0].id).done, true);
+});
+
 console.log('\nediting');
 
 test('adding skips tunes already planned, by the same rule', () => {

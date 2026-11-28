@@ -582,6 +582,19 @@ async function run() {
         assert.deepEqual(pushed[0].record.plan.map(i => i.id), ['p1'], 'the pushed copy carries it too');
     });
 
+    await test('a favourite\'s own name is stored on it, pushed, and removed by an empty name', async () => {
+        const { store, sync } = await signedInStore();
+        await store.addFavourite({ settingID: 42, displayName: 'kesh, the', setting: { tune_id: '1', abc: 'X:1' } });
+        sync.__reset();
+        await store.setFavouriteCustomName(42, '  Annas vals  ');
+        let fav = (await store.getFavourites()).find(f => String(f.result.settingID) === '42');
+        assert.equal(fav.customName, 'Annas vals');
+        assert.equal(fav.result.displayName, 'kesh, the', 'the database name stays');
+        await store.setFavouriteCustomName(42, '');
+        fav = (await store.getFavourites()).find(f => String(f.result.settingID) === '42');
+        assert.equal('customName' in fav, false);
+    });
+
     await test('plan edits apply to the stored plan, so two quick ones both land', async () => {
         const { store } = await signedInStore();
         const s = await store.createPlannedSession({ name: 'Thursday' });

@@ -30,7 +30,7 @@
             </p>
             <p v-else-if="state.storage.checkedAt" class="caption mb-1">Available space could not be determined.</p>
             <p v-if="state.storage.checkedAt" class="caption text--secondary mb-1">
-                Last checked {{ new Date(state.storage.checkedAt).toLocaleTimeString() }}.
+                Last checked {{ formatTime(state.storage.checkedAt) }}.
                 Stored size includes recordings and recovery files in FolkFriend’s Dropbox folder.
             </p>
             <p v-if="state.storage.error" class="caption error--text">{{ state.storage.error }}</p>
@@ -137,6 +137,7 @@
 import { dropboxState, backupStatus, connectDropbox, disconnectDropbox, syncDropbox, restoreDropboxSessions, setWholeRecordings,
          deleteDropboxCopy, deleteLocalCopy, enableSessionBackup, refreshDropboxStorage, sessionConflictMessage, sessionConflict, resolveSessionConflict } from '@/services/dropbox.js';
 import { formatBytes } from '@/services/sessionAudioStore.js';
+import { formatDateTime, formatTime } from '@/js/dateFormat.mjs';
 export default {
     name: 'DropboxBackup',
     props: { sessionId: { type: String, default: '' }, active: { type: Boolean, default: false } },
@@ -160,6 +161,7 @@ export default {
     },
     beforeDestroy() { clearInterval(this._storageTimer); },
     methods: {
+        formatTime,
         formatBytes,
         copyField(field, remote = false) {
             const copy = remote ? this.conflict.remote : this.conflict.local;
@@ -168,7 +170,7 @@ export default {
         },
         editedAt(copy) {
             if (!copy) return 'not there';
-            return copy.updatedAt ? new Date(copy.updatedAt).toLocaleString() : 'unknown';
+            return copy.updatedAt ? formatDateTime(copy.updatedAt) : 'unknown';
         },
         reviewConflict() {
             return this.run(async () => { this.conflict = await sessionConflict(this.sessionId); });

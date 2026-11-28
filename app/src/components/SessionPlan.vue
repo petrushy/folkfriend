@@ -1,15 +1,9 @@
 <template>
     <v-card ref="card" class="pa-4 my-3 session-plan">
-        <div class="d-flex flex-wrap align-center mb-1" style="gap: 8px;">
-            <h2 class="text-h6 mb-0">
-                Plan
-            </h2>
-            <span v-if="progress.total" class="caption text--secondary">
-                {{ progress.doneCount }} of {{ progress.total }} played
-            </span>
+        <!-- The tab above names the plan and counts it; only the switch here. -->
+        <div v-if="progress.doneCount" class="d-flex align-center mb-1">
             <v-spacer />
             <v-switch
-                v-if="progress.doneCount"
                 v-model="hidePlayed"
                 dense
                 hide-details
@@ -279,6 +273,11 @@ export default {
         },
     },
     watch: {
+        // For the Plan tab's count.
+        progress: {
+            immediate: true,
+            handler(p) { this.$emit('progress', { done: p.doneCount, total: p.total }); },
+        },
         sessionId: { handler() { this.load(); }, immediate: false },
         playedRows: { handler() { this.loadPlayedAliases(); }, immediate: true },
     },
@@ -294,10 +293,21 @@ export default {
     },
     mounted() {
         const el = this.$el;
-        const measure = () => { this.width = Math.round(el.getBoundingClientRect().width); };
+        // Small changes are ignored: drawing or dropping the previews can
+        // itself move the width (a scrollbar appearing), and answering that
+        // inside the same frame is a resize loop — the browser reports
+        // "ResizeObserver loop completed with undelivered notifications".
+        // Measured a frame later, and only when it really changed.
+        const measure = () => {
+            const width = Math.round(el.getBoundingClientRect().width);
+            if (Math.abs(width - this.width) >= 8 || (width === 0) !== (this.width === 0)) this.width = width;
+        };
         measure();
         if (typeof ResizeObserver !== 'undefined') {
-            this._resize = new ResizeObserver(measure);
+            this._resize = new ResizeObserver(() => {
+                if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
+                this._resizeFrame = requestAnimationFrame(() => { this._resizeFrame = null; measure(); });
+            });
             this._resize.observe(el);
         }
     },
@@ -307,6 +317,7 @@ export default {
         eventBus.$off('tuneSetsChanged', this._onTags);
         eventBus.$off('syncComplete', this._onTags);
         if (this._resize) this._resize.disconnect();
+        if (this._resizeFrame) cancelAnimationFrame(this._resizeFrame);
     },
     methods: {
         displayName: value => utils.parseDisplayableName(value || ''),

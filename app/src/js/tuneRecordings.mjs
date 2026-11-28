@@ -11,6 +11,7 @@
 // A tune occurrence counts only when it carries an audio offset: that is what
 // says a recording was running when it was heard. Sessions recorded before
 // audio existed, or with recording off, have none.
+import { formatDateTime } from './dateFormat.mjs';
 function hasAudio(tune) {
     return !!tune && typeof tune.audioStartSeconds === 'number';
 }
@@ -28,9 +29,7 @@ export function sessionDetections(session) {
 }
 
 export function formatSessionDate(ms) {
-    return new Date(ms).toLocaleString(undefined, {
-        year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-    });
+    return formatDateTime(ms);
 }
 
 export function sessionLabel(session) {

@@ -631,6 +631,48 @@ export function buildLiveDetections(windowMatches, options, { final = false, con
     return { detections: merged.slice(0, -1), heardTuneId };
 }
 
+// The window matches that would have produced a stored tune list, for
+// continuing a session that was closed (its own matches are local resume
+// state, dropped at Close). Windows one step apart from each tune's start to
+// its last window, so clusterDetections() rebuilds the same rows: same tune,
+// setting, start and end, and the same audio and wall-clock spans, which are
+// interpolated across the windows from the row's own ends. At least two
+// windows per tune, so a row the list kept is never dropped as a lone weak
+// match.
+export function windowMatchesFromTunes(tunes, options) {
+    const step = Math.max(0.5, Number(options && options.stepSeconds) || 5);
+    const windowSeconds = Number(options && options.windowSeconds) || 10;
+    const lerp = (a, b, f) => (typeof a === 'number' && typeof b === 'number') ? a + (b - a) * f
+        : (typeof a === 'number' ? a : null);
+    const matches = [];
+    for (const tune of tunes || []) {
+        if (!tune || tune.tuneId == null || typeof tune.startSeconds !== 'number') continue;
+        const start = tune.startSeconds;
+        const end = typeof tune.endSeconds === 'number' ? tune.endSeconds : start + windowSeconds;
+        const last = Math.max(start, end - windowSeconds);
+        const times = [];
+        for (let t = start; t < last; t += step) times.push(t);
+        times.push(last);
+        if (times.length < 2) times.push(last);
+        times.forEach((t, i) => {
+            const f = times.length > 1 ? i / (times.length - 1) : 0;
+            matches.push({
+                tuneId: tune.tuneId,
+                settingId: tune.settingId,
+                sourceUrl: tune.sourceUrl || '',
+                dataset: tune.dataset || '',
+                displayName: tune.title,
+                score: typeof tune.bestScore === 'number' ? tune.bestScore : 0,
+                alternatives: i === 0 ? (tune.alternatives || []) : [],
+                startSeconds: t,
+                audioSeconds: lerp(tune.audioStartSeconds, tune.audioEndSeconds, f),
+                atMs: lerp(tune.startedAtMs, tune.endedAtMs, f),
+            });
+        });
+    }
+    return matches;
+}
+
 export function normaliseQueryResults(results, options) {
     if (!results || !results.length) return null;
     const best = results[0];

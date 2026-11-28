@@ -62,6 +62,7 @@ import {
     describeAiSummaryError,
     generateNoteForTune,
 } from '@/services/aiSummary.js';
+import { formatDate } from '@/js/dateFormat.mjs';
 
 export default {
     name: 'TuneBackgroundDialog',
@@ -144,7 +145,7 @@ export default {
         },
         formatSummaryDate(timestamp) {
             if (!timestamp) return 'previously';
-            return `on ${new Date(timestamp).toLocaleDateString()}`;
+            return `on ${formatDate(timestamp)}`;
         },
         async generateSummary() {
             // Single in-flight guard: the button is also :loading, but a

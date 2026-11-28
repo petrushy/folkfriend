@@ -830,6 +830,23 @@ class Store {
         return this._favouriteTempoCache.get(String(settingID)) ?? null;
     }
 
+    // The user's own name for a favourite ("what we call it"). Stored on the
+    // favourite like `tempo`, so it syncs per favourite with no rules change;
+    // the database name stays in result.displayName as the alternative. An
+    // empty name removes it.
+    async setFavouriteCustomName(settingID, name) {
+        settingID = String(settingID);
+        const value = String(name || '').trim().slice(0, 200);
+        await this._updateFavourites(items => {
+            const item = items.find(f => String(f.result.settingID) === settingID);
+            if (!item) return false;
+            if ((item.customName || '') === value) return false;
+            if (value) item.customName = value;
+            else delete item.customName;
+            return true;
+        });
+    }
+
     async setFavouriteTempo(settingID, tempoPercent) {
         settingID = String(settingID);
         await this._updateFavourites(items => {
@@ -1636,9 +1653,11 @@ class Store {
         if (record.customName) return { name: record.name, placeName: record.placeName || '' };
         const place = matchPlace(record, places);
         const placeName = place ? place.name : (record.placeName || '');
-        const date = new Date(record.startedAt).toLocaleString(undefined, {
-            year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-        });
+        // YYYY-MM-DD HH:MM, as js/dateFormat.mjs (inlined: several test
+        // harnesses load this file with a fixed import list).
+        const d = new Date(record.startedAt);
+        const pad = n => String(n).padStart(2, '0');
+        const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
         return { name: placeName ? `${date} · ${placeName}` : date, placeName };
     }
 

@@ -1137,6 +1137,11 @@ sessions, not on the clean clips.
 `/session-analysis`). A session is ONE record however it begins: the page's single **New session**
 action asks for a name, then **Start capturing now** or **Plan first** (the
 header is one action row: New session · Open a session · Import recording).
+Under the actions, ONE strip names the session on screen, with a status chip
+(Capturing / Paused / Planned / Past) and that session's own controls; below
+it, **Plan | Played** tabs (kept mounted with `v-show`, so the recording
+player's slot survives a switch). Live view is in the app bar and first in the
+drawer, not on this page.
 A session can be **planned ahead** (Plan first,
 `store.createPlannedSession`): a `liveSessions` record with `planned: true`,
 `tunes: []`, and only a NAME — its date, time and place are taken when capture
@@ -1166,6 +1171,39 @@ results, all through the one `AddToSessionDialog` (`showAddToSession`).
   type) against aliases captured when the item was added. Names that are only
   a tune type ("Polska") never match. Tune ids never match across datasets,
   so this is what crosses off a Norbeck copy of a planned thesession tune.
+- **A closed session can be continued** ("Continue this session",
+  `liveAnalysisService.continueSession`): same record, its tunes kept, its
+  plan still crossed off. Its window matches went with Close (they are local
+  resume state), so they are rebuilt from the stored list
+  (`windowMatchesFromTunes`, sessionAnalysis.js; tested to reproduce the rows,
+  their audio and wall-clock spans), and the listening clock carries on from
+  where it stopped. Not offered for an imported recording.
+- **Dates are YYYY-MM-DD HH:MM, 24-hour, everywhere** (`js/dateFormat.mjs`);
+  date only where the time means nothing (favourites, places, dataset dates).
+  store.js and utils.js inline the same format because test harnesses load
+  them with fixed import lists.
+- **The page has two states: no session open (the list) or one open.**
+  Opening Sessions cold lists the ten most recent sessions, grouped Planned /
+  Past; a tap opens one, and the strip's × closes it again — back to the list
+  for a stored session, or a real Close (capture stops, after a confirm) for
+  the one being captured. "Record audio" and the advanced analysis settings
+  are not on the start page: they are in the New session dialog, and record
+  audio also on an open (live or planned) session's strip.
+- About credits Tom Wyllie as the original author and links both sources;
+  Feedback is explicitly for this fork. The original app's "not the stable
+  release" banner (it tested for folkfriend.app, so it fired everywhere in the
+  fork) is gone. `assets/qr-code.svg` encodes
+  `https://folkfriend-petrush-fork.web.app` (verified by decoding it with
+  macOS CoreImage; the old one encoded http://folkfriend.app).
+- **A favourite can carry the user's own name** (`FavouriteItem.customName`,
+  `store.setFavouriteCustomName`), set on the Tune page ("Your name for this
+  tune…" in a starred setting's menu), where it becomes the title with the
+  database name first among the aliases. It syncs per favourite like
+  `tempo`; the database name stays in `result.displayName`, shown in
+  Favourites as "(also …)" on the title line. Favourites sorts by and filters
+  on both, and a tune sent to a plan carries both names, so a detection under
+  the database name still crosses it off. Not yet shown in the live view or
+  sets. The Favourites row's add button is one menu: a set or a session.
 - The plan is a list to pick from, not a queue: there is no "next" — the
   evening decides the order.
 - The plan card filters by name, type and tag (display only; reordering is

@@ -28,7 +28,7 @@
                                 v-for="s in planned"
                                 :key="s.id"
                                 :value="s.id"
-                                :label="`Planned: ${labelFor(s)}${planCount(s)}`"
+                                :label="`${s.planned ? 'Planned' : 'Past'}: ${labelFor(s)}${s.planned ? '' : ' · ' + formatDate(s.startedAt)}${planCount(s)}`"
                             />
                             <v-radio value="new" label="A new planned session…" />
                         </v-radio-group>
@@ -83,6 +83,7 @@ import store from '@/services/store.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import { addToSessionPlan, planDestinations } from '@/services/sessionPlanActions.js';
 import { sanitisePlan, planTunes } from '@/js/sessionPlan.mjs';
+import { formatDateTime } from '@/js/dateFormat.mjs';
 
 export default {
     name: 'AddToSessionDialog',
@@ -138,9 +139,7 @@ export default {
             return n ? ` · ${n} planned` : '';
         },
         formatDate(ms) {
-            return new Date(ms).toLocaleString(undefined, {
-                weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
-            });
+            return formatDateTime(ms);
         },
         async show({ tunes = [], sets = [], create = false }) {
             if (this.saving) return;
@@ -153,12 +152,14 @@ export default {
             this.open = true;
             this.loading = true;
             try {
-                const { open, planned } = await planDestinations(liveAnalysisService.sessionId);
+                const { open, recent } = await planDestinations(liveAnalysisService.sessionId);
                 this.openSession = open || null;
-                this.planned = planned;
+                this.planned = recent;
                 // The obvious target is preselected: the session happening now,
-                // else the one planned soonest. With none, creating one.
-                this.destination = open ? open.id : (planned.length ? planned[0].id : 'new');
+                // else the most recent planned one, else the most recent. With
+                // none, creating one.
+                const plannedOne = recent.find(s => s.planned);
+                this.destination = open ? open.id : (plannedOne || recent[0] || { id: 'new' }).id;
             } catch (e) {
                 this.error = `Could not read your sessions: ${e.message}`;
                 this.destination = 'new';

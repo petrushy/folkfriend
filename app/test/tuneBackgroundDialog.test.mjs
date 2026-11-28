@@ -120,6 +120,7 @@ async function loadDialog() {
     let source = sfc.slice(open + '<script>'.length, close);
 
     const replacements = [
+        ["from '@/js/dateFormat.mjs'", `from '${path.join(srcDir, 'js', 'dateFormat.mjs')}'`],
         ["from '@/eventBus.js'", "from './fake-eventbus.mjs'"],
         ["from '@/services/store.js'", "from './fake-store.mjs'"],
         ["from '@/services/aiSummary.js'", "from './fake-ai.mjs'"],

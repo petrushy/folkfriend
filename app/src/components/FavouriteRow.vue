@@ -18,6 +18,7 @@
             <v-row class="pt-1 pb-0">
                 <v-col class="py-0">
                     <span class="tune-title">{{ name }}</span>
+                    <span v-if="altName" class="tune-alt-name ml-1">(also {{ altName }})</span>
                 </v-col>
             </v-row>
             <v-row class="pb-0 pt-0">
@@ -102,17 +103,32 @@
             :small="false"
         />
 
-        <v-btn
-            icon
-            class="mr-0"
-            title="Add to set"
-            :aria-label="'Add ' + name + ' to set'"
-            @click.stop="$emit('addToSet', settingID)"
-        >
-            <v-icon color="grey darken-1">
-                {{ icons.addToSet }}
-            </v-icon>
-        </v-btn>
+        <!-- One button, two destinations: the row has no width to spare. -->
+        <v-menu offset-y left>
+            <template #activator="{ on, attrs }">
+                <v-btn
+                    icon
+                    class="mr-0"
+                    title="Add to a set or a session"
+                    :aria-label="'Add ' + name + ' to a set or a session'"
+                    v-bind="attrs"
+                    @click.stop
+                    v-on="on"
+                >
+                    <v-icon color="grey darken-1">
+                        {{ icons.addToSet }}
+                    </v-icon>
+                </v-btn>
+            </template>
+            <v-list dense>
+                <v-list-item @click="$emit('addToSet', settingID)">
+                    <v-list-item-title>Add to a set…</v-list-item-title>
+                </v-list-item>
+                <v-list-item @click="$emit('addToSession', settingID)">
+                    <v-list-item-title>Add to a session plan…</v-list-item-title>
+                </v-list-item>
+            </v-list>
+        </v-menu>
 
         <!-- Add tag button — outside the clickable container, left of star, easy to tap -->
         <v-menu
@@ -198,6 +214,8 @@ export default {
         tuneID: { type: [String, Number], default: '' },
         sourceUrl: { type: String, default: '' },
         descriptor: { type: String, required: true },
+        // The database name, when the user has given the tune their own.
+        altName: { type: String, default: '' },
         settingID: { type: String, required: true },
         timestamp: { type: Number, required: true },
         selected: { type: Boolean, default: false },
@@ -325,6 +343,11 @@ export default {
 </script>
 
 <style scoped>
+.tune-alt-name {
+    font-size: 0.8rem;
+    opacity: 0.7;
+    line-height: 1.2;
+}
 .tune-title {
   font-size: 0.95rem;
   font-weight: 600;
