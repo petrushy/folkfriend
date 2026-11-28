@@ -115,8 +115,7 @@
         </v-snackbar>
 
         <v-alert v-if="offlineFallback" dense text type="info" class="mx-2 my-2">
-            Showing your saved offline copy. Connect to the internet to see all
-            settings for this tune.
+            {{ fallbackText }}
         </v-alert>
 
         <v-expansion-panels ref="expansionPanels" v-model="expandedIndex" :class="{ abcFullScreen: abcFullScreen }"
@@ -354,7 +353,7 @@
 
 <script>
 import utils from '@/js/utils.js';
-import { sourceNameForTuneID, settingSourceUrl, tuneSourceUrl } from '@/js/source.mjs';
+import { sourceNameForTuneID, settingSourceUrl, tuneSourceUrl, datasetForTuneID, datasetDisplayName } from '@/js/source.mjs';
 import { placesForTune } from '@/js/places.mjs';
 import { instrumentItems } from '@/js/instruments.mjs';
 import TunePlaceDialog from '@/components/TunePlaceDialog.vue';
@@ -395,6 +394,7 @@ import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import { indexSetsBySetting } from '@/js/setMembership.mjs';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
 import { formatDate } from '@/js/dateFormat.mjs';
+import { fallbackReason } from '@/js/fallbackReason.mjs';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
 // fire: ffBackend.indexReady() resolves as soon as the worker's state machine
@@ -434,6 +434,7 @@ export default {
             // True when the tune index was unavailable and we rendered from the
             // user's saved (favourite) copy instead — shown as a banner.
             offlineFallback: false,
+            fallbackText: '',
 
             // Where this tune has been heard — several places for one tune is
             // the normal case, which is why sightings are a log rather than a
@@ -664,6 +665,7 @@ export default {
         // background download finishes — upgrade the view in place rather than
         // leaving the user on a partial copy.
         this._onIndexStatus = (detail) => {
+            if (this.offlineFallback) this._updateFallbackText();
             if (detail.status !== 'ready') return;
             if (!this.offlineFallback && !this.loadError) return;
             this._reloadFromIndex();
@@ -961,9 +963,40 @@ export default {
             const fallback = await this._settingsFromFavourites();
             if (fallback) {
                 this.offlineFallback = true;
+                this._updateFallbackText(fallback.settings);
+                // The index may have become ready while the saved copy was
+                // being read (the 20 s wait timed out on a slow cold start).
+                // Its 'ready' event then landed before offlineFallback was
+                // set and was ignored, leaving the banner up for good. Look
+                // once more, after the view has rendered the saved copy.
+                if (store.state.indexLoaded) {
+                    this.$nextTick(() => this._reloadFromIndex());
+                }
                 return fallback;
             }
             return null;
+        },
+        // Say WHY the saved copy is shown. See js/fallbackReason.mjs.
+        _updateFallbackText(settings = this.settings) {
+            const first = (settings || []).find(s => s && s.dataset);
+            const dataset = datasetForTuneID(this.tuneID, first ? first.dataset : '');
+            const datasets = store.state.indexDatasets || {};
+            const detail = store.state.indexStatusDetail || {};
+            const reason = fallbackReason({
+                dataset,
+                label: datasetDisplayName(dataset),
+                loaded: datasets.loaded || [],
+                missing: datasets.missing || [],
+                errors: datasets.errors || {},
+                usable: !!store.state.indexLoaded,
+                status: store.state.indexStatus || detail.status || '',
+                offline: typeof navigator !== 'undefined' && navigator.onLine === false,
+            });
+            this.fallbackText = reason.text;
+            console.info('Tune view showing the saved copy:', reason.kind, {
+                tuneID: this.tuneID, dataset, status: store.state.indexStatus,
+                loaded: datasets.loaded, missing: datasets.missing, errors: datasets.errors,
+            });
         },
         // Resolve as soon as the index is usable or definitively unavailable.
         // ffBackend.indexReady() reads the worker's state machine, which always
