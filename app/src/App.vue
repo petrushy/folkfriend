@@ -173,15 +173,20 @@
                 {{ icons.close }}
             </v-icon>
 
-            <v-img
-                src="@/assets/logo.svg"
-                max-height="90%"
-                max-width="75%"
-                class="mx-auto MainLogo"
-                align-center
-                center
-                contain
-            />
+            <!-- The chip marks this as a fork of the original app. It sits
+                 beside the logo, never over it, and the logo shrinks to make
+                 room for it at phone width. -->
+            <div class="mx-auto MainLogoWrap">
+                <img
+                    src="@/assets/logo.svg"
+                    class="MainLogo"
+                    alt="FolkFriend"
+                >
+                <span
+                    class="ForkChip"
+                    title="A fork of FolkFriend by Tom Wyllie"
+                >fork</span>
+            </div>
             <!-- The live view, one tap from any page. Opening it only listens;
                  it never starts or resumes a session (services/liveView.js). -->
             <v-progress-circular
@@ -636,8 +641,36 @@ html[data-theme="warm"] .theme--light.v-text-field--solo > .v-input__control > .
 html[data-theme="warm"] .theme--light.v-divider {
     border-color: var(--ff-border) !important;
 }
+.MainLogoWrap {
+    display: flex;
+    align-items: flex-end;
+    height: 90%;
+    max-width: 75%;
+    min-width: 0;
+}
+.MainLogoWrap .MainLogo {
+    height: 100%;
+    min-width: 0;
+    object-fit: contain;
+    object-position: right center;
+}
+.ForkChip {
+    flex: none;
+    margin: 0 0 6px 3px;
+    padding: 0 4px;
+    border: 1px solid var(--v-primary-base);
+    border-radius: 6px;
+    color: var(--v-primary-base);
+    font-size: 7px;
+    font-weight: 500;
+    line-height: 11px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: 0.85;
+    user-select: none;
+}
 /* The logo is dark blue artwork; on a dark ground it takes the text colour. */
-.MainLogo .v-image__image {
+.MainLogo {
     filter: var(--ff-logo-filter, none);
 }
 
