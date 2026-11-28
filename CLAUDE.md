@@ -1131,6 +1131,22 @@ sessions, not on the clean clips.
 
 ## Recent changes
 
+### Install page and drawer entry (November 2026)
+
+The drawer shows **Install the app** at the top until the app runs installed,
+and it opens `/install` (`views/Install.vue`). That page shows the steps for the
+browser it detects, with every other platform under expandable panels so the
+user can help a friend. `js/installPlatform.mjs` is the pure detection, tested
+by `installPlatform.test.mjs`. An iPad that reports itself as a Mac is detected
+by its touch points. In-app browsers (Instagram, Facebook, Gmail, an Android
+WebView) get "open in a real browser", because they cannot install anything.
+`services/installPrompt.js` catches `beforeinstallprompt` when it is imported,
+which is before App mounts, because the event fires once and early. On Chromium
+the page then offers a real **Install now** button. The service also listens for
+`appinstalled` and for display-mode changes, so the drawer entry goes away
+without a reload. ⚠️ The step wording for each browser comes from current
+browser menus and has not been checked on each device.
+
 ### Sessions: planning and leading from a plan (November 2026)
 
 "Session Tools" is now **Sessions** (label only; the route is still
