@@ -75,16 +75,32 @@
             :source-url="setting.source_url || ''"
             :small="false"
         />
-        <v-btn
-            icon
-            title="Add to set"
-            :aria-label="'Add ' + name + ' to set'"
-            @click.stop="addToSet"
-        >
-            <v-icon color="grey darken-1">
-                {{ addSetIcon }}
-            </v-icon>
-        </v-btn>
+        <!-- One button, two destinations: a row has no width to spare on a
+             phone, and both are "put this tune somewhere". -->
+        <v-menu offset-y left>
+            <template #activator="{ on, attrs }">
+                <v-btn
+                    icon
+                    title="Add to a set or a session"
+                    :aria-label="'Add ' + name + ' to a set or a session'"
+                    v-bind="attrs"
+                    @click.stop
+                    v-on="on"
+                >
+                    <v-icon color="grey darken-1">
+                        {{ addSetIcon }}
+                    </v-icon>
+                </v-btn>
+            </template>
+            <v-list dense>
+                <v-list-item @click="addToSet">
+                    <v-list-item-title>Add to a set…</v-list-item-title>
+                </v-list-item>
+                <v-list-item @click="addToSession">
+                    <v-list-item-title>Add to a session plan…</v-list-item-title>
+                </v-list-item>
+            </v-list>
+        </v-menu>
         <v-btn
             icon
             class="mr-2"
@@ -275,6 +291,15 @@ export default {
         });
     },
     methods: {
+        addToSession() {
+            eventBus.$emit('showAddToSession', { tunes: [{
+                tuneID: this.setting.tune_id,
+                settingID: this.hasValidSettingID ? this.settingID : null,
+                title: this.displayName,
+                dataset: this.setting.dataset,
+                setting: this.setting.mode ? this.setting : null,
+            }] });
+        },
         addToSet() {
             eventBus.$emit('showAddToSet', { tuneID: this.setting.tune_id, title: this.displayName,
                                              preferredSettingID: this.hasValidSettingID ? this.settingID : null,

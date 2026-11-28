@@ -562,6 +562,37 @@ async function run() {
         assert.deepEqual(sync.__records, [{ op: 'delete', name: 'liveSessions', id: 's1' }]);
     });
 
+    await test('a session\'s plan survives the live service\'s next save, here and remotely', async () => {
+        // _persistSession rebuilds the record from the fields it owns and has
+        // no `plan`; replacing the stored record wholesale would erase the
+        // plan at the first checkpoint, on every device.
+        const { store, sync } = await signedInStore();
+        const planned = await store.createPlannedSession({ name: 'Thursday' });
+        assert.equal(planned.planned, true);
+        await store.updateSessionPlan(planned.id, plan => [...plan, { id: 'p1', kind: 'tune', tuneID: '1', title: 'The Kesh' }]);
+        sync.__reset();
+
+        await store.upsertLiveSession({ id: planned.id, startedAt: 10, planned: false, tunes: [{ tuneId: 1 }] });
+
+        const stored = (await store.getLiveSessionsStrict()).find(s => s.id === planned.id);
+        assert.deepEqual(stored.plan.map(i => i.id), ['p1']);
+        assert.equal(stored.planned, false);
+        const pushed = sync.__records.filter(r => r.op === 'push');
+        assert.equal(pushed.length, 1);
+        assert.deepEqual(pushed[0].record.plan.map(i => i.id), ['p1'], 'the pushed copy carries it too');
+    });
+
+    await test('plan edits apply to the stored plan, so two quick ones both land', async () => {
+        const { store } = await signedInStore();
+        const s = await store.createPlannedSession({ name: 'Thursday' });
+        await Promise.all([
+            store.updateSessionPlan(s.id, plan => [...plan, { id: 'a', kind: 'tune', title: 'A' }]),
+            store.updateSessionPlan(s.id, plan => [...plan, { id: 'b', kind: 'tune', title: 'B' }]),
+        ]);
+        const stored = (await store.getLiveSessionsStrict()).find(r => r.id === s.id);
+        assert.deepEqual(stored.plan.map(i => i.id).sort(), ['a', 'b']);
+    });
+
     await test('clearing sessions deletes each of them remotely', async () => {
         const { store, sync } = await signedInStore();
         await store.upsertLiveSession({ id: 's1', startedAt: 1, tunes: [] });

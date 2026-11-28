@@ -301,6 +301,23 @@
                 </v-icon>
                 Add to set ({{ selectedIDs.size }})
             </v-btn>
+            <v-btn
+                v-if="selectedIDs.size > 0"
+                small
+                text
+                color="primary"
+                class="ml-1"
+                title="Add selected tunes to a session's plan"
+                @click="addSelectedToSession"
+            >
+                <v-icon
+                    small
+                    left
+                >
+                    {{ icons.addToSession }}
+                </v-icon>
+                Add to session ({{ selectedIDs.size }})
+            </v-btn>
             <v-menu
                 v-model="bulkTagMenu"
                 :close-on-content-click="false"
@@ -758,7 +775,7 @@
 </template>
 
 <script>
-import { mdiPlaylistPlus, mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline, mdiShuffleVariant } from '@mdi/js';
+import { mdiPlaylistPlus, mdiChevronRight, mdiChevronDown, mdiExport, mdiPencil, mdiDelete, mdiTagMultipleOutline, mdiTagPlusOutline, mdiSort, mdiCalendarMonth, mdiMapMarker, mdiMapMarkerMultipleOutline, mdiClose, mdiPlus, mdiCheckboxMarked, mdiCheckboxBlankOutline, mdiShuffleVariant, mdiCalendarPlus } from '@mdi/js';
 import ABCJS from 'abcjs';
 import eventBus from '@/eventBus';
 import store from '@/services/store';
@@ -845,6 +862,7 @@ export default {
             shuffleSeed: Math.floor(Math.random() * 2 ** 31),
             icons: {
                 addToSet: mdiPlaylistPlus,
+                addToSession: mdiCalendarPlus,
                 export: mdiExport,
                 pencil: mdiPencil,
                 delete: mdiDelete,
@@ -1546,6 +1564,27 @@ export default {
         addFavouriteToSet(settingID) {
             const item = this.favouriteItems.find(f => String(f.result.settingID) === String(settingID));
             if (item) this.showSetDestination([item]);
+        },
+        // Same order and same selection as Add to set: the list as sorted on
+        // screen, which is the order the plan gets.
+        addSelectedToSession() {
+            const selected = new Set([...this.selectedIDs].map(String));
+            const seen = new Set();
+            const items = [...this.filteredItems, ...this.favouriteItems].filter(item => {
+                const id = String(item.result.settingID);
+                if (!selected.has(id) || seen.has(id)) return false;
+                seen.add(id); return true;
+            });
+            if (!items.length) return;
+            eventBus.$emit('showAddToSession', {
+                tunes: items.map(item => ({
+                    tuneID: item.result.setting && item.result.setting.tune_id,
+                    settingID: item.result.settingID,
+                    title: item.result.displayName,
+                    dataset: item.result.setting && item.result.setting.dataset,
+                    setting: item.result.setting,
+                })),
+            });
         },
         addSelectedToSet() {
             const selected = new Set([...this.selectedIDs].map(String));

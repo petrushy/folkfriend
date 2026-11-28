@@ -262,6 +262,11 @@ export const mdiPause = 'pause';
 export const mdiPlay = 'play';
 export const mdiRecordCircleOutline = 'record';
 export const mdiAlertCircleOutline = 'alert';
+export const mdiCalendarPlus = 'calendar-plus';
+export const mdiPlus = 'plus';
+export const mdiFolderOpenOutline = 'folder-open';
+export const mdiFileUploadOutline = 'file-upload';
+export const mdiArrowLeft = 'arrow-left';
 export const mdiStop = 'stop';
 `;
 
@@ -377,6 +382,7 @@ export function sessionConflictMessage() { return __state.conflict; }
         ["from '@/components/VolumeMeter.vue'", "from './fake-component.mjs'"],
         ["from '@/services/liveView.js'", "from './fake-live-view.mjs'"],
         ["from '@/components/DropboxBackup.vue'", "from './fake-component.mjs'"],
+        ["from '@/components/SessionPlan.vue'", "from './fake-component.mjs'"],
         ["from '@/services/sessionPlayerHost.js'", "from './fake-player-host.mjs'"],
         ["from '@/services/sessionAudioStore.js'", "from './fake-audio-store.mjs'"],
         ["from '@/services/sessionRecorder.js'", "from './fake-recorder.mjs'"],

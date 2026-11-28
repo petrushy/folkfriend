@@ -243,15 +243,22 @@ class LiveAnalysisService {
         return !!this.sessionId && !this.isRunning;
     }
 
-    async start(windowSeconds, stepSeconds) {
+    // `plannedSession`: a record planned ahead (store.createPlannedSession).
+    // The capture goes INTO it — same id, name and plan — rather than into a
+    // new record beside it. Refused while another session is open, since
+    // that one would otherwise silently become the planned one.
+    async start(windowSeconds, stepSeconds, { plannedSession = null } = {}) {
         if (this._sessionTransition) await this._sessionTransition;
         if (this._startPromise) return this._startPromise;
-        this._startPromise = this._startCapture(windowSeconds, stepSeconds);
+        if (plannedSession && this.sessionId && this.sessionId !== plannedSession.id) {
+            throw new Error('Close the current session first, then start this one.');
+        }
+        this._startPromise = this._startCapture(windowSeconds, stepSeconds, plannedSession);
         try { return await this._startPromise; }
         finally { this._startPromise = null; }
     }
 
-    async _startCapture(windowSeconds, stepSeconds) {
+    async _startCapture(windowSeconds, stepSeconds, plannedSession = null) {
         if (this._stopPromise) await this._stopPromise;
         if (this.isRunning) return;
 
@@ -276,6 +283,15 @@ class LiveAnalysisService {
             this.sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
             this._sessionStartedAt = Date.now();
             this._lastActiveAt = Date.now();
+            if (plannedSession && plannedSession.id) {
+                // The planned record already exists: adopt it. Its startedAt
+                // was the planned time; the session starts now.
+                this.sessionId = plannedSession.id;
+                this.sessionName = plannedSession.customName ? (plannedSession.name || '') : '';
+                this.customName = !!plannedSession.customName && !!this.sessionName;
+                this.placeName = plannedSession.placeName || '';
+                this._hasPersisted = true;
+            }
         }
         // else: resuming — detections, _windowMatches, elapsedSeconds and the
         // rest are left exactly as stop() left them, so the list keeps
@@ -1465,6 +1481,10 @@ class LiveAnalysisService {
             customName: this.customName,
             placeName: this.placeName,
             endedAt,
+            // Once anything is captured into a session it is no longer a plan
+            // for one. The plan itself (`plan`) is not this service's: the
+            // store keeps the stored one (upsertLiveSession).
+            planned: false,
             tunes: this.detections.map(d => ({
                 tuneId: d.tuneId,
                 settingId: d.settingId,

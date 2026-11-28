@@ -53,6 +53,10 @@ const USER_SETTING_DEFAULTS = {
     // Off by default — it moves the page on its own, and its estimate of the
     // position is unmeasured against real sessions.
     liveAutoCenter: false,
+    // Session plan: how long a planned tune must be heard before it is
+    // crossed off (js/sessionPlan.mjs). A few seconds of a tune is a phrase
+    // someone tried, or the detector settling, not the tune being played.
+    planMinPlayedSeconds: 45,
     // Keep the audio of a live session so it can be listened back to and
     // exported. Off by default and deliberately so: three hours of a pub
     // records the conversations of everyone in it, and it is the largest thing
@@ -1651,12 +1655,64 @@ class Store {
         if (!session || !session.id) return null;
         const record = { ...session, updatedAt: nextUpdatedAt(session.updatedAt) };
         Object.assign(record, this._liveSessionLabel(record, this.userSettings.geoTagDetections ? await this.getPlaces() : []));
-        await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
+        const stored = await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
             const index = sessions.findIndex(s => s.id === record.id);
-            if (index === -1) sessions.unshift(record);
-            else sessions[index] = record;
+            // The live service rebuilds its record from the fields IT owns and
+            // knows nothing of the plan, so a plan already stored is kept
+            // unless the caller says otherwise. Merged here, inside the write
+            // queue, so a plan edit that landed a moment ago is what is kept.
+            const merged = index >= 0 && !('plan' in record) && 'plan' in sessions[index]
+                ? { ...record, plan: sessions[index].plan }
+                : record;
+            if (index === -1) sessions.unshift(merged);
+            else sessions[index] = merged;
             sessions.sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
-            return { write: true, records: sessions };
+            return { write: true, records: sessions, value: merged };
+        }, 'liveSessionsChanged');
+        // Push what was STORED: pushing `record` would erase the plan on every
+        // other device.
+        this._syncPush('liveSessions', stored);
+        return stored;
+    }
+
+    // A session planned ahead: a record with nothing captured yet, so that a
+    // plan can be built on it and the evening captured into it. Only a name:
+    // the date, time and place are the start's (liveAnalysis adopts the
+    // record and stamps them then). startedAt holds when it was planned until
+    // capture starts — the rules require a number, and it sorts it.
+    async createPlannedSession({ name, placeName = '' } = {}) {
+        const when = Date.now();
+        const label = String(name || '').trim().slice(0, 200);
+        return this.upsertLiveSession({
+            id: `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            startedAt: when,
+            endedAt: null,
+            name: label,
+            customName: !!label,
+            placeName,
+            planned: true,
+            plan: [],
+            tunes: [],
+            listenedSeconds: 0,
+            lastActiveAt: Date.now(),
+            lat: null,
+            lon: null,
+            accuracy: null,
+        });
+    }
+
+    // A plan edit: `mutate(plan)` returns the new plan, applied to the plan as
+    // it is in storage NOW (inside the write queue), so two quick edits, or an
+    // edit racing a checkpoint, cannot lose one another.
+    async updateSessionPlan(sessionID, mutate) {
+        const record = await this._withRecords(KEY_LIVE_SESSIONS, sessions => {
+            const index = sessions.findIndex(s => s.id === sessionID);
+            if (index < 0) throw new Error('This session was deleted. Your changes have not been saved.');
+            const current = sessions[index];
+            const plan = mutate(Array.isArray(current.plan) ? current.plan : []);
+            const updated = { ...current, plan, id: sessionID, updatedAt: nextUpdatedAt(current.updatedAt) };
+            sessions[index] = updated;
+            return { write: true, records: sessions, value: updated };
         }, 'liveSessionsChanged');
         this._syncPush('liveSessions', record);
         return record;

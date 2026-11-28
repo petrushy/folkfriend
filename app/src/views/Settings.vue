@@ -95,6 +95,33 @@
         </v-card>
         <v-card class="pa-5 my-2">
             <h1 class="pb-3">
+                Sessions
+            </h1>
+            <p>
+                A session can be planned ahead on the
+                <router-link to="/session-analysis">Sessions</router-link> page: tunes, favourites
+                and sets in the order you mean to lead them. Once a planned tune has been played it is
+                crossed off.
+            </p>
+            <v-row
+                align="center"
+                class="pl-2 pr-4"
+            >
+                <v-text-field
+                    v-model.number="userSettings.planMinPlayedSeconds"
+                    label="Cross off a planned tune after (seconds)"
+                    type="number"
+                    min="0"
+                    max="600"
+                    style="max-width: 280px"
+                    hint="How long it must be heard first, so a few bars or a passing misdetection do not count. Default 45 s."
+                    persistent-hint
+                    @change="onPlanMinPlayedChanged"
+                />
+            </v-row>
+        </v-card>
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
                 Session Recording
             </h1>
             <p>
@@ -104,7 +131,7 @@
             </p>
             <p>
                 <strong>Whether to record is chosen per session</strong>, on the
-                <router-link to="/session-analysis">Session Tools</router-link> page —
+                <router-link to="/session-analysis">Sessions</router-link> page —
                 it is the sort of thing that changes from one evening to the next. What is
                 here is the part that does not: quality, and what is already stored.
             </p>
@@ -1688,6 +1715,11 @@ export default {
             store.resetAiUsage();
             this.aiUsage = store.getAiUsage();
             this.aiMessage = 'Usage counters reset.';
+        },
+        onPlanMinPlayedChanged() {
+            const v = Math.round(Number(this.userSettings.planMinPlayedSeconds));
+            this.userSettings.planMinPlayedSeconds = Number.isFinite(v) ? Math.min(600, Math.max(0, v)) : 45;
+            store.updateUserSettings(this.userSettings);
         },
         onRecordingLimitChanged() {
             const v = Math.round(this.userSettings.recordingTimeLimitSecs);
