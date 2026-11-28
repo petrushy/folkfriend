@@ -173,9 +173,8 @@
                 {{ icons.close }}
             </v-icon>
 
-            <!-- The chip marks this as a fork of the original app. It sits
-                 beside the logo, never over it, and the logo shrinks to make
-                 room for it at phone width. -->
+            <!-- The chip marks this as a fork of the original app, centred
+                 under the logo. -->
             <div class="mx-auto MainLogoWrap">
                 <img
                     src="@/assets/logo.svg"
@@ -642,31 +641,36 @@ html[data-theme="warm"] .theme--light.v-divider {
     border-color: var(--ff-border) !important;
 }
 .MainLogoWrap {
-    display: flex;
-    align-items: flex-end;
+    position: relative;
     height: 90%;
     max-width: 75%;
     min-width: 0;
 }
 .MainLogoWrap .MainLogo {
+    display: block;
     height: 100%;
-    min-width: 0;
+    max-width: 100%;
+    margin: 0 auto;
     object-fit: contain;
-    object-position: right center;
 }
+/* Centred under the logo, overlapping its bottom edge. The background is
+   the app bar's own, so the chip reads cleanly over the lettering. */
 .ForkChip {
-    flex: none;
-    margin: 0 0 6px 3px;
+    position: absolute;
+    left: 50%;
+    bottom: -3px;
+    transform: translateX(-50%);
     padding: 0 4px;
     border: 1px solid var(--v-primary-base);
     border-radius: 6px;
+    background: var(--ff-surface, #fff);
     color: var(--v-primary-base);
     font-size: 7px;
     font-weight: 500;
     line-height: 11px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    opacity: 0.85;
+    white-space: nowrap;
     user-select: none;
 }
 /* The logo is dark blue artwork; on a dark ground it takes the text colour. */
