@@ -8,22 +8,6 @@
                   Guess otherwise vuetify thinks it's not clickable?
                   The 0 is insignificant I just needed any valid javascript-->
             <v-list dense>
-                <!-- Only until the app is installed: once it runs from the
-                     Home Screen the instructions are noise. -->
-                <router-link v-if="!installState.installed" to="/install" class="navInstall">
-                    <v-list-item @click="0">
-                        <v-list-item-action>
-                            <v-icon medium color="primary">
-                                {{ icons.cellphoneArrowDown }}
-                            </v-icon>
-                        </v-list-item-action>
-                        <v-list-item-content>
-                            <v-list-item-title class="navBarEntry">
-                                Install the app
-                            </v-list-item-title>
-                        </v-list-item-content>
-                    </v-list-item>
-                </router-link>
                 <!-- An action, not a page: the live view opens over whatever
                      page is showing (the same as the app-bar button). -->
                 <v-list-item class="navLiveView" @click="drawer = false; openLiveView()">
@@ -139,6 +123,22 @@
                         <v-list-item-content>
                             <v-list-item-title class="navBarEntry">
                                 Donate to original FolkFriend
+                            </v-list-item-title>
+                        </v-list-item-content>
+                    </v-list-item>
+                </router-link>
+                <!-- Only until the app is installed: once it runs from the
+                     Home Screen the instructions are noise. -->
+                <router-link v-if="!installState.installed" to="/install" class="navInstall">
+                    <v-list-item @click="0">
+                        <v-list-item-action>
+                            <v-icon medium color="primary">
+                                {{ icons.cellphoneArrowDown }}
+                            </v-icon>
+                        </v-list-item-action>
+                        <v-list-item-content>
+                            <v-list-item-title class="navBarEntry">
+                                Install the app
                             </v-list-item-title>
                         </v-list-item-content>
                     </v-list-item>

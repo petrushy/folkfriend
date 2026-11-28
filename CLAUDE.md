@@ -1133,7 +1133,7 @@ sessions, not on the clean clips.
 
 ### Install page and drawer entry (November 2026)
 
-The drawer shows **Install the app** at the top until the app runs installed,
+The drawer shows **Install the app** at the bottom until the app runs installed,
 and it opens `/install` (`views/Install.vue`). That page shows the steps for the
 browser it detects, with every other platform under expandable panels so the
 user can help a friend. `js/installPlatform.mjs` is the pure detection, tested
