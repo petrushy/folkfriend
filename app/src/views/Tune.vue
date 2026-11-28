@@ -1,7 +1,7 @@
 <template>
     <v-container v-if="name" class="viewContainerWrapper">
         <h1 class="my-2">
-            {{ name }}
+            {{ tuneCustomName || name }}
         </h1>
 
         <!-- The alternative names are OUTLINED chips on a row of their own:
@@ -9,8 +9,13 @@
              the names are not tappable. As filled chips beside the actions
              they looked exactly like them; as plain text they were hard to
              read. -->
-        <v-container v-if="displayableAliases.length" class="mt-0 mb-0 py-0">
+        <v-container v-if="displayableAliases.length || tuneCustomName" class="mt-0 mb-0 py-0">
             <span class="akaSpan pl-2 pr-1">Also known as</span>
+            <!-- With the user's own name as the title, the database name is
+                 the first alternative. -->
+            <v-chip v-if="tuneCustomName" class="aliasChip ma-1 px-2" small outlined>
+                {{ name }}
+            </v-chip>
             <v-chip
                 v-for="alias in displayableAliases"
                 :key="alias"
@@ -62,6 +67,35 @@
                 Add place
             </v-chip>
         </v-container>
+
+        <!-- The user's own name for a starred setting: shown as the title
+             here and in Favourites, the database name kept as an alternative. -->
+        <v-dialog v-model="renameDialog.open" max-width="440">
+            <v-card>
+                <v-card-title>Your name for this tune</v-card-title>
+                <v-card-text>
+                    <p class="caption text--secondary mb-2">
+                        Database name: {{ name }}. It stays as the alternative, and searching and
+                        session plans know the tune by both.
+                    </p>
+                    <v-text-field
+                        v-model="renameDialog.value"
+                        label="Your name"
+                        maxlength="200"
+                        autofocus
+                        clearable
+                        hint="Leave empty to use the database name."
+                        persistent-hint
+                        @keydown.enter="saveRename"
+                    />
+                </v-card-text>
+                <v-card-actions>
+                    <v-spacer />
+                    <v-btn text @click="renameDialog.open = false">Cancel</v-btn>
+                    <v-btn color="primary" depressed :loading="renameDialog.saving" @click="saveRename">Save</v-btn>
+                </v-card-actions>
+            </v-card>
+        </v-dialog>
 
         <TunePlaceDialog
             v-model="placeDialog"
@@ -153,6 +187,12 @@
                                 <v-list-item @click="addSettingToSession(settingData)">
                                     <v-list-item-title>Add to a session plan…</v-list-item-title>
                                 </v-list-item>
+                                <template v-if="favouritedSettings[settingData.setting_id]">
+                                    <v-divider />
+                                    <v-list-item @click="openRename(settingData)">
+                                        <v-list-item-title>Your name for this tune…</v-list-item-title>
+                                    </v-list-item>
+                                </template>
                             </v-list>
                         </v-menu>
                         <v-menu
@@ -354,6 +394,7 @@ import liveAnalysisService from '@/services/liveAnalysis.js';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 import { indexSetsBySetting } from '@/js/setMembership.mjs';
 import SetPartnersButton from '@/components/SetPartnersButton.vue';
+import { formatDate } from '@/js/dateFormat.mjs';
 
 // Absolute last-resort cap on waiting for the tune index. This should never
 // fire: ffBackend.indexReady() resolves as soon as the worker's state machine
@@ -415,6 +456,9 @@ export default {
 
             expandedIndex: [],
             favouritedSettings: {},
+            // settingID -> the user's own name for that favourite.
+            customNames: {},
+            renameDialog: { open: false, settingID: null, value: '', saving: false },
             // setting_id -> semitones. Saved with the favourite (and so synced);
             // for a tune that is not starred it is simply this visit's choice.
             transposeBySetting: {},
@@ -456,6 +500,14 @@ export default {
         };
     },
     computed: {
+        // The user's name for the tune: from the setting asked for, else from
+        // any starred setting that has one.
+        tuneCustomName() {
+            const wanted = this.settingID && this.customNames[String(this.settingID)];
+            if (wanted) return wanted;
+            const any = this.settings.find(s => this.customNames[String(s.setting_id)]);
+            return any ? this.customNames[String(any.setting_id)] : '';
+        },
         setMemberships() { return indexSetsBySetting(this.tuneSets); },
         instrumentItems() {
             return instrumentItems(this.instrumentShift);
@@ -583,6 +635,8 @@ export default {
                 }),
             ]);
 
+            this.loadCustomNames();
+
             // Auto-pop open the matched setting:
             // 1. If a specific settingID was passed (e.g. from audio results or favourites list), use it
             // 2. Else if any setting is favourited, open the first favourited one
@@ -648,10 +702,39 @@ export default {
         },
         setsForSetting(id) { return this.setMemberships[String(id)] || []; },
         // The exact setting on screen, so the dialog does not ask for a key.
+        async loadCustomNames() {
+            try {
+                const favourites = await store.getFavourites();
+                const names = {};
+                for (const f of favourites) {
+                    if (f.customName && f.result) names[String(f.result.settingID)] = f.customName;
+                }
+                this.customNames = names;
+            } catch (e) { /* the database name stands */ }
+        },
+        openRename(settingData) {
+            this.renameDialog = {
+                open: true, settingID: settingData.setting_id, saving: false,
+                value: this.customNames[String(settingData.setting_id)] || '',
+            };
+        },
+        async saveRename() {
+            if (this.renameDialog.saving) return;
+            this.renameDialog.saving = true;
+            try {
+                await store.setFavouriteCustomName(this.renameDialog.settingID, this.renameDialog.value || '');
+                this.renameDialog.open = false;
+                await this.loadCustomNames();
+            } finally {
+                this.renameDialog.saving = false;
+            }
+        },
         addSettingToSession(settingData) {
             eventBus.$emit('showAddToSession', { tunes: [{
                 tuneID: this.tuneID, settingID: settingData.setting_id,
-                title: this.displayName || this.name, dataset: settingData.dataset, setting: settingData,
+                title: this.customNames[String(settingData.setting_id)] || this.displayName || this.name,
+                aliases: [this.name, ...this.displayableAliases],
+                dataset: settingData.dataset, setting: settingData,
             }] });
         },
         addSettingToSet(settingData) {
@@ -826,9 +909,7 @@ export default {
         },
         formatDate(millis) {
             if (!millis) return 'at an unknown time';
-            return new Date(millis).toLocaleDateString(undefined, {
-                year: 'numeric', month: 'short', day: 'numeric',
-            });
+            return formatDate(millis);
         },
         openPlaces() {
             this.$router.push({ name: 'places' });

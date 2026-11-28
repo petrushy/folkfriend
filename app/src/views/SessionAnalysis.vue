@@ -53,6 +53,65 @@
                     <p v-if="!indexLoaded" class="caption text--secondary mb-1">
                         Capturing needs the tune index ({{ indexStatusText }}). You can plan meanwhile.
                     </p>
+                    <!-- Chosen as the session is made: whether to keep its audio,
+                         and (rarely) how finely to scan. -->
+                    <v-switch
+                        :input-value="recordAudio"
+                        :disabled="!audioRecordingAvailable"
+                        inset
+                        dense
+                        hide-details
+                        class="mt-3 mb-1"
+                        :label="recordAudioLabel"
+                        @change="setRecordAudio"
+                    />
+                    <v-expansion-panels flat class="mt-2 analysis-settings">
+                        <v-expansion-panel>
+                            <v-expansion-panel-header class="px-0">Analysis settings (advanced)</v-expansion-panel-header>
+                            <v-expansion-panel-content>
+                                <div class="d-flex flex-wrap align-center" style="gap: 16px;">
+                                    <v-switch
+                                        v-model="customAnalysisSettings"
+                                        inset
+                                        hide-details
+                                        class="mt-0 pt-0"
+                                        label="Custom analysis settings"
+                                    />
+                                    <v-text-field
+                                        v-model.number="analysisSettings.windowSeconds"
+                                        :disabled="!customAnalysisSettings"
+                                        type="number"
+                                        min="3"
+                                        step="1"
+                                        dense
+                                        hide-details
+                                        label="Window (sec)"
+                                        style="max-width: 150px;"
+                                    />
+                                    <v-text-field
+                                        v-model.number="analysisSettings.stepSeconds"
+                                        :disabled="!customAnalysisSettings"
+                                        type="number"
+                                        min="1"
+                                        step="1"
+                                        dense
+                                        hide-details
+                                        label="Step (sec)"
+                                        style="max-width: 150px;"
+                                    />
+                                </div>
+
+                                <p class="mt-2 mb-0 text--secondary">
+                                    Leave this off for automatic defaults. Turn it on when you want finer or coarser scanning,
+                                    including sparse non-continuous sampling.
+                                </p>
+                                <p class="mt-2 mb-0 text--secondary">
+                                    A tune heard for less than {{ minPastDetectionSeconds }}s drops off the list once the next
+                                    tune starts — brief mis-matches aren't kept.
+                                </p>
+                            </v-expansion-panel-content>
+                        </v-expansion-panel>
+                    </v-expansion-panels>
                     <v-alert v-if="newSession.error" type="error" dense text class="mt-2 mb-0">
                         {{ newSession.error }}
                     </v-alert>
@@ -97,141 +156,190 @@
             </v-card>
         </v-dialog>
 
-        <!-- Session Capture: the one place a session is started, paused,
-             resumed and closed. Independent of the live view (follow score),
-             which only listens: a capture is what LOGS — the tune list, Past
-             Sessions, place, and audio if the switch is on. Shown on every
-             session tab so an ongoing capture is always visible here. -->
-        <v-card v-if="viewMode !== 'file'" class="pa-5 my-3 session-capture">
-            <div class="d-flex flex-wrap align-center mb-2" style="gap: 8px;">
-                <h2 class="text-h6 mb-0">
-                    Session Capture
-                </h2>
-                <v-spacer />
-                <v-chip small :color="captureStatus.color" text-color="white" class="capture-status">
-                    <v-icon left small>{{ captureStatus.icon }}</v-icon>
-                    {{ captureStatus.label }}
-                </v-chip>
-            </div>
-            <p v-if="live.hasSession" class="caption text--secondary mb-3">
-                {{ live.sessionName || formatSessionDate(live.startedAt) }}
-                · {{ formatSecondsAsDuration(live.elapsedSeconds) }} captured
-                · {{ live.detections.length }} {{ live.detections.length === 1 ? 'tune' : 'tunes' }}
-            </p>
-            <p v-else class="text--secondary mb-3">
-                Logs every tune recognised into a session you can find again in Past Sessions — with
-                its audio, if you turn that on. The live view follows the music without it.
-            </p>
-            <div class="d-flex flex-wrap align-center" style="gap: 8px;">
-                <template v-if="!live.hasSession">
-                    <!-- A session planned ahead is captured INTO, not beside:
-                         its plan is what the evening is crossed off against. -->
+        <!-- The open session, right under the actions: which session this
+             page is showing, what state it is in, and its controls. One
+             strip for live, planned and past sessions alike, so "which
+             session am I looking at" is never a question. Capture controls
+             (Pause / Resume / Close / Start) belong to the session they act
+             on and appear only on it. -->
+        <v-card v-if="viewMode !== 'file'" class="pa-4 my-3 session-strip">
+            <template v-if="activeSession">
+                <div class="d-flex align-center" style="gap: 8px;">
+                    <v-text-field
+                        :value="activeSession.name || sessionLabel(activeSession)"
+                        aria-label="Session name"
+                        maxlength="160"
+                        hide-details
+                        dense
+                        class="session-name mt-0 pt-0"
+                        :disabled="workspaceBusy"
+                        @change="renameSession"
+                    />
+                    <v-chip small :color="sessionStatus.color" text-color="white" class="capture-status flex-shrink-0">
+                        <v-icon left small>{{ sessionStatus.icon }}</v-icon>
+                        {{ sessionStatus.label }}
+                    </v-chip>
+                    <v-menu offset-y left>
+                        <template #activator="{ on, attrs }">
+                            <v-btn icon small aria-label="Session actions" v-bind="attrs" v-on="on">
+                                <v-icon>{{ icons.more }}</v-icon>
+                            </v-btn>
+                        </template>
+                        <v-list dense>
+                            <v-list-item role="menuitem" :disabled="!activeDetections.length || workspaceBusy" @click="clearSessionTunes">
+                                <v-list-item-title>Clear tune list</v-list-item-title>
+                            </v-list-item>
+                            <v-list-item role="menuitem" :disabled="workspaceBusy" @click="deleteSelectedSession">
+                                <v-list-item-title class="error--text">Delete session</v-list-item-title>
+                            </v-list-item>
+                        </v-list>
+                    </v-menu>
+                    <!-- Two states only: a session open, or none (the list).
+                         This leaves the first for the second. -->
                     <v-btn
-                        v-for="planned in plannedToStart"
-                        :key="planned.id"
+                        icon
+                        small
+                        :aria-label="viewMode === 'live' ? 'Close this session (stops capturing)' : 'Close this session'"
+                        :title="viewMode === 'live' ? 'Close this session (stops capturing; it is saved)' : 'Close this session'"
+                        :disabled="workspaceBusy || live.starting"
+                        :loading="closingSession"
+                        @click="closeViewer"
+                    >
+                        <v-icon>{{ icons.close }}</v-icon>
+                    </v-btn>
+                </div>
+                <p class="caption text--secondary mt-1 mb-2">
+                    <template v-if="activeSession.planned">
+                        Planned. It gets its date, time and place when you start capturing it.
+                    </template>
+                    <template v-else>
+                        {{ formatSessionDate(activeSession.startedAt) }} · {{ formatSecondsAsDuration(activeListenedSeconds) }} captured
+                        · {{ activeDetections.length }} {{ activeDetections.length === 1 ? 'tune' : 'tunes' }}
+                    </template>
+                </p>
+                <div class="d-flex flex-wrap align-center" style="gap: 8px;">
+                    <template v-if="viewMode === 'live'">
+                        <v-btn v-if="live.capturing" color="secondary" @click="pauseLive">
+                            <v-icon left small>{{ icons.pause }}</v-icon>
+                            Pause
+                        </v-btn>
+                        <v-btn
+                            v-else
+                            color="primary"
+                            :disabled="!live.canResume || !indexLoaded || live.starting"
+                            :loading="live.starting"
+                            @click="resumeLive"
+                        >
+                            <v-icon left small>{{ icons.play }}</v-icon>
+                            Resume
+                        </v-btn>
+                        <VolumeMeter v-if="live.capturing" :active="live.micHealthy" />
+                    </template>
+                    <v-btn
+                        v-else-if="activeSession.planned && !live.hasSession"
                         color="primary"
                         :disabled="!canStartLive"
                         :loading="live.starting"
-                        @click="startPlannedSession(planned)"
+                        @click="startPlannedSession(activeSession)"
                     >
                         <v-icon left small>{{ icons.record }}</v-icon>
-                        {{ plannedToStart.length === 1 && viewMode === 'history' ? 'Start this session' : `Start ‘${sessionLabel(planned)}’` }}
+                        Start this session
                     </v-btn>
-                    <span v-if="!plannedToStart.length" class="text--secondary">
-                        Nothing is being captured. Use <strong>New session</strong> above to start.
-                    </span>
-                </template>
-                <template v-else>
-                    <v-btn v-if="live.capturing" color="secondary" @click="pauseLive">
-                        <v-icon left small>{{ icons.pause }}</v-icon>
-                        Pause
-                    </v-btn>
+                    <!-- Closed is not final: an evening stopped too early, or
+                         closed by mistake, carries on in the same record. -->
                     <v-btn
-                        v-else
+                        v-else-if="viewMode === 'history' && !live.hasSession && !activeSession.source"
                         color="primary"
-                        :disabled="!live.canResume || !indexLoaded || live.starting"
+                        :disabled="!canStartLive || !!pendingSessionPatch"
                         :loading="live.starting"
-                        @click="resumeLive"
+                        @click="continueStoredSession(activeSession)"
                     >
-                        <v-icon left small>{{ icons.play }}</v-icon>
-                        Resume
+                        <v-icon left small>{{ icons.record }}</v-icon>
+                        Continue this session
                     </v-btn>
-                    <v-btn
-                        text
-                        :disabled="workspaceBusy || live.starting"
-                        :loading="closingSession"
-                        @click="closeSession"
-                    >
-                        <v-icon left small>{{ icons.stop }}</v-icon>
-                        Close session
+                    <v-btn v-if="viewMode === 'history' && live.hasSession" text color="primary" @click="viewMode = 'live'">
+                        Back to {{ live.sessionName || 'the current session' }}
+                        <span class="ml-1 text--secondary">({{ live.capturing ? 'capturing' : 'paused' }})</span>
                     </v-btn>
+                </div>
+            </template>
+            <template v-else>
+                <!-- Cold start: most visits are to open a recent session, so
+                     they are listed here rather than behind a picker. -->
+                <p v-if="!recentSessions.length" class="text--secondary mb-0">
+                    No sessions yet.
+                </p>
+                <template v-for="group in recentGroups">
+                    <div :key="group.key + '-h'" class="text-subtitle-2 mt-2 mb-1">
+                        {{ group.label }}
+                    </div>
+                    <v-list :key="group.key" dense class="recent-sessions py-0">
+                        <v-list-item
+                            v-for="s in group.sessions"
+                            :key="s.id"
+                            class="px-1"
+                            @click="selectSession(s.id)"
+                        >
+                            <v-list-item-content>
+                                <v-list-item-title>{{ sessionLabel(s) }}</v-list-item-title>
+                                <v-list-item-subtitle>{{ recentSessionDetail(s) }}</v-list-item-subtitle>
+                            </v-list-item-content>
+                            <v-list-item-icon class="my-auto">
+                                <v-icon small>{{ icons.chevronRight }}</v-icon>
+                            </v-list-item-icon>
+                        </v-list-item>
+                    </v-list>
                 </template>
-                <v-btn text color="primary" @click="openLive">
-                    <v-icon left small>{{ icons.clef }}</v-icon>
-                    Live view
-                </v-btn>
-                <VolumeMeter v-if="live.capturing" :active="live.micHealthy" />
-            </div>
-            <v-switch
-                :input-value="recordAudio"
-                :disabled="!audioRecordingAvailable"
-                inset
-                dense
-                hide-details
-                class="mt-4 mb-0"
-                :label="recordAudioLabel"
-                @change="setRecordAudio"
-            />
-            <p v-if="!audioRecordingAvailable" class="caption text--secondary mt-2 mb-0">
-                This browser cannot record audio.
-            </p>
-            <p v-else-if="!live.hasSession" class="caption text--secondary mt-2 mb-0">
-                Keeps the audio so you can play the evening back and jump to any tune.
-                It records the whole room. Audio stays local unless you enable Dropbox backup
-                or export it. Local audio is deleted with the session. Quality and stored recordings are in Settings.
-            </p>
-            <p v-if="!indexLoaded" class="caption text--secondary mt-2 mb-0">
+                <p class="caption text--secondary mt-2 mb-0">
+                    <strong>New session</strong> starts capturing now, or makes a plan for later.
+                    <template v-if="pastSessions.length > recentSessions.length">
+                        Older ones are under <strong>Open a session</strong>.
+                    </template>
+                </p>
+            </template>
+            <template v-if="activeSession && (viewMode === 'live' || activeSession.planned)">
+                <v-switch
+                    :input-value="recordAudio"
+                    :disabled="!audioRecordingAvailable"
+                    inset
+                    dense
+                    hide-details
+                    class="mt-3 mb-0"
+                    :label="recordAudioLabel"
+                    @change="setRecordAudio"
+                />
+                <p v-if="!audioRecordingAvailable" class="caption text--secondary mt-1 mb-0">
+                    This browser cannot record audio.
+                </p>
+            </template>
+            <p v-if="!indexLoaded && activeSession" class="caption text--secondary mt-2 mb-0">
                 Tune index: {{ indexStatusText }}
-            </p>
-            <p v-if="live.hasSession" class="caption text--secondary mt-2 mb-0">
-                <strong>Pause</strong> stops logging and keeps the session; <strong>Close session</strong>
-                files it in Past Sessions. Everything is saved automatically.
             </p>
         </v-card>
 
-        <v-card v-if="viewMode !== 'file' && activeSession" class="pa-5 my-3">
-            <v-text-field :value="activeSession.name || sessionLabel(activeSession)" label="Session name"
-                          maxlength="160" hide-details class="mb-3" :disabled="workspaceBusy" @change="renameSession" />
-            <p v-if="activeSession.planned" class="caption text--secondary">
-                Planned session. Build the plan below, then start capturing it when the music starts —
-                that is when it gets its date, time and place. Changes are saved automatically.
-            </p>
-            <p v-else class="caption text--secondary">
-                {{ formatSessionDate(activeSession.startedAt) }} · {{ formatSecondsAsDuration(activeListenedSeconds) }} listened.
-                Changes are saved automatically.
-            </p>
-            <div class="d-flex flex-wrap" style="gap: 8px;">
-                <v-btn v-if="viewMode === 'history' && live.hasSession" text color="primary" @click="viewMode = 'live'">Current session</v-btn>
-                <v-menu offset-y>
-                    <template #activator="{ on, attrs }">
-                        <v-btn text small v-bind="attrs" v-on="on">Session actions</v-btn>
-                    </template>
-                    <v-list dense>
-                        <v-list-item role="menuitem" :disabled="!activeDetections.length || workspaceBusy" @click="clearSessionTunes">
-                            <v-list-item-title>Clear tune list</v-list-item-title>
-                        </v-list-item>
-                        <v-list-item role="menuitem" :disabled="workspaceBusy" @click="deleteSelectedSession">
-                            <v-list-item-title class="error--text">Delete session</v-list-item-title>
-                        </v-list-item>
-                    </v-list>
-                </v-menu>
-            </div>
-        </v-card>
+        <!-- Plan and Played: the two halves of a session, one tap apart. Kept
+             mounted (v-show), so the recording player's slot survives a
+             switch and playback is not interrupted. -->
+        <v-tabs
+            v-if="viewMode !== 'file' && activeSession"
+            v-model="sessionTab"
+            grow
+            class="session-tabs mb-1"
+        >
+            <v-tab href="#plan">
+                Plan<span v-if="planCounts.total" class="ml-1">({{ planCounts.done }}/{{ planCounts.total }})</span>
+            </v-tab>
+            <v-tab href="#played">
+                Played<span class="ml-1">({{ activeDetections.length }})</span>
+            </v-tab>
+        </v-tabs>
         <SessionPlan
             v-if="viewMode !== 'file' && activeSession && activeSession.id"
+            v-show="sessionTab === 'plan'"
             :key="activeSession.id"
             :session-id="activeSession.id"
             :played="activeDetections"
+            @progress="planCounts = $event"
         />
         <v-alert v-if="workspaceError" type="error" dense text>
             {{ workspaceError }}
@@ -371,49 +479,6 @@
 
         <!-- Analysis settings for the next capture. Only before one starts:
              a session keeps the window it was captured with. -->
-        <v-card v-if="viewMode === 'live' && !live.hasSession" class="pa-5 my-3">
-            <div class="d-flex flex-wrap align-center" style="gap: 16px;">
-                <v-switch
-                    v-model="customAnalysisSettings"
-                    inset
-                    hide-details
-                    class="mt-0 pt-0"
-                    label="Custom analysis settings"
-                />
-                <v-text-field
-                    v-model.number="analysisSettings.windowSeconds"
-                    :disabled="!customAnalysisSettings"
-                    type="number"
-                    min="3"
-                    step="1"
-                    dense
-                    hide-details
-                    label="Window (sec)"
-                    style="max-width: 150px;"
-                />
-                <v-text-field
-                    v-model.number="analysisSettings.stepSeconds"
-                    :disabled="!customAnalysisSettings"
-                    type="number"
-                    min="1"
-                    step="1"
-                    dense
-                    hide-details
-                    label="Step (sec)"
-                    style="max-width: 150px;"
-                />
-            </div>
-
-            <p class="mt-2 mb-0 text--secondary">
-                Leave this off for automatic defaults. Turn it on when you want finer or coarser scanning,
-                including sparse non-continuous sampling.
-            </p>
-            <p class="mt-2 mb-0 text--secondary">
-                A tune heard for less than {{ minPastDetectionSeconds }}s drops off the list once the next
-                tune starts — brief mis-matches aren't kept.
-            </p>
-        </v-card>
-
         <!-- File controls, entirely independent of the live session. -->
         <v-card v-if="viewMode === 'file'" class="pa-5 my-3">
             <div class="d-flex flex-wrap align-center" style="gap: 12px;">
@@ -505,7 +570,7 @@
              full-height card of backup explanation and Delete buttons about
              audio that did not exist, which at phone width pushed the tune
              list off the first screen of every session ever saved. -->
-        <v-card v-if="viewMode !== 'file' && hasSessionRecording" class="pa-5 my-3">
+        <v-card v-if="viewMode !== 'file' && hasSessionRecording" v-show="sessionTab === 'played'" class="pa-5 my-3">
             <h2 class="text-h6 mb-2">
                 Session recording
             </h2>
@@ -533,7 +598,7 @@
         </v-card>
 
         <!-- Results. One table, but the two modes keep their own list. -->
-        <v-card v-if="activeDetections.length" class="pa-5 my-3">
+        <v-card v-if="activeDetections.length" v-show="viewMode === 'file' || sessionTab === 'played'" class="pa-5 my-3">
             <div class="d-flex flex-wrap justify-space-between align-center" style="gap: 12px;">
                 <div>
                     <h2 class="text-h6 mb-1">
@@ -851,7 +916,7 @@
             </v-alert>
         </v-card>
 
-        <v-card v-if="viewMode !== 'file' && activeSession && !activeDetections.length" class="pa-5 my-3">
+        <v-card v-if="viewMode !== 'file' && activeSession && !activeDetections.length" v-show="sessionTab === 'played'" class="pa-5 my-3">
             <h2 class="text-h6">No tunes in this session yet</h2>
             <p class="mb-0 text--secondary">{{ viewMode === 'live' ? 'The session is saved. Recognised tunes will appear here while listening.' : 'The session is saved with an empty tune list.' }}</p>
         </v-card>
@@ -864,7 +929,7 @@ import eventBus from '@/eventBus.js';
 import {
     mdiOpenInNew, mdiMicrophone, mdiClose, mdiPlaylistPlus, mdiMusicClefTreble, mdiStar, mdiStarOutline, mdiPlay, mdiPause,
     mdiRecordCircleOutline, mdiStop, mdiAlertCircleOutline, mdiCalendarPlus, mdiPlus, mdiFolderOpenOutline,
-    mdiFileUploadOutline, mdiArrowLeft,
+    mdiFileUploadOutline, mdiArrowLeft, mdiDotsVertical, mdiChevronRight,
 } from '@mdi/js';
 import ffBackend from '@/services/backend.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
@@ -893,6 +958,10 @@ import {
     parseXscMetadata,
     MIN_PAST_DETECTION_SECONDS,
 } from '@/js/sessionAnalysis.js';
+import { formatDateTime, formatTime } from '@/js/dateFormat.mjs';
+import { planTunes } from '@/js/sessionPlan.mjs';
+
+const planTuneCount = plan => planTunes(plan).length;
 
 const SESSION_ANALYSIS_STATE_VERSION = 3;
 
@@ -970,6 +1039,8 @@ export default {
             viewMode: 'live', // 'file' | 'live' | 'history'
             lastSessionView: 'live',
             newSession: { open: false, name: '', busy: false, error: '' },
+            sessionTab: 'played',
+            planCounts: { done: 0, total: 0 },
             // The two analyses keep their own results, progress and errors.
             // They used to share one set of fields, so starting one wiped the
             // other's results and the "stage" of whichever ran last decided
@@ -996,6 +1067,8 @@ export default {
             tuneSets: [],
             icons: {
                 plan: mdiCalendarPlus,
+                more: mdiDotsVertical,
+                chevronRight: mdiChevronRight,
                 plus: mdiPlus,
                 open: mdiFolderOpenOutline,
                 import: mdiFileUploadOutline,
@@ -1044,6 +1117,19 @@ export default {
         };
     },
     watch: {
+        // A planned session opens on its plan; anything captured on what was
+        // played. Decided per session, not on every update.
+        'activeSession.id': {
+            immediate: true,
+            handler() {
+                this.selectedRowKeys = [];
+                const s = this.activeSession;
+                // Starting a planned session keeps its id, so the tab does not
+                // jump away from the plan the leader is reading.
+                this.sessionTab = s && s.planned ? 'plan' : 'played';
+                this.planCounts = { done: 0, total: 0 };
+            },
+        },
         // A `?session=` link followed while this page is already open (the
         // "Open" on the add-to-session notice): the view is not remounted.
         '$route.query.session'(id) {
@@ -1070,7 +1156,6 @@ export default {
             const kept = this.selectedRowKeys.filter(key => present.has(key));
             if (kept.length !== this.selectedRowKeys.length) this.selectedRowKeys = kept;
         },
-        'activeSession.id'() { this.selectedRowKeys = []; },
         viewMode(newVal) {
             this.selectedRowKeys = [];
             if (newVal !== 'file') this.lastSessionView = newVal;
@@ -1119,6 +1204,23 @@ export default {
         // Planned sessions the capture card offers to start: the one open on
         // screen, else the two planned most recently. A plan has no date of
         // its own (it gets one when started), so recency is all there is.
+        // The cold-start list: the most recent ten, planned ones included
+        // (a plan made this afternoon is what tonight opens).
+        recentSessions() {
+            return this.pastSessions.slice()
+                .sort((x, y) => (y.lastActiveAt || y.startedAt || 0) - (x.lastActiveAt || x.startedAt || 0))
+                .slice(0, 10);
+        },
+        // The same list split for reading: plans still to come, then what was
+        // played. Empty groups are left out.
+        recentGroups() {
+            const planned = this.recentSessions.filter(x => x.planned);
+            const past = this.recentSessions.filter(x => !x.planned);
+            return [
+                { key: 'planned', label: 'Planned', sessions: planned },
+                { key: 'past', label: 'Past', sessions: past },
+            ].filter(g => g.sessions.length);
+        },
         plannedToStart() {
             if (this.live.hasSession) return [];
             if (this.viewMode === 'history') {
@@ -1184,6 +1286,13 @@ export default {
         },
         // The Session Capture card's chip: what the capture is doing, never
         // what the live view is doing — the two are independent.
+        // The strip's chip: what the session on screen IS. Only the open
+        // session can be capturing; a stored one is planned or past.
+        sessionStatus() {
+            if (this.viewMode === 'live') return this.captureStatus;
+            if (this.activeSession && this.activeSession.planned) return { label: 'Planned', color: 'primary', icon: this.icons.plan };
+            return { label: 'Past', color: 'grey', icon: this.icons.open };
+        },
         captureStatus() {
             if (!this.live.hasSession) return { label: 'Not capturing', color: 'grey', icon: this.icons.record };
             if (this.live.capturing && !this.live.micHealthy) {
@@ -1871,6 +1980,39 @@ export default {
             });
         },
 
+        recentSessionDetail(session) {
+            const planned = Array.isArray(session.plan) ? planTuneCount(session.plan) : 0;
+            const planText = planned ? ` · ${planned} planned` : '';
+            if (session.planned) return planned ? `${planned} in the plan` : 'Nothing planned yet';
+            const n = (session.tunes || []).length;
+            return `${this.formatSessionDate(session.startedAt)} · ${n} ${n === 1 ? 'tune' : 'tunes'}${planText}`;
+        },
+        // The strip's ×. A stored session just closes (the list comes back);
+        // the session being captured is closed for real — capture stops and
+        // it is filed — after asking, if it is still capturing.
+        async closeViewer() {
+            if (this.viewMode === 'history') {
+                if (this.pendingSessionPatch) {
+                    this.workspaceError = 'Save your pending changes before closing the session.';
+                    return;
+                }
+                this.selectedSession = null;
+                this.savedDetections = [];
+                store.state.sessionWorkspace = null;
+                this.viewMode = 'live';
+                if (this.$route && this.$route.query.session) {
+                    const query = { ...this.$route.query };
+                    delete query.session;
+                    this.$router.replace({ query }).catch(() => {});
+                }
+                this.refreshPastSessions();
+                return;
+            }
+            if (this.live.capturing
+                && !window.confirm('Stop capturing and close this session? It is saved, and can be continued later.')) return;
+            await this.closeSession();
+            this.refreshPastSessions();
+        },
         pickerLabel(session) {
             return session.planned ? `Planned · ${this.sessionLabel(session)}` : this.sessionLabel(session);
         },
@@ -1924,6 +2066,34 @@ export default {
             if (this._destroyed || !this.pastSessions.some(p => p.id === id)) return false;
             this.selectSession(id);
             return true;
+        },
+        async continueStoredSession(session) {
+            if (this.pendingSessionPatch) {
+                this.workspaceError = 'Save your pending changes before continuing the session.';
+                return;
+            }
+            this.live.micError = '';
+            this.workspaceError = '';
+            this.live.starting = true;
+            const windowSeconds = Number(this.analysisSettings.windowSeconds) || 10;
+            const stepSeconds = Number(this.analysisSettings.stepSeconds) || 5;
+            try {
+                await liveAnalysisService.continueSession(session, windowSeconds, stepSeconds);
+                this.selectedSession = null;
+                this.savedDetections = [];
+                this.viewMode = 'live';
+                this.refreshPastSessions();
+            } catch (e) {
+                if (liveAnalysisService.sessionId === session.id) {
+                    this.viewMode = 'live';
+                    this.live.micError = `Could not access microphone: ${e.message || 'please check permissions'}. Your session is kept; use Resume to retry.`;
+                } else {
+                    this.workspaceError = e.message || String(e);
+                }
+            } finally {
+                this.live.starting = false;
+                this._syncLiveFromService();
+            }
         },
         async startPlannedSession(session) {
             if (this.pendingSessionPatch) {
@@ -2219,12 +2389,10 @@ export default {
             return `${start} – ${this.formatSessionTime(session.endedAt)}`;
         },
         formatSessionDate(ms) {
-            return new Date(ms).toLocaleString(undefined, {
-                year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-            });
+            return formatDateTime(ms);
         },
         formatSessionTime(ms) {
-            return new Date(ms).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+            return formatTime(ms);
         },
         tuneLinkForSessionTune(tune) {
             return {

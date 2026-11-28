@@ -5,6 +5,7 @@
 // 'error' (needs attention) or 'unknown' (not yet checked with the account).
 // `retry` says whether a Retry button makes sense.
 
+import { formatDateTime } from './dateFormat.mjs';
 const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 export function describeFavouriteSync(state, { total = null, online = true, now = Date.now() } = {}) {
@@ -59,5 +60,5 @@ function confirmedSuffix(at, now) {
     const mins = Math.round((now - at) / 60000);
     if (mins < 1) return ' · confirmed just now';
     if (mins < 60) return ` · confirmed ${mins} min ago`;
-    return ` · confirmed ${new Date(at).toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', day: 'numeric', month: 'short' })}`;
+    return ` · confirmed ${formatDateTime(at)}`;
 }

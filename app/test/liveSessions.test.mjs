@@ -689,6 +689,29 @@ async function run() {
         await service.stop();
     });
 
+    await test('a CLOSED session can be continued: its tunes stay, it is open again, same record', async () => {
+        const { service, store } = await loadService();
+        const closed = {
+            id: 'session-closed-1', startedAt: 1000, endedAt: 9000, name: 'Saturday', customName: true,
+            listenedSeconds: 300,
+            tunes: [
+                { tuneId: 1, settingId: 10, title: 'The Kesh', startSeconds: 0, endSeconds: 130, bestScore: 0.7, alternatives: [] },
+                { tuneId: 2, settingId: 20, title: 'Morning Dew', startSeconds: 131, endSeconds: 260, bestScore: 0.7, alternatives: [] },
+            ],
+        };
+        await service.continueSession(closed, 10, 5);
+        assert.equal(service.sessionId, closed.id);
+        assert.equal(service.isRunning, true);
+        assert.deepEqual(service.detections.map(d => d.tuneId), [1, 2], 'the tunes it had are kept');
+        assert.ok(service.elapsedSeconds >= 300, 'the clock carries on, so new tunes come after');
+        await service._saveChain;
+        const saved = store.__sessions.find(s => s.id === closed.id);
+        assert.equal(saved.endedAt, null, 'open again');
+        assert.equal(saved.startedAt, 1000, 'still the evening it began');
+        assert.deepEqual(saved.tunes.map(t => t.tuneId), [1, 2]);
+        await service.stop();
+    });
+
     await test('a planned session is refused while another session is open', async () => {
         const { service } = await loadService();
         await service.start(10, 5);

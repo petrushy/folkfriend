@@ -178,6 +178,7 @@ import {
 } from '@/js/places.mjs';
 import PlacesMap from '@/components/PlacesMap.vue';
 import PlacePickerDialog from '@/components/PlacePickerDialog.vue';
+import { formatDate } from '@/js/dateFormat.mjs';
 
 export default {
     name: 'PlacesView',
@@ -311,9 +312,7 @@ export default {
         },
         formatDate(millis) {
             if (!millis) return 'unknown';
-            return new Date(millis).toLocaleDateString(undefined, {
-                year: 'numeric', month: 'short', day: 'numeric',
-            });
+            return formatDate(millis);
         },
         openTune(tune) {
             router.push({

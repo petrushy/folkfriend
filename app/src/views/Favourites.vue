@@ -379,6 +379,7 @@
                     :key="row.settingID"
                     :name="row.name"
                     :descriptor="row.descriptor"
+                    :alt-name="row.altName"
                     :setting-i-d="row.settingID"
                     :timestamp="row.timestamp"
                     :selected="selectedIDs.has(row.settingID)"
@@ -393,6 +394,7 @@
                     @playRecording="playRecording($event, row.name)"
                     @favouriteItemClicked="loadFavouriteItem"
                     @addToSet="addFavouriteToSet"
+                    @addToSession="addFavouriteToSession"
                     @unstar="removeFavourite"
                     @toggle="toggleSelected"
                     @addTag="addTag"
@@ -443,6 +445,7 @@
                             :key="row.settingID"
                             :name="row.name"
                             :descriptor="row.descriptor"
+                            :alt-name="row.altName"
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
@@ -456,6 +459,7 @@
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @addToSet="addFavouriteToSet"
+                            @addToSession="addFavouriteToSession"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -502,6 +506,7 @@
                             :key="row.settingID"
                             :name="row.name"
                             :descriptor="row.descriptor"
+                            :alt-name="row.altName"
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
@@ -515,6 +520,7 @@
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @addToSet="addFavouriteToSet"
+                            @addToSession="addFavouriteToSession"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -564,6 +570,7 @@
                             :key="row.settingID"
                             :name="row.name"
                             :descriptor="row.descriptor"
+                            :alt-name="row.altName"
                             :setting-i-d="row.settingID"
                             :timestamp="row.timestamp"
                             :selected="selectedIDs.has(row.settingID)"
@@ -577,6 +584,7 @@
                             @playRecording="playRecording($event, row.name)"
                             @favouriteItemClicked="loadFavouriteItem"
                             @addToSet="addFavouriteToSet"
+                            @addToSession="addFavouriteToSession"
                             @unstar="removeFavourite"
                             @toggle="toggleSelected"
                             @addTag="addTag"
@@ -791,6 +799,7 @@ import { listManifests } from '@/services/sessionAudioStore.js';
 import { dropboxState } from '@/services/dropbox.js';
 import { playSessionTuneLooped, playerHost, sessionPlayer } from '@/services/sessionPlayerHost.js';
 import liveAnalysisService from '@/services/liveAnalysis.js';
+import { formatDate } from '@/js/dateFormat.mjs';
 
 const FILTER_STATE_KEY = 'favouritesFilterState';
 
@@ -913,9 +922,7 @@ export default {
                     shuffleKey(a.result.settingID, this.shuffleSeed) - shuffleKey(b.result.settingID, this.shuffleSeed));
                 break;
             case 'name':
-                sorted.sort((a, b) =>
-                    utils.parseDisplayableName(a.result.displayName)
-                        .localeCompare(utils.parseDisplayableName(b.result.displayName)));
+                sorted.sort((a, b) => this.favName(a).localeCompare(this.favName(b)));
                 break;
             case 'type':
                 sorted.sort((a, b) => {
@@ -1036,7 +1043,7 @@ export default {
             const byMonth = new Map();
             for (const item of this.filteredItems) {
                 const d = new Date(item.timestamp);
-                const label = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+                const label = formatDate(d.getTime());
                 if (!byMonth.has(label)) byMonth.set(label, []);
                 byMonth.get(label).push(item);
             }
@@ -1236,7 +1243,8 @@ export default {
         },
         _toRow(item) {
             return {
-                name: utils.parseDisplayableName(item.result.displayName),
+                name: this.favName(item),
+                altName: item.customName ? utils.parseDisplayableName(item.result.displayName) : '',
                 descriptor: utils.parseDisplayableDescription(item.result.setting),
                 settingID: item.result.settingID,
                 timestamp: item.timestamp,
@@ -1249,6 +1257,10 @@ export default {
                 tuneID: (item.result.setting && item.result.setting.tune_id) || '',
                 sourceUrl: (item.result.setting && item.result.setting.source_url) || '',
             };
+        },
+        // What the user calls the tune: their own name when they gave one.
+        favName(item) {
+            return (item.customName && item.customName.trim()) || utils.parseDisplayableName(item.result.displayName);
         },
         loadFavourites() {
             store.getFavourites().then(items => {
@@ -1434,7 +1446,9 @@ export default {
                     // Name or composer. The composer lives on the saved setting
                     // snapshot; favourites saved before it was indexed have none.
                     const composer = item.result.setting && item.result.setting.composer;
-                    const inName = utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle);
+                    // Either name: the user's own, or the database's.
+                    const inName = utils.parseDisplayableName(item.result.displayName).toLowerCase().includes(needle)
+                        || (item.customName || '').toLowerCase().includes(needle);
                     const inComposer = typeof composer === 'string' && composer.toLowerCase().includes(needle);
                     if (!inName && !inComposer) return false;
                 }
@@ -1567,6 +1581,22 @@ export default {
         },
         // Same order and same selection as Add to set: the list as sorted on
         // screen, which is the order the plan gets.
+        addFavouriteToSession(settingID) {
+            const item = this.favouriteItems.find(f => String(f.result.settingID) === String(settingID));
+            if (item) eventBus.$emit('showAddToSession', { tunes: [this._sessionTune(item)] });
+        },
+        _sessionTune(item) {
+            return {
+                tuneID: item.result.setting && item.result.setting.tune_id,
+                settingID: item.result.settingID,
+                title: this.favName(item),
+                // The database name too, so a detection by it crosses the
+                // plan item off.
+                aliases: [item.result.displayName],
+                dataset: item.result.setting && item.result.setting.dataset,
+                setting: item.result.setting,
+            };
+        },
         addSelectedToSession() {
             const selected = new Set([...this.selectedIDs].map(String));
             const seen = new Set();
@@ -1576,15 +1606,7 @@ export default {
                 seen.add(id); return true;
             });
             if (!items.length) return;
-            eventBus.$emit('showAddToSession', {
-                tunes: items.map(item => ({
-                    tuneID: item.result.setting && item.result.setting.tune_id,
-                    settingID: item.result.settingID,
-                    title: item.result.displayName,
-                    dataset: item.result.setting && item.result.setting.dataset,
-                    setting: item.result.setting,
-                })),
-            });
+            eventBus.$emit('showAddToSession', { tunes: items.map(item => this._sessionTune(item)) });
         },
         addSelectedToSet() {
             const selected = new Set([...this.selectedIDs].map(String));
@@ -1608,7 +1630,7 @@ export default {
             if (selected.length === 0) return;
 
             const plainText = selected.map((item) => {
-                const name = utils.parseDisplayableName(item.result.displayName);
+                const name = this.favName(item);
                 const descriptor = utils.parseDisplayableDescription(item.result.setting);
                 const url = settingSourceUrl({
                     tuneID: item.result.setting.tune_id,
@@ -1638,7 +1660,7 @@ export default {
             const escapeHtml = s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
             const renderItem = (item) => {
-                const name = escapeHtml(utils.parseDisplayableName(item.result.displayName));
+                const name = escapeHtml(this.favName(item));
                 const descriptor = escapeHtml(utils.parseDisplayableDescription(item.result.setting));
                 // Escaped like every other interpolation here. source.mjs
                 // already refuses anything but http(s), but this string is a

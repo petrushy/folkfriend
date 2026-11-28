@@ -44,7 +44,9 @@ async function resolveTune(tune, favourites) {
         settingID,
         title: tune.title,
         dataset: tune.dataset || (setting && setting.dataset) || null,
-        aliases: await aliasesFor(tune.tuneID != null ? tune.tuneID : (setting && setting.tune_id)),
+        // The caller's own (a favourite's database name, when the user has
+        // renamed it) plus the index's, so any of them crosses it off.
+        aliases: [...(tune.aliases || []), ...await aliasesFor(tune.tuneID != null ? tune.tuneID : (setting && setting.tune_id))],
         mode: setting && setting.mode,
         meter: setting && setting.meter,
         type: setting && setting.dance,
@@ -76,12 +78,17 @@ export async function addToSessionPlan(sessionID, { tunes = [], sets = [] } = {}
     return counts;
 }
 
-// The sessions a plan can be added to: the one open now (whatever its state)
-// and every planned one, most recently planned first.
+// The sessions a plan can be added to, as one-tap choices: the one open now
+// (whatever its state) first, then the most recent others — planned or
+// past — up to three in all. Imported recordings are left out.
+export const PLAN_DESTINATION_COUNT = 3;
+
 export async function planDestinations(openSessionID) {
     const sessions = await store.getNamedLiveSessions();
-    const open = openSessionID ? sessions.find(s => s.id === openSessionID) : null;
-    const planned = sessions.filter(s => s.planned && s.id !== openSessionID)
-        .sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
-    return { open, planned };
+    const open = openSessionID ? sessions.find(s => s.id === openSessionID) || null : null;
+    const recent = sessions
+        .filter(s => s.id !== openSessionID && s.source !== 'import')
+        .sort((a, b) => (b.lastActiveAt || b.startedAt || 0) - (a.lastActiveAt || a.startedAt || 0))
+        .slice(0, PLAN_DESTINATION_COUNT - (open ? 1 : 0));
+    return { open, recent };
 }

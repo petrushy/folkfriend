@@ -2,15 +2,6 @@
     <v-container 
         class="viewContainerWrapper"
     >
-        <v-card
-            v-if="!isStableRelease"
-            class="pa-5 my-2 UnstableRelease"
-        >
-            <v-icon class="WarningIcon px-3">
-                {{ icons.alertCircle }}
-            </v-icon>
-            <span>You are not using the stable release version of FolkFriend, which is at <a href="https://folkfriend.app">folkfriend.app</a>. This is the development version, which may contain features which are untested.</span>
-        </v-card>
         <v-card class="pa-5 my-2">
             <h1>About</h1>
             <p>
@@ -21,20 +12,31 @@
                 entirely in browser and works without an internet connection.
             </p>
             <p>
-                FolkFriend was created by Tom Wyllie. This is a fork
-                maintained by Petrus Hyvönen, which adds offline
-                multi-database tune search, session and place logging, live
-                session follow, and AI-written tune background notes. The
-                source is on <a
-                    href="https://github.com/petrushy/folkfriend"
-                >GitHub</a>.
+                FolkFriend was initially created by <strong>Tom Wyllie</strong>.
             </p>
+            <p>
+                This is a further developed fork, maintained by Petrus Hyvönen. It
+                adds offline search across several tune databases, sessions with
+                plans, capture and recordings, sets, places, live session follow and
+                AI-written tune background notes.
+            </p>
+            <ul class="mb-0">
+                <li>
+                    The original source is at
+                    <a href="https://github.com/TomWyllie/folkfriend">github.com/TomWyllie/folkfriend</a>,
+                    and the original app at <a href="https://folkfriend.app">folkfriend.app</a>.
+                </li>
+                <li>
+                    This fork's source is at
+                    <a href="https://github.com/petrushy/folkfriend">github.com/petrushy/folkfriend</a>.
+                </li>
+            </ul>
         </v-card>
         <v-card
             class="pa-5 my-2"
         >
             <h1>Share</h1>
-            <p>Scan the QR code on another device to open FolkFriend.</p>
+            <p>Scan the QR code on another device to open this version of FolkFriend.</p>
             <v-img
                 src="@/assets/qr-code.svg"
                 class="mx-auto QRCode"
@@ -46,21 +48,19 @@
         <v-card class="pa-5 my-2">
             <h1>Feedback</h1>
             <p>
-                Bug reports and feature requests for this version belong on
-                the <a
+                Bug reports and feature requests for <strong>this fork</strong> — the
+                version you are using now — belong on its
+                <a
                     class="feedbackEmail"
                     href="https://github.com/petrushy/folkfriend/issues"
-                >GitHub issues page</a>. Many of the features here do not
-                exist in the original app, so reporting them anywhere else is
-                unlikely to reach anyone who can fix them.
+                >GitHub issues page</a>. Many of its features do not exist in the
+                original app, so reporting them anywhere else is unlikely to reach
+                anyone who can fix them.
             </p>
-            <p class="mb-0">
-                Feedback about the original FolkFriend, at <a
-                    href="https://folkfriend.app"
-                >folkfriend.app</a>, goes to <a
-                    class="feedbackEmail"
-                    href="mailto:feedback@folkfriend.app"
-                >feedback@folkfriend.app</a>.
+            <p class="mb-0 caption text--secondary">
+                Feedback about the original FolkFriend, at
+                <a href="https://folkfriend.app">folkfriend.app</a>, goes to its author
+                at <a href="mailto:feedback@folkfriend.app">feedback@folkfriend.app</a>.
             </p>
         </v-card>
         <p class="AppInfo">
@@ -76,22 +76,20 @@ import ffConfig from '@/ffConfig.js';
 import { datasetDisplayName } from '@/js/source.mjs';
 import ffBackend from '@/services/backend';
 import eventBus from '@/eventBus';
-import utils from '@/js/utils.js';
 
 import {
-    mdiAlertCircle,
     mdiCellphoneArrowDown,
     mdiCheckCircleOutline,
     mdiDotsVertical,
     mdiExportVariant,
     mdiPlusBoxOutline,
 } from '@mdi/js';
+import { formatDate } from '@/js/dateFormat.mjs';
 
 export default {
     name: 'HelpView',
     data: () => ({
         icons: {
-            alertCircle: mdiAlertCircle,
             iosShare: mdiExportVariant,
             iosAddToHomeScreen: mdiPlusBoxOutline,
             checkCircle: mdiCheckCircleOutline,
@@ -101,7 +99,6 @@ export default {
             cellphoneArrowDown: mdiCellphoneArrowDown,
             dotsVertical: mdiDotsVertical,
         },
-        isStableRelease: utils.isStableRelease(),
         year: new Date().getFullYear(),
         // Stored manifests of the loaded datasets: their names and notices.
         datasetManifests: {},
@@ -144,13 +141,13 @@ export default {
         tuneIndexDate() {
             const date = store.state.tuneIndexDate;
             if (date) {
-                return new Date(date).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+                return formatDate(new Date(date).getTime());
             }
             const v = store.state.tuneIndexVersion;
             if (!v) return 'loading…';
             // v = days since 2020-01-01 (fallback for old metadata without date field)
             const ms = (1577836800 + v * 86400) * 1000;
-            return new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+            return formatDate(ms);
         },
     },
     created: function () {

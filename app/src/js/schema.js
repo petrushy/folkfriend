@@ -11,6 +11,9 @@ export class FavouriteItem {
         this.timestamp = Date.now();
         this.tags = []; // string[] — user-defined tags, e.g. ['to practice', 'for tuesday sessions']
         this.tempo = null; // number|null — persisted tempo slider value (% of default)
+        // Not set here: `customName`, the user's own name for the tune (an
+        // in-house name). Shown in its place, with result.displayName kept as
+        // the alternative; absent means none.
         // Not set in the constructor: `aiSummary`, an optional
         // { text, model, generatedAt, sourceUrl } record mirrored here by
         // store.setAiSummary purely so it rides the favourites Firestore sync to

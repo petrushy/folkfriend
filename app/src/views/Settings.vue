@@ -1022,6 +1022,7 @@ import {
     mdiRefresh,
     mdiUpload,
 } from '@mdi/js';
+import { formatDateTime } from '@/js/dateFormat.mjs';
 
 function formatBytes(bytes) {
     if (!bytes) return '0 MB';
@@ -1299,7 +1300,7 @@ export default {
                 .map(id => manifests[id] && manifests[id].savedAt)
                 .filter(Boolean);
             if (!times.length) return '';
-            return ` — saved ${new Date(Math.max(...times)).toLocaleString()}`;
+            return ` — saved ${formatDateTime(Math.max(...times))}`;
         },
         inMemoryLabel() {
             const loaded = ((this.indexStatusDetail || {}).datasetsLoaded || []).length;

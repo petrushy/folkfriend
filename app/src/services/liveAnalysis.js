@@ -4,7 +4,7 @@ import geoService from './geo.js';
 import store from './store.js';
 import sessionRecorder from './sessionRecorder.js';
 import {
-    normaliseQueryResults, buildLiveDetections, SESSION_ANALYSIS_DEFAULTS,
+    normaliseQueryResults, buildLiveDetections, SESSION_ANALYSIS_DEFAULTS, windowMatchesFromTunes,
 } from '@/js/sessionAnalysis.js';
 import { biasResultsTowardPrevious } from '@/js/biasResults.mjs';
 import { detectionFreshness } from '@/js/detectionFreshness.mjs';
@@ -256,6 +256,42 @@ class LiveAnalysisService {
         this._startPromise = this._startCapture(windowSeconds, stepSeconds, plannedSession);
         try { return await this._startPromise; }
         finally { this._startPromise = null; }
+    }
+
+    // Reopens a CLOSED session (or any stored one) and captures into it: the
+    // tunes it has stay, new ones append, its plan goes on being crossed off.
+    // Its own window matches went with Close, so they are rebuilt from the
+    // stored list (windowMatchesFromTunes), and the listening clock carries
+    // on from where it stopped so new rows come after the old ones.
+    async continueSession(record, windowSeconds, stepSeconds) {
+        if (this._sessionTransition) await this._sessionTransition;
+        if (!record || !record.id) throw new Error('No session to continue.');
+        if (this.sessionId && this.sessionId !== record.id) {
+            throw new Error('Close the current session first, then continue this one.');
+        }
+        if (!this.sessionId) {
+            const options = defaultLiveOptions(windowSeconds, stepSeconds);
+            const tunes = Array.isArray(record.tunes) ? record.tunes : [];
+            const lastEnd = tunes.reduce((m, t) => Math.max(m, Number(t.endSeconds) || 0), 0);
+            this._resetSessionState();
+            this.sessionId = record.id;
+            this.sessionName = record.customName ? (record.name || '') : '';
+            this.customName = !!record.customName && !!this.sessionName;
+            this.placeName = record.placeName || '';
+            this._sessionStartedAt = record.planned ? Date.now() : (record.startedAt || Date.now());
+            this._lastActiveAt = Date.now();
+            this.elapsedSeconds = Math.max(Number(record.listenedSeconds) || 0, lastEnd);
+            this.options = options;
+            this._windowMatches = windowMatchesFromTunes(tunes, options);
+            if (typeof record.lat === 'number' && typeof record.lon === 'number') {
+                this._sessionFix = { lat: record.lat, lon: record.lon, accuracy: record.accuracy ?? null };
+            }
+            this._lastSavedTuneId = tunes.length ? tunes[tunes.length - 1].tuneId : null;
+            this._hasPersisted = true;
+            this.isPaused = true;
+            this._recluster();
+        }
+        return this.start(windowSeconds, stepSeconds);
     }
 
     async _startCapture(windowSeconds, stepSeconds, plannedSession = null) {

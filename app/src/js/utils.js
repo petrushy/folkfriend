@@ -2,9 +2,6 @@
 
 // https://grammar.yourdictionary.com/capitalization/rules-for-capitalization-in-titles.html
 const LOWER_TITLE_WORDS = new Set(['a', 'an', 'the', 'at', 'by', 'for', 'in', 'of', 'on', 'to', 'up', 'and', 'as', 'but', 'or', 'nor']);
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const MS_12_HOURS = 12 * 60 * 60 * 1000;
-const MS_6_MONTHS = 365 * MS_12_HOURS;
 
 // Wrap in a class for ease of exports
 export default class utils {
@@ -20,19 +17,14 @@ export default class utils {
         return Math.max(0, daysSince2020);
     }
 
+    // The date a favourite or history entry was made: YYYY-MM-DD, as
+    // js/dateFormat.mjs (inlined: tests copy this file on its own). The time
+    // of day it was starred says nothing worth the space.
     static utcToString(utc) {
-        let msAge = Date.now() - utc;
-        let date = new Date(utc);
-        let dateString;
-
-        if (msAge > MS_12_HOURS) {
-            dateString = date.getDate().toString() + ' ' + MONTHS[date.getMonth()];
-            dateString = msAge > MS_6_MONTHS ? dateString + ' ' + date.getFullYear() : dateString;
-        } else {
-            let hour = date.getHours();
-            dateString = ('0' + hour).slice(-2) + ':' + ('0' + date.getMinutes()).slice(-2);
-        }
-        return dateString;
+        const d = new Date(utc);
+        if (Number.isNaN(d.getTime())) return '';
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
     }
 
     static parseDisplayableName(rawName) {
@@ -122,7 +114,4 @@ export default class utils {
         return (window.matchMedia('(display-mode: standalone)').matches);
     }
 
-    static isStableRelease() {
-        return /folkfriend.app/.test(window.location.href.toLowerCase());
-    }
 }
