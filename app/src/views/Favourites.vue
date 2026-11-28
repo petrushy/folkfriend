@@ -118,7 +118,8 @@
              and every key besides — so only the ACTIVE ones sit in the bar,
              each as a chip closed to remove it. Tags stay as toggle chips. -->
         <div
-            v-if="typeFilterOptions.length > 0 || keyFilterOptions.length > 0 || allTags.length > 0"
+            v-if="typeFilterOptions.length > 0 || keyFilterOptions.length > 0 || tagChips.length > 0
+                || activeTypes.length > 0 || activeKeys.length > 0"
             class="tag-filter-bar mb-3"
         >
             <div
@@ -237,7 +238,7 @@
                     </v-list>
                 </v-menu>
                 <v-chip
-                    v-for="tag in allTags"
+                    v-for="tag in tagChips"
                     :key="tag"
                     small
                     :color="activeTags.includes(tag) ? 'primary' : undefined"
@@ -405,7 +406,10 @@
                 v-else-if="favouriteItems.length > 0"
                 class="mt-4 grey--text"
             >
-                No favourites match the selected tags.
+                No favourites match the current filters.
+                <v-btn small text color="primary" class="ml-1" @click="clearAllFilters">
+                    Clear filters
+                </v-btn>
             </p>
         </template>
 
@@ -997,6 +1001,12 @@ export default {
             this.filteredItems.forEach(item => (item.tags || []).forEach(t => tags.add(t)));
             return [...tags].sort();
         },
+        // The tag chips: those on screen, plus every ACTIVE one even when
+        // nothing matches — a filter that is on must always be visible and
+        // removable, or an empty list has no explanation.
+        tagChips() {
+            return [...new Set([...this.allTags, ...this.activeTags])].sort();
+        },
         // Every tag in use, whatever is filtered: what can be ADDED to a
         // favourite, renamed or deleted. Reading this from the filtered view
         // emptied the add-tag dropdown whenever the name filter was in use.
@@ -1471,6 +1481,11 @@ export default {
         },
         keyLabelFor(key) {
             return keyLabel(key);
+        },
+        clearAllFilters() {
+            this.clearFilterChips();
+            this.activePlaceIDs = [];
+            this.nameFilter = '';
         },
         clearFilterChips() {
             this.activeTypes = [];
