@@ -148,7 +148,7 @@
 
         <v-app-bar
             app
-            color="white"
+            :color="$vuetify.theme.dark ? undefined : 'white'"
             elevate-on-scroll
         >
             <v-icon
@@ -569,6 +569,53 @@ async function initSetup() {
 </script>
 
 <style>
+/* ---- Colour themes (js/theme.mjs, services/theme.js) ----
+   Dim and Dark both run Vuetify's dark mode; these rules swap Vuetify's
+   fixed dark greys for the theme's own grounds, so Dim can be a soft charcoal
+   and Dark true black. The score follows `color`, since abcjs draws in
+   currentColor. */
+.v-application.theme--dark {
+    background: var(--ff-bg) !important;
+    color: var(--ff-text);
+}
+.theme--dark.v-card,
+.theme--dark.v-sheet,
+.theme--dark.v-navigation-drawer,
+.theme--dark.v-list,
+.theme--dark.v-expansion-panels .v-expansion-panel,
+.theme--dark.v-tabs-items,
+.theme--dark.v-tabs > .v-tabs-bar,
+.theme--dark.v-data-table,
+.theme--dark.v-stepper,
+.theme--dark.v-toolbar.v-sheet {
+    background-color: var(--ff-surface) !important;
+}
+.theme--dark.v-card,
+.theme--dark.v-list-item:not(.v-list-item--active):not(.v-list-item--disabled),
+.theme--dark.v-expansion-panels .v-expansion-panel,
+.theme--dark.v-label,
+.theme--dark.v-input input,
+.theme--dark.v-input textarea,
+.theme--dark.v-select .v-select__selection--comma,
+.theme--dark.v-icon {
+    color: var(--ff-text);
+}
+.theme--dark.v-card > .v-card__text,
+.theme--dark.v-card > .v-card__subtitle,
+.theme--dark.v-list-item .v-list-item__subtitle {
+    color: var(--ff-text-muted);
+}
+.theme--dark.v-text-field--solo > .v-input__control > .v-input__slot {
+    background: var(--ff-surface2) !important;
+}
+.theme--dark.v-divider {
+    border-color: var(--ff-border) !important;
+}
+/* The logo is dark blue artwork; on a dark ground it takes the text colour. */
+.MainLogo .v-image__image {
+    filter: var(--ff-logo-filter, none);
+}
+
 .v-list > a {
     text-decoration: none;
 }
@@ -600,7 +647,7 @@ html, body {
     gap: 4px;
     padding: 4px 8px;
     border-radius: 24px;
-    background: #fff;
+    background: var(--ff-surface, #fff);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     max-width: 560px;
     margin: 0 auto;

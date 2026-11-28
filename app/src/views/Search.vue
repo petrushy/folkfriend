@@ -449,7 +449,7 @@ export default {
 
 .analyze-ring {
     stroke: var(--v-secondary-base);
-    fill: white;
+    fill: var(--ff-surface, white);
     stroke-width: 1px;
     transform-origin: 12px 12px;
     transition: transform 200ms ease-out;
@@ -460,7 +460,7 @@ export default {
 }
 
 .analyze-circle:active .analyze-ring {
-    fill: #f5f5f5;
+    fill: var(--ff-surface2, #f5f5f5);
 }
 
 .analyze-icon {

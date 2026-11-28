@@ -227,7 +227,7 @@ export default {
 
 .RecorderCircle {
     stroke: var(--v-secondary-base);
-    fill: white;
+    fill: var(--ff-bg, white);
     stroke-width: 1px;
     transition: fill 250ms ease-in-out, transform 200ms ease-out;
     transform-origin: 12px 12px;
@@ -291,7 +291,7 @@ export default {
 .ff-centre-1,
 .ff-centre-2,
 .ff-centre-3 {
-    fill: #ffffffff;
+    fill: var(--ff-bg, #ffffff);
     stroke: var(--v-primary-base);
     stroke-width: 16px;
     stroke-linejoin: round;

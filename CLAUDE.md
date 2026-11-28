@@ -1131,6 +1131,42 @@ sessions, not on the clean clips.
 
 ## Recent changes
 
+### Colour themes: Light, Dim, Dark (November 2026)
+
+Settings → **Appearance**, saved as `userSettings.colorTheme`
+(`'light'`, `'dim'` or `'dark'`, default `'light'`):
+
+- **Light** is the original look.
+- **Dim** is a soft charcoal ground with warm off-white text. It is
+  deliberately lower contrast than Dark, and still AAA.
+- **Dark** is a true black ground, which also saves battery on OLED screens.
+
+How it fits together:
+
+- `js/theme.mjs` holds the palettes and is pure. `services/theme.js` applies
+  one. Dim and Dark both switch on Vuetify's dark mode with their own palette.
+  The original #055581 blue is unreadable on black, so the dark themes use
+  lighter primary colours.
+- The theme also sets `--ff-*` CSS variables on `:root`. Hand-written component
+  CSS must use them, not literal white or grey: `var(--ff-surface, #fff)`.
+  A literal `white` background reads as a glaring box in a dark pub.
+- Global rules in `App.vue` swap Vuetify's fixed dark greys for the theme's own
+  grounds.
+- **Scores need nothing.** abcjs draws in `currentColor`, so the notes follow
+  the page's text colour. Do not pass `foregroundColor`.
+- The theme is applied in `main.js` before the mount, and `index.html` paints
+  the dark ground before any JS loads, so a dark theme does not flash white at
+  launch. Those inline colours mirror `theme.mjs`.
+- `applyTheme` accepts either the Vuetify instance from `main.js` (whose theme
+  service lives on `.framework`) or a component's `this.$vuetify`. Setting
+  `vuetify.theme.dark` on the instance silently does nothing.
+- `theme.test.mjs` asserts WCAG contrast for every text colour on every ground
+  in every theme. It caught Dim's muted text at 4.5:1 on its lighter panels.
+
+⚠️ Not every hard-coded colour was converted. Fixed-colour indicators
+(LEDs, session block colours, map markers) stay as they are on purpose. Some
+`rgba(0, 0, 0, …)` borders remain and will look faint on dark grounds.
+
 ### Install page and drawer entry (November 2026)
 
 The drawer shows **Install the app** at the bottom until the app runs installed,

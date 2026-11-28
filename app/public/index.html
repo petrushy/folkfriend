@@ -21,6 +21,20 @@
     <meta name="msapplication-TileColor" content="#2b5797">
     <meta name="msapplication-config" content="/img/browserconfig.xml">
     <meta name="theme-color" content="#ffffff">
+    <!-- Paint the chosen theme's ground before the app's JS arrives, so a dark
+         theme does not flash white on every launch. Colours mirror
+         src/js/theme.mjs (bg / themeColor). -->
+    <script>
+        try {
+            var t = (JSON.parse(localStorage.getItem('userSettings') || '{}') || {}).colorTheme;
+            var bg = { dim: '#25282c', dark: '#000000' }[t];
+            if (bg) {
+                document.documentElement.style.background = bg;
+                document.documentElement.style.colorScheme = 'dark';
+                document.querySelector('meta[name="theme-color"]').setAttribute('content', t === 'dim' ? '#2e3237' : '#000000');
+            }
+        } catch (e) { /* the app applies the theme itself once it loads */ }
+    </script>
 
     <script src="https://donorbox.org/widget.js" paypalExpress="false"></script>
 

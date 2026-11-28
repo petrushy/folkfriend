@@ -451,8 +451,8 @@ export default {
 };
 </script>
 <style scoped>
-.set-follow-bar { position: sticky; top: 64px; z-index: 4; background: #f8fafb; border: 1px solid #dce3e7; border-radius: 6px; }
-.set-score { scroll-margin-top: 210px; padding-top: 16px; border-top: 1px solid #eceff1; }
+.set-follow-bar { position: sticky; top: 64px; z-index: 4; background: var(--ff-surface2, #f8fafb); border: 1px solid var(--ff-border, #dce3e7); border-radius: 6px; }
+.set-score { scroll-margin-top: 210px; padding-top: 16px; border-top: 1px solid var(--ff-border, #eceff1); }
 .score-meta { font-size: .875rem; line-height: 1.5; color: #616161; }
 .set-tune-title { font-size: 1.125rem; font-weight: 600; line-height: 1.4; color: inherit; text-decoration: none; }
 .set-tune-title:hover { color: #055581; text-decoration: underline; }

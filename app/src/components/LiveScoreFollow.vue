@@ -757,7 +757,8 @@ export default {
     bottom: 0;
     left: 0;
     z-index: 12;
-    background: white;
+    background: var(--ff-bg, white);
+    color: var(--ff-text);
     display: flex;
     flex-direction: column;
 }
@@ -1013,8 +1014,8 @@ export default {
     align-items: center;
     gap: 12px;
     padding: 8px max(12px, env(safe-area-inset-right, 12px)) max(8px, env(safe-area-inset-bottom, 8px)) max(12px, env(safe-area-inset-left, 12px));
-    border-top: 1px solid rgba(0, 0, 0, 0.08);
-    background: rgba(255, 255, 255, 0.92);
+    border-top: 1px solid var(--ff-border, rgba(0, 0, 0, 0.08));
+    background: var(--ff-overlay, rgba(255, 255, 255, 0.92));
 }
 
 .overrideSelect {

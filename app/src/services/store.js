@@ -37,6 +37,9 @@ function dropRetiredSettings(userSettings) {
 // TODO load from local storage or similar
 const USER_SETTING_DEFAULTS = {
     advancedMode: false,
+    // 'light' | 'dim' | 'dark' (js/theme.mjs). Applied in main.js before the
+    // first paint, and live from Settings.
+    colorTheme: 'light',
     preferFileUpload: false,
     showAbcText: false,
     microphoneChoice: null,

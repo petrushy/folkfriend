@@ -1198,8 +1198,8 @@ h1 {
    action chips. `outlined` already gives the border; this pins the ground and
    keeps the hover/press tint from suggesting it does something. */
 .aliasChip.v-chip {
-    background-color: #fff !important;
-    border-color: rgba(0, 0, 0, 0.25) !important;
+    background-color: var(--ff-surface, #fff) !important;
+    border-color: var(--ff-border, rgba(0, 0, 0, 0.25)) !important;
     cursor: default;
 }
 
