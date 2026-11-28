@@ -246,7 +246,12 @@ try {
     await waitFor(`window.findVM('FavouritesView')?.favouriteItems.length === 2`, 15000, 'favorite tunes');
     await waitFor(`!!document.querySelector('.favourite-row-wrapper [aria-label="Sets containing this setting"] .v-chip')`, 10000, 'favorite setting membership');
     check('Favorite Tunes shows clickable exact-setting set names', await evaluate(`!!document.querySelector('.favourite-row-wrapper [aria-label="Sets containing this setting"] a[href*="setID="]')`));
-    await evaluate(`document.querySelector('.favourite-row-wrapper button[title="Add to set"]').click()`);
+    // The row's button opens a menu: a set, or a session's plan.
+    await evaluate(`(async () => {
+        document.querySelector('.favourite-row-wrapper button[title="Add to a set or a session"]').click();
+        await new Promise(r => setTimeout(r, 400));
+        [...document.querySelectorAll('.menuable__content__active .v-list-item')].find(e => e.innerText.includes('Add to a set')).click();
+    })()`);
     await waitFor(`window.findVM('AddToSetDialog').open && !window.findVM('AddToSetDialog').loading`, 10000, 'favorite destination picker');
     const oneFavorite = await evaluate(`(async () => {
         const dialog = window.findVM('AddToSetDialog');
@@ -574,8 +579,12 @@ try {
         await evaluate(`window.confirm = () => true; window.findVM('SetsView').close(); document.querySelector('#app').__vue__.$router.push({ name: 'search' }).then(() => true)`);
         await waitFor(`!!window.findVM('SearchView')`, 10000, 'main search');
         await evaluate(`window.findVM('SearchView').textQuery = 'cooley'; window.findVM('SearchView').nameQuery()`);
-        await waitFor(`!!document.querySelector('.result-row-wrapper button[title="Add to set"]')`, 15000, 'search result add action');
-        await evaluate(`document.querySelector('.result-row-wrapper button[title="Add to set"]').click()`);
+        await waitFor(`!!document.querySelector('.result-row-wrapper button[title="Add to a set or a session"]')`, 15000, 'search result add action');
+        await evaluate(`(async () => {
+        document.querySelector('.result-row-wrapper button[title="Add to a set or a session"]').click();
+        await new Promise(r => setTimeout(r, 400));
+        [...document.querySelectorAll('.menuable__content__active .v-list-item')].find(e => e.innerText.includes('Add to a set')).click();
+    })()`);
         await waitFor(`window.findVM('AddToSetDialog').open && !window.findVM('AddToSetDialog').loading`, 10000, 'result setting picker');
         check('search results offer Add to set with selectable full settings', await evaluate(`window.findVM('AddToSetDialog').settings.length > 0 || window.findVM('AddToSetDialog').batch.length > 0`));
         await evaluate(`window.findVM('AddToSetDialog').destination = window.findVM('AddToSetDialog').sets[0].id`);
