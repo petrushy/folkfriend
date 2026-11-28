@@ -9,7 +9,9 @@ export function applyTheme(vuetify, name) {
     const dark = isDarkTheme(theme);
     const framework = vuetify && (vuetify.framework || vuetify);
     if (framework && framework.theme) {
-        // Both dim and dark use Vuetify's dark mode; they differ in palette.
+        // Dim and dark use Vuetify's dark mode, light and warm its light
+        // mode; within a mode the themes differ in palette. Assigning the full
+        // palette each time is what puts Light's colours back after Warm.
         Object.assign(framework.theme.themes[dark ? 'dark' : 'light'], vuetifyPalette(theme));
         framework.theme.dark = dark;
     }

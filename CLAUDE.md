@@ -1134,9 +1134,15 @@ sessions, not on the clean clips.
 ### Colour themes: Light, Dim, Dark (November 2026)
 
 Settings → **Appearance**, saved as `userSettings.colorTheme`
-(`'light'`, `'dim'` or `'dark'`, default `'light'`):
+(`'light'`, `'warm'`, `'dim'` or `'dark'`, default `'light'`):
 
 - **Light** is the original look.
+- **Warm** is cream paper with dark warm-brown text, so the score stays dark
+  ink on paper. It is a LIGHT theme (Vuetify light mode, `isDarkTheme` false).
+  Because Vuetify's light mode paints cards and the app background pure
+  white, the `App.vue` override rules are written twice: once for
+  `.theme--dark`, and once for `html[data-theme="warm"] .theme--light`.
+  Light itself is left entirely to Vuetify.
 - **Dim** is a soft charcoal ground with warm off-white text. It is
   deliberately lower contrast than Dark, and still AAA.
 - **Dark** is a true black ground, which also saves battery on OLED screens.
@@ -1145,6 +1151,8 @@ How it fits together:
 
 - `js/theme.mjs` holds the palettes and is pure. `services/theme.js` applies
   one. Dim and Dark both switch on Vuetify's dark mode with their own palette.
+  Every theme sets all four palette keys, which is what restores Light's
+  colours after Warm (a test pins it).
   The original #055581 blue is unreadable on black, so the dark themes use
   lighter primary colours.
 - The theme also sets `--ff-*` CSS variables on `:root`. Hand-written component

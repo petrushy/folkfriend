@@ -27,11 +27,12 @@
     <script>
         try {
             var t = (JSON.parse(localStorage.getItem('userSettings') || '{}') || {}).colorTheme;
-            var bg = { dim: '#25282c', dark: '#000000' }[t];
+            var bg = { warm: '#f4ecdc', dim: '#25282c', dark: '#000000' }[t];
+            var chrome = { warm: '#f4ecdc', dim: '#2e3237', dark: '#000000' }[t];
             if (bg) {
                 document.documentElement.style.background = bg;
-                document.documentElement.style.colorScheme = 'dark';
-                document.querySelector('meta[name="theme-color"]').setAttribute('content', t === 'dim' ? '#2e3237' : '#000000');
+                if (t !== 'warm') document.documentElement.style.colorScheme = 'dark';
+                document.querySelector('meta[name="theme-color"]').setAttribute('content', chrome);
             }
         } catch (e) { /* the app applies the theme itself once it loads */ }
     </script>

@@ -30,12 +30,13 @@ function contrast(fg, bg) {
     return (a + 0.05) / (b + 0.05);
 }
 
-test('three themes, light is the default, unknown names fall back', () => {
-    assert.deepEqual([...THEMES], ['light', 'dim', 'dark']);
+test('four themes, light is the default, unknown names fall back', () => {
+    assert.deepEqual([...THEMES], ['light', 'warm', 'dim', 'dark']);
     assert.equal(DEFAULT_THEME, 'light');
     assert.equal(normaliseTheme('neon'), 'light');
     assert.equal(normaliseTheme(undefined), 'light');
     assert.equal(isDarkTheme('light'), false);
+    assert.equal(isDarkTheme('warm'), false, 'warm is a light theme: dark text and score');
     assert.equal(isDarkTheme('dim'), true);
     assert.equal(isDarkTheme('dark'), true);
     for (const t of THEMES) { assert.ok(THEME_LABELS[t]); assert.ok(THEME_DESCRIPTIONS[t]); }
@@ -75,6 +76,21 @@ test('the primary colour is readable on each theme\'s surface', () => {
         const c = contrast(vuetifyPalette(t).primary, themeCssVars(t)['--ff-surface']);
         assert.ok(c >= 4.5, `${t} primary: ${c.toFixed(1)}`);
     }
+});
+
+test('warm is a cream ground, not white, with dark text', () => {
+    const v = themeCssVars('warm');
+    assert.notEqual(v['--ff-bg'], '#ffffff');
+    assert.notEqual(v['--ff-surface'], '#ffffff');
+    assert.ok(lum(parse(v['--ff-text'])) < 0.05, 'text (and so the score) is near-black');
+    assert.ok(lum(parse(v['--ff-bg'])) > 0.75, 'still a light ground');
+    const [r, , b] = parse(v['--ff-bg']);
+    assert.ok(r > b, 'warm: more red than blue');
+});
+
+test('every theme sets the same palette keys, so switching back restores them', () => {
+    const keys = Object.keys(vuetifyPalette('light')).sort();
+    for (const t of THEMES) assert.deepEqual(Object.keys(vuetifyPalette(t)).sort(), keys, t);
 });
 
 console.log(`\n${passed} passed`);

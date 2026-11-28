@@ -1,6 +1,8 @@
 // Colour themes (userSettings.colorTheme). Pure, tested by test/theme.test.mjs.
 //
 //  - light: the original look, white ground.
+//  - warm:  cream paper with dark warm-brown text and score. Still a light
+//           theme (Vuetify light mode), just without the glare of pure white.
 //  - dim:   for a dark pub or a stage: a warm charcoal ground with off-white
 //           text, deliberately lower contrast than black-on-white so it does
 //           not glare, but every text colour still passes WCAG AA.
@@ -12,17 +14,19 @@
 // components, and the score, which abcjs draws in `currentColor` and so follows
 // `--ff-text` wherever the page's text colour is set.
 
-export const THEMES = Object.freeze(['light', 'dim', 'dark']);
+export const THEMES = Object.freeze(['light', 'warm', 'dim', 'dark']);
 export const DEFAULT_THEME = 'light';
 
 export const THEME_LABELS = Object.freeze({
     light: 'Light',
+    warm: 'Warm',
     dim: 'Dim',
     dark: 'Dark',
 });
 
 export const THEME_DESCRIPTIONS = Object.freeze({
     light: 'White background (the original look).',
+    warm: 'Cream paper with dark text — softer than white, and the score stays dark ink on paper.',
     dim: 'Soft charcoal with warm text — easy on the eyes in a dark room.',
     dark: 'Black background, for the darkest rooms. Saves battery on OLED screens.',
 });
@@ -31,6 +35,7 @@ export const THEME_DESCRIPTIONS = Object.freeze({
 // original #055581 blue is unreadable on black.
 const VUETIFY = {
     light: { primary: '#055581', secondary: '#FF3B3F', accent: '#3585C1', error: '#B71C1C' },
+    warm: { primary: '#055581', secondary: '#c8372d', accent: '#3585C1', error: '#B71C1C' },
     dim: { primary: '#8fbcdb', secondary: '#e8777a', accent: '#7fb0d6', error: '#ef9a9a' },
     dark: { primary: '#6cb4ee', secondary: '#ff6b6e', accent: '#64a8e0', error: '#ef5350' },
 };
@@ -51,6 +56,21 @@ const VARS = {
         tagText: '#1a56a0',
         logoFilter: 'none',
         themeColor: '#ffffff',
+    },
+    warm: {
+        bg: '#f4ecdc',
+        surface: '#fbf6ec',
+        surface2: '#f2e9d8',
+        surface3: '#ece2ce',
+        text: '#2b241c',
+        textMuted: '#5f5446',
+        border: '#ddd0b8',
+        overlay: 'rgba(251, 246, 236, 0.94)',
+        cursor: '#2b241c',
+        tagBg: '#ece0c8',
+        tagText: '#5a3d12',
+        logoFilter: 'none',
+        themeColor: '#f4ecdc',
     },
     dim: {
         bg: '#25282c',
@@ -91,7 +111,8 @@ export function normaliseTheme(name) {
 }
 
 export function isDarkTheme(name) {
-    return normaliseTheme(name) !== 'light';
+    const t = normaliseTheme(name);
+    return t === 'dim' || t === 'dark';
 }
 
 export function vuetifyPalette(name) {

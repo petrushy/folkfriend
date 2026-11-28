@@ -1937,6 +1937,7 @@ export default {
 /* Fixed colours on purpose: each swatch shows its own theme, whatever the
    current one is. */
 .themeSwatch--light { background: #ffffff; color: #055581; }
+.themeSwatch--warm { background: #fbf6ec; color: #2b241c; }
 .themeSwatch--dim { background: #2e3237; color: #ddd6c8; }
 .themeSwatch--dark { background: #000000; color: #dedede; }
 .themeDescription { color: var(--ff-text-muted); }

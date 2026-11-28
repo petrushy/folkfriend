@@ -570,45 +570,70 @@ async function initSetup() {
 
 <style>
 /* ---- Colour themes (js/theme.mjs, services/theme.js) ----
-   Dim and Dark both run Vuetify's dark mode; these rules swap Vuetify's
-   fixed dark greys for the theme's own grounds, so Dim can be a soft charcoal
-   and Dark true black. The score follows `color`, since abcjs draws in
-   currentColor. */
-.v-application.theme--dark {
+   Dim and Dark run Vuetify's dark mode and Warm its light mode; these rules
+   swap Vuetify's fixed greys and whites for the theme's own grounds, so Dim
+   can be a soft charcoal, Dark true black and Warm cream paper. Light, the
+   original, is left to Vuetify. The score follows `color`, since abcjs draws
+   in currentColor. */
+.v-application.theme--dark,
+html[data-theme="warm"] .v-application.theme--light {
     background: var(--ff-bg) !important;
     color: var(--ff-text);
 }
 .theme--dark.v-card,
+html[data-theme="warm"] .theme--light.v-card,
 .theme--dark.v-sheet,
+html[data-theme="warm"] .theme--light.v-sheet,
 .theme--dark.v-navigation-drawer,
+html[data-theme="warm"] .theme--light.v-navigation-drawer,
 .theme--dark.v-list,
+html[data-theme="warm"] .theme--light.v-list,
 .theme--dark.v-expansion-panels .v-expansion-panel,
+html[data-theme="warm"] .theme--light.v-expansion-panels .v-expansion-panel,
 .theme--dark.v-tabs-items,
+html[data-theme="warm"] .theme--light.v-tabs-items,
 .theme--dark.v-tabs > .v-tabs-bar,
+html[data-theme="warm"] .theme--light.v-tabs > .v-tabs-bar,
 .theme--dark.v-data-table,
+html[data-theme="warm"] .theme--light.v-data-table,
 .theme--dark.v-stepper,
-.theme--dark.v-toolbar.v-sheet {
+html[data-theme="warm"] .theme--light.v-stepper,
+.theme--dark.v-toolbar.v-sheet,
+html[data-theme="warm"] .theme--light.v-toolbar.v-sheet {
     background-color: var(--ff-surface) !important;
 }
 .theme--dark.v-card,
+html[data-theme="warm"] .theme--light.v-card,
 .theme--dark.v-list-item:not(.v-list-item--active):not(.v-list-item--disabled),
+html[data-theme="warm"] .theme--light.v-list-item:not(.v-list-item--active):not(.v-list-item--disabled),
 .theme--dark.v-expansion-panels .v-expansion-panel,
+html[data-theme="warm"] .theme--light.v-expansion-panels .v-expansion-panel,
 .theme--dark.v-label,
+html[data-theme="warm"] .theme--light.v-label,
 .theme--dark.v-input input,
+html[data-theme="warm"] .theme--light.v-input input,
 .theme--dark.v-input textarea,
+html[data-theme="warm"] .theme--light.v-input textarea,
 .theme--dark.v-select .v-select__selection--comma,
-.theme--dark.v-icon {
+html[data-theme="warm"] .theme--light.v-select .v-select__selection--comma,
+.theme--dark.v-icon,
+html[data-theme="warm"] .theme--light.v-icon {
     color: var(--ff-text);
 }
 .theme--dark.v-card > .v-card__text,
+html[data-theme="warm"] .theme--light.v-card > .v-card__text,
 .theme--dark.v-card > .v-card__subtitle,
-.theme--dark.v-list-item .v-list-item__subtitle {
+html[data-theme="warm"] .theme--light.v-card > .v-card__subtitle,
+.theme--dark.v-list-item .v-list-item__subtitle,
+html[data-theme="warm"] .theme--light.v-list-item .v-list-item__subtitle {
     color: var(--ff-text-muted);
 }
-.theme--dark.v-text-field--solo > .v-input__control > .v-input__slot {
+.theme--dark.v-text-field--solo > .v-input__control > .v-input__slot,
+html[data-theme="warm"] .theme--light.v-text-field--solo > .v-input__control > .v-input__slot {
     background: var(--ff-surface2) !important;
 }
-.theme--dark.v-divider {
+.theme--dark.v-divider,
+html[data-theme="warm"] .theme--light.v-divider {
     border-color: var(--ff-border) !important;
 }
 /* The logo is dark blue artwork; on a dark ground it takes the text colour. */
