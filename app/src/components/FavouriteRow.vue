@@ -1,190 +1,184 @@
 <template>
-    <div
-        ref="rowEl"
-        class="favourite-row-wrapper d-flex align-center"
-    >
-        <v-checkbox
-            :input-value="selected"
-            class="ml-2 mr-0 mt-0 pt-0 flex-grow-0"
-            hide-details
-            @change="$emit('toggle', settingID)"
-            @click.stop
-        />
-        <v-container
-            v-ripple
-            class="flex-grow-1"
-            @click="favouriteItemClicked"
-        >
-            <v-row class="pt-1 pb-0">
-                <v-col class="py-0">
-                    <span class="tune-title">{{ name }}</span>
-                    <span v-if="altName" class="tune-alt-name ml-1">(also {{ altName }})</span>
-                </v-col>
-            </v-row>
-            <v-row class="pb-0 pt-0">
-                <v-col class="py-0 tune-meta">
-                    {{ descriptor }}, {{ timestampString }}
-                </v-col>
-            </v-row>
-            <!-- Tag chips — @click.stop on the row prevents bubbling to the container's navigation handler -->
-            <v-row
-                v-if="tags.length > 0"
-                class="pb-2 pt-1"
-                @click.stop
-            >
-                <v-col
-                    class="py-0 d-flex flex-wrap align-center"
-                    style="gap:4px"
-                >
-                    <v-chip
-                        v-for="tag in tags"
-                        :key="tag"
-                        x-small
-                        close
-                        @click:close="$emit('removeTag', { settingID, tag })"
-                    >
-                        {{ tag }}
-                    </v-chip>
-                </v-col>
-            </v-row>
-            <v-row
-                v-if="sets.length"
-                class="pt-1"
-                @click.stop
-            >
-                <v-col
-                    class="py-0 d-flex flex-wrap align-center"
-                    style="gap:4px"
-                    aria-label="Sets containing this setting"
-                >
-                    <span class="caption text--secondary">In sets:</span>
-                    <v-chip
-                        v-for="set in sets"
-                        :key="set.id"
-                        x-small
-                        outlined
-                        :to="{ name: 'sets', query: { setID: set.id } }"
-                    >
-                        {{ set.name }}
-                    </v-chip>
-                </v-col>
-            </v-row>
-        </v-container>
-
-        <!-- ABC preview — only rendered when the row is wide enough -->
-        <!-- eslint-disable-next-line vue/no-v-html -->
+    <div class="favourite-row-wrapper">
         <div
-            v-if="showAbcPreview"
-            class="abc-preview"
-            :style="{ width: abcPreviewDisplayWidth + 'px' }"
-            @click.stop="favouriteItemClicked"
-            v-html="abcSvg"
-        />
-
-        <!-- Session recording ▶ — only when a saved session recorded this tune -->
-        <v-btn
-            v-if="recordingCount > 0"
-            icon
-            class="mr-0"
-            :aria-label="recordingPlaying ? `Pause ${name}` : (recordingCount > 1 ? `Play ${name} from a session recording (${recordingCount} sessions)` : `Play ${name} from the session recording, looped`)"
-            :aria-pressed="recordingPlaying ? 'true' : 'false'"
-            @click.stop="$emit('playRecording', tuneID)"
+            ref="rowEl"
+            class="d-flex align-center"
         >
-            <v-icon color="primary">
-                {{ recordingPlaying ? icons.pause : icons.play }}
-            </v-icon>
-        </v-btn>
-
-        <!-- Tune background (i) — outside the clickable container so it does not navigate -->
-        <TuneBackgroundButton
-            :tune-i-d="tuneID"
-            :display-name="name"
-            :source-url="sourceUrl"
-            :small="false"
-        />
-
-        <!-- One button, two destinations: the row has no width to spare. -->
-        <v-menu offset-y left>
-            <template #activator="{ on, attrs }">
-                <v-btn
-                    icon
-                    class="mr-0"
-                    title="Add to a set or a session"
-                    :aria-label="'Add ' + name + ' to a set or a session'"
-                    v-bind="attrs"
-                    @click.stop
-                    v-on="on"
-                >
-                    <v-icon color="grey darken-1">
-                        {{ icons.addToSet }}
-                    </v-icon>
-                </v-btn>
-            </template>
-            <v-list dense>
-                <v-list-item @click="$emit('addToSet', settingID)">
-                    <v-list-item-title>Add to a set…</v-list-item-title>
-                </v-list-item>
-                <v-list-item @click="$emit('addToSession', settingID)">
-                    <v-list-item-title>Add to a session plan…</v-list-item-title>
-                </v-list-item>
-            </v-list>
-        </v-menu>
-
-        <!-- Add tag button — outside the clickable container, left of star, easy to tap -->
-        <v-menu
-            v-model="addTagMenu"
-            :close-on-content-click="false"
-            offset-y
-            left
-        >
-            <template #activator="{ on }">
-                <v-btn
-                    icon
-                    class="mr-0"
-                    @click.stop
-                    v-on="on"
-                >
-                    <v-icon color="grey darken-1">
-                        {{ icons.plus }}
-                    </v-icon>
-                </v-btn>
-            </template>
-            <v-card
-                width="220"
+            <v-checkbox
+                :input-value="selected"
+                class="ml-2 mr-0 mt-0 pt-0 flex-grow-0"
+                hide-details
+                @change="$emit('toggle', settingID)"
                 @click.stop
+            />
+            <v-container
+                v-ripple
+                class="flex-grow-1"
+                @click="favouriteItemClicked"
             >
-                <v-combobox
-                    ref="tagInput"
-                    v-model="tagInputValue"
-                    :items="addableTags"
-                    label="Add tag"
-                    dense
-                    solo
-                    flat
-                    hide-details
-                    class="px-2 pt-1 pb-1"
-                    @change="onTagSelected"
-                    @keydown.esc.stop="addTagMenu = false"
-                />
-            </v-card>
-        </v-menu>
+                <v-row class="pt-1 pb-0">
+                    <v-col class="py-0">
+                        <span class="tune-title">{{ name }}</span>
+                        <span v-if="altName" class="tune-alt-name ml-1">(also {{ altName }})</span>
+                    </v-col>
+                </v-row>
+                <v-row class="pb-0 pt-0">
+                    <v-col class="py-0 tune-meta">
+                        {{ descriptor }}
+                    </v-col>
+                </v-row>
+            </v-container>
 
-        <v-btn
-            icon
-            class="mr-2"
-            @click.stop="unstar"
+            <!-- ABC preview — only rendered when the row is wide enough -->
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <div
+                v-if="showAbcPreview"
+                class="abc-preview"
+                :style="{ width: abcPreviewDisplayWidth + 'px' }"
+                @click.stop="favouriteItemClicked"
+                v-html="abcSvg"
+            />
+
+            <!-- Session recording ▶ — only when a saved session recorded this tune -->
+            <v-btn
+                v-if="recordingCount > 0"
+                icon
+                class="mr-0"
+                :aria-label="recordingPlaying ? `Pause ${name}` : (recordingCount > 1 ? `Play ${name} from a session recording (${recordingCount} sessions)` : `Play ${name} from the session recording, looped`)"
+                :aria-pressed="recordingPlaying ? 'true' : 'false'"
+                @click.stop="$emit('playRecording', tuneID)"
+            >
+                <v-icon color="primary">
+                    {{ recordingPlaying ? icons.pause : icons.play }}
+                </v-icon>
+            </v-btn>
+
+            <!-- Tune background (i) — outside the clickable container so it does not navigate -->
+            <TuneBackgroundButton
+                :tune-i-d="tuneID"
+                :display-name="name"
+                :source-url="sourceUrl"
+                :small="false"
+            />
+
+            <!-- One button, two destinations: the row has no width to spare. -->
+            <v-menu offset-y left>
+                <template #activator="{ on, attrs }">
+                    <v-btn
+                        icon
+                        class="mr-0"
+                        title="Add to a set or a session"
+                        :aria-label="'Add ' + name + ' to a set or a session'"
+                        v-bind="attrs"
+                        @click.stop
+                        v-on="on"
+                    >
+                        <v-icon color="grey darken-1">
+                            {{ icons.addToSet }}
+                        </v-icon>
+                    </v-btn>
+                </template>
+                <v-list dense>
+                    <v-list-item @click="$emit('addToSet', settingID)">
+                        <v-list-item-title>Add to a set…</v-list-item-title>
+                    </v-list-item>
+                    <v-list-item @click="$emit('addToSession', settingID)">
+                        <v-list-item-title>Add to a session plan…</v-list-item-title>
+                    </v-list-item>
+                </v-list>
+            </v-menu>
+
+            <!-- Add tag button — outside the clickable container, left of star, easy to tap -->
+            <v-menu
+                v-model="addTagMenu"
+                :close-on-content-click="false"
+                offset-y
+                left
+            >
+                <template #activator="{ on }">
+                    <v-btn
+                        icon
+                        class="mr-0"
+                        @click.stop
+                        v-on="on"
+                    >
+                        <v-icon color="grey darken-1">
+                            {{ icons.plus }}
+                        </v-icon>
+                    </v-btn>
+                </template>
+                <v-card
+                    width="220"
+                    @click.stop
+                >
+                    <v-combobox
+                        ref="tagInput"
+                        v-model="tagInputValue"
+                        :items="addableTags"
+                        label="Add tag"
+                        dense
+                        solo
+                        flat
+                        hide-details
+                        class="px-2 pt-1 pb-1"
+                        @change="onTagSelected"
+                        @keydown.esc.stop="addTagMenu = false"
+                    />
+                </v-card>
+            </v-menu>
+
+            <v-btn
+                icon
+                class="mr-2"
+                @click.stop="unstar"
+            >
+                <v-icon color="amber darken-1">
+                    {{ icons.star }}
+                </v-icon>
+            </v-btn>
+        </div>
+        <!-- Tags and sets get the row's full width, below the buttons: inside the
+             title column they had only what the four buttons left over, and
+             stacked one chip per line on a phone. @click.stop keeps a tap on a
+             chip from opening the tune. -->
+        <div
+            v-if="tags.length || sets.length"
+            class="favourite-chips d-flex flex-wrap align-center"
+            @click.stop
         >
-            <v-icon color="amber darken-1">
-                {{ icons.star }}
-            </v-icon>
-        </v-btn>
+            <v-chip
+                v-for="tag in tags"
+                :key="'tag:' + tag"
+                x-small
+                close
+                @click:close="$emit('removeTag', { settingID, tag })"
+            >
+                {{ tag }}
+            </v-chip>
+            <span
+                v-if="sets.length"
+                class="d-inline-flex flex-wrap align-center"
+                style="gap:4px"
+                aria-label="Sets containing this setting"
+            >
+                <span class="caption text--secondary">In sets:</span>
+                <v-chip
+                    v-for="set in sets"
+                    :key="set.id"
+                    x-small
+                    outlined
+                    :to="{ name: 'sets', query: { setID: set.id } }"
+                >
+                    {{ set.name }}
+                </v-chip>
+            </span>
+        </div>
     </div>
 </template>
 
 <script>
 import { mdiStar, mdiPlaylistPlus, mdiTagPlusOutline, mdiPlayCircleOutline, mdiPauseCircleOutline } from '@mdi/js';
 import ABCJS from 'abcjs';
-import utils from '@/js/utils';
 import { previewAbc, previewBars, previewRenderOptions } from '@/js/abcPreview.mjs';
 import TuneBackgroundButton from '@/components/TuneBackgroundButton.vue';
 
@@ -248,9 +242,6 @@ export default {
         };
     },
     computed: {
-        timestampString() {
-            return utils.utcToString(this.timestamp);
-        },
         addableTags() {
             return this.allTags.filter(t => !this.tags.includes(t));
         },
@@ -362,6 +353,12 @@ export default {
 
 .tune-meta::first-letter {
   text-transform: uppercase;
+}
+
+.favourite-chips {
+  gap: 4px;
+  /* Lines up with the title: checkbox (~44px) + container padding (12px). */
+  padding: 0 12px 8px 56px;
 }
 
 .abc-preview {

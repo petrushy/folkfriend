@@ -84,7 +84,6 @@ async function loadRow() {
     const replacements = [
         ["from '@mdi/js'", "from './fake-mdi.mjs'"],
         ["from 'abcjs'", "from './fake-abcjs.mjs'"],
-        ["from '@/js/utils'", "from './fake-utils.mjs'"],
         ["from '@/js/abcPreview.mjs'", `from '${path.join(srcDir, 'js', 'abcPreview.mjs')}'`],
         ["from '@/components/TuneBackgroundButton.vue'", "from './fake-component.mjs'"],
     ];
