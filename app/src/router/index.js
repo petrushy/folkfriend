@@ -12,6 +12,7 @@ import Favourites from '@/views/Favourites.vue';
 import Sets from '@/views/Sets.vue';
 import Places from '@/views/Places.vue';
 import Help from '@/views/Help.vue';
+import Install from '@/views/Install.vue';
 
 Vue.use(VueRouter);
 
@@ -64,6 +65,10 @@ const routes = [{
     path: '/help',
     name: 'help',
     component: Help,
+}, {
+    path: '/install',
+    name: 'install',
+    component: Install,
 }, {
     path: '/donate',
     name: 'donate',

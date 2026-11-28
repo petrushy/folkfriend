@@ -795,7 +795,8 @@ export default {
     left: 0;
     width: 100vw;
     height: 100vh;
-    background: white;
+    background: var(--ff-bg, white);
+    color: var(--ff-text);
     overflow-y: scroll;
 
     /* TODO z index flicker here isn't great */
@@ -837,7 +838,7 @@ export default {
     padding: max(16px, env(safe-area-inset-top, 16px)) 64px 4px 20px;
     font-size: 1.25rem;
     font-weight: 500;
-    color: #1a1a1a;
+    color: var(--ff-text, #1a1a1a);
 }
 
 .inlineControls {
@@ -857,10 +858,10 @@ export default {
     flex-wrap: wrap;
     align-items: center;
     padding: 8px max(12px, env(safe-area-inset-right, 12px)) max(8px, env(safe-area-inset-bottom, 8px)) max(12px, env(safe-area-inset-left, 12px));
-    background: rgba(255, 255, 255, 0.92);
+    background: var(--ff-overlay, rgba(255, 255, 255, 0.92));
     backdrop-filter: blur(6px);
     z-index: 11;
-    border-top: 1px solid rgba(0, 0, 0, 0.08);
+    border-top: 1px solid var(--ff-border, rgba(0, 0, 0, 0.08));
 }
 
 .exitFullScreenBtn {

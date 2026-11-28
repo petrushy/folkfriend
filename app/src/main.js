@@ -3,6 +3,8 @@ import App from './App.vue';
 import './registerServiceWorker';
 import router from './router';
 import vuetify from './plugins/vuetify';
+import store from './services/store.js';
+import { applyTheme } from './services/theme.js';
 
 import { handleDropboxCallback, startDropbox } from './services/dropbox.js';
 
@@ -23,6 +25,13 @@ try {
 }
 
 if (!isCallbackTab) {
+    // Before the mount, so the first paint is already in the chosen theme.
+    try {
+        applyTheme(vuetify, store.userSettings.colorTheme);
+    } catch (e) {
+        console.error('Could not apply colour theme', e);
+    }
+
     new Vue({
         router,
         vuetify,

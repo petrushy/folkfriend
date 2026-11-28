@@ -124,7 +124,7 @@ export default {
 }
 
 .resultsTable > div:nth-child(odd) {
-    background: #efefef;
+    background: var(--ff-surface3, #efefef);
 }
 
 .debugLine {

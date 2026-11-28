@@ -2,6 +2,37 @@
     <v-container 
         class="viewContainerWrapper"
     >
+        <v-card class="pa-5 my-2">
+            <h1 class="pb-3">
+                Appearance
+            </h1>
+            <v-radio-group
+                v-model="userSettings.colorTheme"
+                class="mt-0 themeChoice"
+                hide-details
+                @change="themeChanged"
+            >
+                <v-radio
+                    v-for="t in themes"
+                    :key="t"
+                    :value="t"
+                >
+                    <template #label>
+                        <span class="d-flex align-center">
+                            <span
+                                class="themeSwatch"
+                                :class="'themeSwatch--' + t"
+                            >Aa</span>
+                            <span>
+                                <strong>{{ themeLabels[t] }}</strong>
+                                <span class="d-block text-caption themeDescription">{{ themeDescriptions[t] }}</span>
+                            </span>
+                        </span>
+                    </template>
+                </v-radio>
+            </v-radio-group>
+        </v-card>
+
         <v-card
             class="pa-5 my-2"
         >
@@ -979,6 +1010,8 @@
 
 <script>
 import DropboxBackup from '@/components/DropboxBackup.vue';
+import { THEMES, THEME_LABELS, THEME_DESCRIPTIONS } from '@/js/theme.mjs';
+import { applyTheme } from '@/services/theme.js';
 import store, { KNOWN_DATASETS } from '@/services/store.js';
 import { datasetDisplayName, DATASET_DESCRIPTIONS } from '@/js/source.mjs';
 import ffBackend from '@/services/backend.js';
@@ -1127,6 +1160,9 @@ export default {
         },
         settingsLoaded: false,
         userSettings: store.userSettings,
+        themes: THEMES,
+        themeLabels: THEME_LABELS,
+        themeDescriptions: THEME_DESCRIPTIONS,
         isPWA: utils.checkStandalone(),
         restoreMessage: null,
         // AI tune summaries. The key is read out of its own localStorage slot,
@@ -1682,6 +1718,10 @@ export default {
         settingsChanged() {
             store.updateUserSettings(this.userSettings);
         },
+        themeChanged(theme) {
+            applyTheme(this.$vuetify, theme);
+            store.updateUserSettings(this.userSettings);
+        },
         formatUsd(amount) {
             const value = Number(amount) || 0;
             if (value > 0 && value < 0.01) return '<$0.01';
@@ -1878,6 +1918,29 @@ export default {
 </script>
 
 <style scoped>
+.themeChoice :deep(.v-radio) {
+    margin-bottom: 12px;
+    align-items: flex-start;
+}
+.themeSwatch {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 44px;
+    height: 32px;
+    margin-right: 12px;
+    border-radius: 6px;
+    border: 1px solid var(--ff-border, #e0e0e0);
+    font-weight: 600;
+}
+/* Fixed colours on purpose: each swatch shows its own theme, whatever the
+   current one is. */
+.themeSwatch--light { background: #ffffff; color: #055581; }
+.themeSwatch--warm { background: #fbf6ec; color: #2b241c; }
+.themeSwatch--dim { background: #2e3237; color: #ddd6c8; }
+.themeSwatch--dark { background: #000000; color: #dedede; }
+.themeDescription { color: var(--ff-text-muted); }
 /* The real file input is driven by a styled button, so it must not be
    `display: none` — Safari will not open the picker for a hidden input. */
 .hiddenFileInput {

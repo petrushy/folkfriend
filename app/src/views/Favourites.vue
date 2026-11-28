@@ -1762,11 +1762,11 @@ ${sections}
 
 <style scoped>
 .resultsTable > div:nth-child(odd) {
-    background: #efefef;
+    background: var(--ff-surface3, #efefef);
 }
 
 .tag-group-header {
-    background: #e8e8e8;
+    background: var(--ff-surface2, #e8e8e8);
     border-radius: 4px 4px 0 0;
     min-height: 36px;
 }
@@ -1781,12 +1781,12 @@ ${sections}
 }
 
 .tag-filter-bar {
-    border-bottom: 1px solid #e0e0e0;
+    border-bottom: 1px solid var(--ff-border, #e0e0e0);
     padding-bottom: 10px;
 }
 
 .select-all-bar {
-    border-bottom: 1px solid #e0e0e0;
+    border-bottom: 1px solid var(--ff-border, #e0e0e0);
     min-height: 36px;
 }
 </style>

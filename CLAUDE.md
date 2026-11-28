@@ -1131,6 +1131,66 @@ sessions, not on the clean clips.
 
 ## Recent changes
 
+### Colour themes: Light, Dim, Dark (November 2026)
+
+Settings → **Appearance**, saved as `userSettings.colorTheme`
+(`'light'`, `'warm'`, `'dim'` or `'dark'`, default `'light'`):
+
+- **Light** is the original look.
+- **Warm** is cream paper with dark warm-brown text, so the score stays dark
+  ink on paper. It is a LIGHT theme (Vuetify light mode, `isDarkTheme` false).
+  Because Vuetify's light mode paints cards and the app background pure
+  white, the `App.vue` override rules are written twice: once for
+  `.theme--dark`, and once for `html[data-theme="warm"] .theme--light`.
+  Light itself is left entirely to Vuetify.
+- **Dim** is a soft charcoal ground with warm off-white text. It is
+  deliberately lower contrast than Dark, and still AAA.
+- **Dark** is a true black ground, which also saves battery on OLED screens.
+
+How it fits together:
+
+- `js/theme.mjs` holds the palettes and is pure. `services/theme.js` applies
+  one. Dim and Dark both switch on Vuetify's dark mode with their own palette.
+  Every theme sets all four palette keys, which is what restores Light's
+  colours after Warm (a test pins it).
+  The original #055581 blue is unreadable on black, so the dark themes use
+  lighter primary colours.
+- The theme also sets `--ff-*` CSS variables on `:root`. Hand-written component
+  CSS must use them, not literal white or grey: `var(--ff-surface, #fff)`.
+  A literal `white` background reads as a glaring box in a dark pub.
+- Global rules in `App.vue` swap Vuetify's fixed dark greys for the theme's own
+  grounds.
+- **Scores need nothing.** abcjs draws in `currentColor`, so the notes follow
+  the page's text colour. Do not pass `foregroundColor`.
+- The theme is applied in `main.js` before the mount, and `index.html` paints
+  the dark ground before any JS loads, so a dark theme does not flash white at
+  launch. Those inline colours mirror `theme.mjs`.
+- `applyTheme` accepts either the Vuetify instance from `main.js` (whose theme
+  service lives on `.framework`) or a component's `this.$vuetify`. Setting
+  `vuetify.theme.dark` on the instance silently does nothing.
+- `theme.test.mjs` asserts WCAG contrast for every text colour on every ground
+  in every theme. It caught Dim's muted text at 4.5:1 on its lighter panels.
+
+⚠️ Not every hard-coded colour was converted. Fixed-colour indicators
+(LEDs, session block colours, map markers) stay as they are on purpose. Some
+`rgba(0, 0, 0, …)` borders remain and will look faint on dark grounds.
+
+### Install page and drawer entry (November 2026)
+
+The drawer shows **Install the app** at the bottom until the app runs installed,
+and it opens `/install` (`views/Install.vue`). That page shows the steps for the
+browser it detects, with every other platform under expandable panels so the
+user can help a friend. `js/installPlatform.mjs` is the pure detection, tested
+by `installPlatform.test.mjs`. An iPad that reports itself as a Mac is detected
+by its touch points. In-app browsers (Instagram, Facebook, Gmail, an Android
+WebView) get "open in a real browser", because they cannot install anything.
+`services/installPrompt.js` catches `beforeinstallprompt` when it is imported,
+which is before App mounts, because the event fires once and early. On Chromium
+the page then offers a real **Install now** button. The service also listens for
+`appinstalled` and for display-mode changes, so the drawer entry goes away
+without a reload. ⚠️ The step wording for each browser comes from current
+browser menus and has not been checked on each device.
+
 ### Sessions: planning and leading from a plan (November 2026)
 
 "Session Tools" is now **Sessions** (label only; the route is still

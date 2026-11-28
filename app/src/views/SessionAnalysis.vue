@@ -2599,17 +2599,17 @@ export default {
     border: 2px dashed rgba(5, 85, 129, 0.35);
     border-radius: 14px;
     padding: 28px;
-    background: linear-gradient(180deg, rgba(5, 85, 129, 0.04), rgba(255, 255, 255, 0.9));
+    background: linear-gradient(180deg, rgba(5, 85, 129, 0.04), var(--ff-surface, rgba(255, 255, 255, 0.9)));
 }
 
 .drop-zone--active {
     border-color: var(--v-primary-base);
-    background: linear-gradient(180deg, rgba(5, 85, 129, 0.1), rgba(255, 255, 255, 0.95));
+    background: linear-gradient(180deg, rgba(5, 85, 129, 0.1), var(--ff-surface, rgba(255, 255, 255, 0.95)));
 }
 
 .file-summary {
     border-radius: 12px;
-    background: #f5f7fa;
+    background: var(--ff-surface2, #f5f7fa);
     padding: 16px;
     min-height: 96px;
 }

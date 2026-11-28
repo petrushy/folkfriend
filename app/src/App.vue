@@ -127,12 +127,28 @@
                         </v-list-item-content>
                     </v-list-item>
                 </router-link>
+                <!-- Only until the app is installed: once it runs from the
+                     Home Screen the instructions are noise. -->
+                <router-link v-if="!installState.installed" to="/install" class="navInstall">
+                    <v-list-item @click="0">
+                        <v-list-item-action>
+                            <v-icon medium color="primary">
+                                {{ icons.cellphoneArrowDown }}
+                            </v-icon>
+                        </v-list-item-action>
+                        <v-list-item-content>
+                            <v-list-item-title class="navBarEntry">
+                                Install the app
+                            </v-list-item-title>
+                        </v-list-item-content>
+                    </v-list-item>
+                </router-link>
             </v-list>
         </v-navigation-drawer>
 
         <v-app-bar
             app
-            color="white"
+            :color="$vuetify.theme.dark ? undefined : 'white'"
             elevate-on-scroll
         >
             <v-icon
@@ -277,6 +293,7 @@ import store from '@/services/store.js';
 import eventBus from '@/eventBus.js';
 import router from '@/router/index.js';
 import {
+    mdiCellphoneArrowDown,
     mdiChevronLeft,
     mdiCog,
     mdiClose,
@@ -306,6 +323,7 @@ import SessionStatusBar from '@/components/SessionStatusBar.vue';
 import liveAnalysisService from '@/services/liveAnalysis.js';
 import LiveViewHost from '@/components/LiveViewHost.vue';
 import { liveView, openLiveView } from '@/services/liveView.js';
+import { installState } from '@/services/installPrompt.js';
 import SessionAudioPlayer from '@/components/SessionAudioPlayer.vue';
 import { playerHost, registerPlayer } from '@/services/sessionPlayerHost.js';
 
@@ -331,10 +349,12 @@ export default {
         syncErrorText: '',
         playerHost,
         liveView,
+        installState,
         // The mini player appears once something has played, and stays
         // (paused or not) until closed, so a pause is never a dead end.
         miniPlayerOpen: false,
         icons: {
+            cellphoneArrowDown: mdiCellphoneArrowDown,
             chevronLeft: mdiChevronLeft,
             clef: mdiMusicClefTreble,
             cog: mdiCog,
@@ -549,6 +569,78 @@ async function initSetup() {
 </script>
 
 <style>
+/* ---- Colour themes (js/theme.mjs, services/theme.js) ----
+   Dim and Dark run Vuetify's dark mode and Warm its light mode; these rules
+   swap Vuetify's fixed greys and whites for the theme's own grounds, so Dim
+   can be a soft charcoal, Dark true black and Warm cream paper. Light, the
+   original, is left to Vuetify. The score follows `color`, since abcjs draws
+   in currentColor. */
+.v-application.theme--dark,
+html[data-theme="warm"] .v-application.theme--light {
+    background: var(--ff-bg) !important;
+    color: var(--ff-text);
+}
+.theme--dark.v-card,
+html[data-theme="warm"] .theme--light.v-card,
+.theme--dark.v-sheet,
+html[data-theme="warm"] .theme--light.v-sheet,
+.theme--dark.v-navigation-drawer,
+html[data-theme="warm"] .theme--light.v-navigation-drawer,
+.theme--dark.v-list,
+html[data-theme="warm"] .theme--light.v-list,
+.theme--dark.v-expansion-panels .v-expansion-panel,
+html[data-theme="warm"] .theme--light.v-expansion-panels .v-expansion-panel,
+.theme--dark.v-tabs-items,
+html[data-theme="warm"] .theme--light.v-tabs-items,
+.theme--dark.v-tabs > .v-tabs-bar,
+html[data-theme="warm"] .theme--light.v-tabs > .v-tabs-bar,
+.theme--dark.v-data-table,
+html[data-theme="warm"] .theme--light.v-data-table,
+.theme--dark.v-stepper,
+html[data-theme="warm"] .theme--light.v-stepper,
+.theme--dark.v-toolbar.v-sheet,
+html[data-theme="warm"] .theme--light.v-toolbar.v-sheet {
+    background-color: var(--ff-surface) !important;
+}
+.theme--dark.v-card,
+html[data-theme="warm"] .theme--light.v-card,
+.theme--dark.v-list-item:not(.v-list-item--active):not(.v-list-item--disabled),
+html[data-theme="warm"] .theme--light.v-list-item:not(.v-list-item--active):not(.v-list-item--disabled),
+.theme--dark.v-expansion-panels .v-expansion-panel,
+html[data-theme="warm"] .theme--light.v-expansion-panels .v-expansion-panel,
+.theme--dark.v-label,
+html[data-theme="warm"] .theme--light.v-label,
+.theme--dark.v-input input,
+html[data-theme="warm"] .theme--light.v-input input,
+.theme--dark.v-input textarea,
+html[data-theme="warm"] .theme--light.v-input textarea,
+.theme--dark.v-select .v-select__selection--comma,
+html[data-theme="warm"] .theme--light.v-select .v-select__selection--comma,
+.theme--dark.v-icon,
+html[data-theme="warm"] .theme--light.v-icon {
+    color: var(--ff-text);
+}
+.theme--dark.v-card > .v-card__text,
+html[data-theme="warm"] .theme--light.v-card > .v-card__text,
+.theme--dark.v-card > .v-card__subtitle,
+html[data-theme="warm"] .theme--light.v-card > .v-card__subtitle,
+.theme--dark.v-list-item .v-list-item__subtitle,
+html[data-theme="warm"] .theme--light.v-list-item .v-list-item__subtitle {
+    color: var(--ff-text-muted);
+}
+.theme--dark.v-text-field--solo > .v-input__control > .v-input__slot,
+html[data-theme="warm"] .theme--light.v-text-field--solo > .v-input__control > .v-input__slot {
+    background: var(--ff-surface2) !important;
+}
+.theme--dark.v-divider,
+html[data-theme="warm"] .theme--light.v-divider {
+    border-color: var(--ff-border) !important;
+}
+/* The logo is dark blue artwork; on a dark ground it takes the text colour. */
+.MainLogo .v-image__image {
+    filter: var(--ff-logo-filter, none);
+}
+
 .v-list > a {
     text-decoration: none;
 }
@@ -580,7 +672,7 @@ html, body {
     gap: 4px;
     padding: 4px 8px;
     border-radius: 24px;
-    background: #fff;
+    background: var(--ff-surface, #fff);
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
     max-width: 560px;
     margin: 0 auto;

@@ -140,10 +140,10 @@ export default {
     width: 8px;
     height: 14px;
     border-radius: 2px;
-    background: #e0e0e0;
+    background: var(--ff-border, #e0e0e0);
     transition: background 250ms ease-out;
 }
-.led--off { background: #e0e0e0; }
+.led--off { background: var(--ff-border, #e0e0e0); }
 .led--low { background: #4caf50; }
 .led--mid { background: #ffc107; }
 .led--high { background: #f44336; }

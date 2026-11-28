@@ -2787,7 +2787,7 @@ export default {
     top: 0;
     bottom: 0;
     width: 2px;
-    background: #000;
+    background: var(--ff-cursor, #000);
     box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.7);
 }
 

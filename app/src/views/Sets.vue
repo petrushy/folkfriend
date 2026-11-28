@@ -574,6 +574,6 @@ export default {
 .sets-description { font-size: .9375rem; color: #616161; margin-bottom: 8px; }
 .sets-status { font-size: .875rem; color: #616161; }
 .set-notes { white-space: pre-wrap; font-size: .9375rem; }
-.sets-toolbar-editing { position: sticky; top: 64px; z-index: 5; background: white; padding: 8px 0; }
+.sets-toolbar-editing { position: sticky; top: 64px; z-index: 5; background: var(--ff-bg, white); padding: 8px 0; }
 @media (max-width: 600px) { .sets-toolbar-editing { top: 56px; } }
 </style>
